@@ -1,0 +1,18 @@
+NIST CAVP test vectors — Public Domain (U.S. Government works)
+================================================================
+
+The NIST Cryptographic Algorithm Validation Program (CAVP) test vectors
+distributed in the kat/ and tests/cavp/ directories are works of the
+United States Government, prepared by officers and employees of the
+National Institute of Standards and Technology (NIST) as part of their
+official duties. Pursuant to 17 U.S.C. § 105, these works are NOT subject
+to copyright in the United States.
+
+Source: https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program
+
+You may copy, modify, publish, use, compile, sell, or distribute these
+test vectors, in source code form or as a compiled binary, for any
+purpose, commercial or non-commercial, and by any means.
+
+NIST disclaims any warranty regarding these vectors. See:
+https://www.nist.gov/disclaimer

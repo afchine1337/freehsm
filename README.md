@@ -1,5 +1,13 @@
 # FreeHSM C --- FIPS 140-3 / CC EAL4+ candidate
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![REUSE status](https://api.reuse.software/badge/github.com/afchine1337/freehsm-c)](https://api.reuse.software/info/github.com/afchine1337/freehsm-c)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/XXXX/badge)](https://www.bestpractices.dev/projects/XXXX)
+[![CI](https://github.com/afchine1337/freehsm-c/actions/workflows/ci.yml/badge.svg)](https://github.com/afchine1337/freehsm-c/actions/workflows/ci.yml)
+[![Mirror](https://github.com/afchine1337/freehsm-c/actions/workflows/mirror.yml/badge.svg)](https://github.com/afchine1337/freehsm-c/actions/workflows/mirror.yml)
+
+> **Note sur le badge OpenSSF/CII** : le numéro `XXXX` sera remplacé par l'ID attribué par https://www.bestpractices.dev/ après l'inscription du projet. `bestpractices.dev` (OpenSSF Best Practices) est le successeur officiel du programme CII Best Practices : un seul badge couvre les deux.
+
 Réimplémentation native en **C11** du Soft HSM PKCS#11 v3.2 FreeHSM, conçue pour passer une évaluation FIPS 140-3 Niveau 1 et une certification Common Criteria EAL4+ augmentée (ALC_FLR.2 + AVA_VAN.5).
 
 ## Pourquoi C ?

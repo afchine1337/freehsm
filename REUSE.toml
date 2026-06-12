@@ -1,0 +1,56 @@
+version = 1
+SPDX-PackageName = "FreeHSM C"
+SPDX-PackageSupplier = "Afchine Madjlessi <afchine.mad@gmail.com>"
+SPDX-PackageDownloadLocation = "https://github.com/afchine1337/freehsm-c"
+
+# -----------------------------------------------------------------------------
+# Bulk declarations for files that cannot carry an SPDX header in their body.
+# Each [[annotations]] block applies the SPDX-FileCopyrightText and
+# SPDX-License-Identifier to every path matching the glob.
+# -----------------------------------------------------------------------------
+
+[[annotations]]
+path = [
+    "CHANGELOG.md",
+    "README.md",
+    "README.en.md",
+    "NOTICE",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+    "RELEASE_v1.1.0.md",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Afchine Madjlessi <afchine.mad@gmail.com>"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "docs/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Afchine Madjlessi <afchine.mad@gmail.com>"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["kat/**", "tests/cavp/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "NIST CAVP — Public Domain"
+SPDX-License-Identifier = "LicenseRef-NIST-PD"
+SPDX-FileComment = "NIST CAVP test vectors are works of the United States Government and are in the public domain."
+
+[[annotations]]
+path = [".gitignore", ".gitattributes", "REUSE.toml"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Afchine Madjlessi <afchine.mad@gmail.com>"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = [
+    "**/*.json",
+    "**/*.yaml",
+    "**/*.yml",
+    "**/*.toml",
+    "afchine-pubkey.asc",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Afchine Madjlessi <afchine.mad@gmail.com>"
+SPDX-License-Identifier = "Apache-2.0"
