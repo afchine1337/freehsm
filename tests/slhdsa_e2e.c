@@ -1,0 +1,205 @@
+/* ===========================================================================
+ * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ * ========================================================================= */
+/* ===========================================================================
+ * slhdsa_e2e.c --- end-to-end SLH-DSA-SHA2-128s sign/verify via dlsym.
+ *
+ *  Same shape as mldsa_e2e.c but for stateless hash-based signatures.
+ *  SLH-DSA (FIPS 205) is the only "hash-only" PQ signature standard
+ *  approved by NIST ; it does NOT rely on lattice problems, only on
+ *  the security of SHA-2/SHAKE.
+ *
+ *  Parameter set selection :
+ *    SLH-DSA-SHA2-128s : 128-bit classical security, signatures ≈ 7856
+ *                        bytes ; keygen+sign are slow (~seconds) but
+ *                        verify is fast (~ms). Chosen here because
+ *                        it is the smallest/fastest variant.
+ *    SLH-DSA-SHA2-128f : faster but bigger signature (~17088 bytes)
+ *    SLH-DSA-SHA2-192s/192f/256s/256f : higher security levels, much slower
+ *
+ *  ⚠ The "s" variants take a few seconds for keygen+sign. Don't be
+ *  surprised by the wall time --- this is the design trade-off.
+ *
+ *  Build : cc tests/slhdsa_e2e.c -ldl -o tests/slhdsa_e2e
+ *  Run   : sudo -u freehsm ./tests/slhdsa_e2e
+ *
+ *  Pre-req : slot 0 initialized with USER PIN "user0000".
+ * ========================================================================= */
+
+#include <dlfcn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <time.h>
+
+#define MODULE      "/opt/freehsm/lib/libfreehsm-fips.so"
+#define USER_PIN    "user0000"
+#define PSET        "SLH-DSA-SHA2-128s"
+
+typedef unsigned long CK_ULONG;
+typedef CK_ULONG      CK_FLAGS;
+typedef CK_ULONG      CK_RV;
+typedef CK_ULONG      CK_MECHANISM_TYPE;
+typedef CK_ULONG      CK_ATTRIBUTE_TYPE;
+typedef CK_ULONG      CK_SESSION_HANDLE;
+typedef CK_ULONG      CK_OBJECT_HANDLE;
+typedef CK_ULONG      CK_SLOT_ID;
+typedef CK_ULONG      CK_USER_TYPE;
+
+typedef struct {
+    CK_MECHANISM_TYPE mechanism;
+    void             *pParameter;
+    CK_ULONG          ulParameterLen;
+} CK_MECHANISM;
+
+typedef struct {
+    CK_ATTRIBUTE_TYPE type;
+    void             *pValue;
+    CK_ULONG          ulValueLen;
+} CK_ATTRIBUTE;
+
+#define CKM_SLH_DSA_KEY_PAIR_GEN  0x00004040UL
+#define CKM_SLH_DSA               0x00004041UL
+#define CKA_LABEL                 0x00000003UL
+#define CKA_PARAMETER_SET         0x00000170UL
+#define CKR_OK                    0x00000000UL
+#define CKU_USER                  1UL
+
+typedef CK_RV (*pf_init_t)(void *);
+typedef CK_RV (*pf_open_t)(CK_SLOT_ID, CK_FLAGS, void*, void*, CK_SESSION_HANDLE*);
+typedef CK_RV (*pf_login_t)(CK_SESSION_HANDLE, CK_USER_TYPE,
+                             unsigned char*, CK_ULONG);
+typedef CK_RV (*pf_keypair_t)(CK_SESSION_HANDLE, CK_MECHANISM*,
+                               CK_ATTRIBUTE*, CK_ULONG,
+                               CK_ATTRIBUTE*, CK_ULONG,
+                               CK_OBJECT_HANDLE*, CK_OBJECT_HANDLE*);
+typedef CK_RV (*pf_signinit_t)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE);
+typedef CK_RV (*pf_sign_t)(CK_SESSION_HANDLE, unsigned char*, CK_ULONG,
+                            unsigned char*, CK_ULONG*);
+typedef CK_RV (*pf_verifyinit_t)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE);
+typedef CK_RV (*pf_verify_t)(CK_SESSION_HANDLE, unsigned char*, CK_ULONG,
+                              unsigned char*, CK_ULONG);
+
+#define LOAD(h, name, type)                                                  \
+    type name = (type)dlsym(h, #name);                                       \
+    if (!name) { fprintf(stderr, "dlsym %s : %s\n", #name, dlerror()); return 1; }
+
+static double elapsed_sec(struct timespec t0, struct timespec t1) {
+    return (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+}
+
+int main(void) {
+    void *h = dlopen(MODULE, RTLD_NOW);
+    if (!h) { fprintf(stderr, "dlopen : %s\n", dlerror()); return 1; }
+
+    LOAD(h, C_Initialize,      pf_init_t)
+    LOAD(h, C_OpenSession,     pf_open_t)
+    LOAD(h, C_Login,           pf_login_t)
+    LOAD(h, C_GenerateKeyPair, pf_keypair_t)
+    LOAD(h, C_SignInit,        pf_signinit_t)
+    LOAD(h, C_Sign,            pf_sign_t)
+    LOAD(h, C_VerifyInit,      pf_verifyinit_t)
+    LOAD(h, C_Verify,          pf_verify_t)
+
+    CK_RV rv = C_Initialize(NULL);
+    if (rv != CKR_OK) { fprintf(stderr, "C_Initialize : 0x%lx\n", rv); return 1; }
+
+    CK_SESSION_HANDLE session = 0;
+    rv = C_OpenSession(0, 1 << 2, NULL, NULL, &session);
+    if (rv != CKR_OK) { fprintf(stderr, "C_OpenSession : 0x%lx\n", rv); return 1; }
+
+    rv = C_Login(session, CKU_USER, (unsigned char*)USER_PIN, strlen(USER_PIN));
+    if (rv != CKR_OK) { fprintf(stderr, "C_Login : 0x%lx\n", rv); return 1; }
+
+    printf("[slhdsa] parameter set = " PSET "\n");
+    printf("[slhdsa] note : keygen+sign take a few seconds (FIPS 205 §10)\n");
+
+    /* 1. Generate SLH-DSA key pair. */
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    CK_MECHANISM kpgm = { CKM_SLH_DSA_KEY_PAIR_GEN, NULL, 0 };
+    char label[] = "slhdsa-e2e";
+    char pset[] = PSET;
+    CK_ATTRIBUTE pub_tpl[] = {
+        { CKA_LABEL,         label,    sizeof(label) - 1 },
+        { CKA_PARAMETER_SET, pset,     sizeof(pset) - 1 },
+    };
+    CK_ATTRIBUTE priv_tpl[] = {
+        { CKA_LABEL,         label,    sizeof(label) - 1 },
+    };
+    CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+    rv = C_GenerateKeyPair(session, &kpgm,
+                            pub_tpl, sizeof(pub_tpl)/sizeof(pub_tpl[0]),
+                            priv_tpl, sizeof(priv_tpl)/sizeof(priv_tpl[0]),
+                            &hPub, &hPriv);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    if (rv != CKR_OK) { fprintf(stderr, "C_GenerateKeyPair : 0x%lx\n", rv); return 1; }
+    printf("[slhdsa] keypair generated in %.2f s (pub=%lu priv=%lu)\n",
+           elapsed_sec(t0, t1), hPub, hPriv);
+
+    /* 2. Sign. */
+    unsigned char msg[] = "post-quantum sign/verify with SLH-DSA-SHA2-128s";
+    CK_MECHANISM sigm = { CKM_SLH_DSA, NULL, 0 };
+    rv = C_SignInit(session, &sigm, hPriv);
+    if (rv != CKR_OK) { fprintf(stderr, "C_SignInit : 0x%lx\n", rv); return 1; }
+
+    /* Pre-allocate worst-case buffer (sig hint = 65536). The query path
+     * via C_Sign(NULL) would leave the op active and force a second
+     * C_SignInit which returns CKR_OPERATION_ACTIVE on our impl. So we
+     * skip the query and pass a generous buffer directly. */
+    CK_ULONG sig_len = 65536;
+    unsigned char *sig = malloc(sig_len);
+    if (!sig) { fprintf(stderr, "malloc(%lu)\n", sig_len); return 1; }
+
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    rv = C_Sign(session, msg, sizeof(msg) - 1, sig, &sig_len);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    if (rv != CKR_OK) { fprintf(stderr, "C_Sign : 0x%lx\n", rv); free(sig); return 1; }
+    printf("[slhdsa] signed in %.2f s, signature size = %lu bytes\n",
+           elapsed_sec(t0, t1), sig_len);
+
+    /* 3. Verify. */
+    rv = C_VerifyInit(session, &sigm, hPub);
+    if (rv != CKR_OK) { fprintf(stderr, "C_VerifyInit : 0x%lx\n", rv); free(sig); return 1; }
+
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    rv = C_Verify(session, msg, sizeof(msg) - 1, sig, sig_len);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    if (rv != CKR_OK) {
+        fprintf(stderr, "[slhdsa] FAIL : verify returned 0x%lx\n", rv);
+        free(sig); return 1;
+    }
+    printf("[slhdsa] verified in %.3f s\n", elapsed_sec(t0, t1));
+
+    /* 4. Tamper. */
+    rv = C_VerifyInit(session, &sigm, hPub);
+    if (rv != CKR_OK) { fprintf(stderr, "C_VerifyInit (3) : 0x%lx\n", rv); free(sig); return 1; }
+    sig[sig_len / 2] ^= 0x80;
+    rv = C_Verify(session, msg, sizeof(msg) - 1, sig, sig_len);
+    free(sig);
+    if (rv == CKR_OK) {
+        fprintf(stderr, "[slhdsa] FAIL : tampered signature accepted\n");
+        return 1;
+    }
+    printf("[slhdsa] tamper test : verify rejected (rv=0x%lx)\n", rv);
+
+    printf("[slhdsa] PASS : SLH-DSA-SHA2-128s sign + verify + tamper-reject\n");
+    printf("[slhdsa]        FIPS 205 approved hash-based signature\n");
+    return 0;
+}

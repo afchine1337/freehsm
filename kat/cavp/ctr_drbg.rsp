@@ -1,0 +1,12 @@
+# CAVP CTR_DRBG-AES-256 placeholder
+# Walker not implemented yet -- file structure documented below.
+#
+# Section :  [AES-256 no df]
+#            [PredictionResistance = False]
+# Vector  :  EntropyInput | Nonce | PersonalizationString
+#            EntropyInputReseed | AdditionalInputReseed
+#            AdditionalInput | EntropyInputPR | AdditionalInput
+#            ReturnedBits
+
+[AES-256 no df]
+[PredictionResistance = False]

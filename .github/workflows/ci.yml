@@ -1,0 +1,149 @@
+# ===========================================================================
+# .github/workflows/ci.yml
+#
+# Continuous integration for FreeHSM C.
+#
+#   - lint       : SPDX header presence on every .c/.h
+#   - build      : Debian 13 image with OpenSSL 3.5 FIPS provider
+#   - test-smoke : the built-in static smoke test
+#   - test-cov   : full PKCS#11 coverage matrix (27 PASS / 5 SKIP target)
+#   - repro      : two-build reproducibility check
+#
+# Triggered on every push to main, every PR targeting main, and weekly
+# (security-scan freshness).
+# ===========================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, 'release/**']
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'   # Monday 06:00 UTC
+
+jobs:
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check SPDX headers
+        run: bash scripts/add_copyright_header.sh --check
+      - name: Verify LICENSE + NOTICE present
+        run: |
+          test -f LICENSE
+          test -f NOTICE
+          grep -q "Afchine Madjlessi" NOTICE
+
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (default profile = legacy)
+        run: |
+          make clean
+          make 2>&1 | tee build.log
+          test -f libfreehsm-fips.so
+
+      - name: Sign module digest
+        run: |
+          make integrity 2>&1 | tee integrity.log
+          ls -la libfreehsm-fips.so
+
+      - name: Smoke test (smoke + KAT report)
+        run: |
+          install -m 755 tests/test_smoke /tmp/smoke
+          /tmp/smoke 2>&1 | head -30
+
+      - name: Upload artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libfreehsm-fips-so
+          path: |
+            libfreehsm-fips.so
+            build.log
+            integrity.log
+          retention-days: 14
+
+  test-coverage-matrix:
+    runs-on: ubuntu-latest
+    needs: build
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-test:debian13-pkcs11-tools
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: libfreehsm-fips-so
+      - name: Install module
+        run: |
+          mkdir -p /opt/freehsm/lib
+          install -m 755 libfreehsm-fips.so /opt/freehsm/lib/
+          useradd -r -d /var/lib/freehsm -m freehsm || true
+          chown -R freehsm: /var/lib/freehsm
+      - name: Run coverage matrix
+        run: |
+          bash tests/coverage_matrix.sh 2>&1 | tee matrix.log
+          tail -1 matrix.log | grep -q "ALL ASSERTIONS PASS"
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-matrix-report
+          path: |
+            matrix.log
+            /tmp/freehsm-coverage.tsv
+          retention-days: 14
+
+  test-fips-mode:
+    runs-on: ubuntu-latest
+    needs: build
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-test:debian13-pkcs11-tools
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: libfreehsm-fips-so
+      - name: Run in FIPS strict mode
+        env:
+          FHSM_MODE: fips
+        run: |
+          install -m 755 libfreehsm-fips.so /opt/freehsm/lib/
+          bash tests/coverage_matrix.sh 2>&1 | tee matrix-fips.log
+          tail -1 matrix-fips.log | grep -q "ALL ASSERTIONS PASS"
+
+  reproducibility:
+    runs-on: ubuntu-latest
+    needs: build
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build 2
+        env:
+          SOURCE_DATE_EPOCH: '1717977600'
+        run: |
+          make clean
+          make
+          sha256sum libfreehsm-fips.so > /tmp/build2.sha256
+      - uses: actions/download-artifact@v4
+        with:
+          name: libfreehsm-fips-so
+          path: /tmp/build1/
+      - name: Compare
+        run: |
+          sha256sum /tmp/build1/libfreehsm-fips.so > /tmp/build1.sha256
+          cat /tmp/build1.sha256 /tmp/build2.sha256
+          cmp <(awk '{print $1}' /tmp/build1.sha256) <(awk '{print $1}' /tmp/build2.sha256)

@@ -1,0 +1,3630 @@
+/* ===========================================================================
+ * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ * ========================================================================= */
+/* ===========================================================================
+ * fhsm_pkcs11.c --- PKCS#11 v3.2 entry points (libfreehsm-fips.so).
+ *
+ * This is the ABI boundary visible to applications. Every C_* function
+ *   1. Validates fhsm_state_get() != ERROR  (else FHSM_RV_FUNCTION_FAILED)
+ *   2. Validates the FIPS mode flag         (else FHSM_RV_FIPS_NOT_APPROVED)
+ *   3. Emits an audit event with parameter lengths
+ *   4. Dispatches to the internal subsystem (token, crypto, session)
+ *   5. Returns the numeric value (which maps 1:1 to CKR_*)
+ *
+ * The functions exported here are intentionally THIN: they perform no
+ * cryptographic work themselves. All sensitive logic lives in
+ * fhsm_crypto.c / fhsm_token.c / fhsm_session.c. This decomposition is
+ * required by FIPS 140-3 §7.4.5 ("cryptographic module interface") and
+ * CC EAL4+ ADV_TDS.3 (basic modular design).
+ *
+ * Only a representative subset of C_* entry points is implemented in
+ * this scaffold to demonstrate the boundary. The full set
+ * (~70 functions) is generated from include/fhsm_pkcs11.h by a
+ * code-gen tool that lives at scripts/gen_p11_thunks.py and writes
+ * the boilerplate below. See docs/ARCHITECTURE.md §4.
+ * ========================================================================= */
+
+#include "fhsm_common.h"
+#include "fhsm_crypto.h"
+#include "fhsm_token.h"
+#include "fhsm_audit.h"
+#include "fhsm_session.h"
+#include "fhsm_session.h"
+#include "fhsm_pairwise.h"
+
+#include <stdint.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+/* OpenSSL EVP types used by C_GenerateKeyPair (RSA/EC keygen + DER
+ * serialization) and by the multi-part streaming thunks
+ * (EVP_MD_CTX, EVP_CIPHER_CTX, EVP_MAC_CTX). Pulled up here so all
+ * downstream code in this TU sees the declarations. */
+#include <openssl/evp.h>
+#include <openssl/x509.h>
+#include <openssl/crypto.h>
+#include <openssl/hmac.h>
+#include <openssl/rsa.h>      /* RSA_PKCS1_PSS_PADDING */
+
+/* CK_RV is identical to fhsm_rv_t numerically. */
+typedef unsigned long  CK_RV;
+typedef unsigned long  CK_ULONG;
+typedef CK_ULONG       CK_FLAGS;
+typedef CK_ULONG       CK_USER_TYPE;
+typedef CK_ULONG       CK_SESSION_HANDLE;
+typedef CK_ULONG       CK_SLOT_ID;
+typedef char          *CK_UTF8CHAR_PTR;
+typedef void          *CK_VOID_PTR;
+
+#define CK_DECLARE_FUNCTION(rt, name)  rt name
+
+/* ---------------------------------------------------------------------------
+ * Forward declarations of every TSFI symbol exported by libfreehsm-fips.so.
+ * Required to satisfy -Wmissing-prototypes : the C_* functions are
+ * exported (default visibility) but no upstream header is included here,
+ * so we declare them locally. The visibility attribute overrides the
+ * file-level -fvisibility=hidden setting from the Makefile.
+ * ----------------------------------------------------------------------- */
+#define FHSM_EXPORT __attribute__((visibility("default")))
+
+FHSM_EXPORT CK_RV C_Initialize(CK_VOID_PTR pInitArgs);
+FHSM_EXPORT CK_RV C_Finalize(CK_VOID_PTR pReserved);
+FHSM_EXPORT CK_RV C_GetInfo(CK_VOID_PTR pInfo);
+FHSM_EXPORT CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
+                                 CK_VOID_PTR pApp, CK_VOID_PTR Notify,
+                                 CK_SESSION_HANDLE *phSession);
+FHSM_EXPORT CK_RV C_CloseSession(CK_SESSION_HANDLE hSession);
+FHSM_EXPORT CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
+                           CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen);
+FHSM_EXPORT CK_RV C_Logout(CK_SESSION_HANDLE hSession);
+FHSM_EXPORT CK_RV C_GetSlotList(unsigned char tokenPresent,
+                                 CK_SLOT_ID *pSlotList,
+                                 CK_ULONG *pulCount);
+FHSM_EXPORT CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo);
+FHSM_EXPORT CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo);
+FHSM_EXPORT CK_RV C_GetMechanismList(CK_SLOT_ID slotID,
+                                      CK_ULONG *pMechanismList,
+                                      CK_ULONG *pulCount);
+FHSM_EXPORT CK_RV C_GetMechanismInfo(CK_SLOT_ID slotID, CK_ULONG type,
+                                      CK_VOID_PTR pInfo);
+FHSM_EXPORT CK_RV C_InitToken(CK_SLOT_ID slotID,
+                               CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen,
+                               CK_UTF8CHAR_PTR pLabel);
+FHSM_EXPORT CK_RV C_InitPIN(CK_SESSION_HANDLE hSession,
+                             CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen);
+FHSM_EXPORT CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
+                            CK_UTF8CHAR_PTR pOldPin, CK_ULONG ulOldLen,
+                            CK_UTF8CHAR_PTR pNewPin, CK_ULONG ulNewLen);
+
+/* Crypto / object operations (PKCS#11 v3.2 §C.6). The dispatch handlers
+ * for the actual mechanisms live in src/dispatch/ ; the thunks below
+ * validate the session, look up objects, and call the appropriate
+ * primitive. Multi-part streaming (Update/Final) is wired only for
+ * Digest in this scaffold ; one-shot is the canonical path. */
+typedef unsigned long CK_OBJECT_HANDLE;
+typedef CK_OBJECT_HANDLE *CK_OBJECT_HANDLE_PTR;
+typedef CK_ULONG          CK_ATTRIBUTE_TYPE;
+typedef CK_ULONG          CK_MECHANISM_TYPE;
+
+typedef struct CK_ATTRIBUTE {
+    CK_ATTRIBUTE_TYPE  type;
+    CK_VOID_PTR        pValue;
+    CK_ULONG           ulValueLen;
+} CK_ATTRIBUTE;
+
+typedef struct CK_MECHANISM {
+    CK_MECHANISM_TYPE  mechanism;
+    CK_VOID_PTR        pParameter;
+    CK_ULONG           ulParameterLen;
+} CK_MECHANISM;
+
+FHSM_EXPORT CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession,
+                                    unsigned char *pSeed, CK_ULONG ulLen);
+FHSM_EXPORT CK_RV C_DigestInit(CK_SESSION_HANDLE hSession,
+                                CK_MECHANISM *pMechanism);
+FHSM_EXPORT CK_RV C_Digest(CK_SESSION_HANDLE hSession,
+                            unsigned char *pData, CK_ULONG ulDataLen,
+                            unsigned char *pDigest, CK_ULONG *pulDigestLen);
+FHSM_EXPORT CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession,
+                                 CK_MECHANISM *pMechanism,
+                                 CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                                 CK_OBJECT_HANDLE *phKey);
+FHSM_EXPORT CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession,
+                                     CK_MECHANISM *pMechanism,
+                                     CK_ATTRIBUTE *pPubTemplate, CK_ULONG ulPubCount,
+                                     CK_ATTRIBUTE *pPrivTemplate, CK_ULONG ulPrivCount,
+                                     CK_OBJECT_HANDLE *phPub, CK_OBJECT_HANDLE *phPriv);
+FHSM_EXPORT CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession,
+                               CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hBaseKey,
+                               CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                               CK_OBJECT_HANDLE *phKey);
+FHSM_EXPORT CK_RV C_WrapKey(CK_SESSION_HANDLE hSession,
+                             CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hWrappingKey,
+                             CK_OBJECT_HANDLE hKey,
+                             unsigned char *pWrappedKey, CK_ULONG *pulWrappedKeyLen);
+FHSM_EXPORT CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession,
+                               CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hUnwrappingKey,
+                               unsigned char *pWrappedKey, CK_ULONG ulWrappedKeyLen,
+                               CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                               CK_OBJECT_HANDLE *phKey);
+/* PKCS#11 v3.0 extended functions : C_Encapsulate / C_Decapsulate for KEMs
+ * (ML-KEM via this module). Exposed via C_GetInterface, not via the
+ * legacy CK_FUNCTION_LIST. */
+FHSM_EXPORT CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession,
+                                    CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hPublicKey,
+                                    CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                                    CK_OBJECT_HANDLE *phNewKey,
+                                    unsigned char *pCiphertext, CK_ULONG *pulCiphertextLen);
+FHSM_EXPORT CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession,
+                                    CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hPrivateKey,
+                                    CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                                    CK_OBJECT_HANDLE *phNewKey,
+                                    unsigned char *pCiphertext, CK_ULONG ulCiphertextLen);
+/* PKCS#11 v3.0 §5.18 : C_GetInterface / C_GetInterfaceList expose the
+ * v3.0 function table (CK_FUNCTION_LIST_3_0, 91 slots, version {3,0}).
+ * The legacy CK_FUNCTION_LIST (v2.40, 67 slots, version {2,40}) is
+ * still served by C_GetFunctionList for backward compat. */
+struct CK_INTERFACE_s;
+FHSM_EXPORT CK_RV C_GetInterfaceList(struct CK_INTERFACE_s *pInterfacesList,
+                                      CK_ULONG *pulCount);
+FHSM_EXPORT CK_RV C_GetInterface(unsigned char *pInterfaceName,
+                                  void *pVersion,
+                                  struct CK_INTERFACE_s **ppInterface,
+                                  CK_FLAGS flags);
+FHSM_EXPORT CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession,
+                                   CK_OBJECT_HANDLE hObject);
+FHSM_EXPORT CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession,
+                                       CK_OBJECT_HANDLE hObject,
+                                       CK_ATTRIBUTE *pTemplate,
+                                       CK_ULONG ulCount);
+FHSM_EXPORT CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession,
+                                     CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount);
+FHSM_EXPORT CK_RV C_FindObjects(CK_SESSION_HANDLE hSession,
+                                 CK_OBJECT_HANDLE *phObject,
+                                 CK_ULONG ulMaxCount, CK_ULONG *pulCount);
+FHSM_EXPORT CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession);
+FHSM_EXPORT CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession,
+                                 CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey);
+FHSM_EXPORT CK_RV C_Encrypt(CK_SESSION_HANDLE hSession,
+                             unsigned char *pData, CK_ULONG ulDataLen,
+                             unsigned char *pEncrypted, CK_ULONG *pulEncryptedLen);
+FHSM_EXPORT CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession,
+                                 CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey);
+FHSM_EXPORT CK_RV C_Decrypt(CK_SESSION_HANDLE hSession,
+                             unsigned char *pEncrypted, CK_ULONG ulEncLen,
+                             unsigned char *pData, CK_ULONG *pulDataLen);
+FHSM_EXPORT CK_RV C_SignInit(CK_SESSION_HANDLE hSession,
+                              CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey);
+FHSM_EXPORT CK_RV C_Sign(CK_SESSION_HANDLE hSession,
+                          unsigned char *pData, CK_ULONG ulDataLen,
+                          unsigned char *pSignature, CK_ULONG *pulSignatureLen);
+FHSM_EXPORT CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession,
+                                CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey);
+FHSM_EXPORT CK_RV C_Verify(CK_SESSION_HANDLE hSession,
+                            unsigned char *pData, CK_ULONG ulDataLen,
+                            unsigned char *pSignature, CK_ULONG ulSignatureLen);
+/* Multi-part streaming variants. */
+FHSM_EXPORT CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession,
+                                   unsigned char *pPart, CK_ULONG ulPartLen);
+FHSM_EXPORT CK_RV C_DigestFinal(CK_SESSION_HANDLE hSession,
+                                  unsigned char *pDigest, CK_ULONG *pulDigestLen);
+FHSM_EXPORT CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession,
+                                 unsigned char *pPart, CK_ULONG ulPartLen);
+FHSM_EXPORT CK_RV C_SignFinal(CK_SESSION_HANDLE hSession,
+                                unsigned char *pSignature, CK_ULONG *pulSignatureLen);
+FHSM_EXPORT CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession,
+                                    unsigned char *pPart, CK_ULONG ulPartLen,
+                                    unsigned char *pEnc, CK_ULONG *pulEncLen);
+FHSM_EXPORT CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession,
+                                   unsigned char *pLast, CK_ULONG *pulLastLen);
+FHSM_EXPORT CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession,
+                                    unsigned char *pEnc, CK_ULONG ulEncLen,
+                                    unsigned char *pPart, CK_ULONG *pulPartLen);
+FHSM_EXPORT CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession,
+                                   unsigned char *pLast, CK_ULONG *pulLastLen);
+
+struct CK_FUNCTION_LIST;
+FHSM_EXPORT CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList);
+
+/* ---------------------------------------------------------------------------
+ * Forward declarations for the slot registry.
+ *
+ * FHSM_MAX_SLOTS must be visible to C_OpenSession (which validates slotID
+ * against this bound) before the registry itself is defined further down.
+ * fhsm_slot_token() is also called from C_OpenSession to attach the
+ * slot's token to the new session.
+ * ----------------------------------------------------------------------- */
+#define FHSM_MAX_SLOTS 4
+static fhsm_token_t *fhsm_slot_token(CK_SLOT_ID slot);
+
+/* Helper : copy a string into a fixed-length PKCS#11 field, padding the
+ * trailing bytes with ASCII space (per CK_INFO spec §A.6.1). This is
+ * the standard way and avoids the gcc-12 array-bounds warning that
+ * triggers when memcpy(dst, "literal", N) and the literal is shorter
+ * than N (FORTIFY_SOURCE level 2 detects the OOB read). */
+static void fhsm_pack_field(unsigned char *dst, const char *src, size_t n) {
+    size_t l = strlen(src);
+    if (l > n) l = n;
+    memcpy(dst, src, l);
+    memset(dst + l, ' ', n - l);
+}
+
+/* ---------------------------------------------------------------------------
+ * Module lifecycle.
+ * ----------------------------------------------------------------------- */
+CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
+    (void)pInitArgs;
+    fhsm_rv_t rv = fhsm_secure_heap_init();
+    if (rv != FHSM_RV_OK) return rv;
+    rv = fhsm_state_set(FHSM_STATE_INITIALIZING);
+    if (rv != FHSM_RV_OK) return rv;
+    rv = fhsm_crypto_init();
+    if (rv != FHSM_RV_OK) {
+        fhsm_state_latch_error("crypto_init failed in C_Initialize");
+        return rv;
+    }
+    rv = fhsm_state_set(FHSM_STATE_INITIALIZED);
+    (void)fhsm_audit_event(FHSM_EV_MODULE_INIT, -1, -1,
+                            FHSM_ROLE_NONE, rv, NULL);
+    return rv;
+}
+
+CK_RV C_Finalize(CK_VOID_PTR pReserved) {
+    (void)pReserved;
+    (void)fhsm_audit_event(FHSM_EV_MODULE_FINALIZE, -1, -1,
+                            FHSM_ROLE_NONE, FHSM_RV_OK, NULL);
+    fhsm_crypto_finalize();
+    fhsm_audit_close();
+    fhsm_state_set(FHSM_STATE_POWER_OFF);
+    return FHSM_RV_OK;
+}
+
+CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
+    if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
+    /* CK_INFO layout per PKCS#11 v3.2 spec C.6.1 :
+     *   CK_VERSION cryptokiVersion;    // 2 bytes  (major, minor as CK_BYTE)
+     *   CK_UTF8CHAR manufacturerID[32];
+     *   CK_FLAGS    flags;             // CK_ULONG, 8 bytes on LP64
+     *   CK_UTF8CHAR libraryDescription[32];
+     *   CK_VERSION  libraryVersion;    // 2 bytes
+     *
+     * CRITICAL : CK_VERSION's two fields are CK_BYTE (1 byte each), NOT
+     * unsigned short (2 bytes each). Using the wrong width shifts the
+     * downstream fields by 2 bytes and corrupts the manufacturerID. */
+    struct fhsm_ck_info {
+        unsigned char cryptokiVersion[2];    /* major, minor */
+        unsigned char manufacturerID[32];
+        CK_FLAGS      flags;
+        unsigned char libraryDescription[32];
+        unsigned char libraryVersion[2];     /* major, minor */
+    } *info = pInfo;
+    info->cryptokiVersion[0] = 3;
+    info->cryptokiVersion[1] = 2;
+    fhsm_pack_field(info->manufacturerID,    "FreeHSM C (FIPS 140-3)",            32);
+    info->flags = 0;
+    fhsm_pack_field(info->libraryDescription, "libfreehsm-fips.so v" FHSM_VERSION_STRING, 32);
+    info->libraryVersion[0] = FHSM_VERSION_MAJOR;
+    info->libraryVersion[1] = FHSM_VERSION_MINOR;
+    return FHSM_RV_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * Session lifecycle. The session table itself lives in fhsm_session.c;
+ * here we only validate parameters and emit audit events.
+ * (Prototypes are now in include/fhsm_session.h.)
+ * ----------------------------------------------------------------------- */
+CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
+                     CK_VOID_PTR pApp, CK_VOID_PTR Notify,
+                     CK_SESSION_HANDLE *phSession) {
+    (void)pApp; (void)Notify;
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!phSession) return FHSM_RV_ARGUMENTS_BAD;
+    if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
+    /* Per PKCS#11 v3.2 §C.6.5 : C_OpenSession requires the token to be
+     * present. C_InitToken uses a different path (no session needed). */
+    fhsm_token_t *t = fhsm_slot_token(slotID);
+    if (!t) return FHSM_RV_TOKEN_NOT_PRESENT;
+    fhsm_rv_t rv = fhsm_session_open(slotID, flags, phSession);
+    if (rv == FHSM_RV_OK) {
+        /* Attach the slot's token to the new session. */
+        fhsm_session_attach_token(*phSession, t);
+    }
+    return rv;
+}
+
+CK_RV C_CloseSession(CK_SESSION_HANDLE hSession) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    return fhsm_session_close(hSession);
+}
+
+CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
+               CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    fhsm_role_t role = (userType == 0 /*CKU_SO*/) ? FHSM_ROLE_SO :
+                       (userType == 1 /*CKU_USER*/) ? FHSM_ROLE_USER :
+                       FHSM_ROLE_NONE;
+    if (role == FHSM_ROLE_NONE) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_rv_t rv = fhsm_session_login(hSession, role, (const char*)pPin, ulPinLen);
+    char rolename[8] = "NONE";
+    if (role == FHSM_ROLE_SO)   memcpy(rolename, "SO",   3);
+    if (role == FHSM_ROLE_USER) memcpy(rolename, "USER", 5);
+    char pin_len_str[16]; snprintf(pin_len_str, sizeof(pin_len_str), "%lu", ulPinLen);
+    (void)fhsm_audit_event(
+        (rv == FHSM_RV_OK)             ? FHSM_EV_LOGIN_OK :
+        (rv == FHSM_RV_PIN_LOCKED)     ? FHSM_EV_LOGIN_LOCKED :
+        (rv == FHSM_RV_PIN_THROTTLED)  ? FHSM_EV_LOGIN_THROTTLED :
+                                          FHSM_EV_LOGIN_FAIL,
+        -1, (int)hSession, role, rv,
+        "role", rolename, "pin_len", pin_len_str, NULL);
+    return rv;
+}
+
+CK_RV C_Logout(CK_SESSION_HANDLE hSession) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    fhsm_rv_t rv = fhsm_session_logout(hSession);
+    (void)fhsm_audit_event(FHSM_EV_LOGOUT, -1, (int)hSession,
+                            FHSM_ROLE_NONE, rv, NULL);
+    return rv;
+}
+
+/* ---------------------------------------------------------------------------
+ * The full PKCS#11 set (C_GenerateKey, C_Encrypt/Decrypt, C_Sign/Verify,
+ * C_FindObjects, etc.) is omitted from this scaffold for brevity but
+ * follows the exact same pattern as above: parameter validation, audit
+ * event with lengths only, dispatch to fhsm_crypto.* or fhsm_token.*,
+ * and return the numeric value mapped from fhsm_rv_t to CK_RV.
+ *
+ * The full list lives in include/fhsm_pkcs11.h and is generated by the
+ * codegen script. See docs/ARCHITECTURE.md §4 for the complete
+ * mechanism dispatch table.
+ * ----------------------------------------------------------------------- */
+
+/* ===========================================================================
+ * Slot registry. The slot table is built once (lazy) at first
+ * C_GetSlotList call. Slots 0..FHSM_MAX_SLOTS-1 map to the files
+ * "slot{N}.tok" inside the tokens directory. Each slot is either:
+ *   - "uninitialized" : no .tok file yet ; can be initialized via C_InitToken
+ *   - "initialized"   : .tok file exists ; loaded lazily on first attach
+ *
+ * The tokens directory comes from (in order of precedence):
+ *   1. FHSM_TOKENS_DIR environment variable
+ *   2. /etc/freehsm/freehsm.conf [paths] tokens_dir
+ *   3. Compile-time default /var/lib/freehsm/tokens
+ * =========================================================================== */
+#include <sys/stat.h>
+#include <stdlib.h>
+
+/* FHSM_MAX_SLOTS is defined at the top of the file (forward-decl block)
+ * so C_OpenSession can validate slotID before this registry block is
+ * compiled. */
+
+typedef struct fhsm_slot_s {
+    int           present;            /* 1 if .tok file exists */
+    char          path[512];          /* full path to .tok */
+    fhsm_token_t *token;              /* loaded on demand */
+} fhsm_slot_t;
+
+static fhsm_slot_t g_slots[FHSM_MAX_SLOTS];
+static int         g_slots_initialized = 0;
+
+static const char *fhsm_tokens_dir(void) {
+    const char *env = getenv("FHSM_TOKENS_DIR");
+    if (env && *env) return env;
+    return "/var/lib/freehsm/tokens";
+}
+
+static void fhsm_slot_table_init_once(void) {
+    if (g_slots_initialized) return;
+    const char *dir = fhsm_tokens_dir();
+    for (int i = 0; i < FHSM_MAX_SLOTS; ++i) {
+        snprintf(g_slots[i].path, sizeof(g_slots[i].path),
+                 "%s/slot%d.tok", dir, i);
+        struct stat st;
+        g_slots[i].present = (stat(g_slots[i].path, &st) == 0) ? 1 : 0;
+        g_slots[i].token   = NULL;
+    }
+    g_slots_initialized = 1;
+}
+
+/* Lazily load the token for a slot. Returns NULL if absent or unreadable. */
+static fhsm_token_t *fhsm_slot_token(CK_SLOT_ID slot) {
+    if (slot >= FHSM_MAX_SLOTS) return NULL;
+    fhsm_slot_table_init_once();
+    if (!g_slots[slot].present) return NULL;
+    if (g_slots[slot].token) return g_slots[slot].token;
+    fhsm_token_t *t = NULL;
+    if (fhsm_token_load(g_slots[slot].path, &t) == FHSM_RV_OK) {
+        g_slots[slot].token = t;
+    }
+    return g_slots[slot].token;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_GetSlotList --- enumerate the configured slots.
+ * If tokenPresent is non-zero, only slots with an initialized token are
+ * returned. The caller queries the count by passing pSlotList=NULL, then
+ * allocates and re-calls with the buffer.
+ * ----------------------------------------------------------------------- */
+CK_RV C_GetSlotList(unsigned char tokenPresent,
+                     CK_SLOT_ID *pSlotList,
+                     CK_ULONG *pulCount) {
+    if (!pulCount) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_slot_table_init_once();
+
+    /* Count first. */
+    CK_ULONG n = 0;
+    for (CK_ULONG i = 0; i < FHSM_MAX_SLOTS; ++i) {
+        if (tokenPresent && !g_slots[i].present) continue;
+        n++;
+    }
+
+    if (pSlotList == NULL) {
+        *pulCount = n;
+        return FHSM_RV_OK;
+    }
+    if (*pulCount < n) {
+        *pulCount = n;
+        return 0x00000150UL;  /* CKR_BUFFER_TOO_SMALL */
+    }
+    /* Fill. */
+    CK_ULONG k = 0;
+    for (CK_ULONG i = 0; i < FHSM_MAX_SLOTS; ++i) {
+        if (tokenPresent && !g_slots[i].present) continue;
+        pSlotList[k++] = i;
+    }
+    *pulCount = n;
+    return FHSM_RV_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_GetSlotInfo --- describe a slot. CK_SLOT_INFO layout (PKCS#11 v3.2 C.6.2):
+ *   slotDescription[64], manufacturerID[32], flags(CK_ULONG),
+ *   hardwareVersion(CK_VERSION), firmwareVersion(CK_VERSION)
+ * Total = 64 + 32 + 8 + 2 + 2 = 108 bytes.
+ * ----------------------------------------------------------------------- */
+#define CKF_TOKEN_PRESENT     0x00000001UL
+#define CKF_REMOVABLE_DEVICE  0x00000002UL
+#define CKF_HW_SLOT           0x00000004UL
+
+CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
+    if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
+    if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
+    fhsm_slot_table_init_once();
+    struct fhsm_ck_slot_info {
+        unsigned char slotDescription[64];
+        unsigned char manufacturerID[32];
+        CK_FLAGS      flags;
+        unsigned char hardwareVersion[2];
+        unsigned char firmwareVersion[2];
+    } *info = pInfo;
+    char desc[64];
+    snprintf(desc, sizeof(desc), "FreeHSM slot %lu (%s)", (unsigned long)slotID,
+             g_slots[slotID].present ? "initialized" : "uninitialized");
+    fhsm_pack_field(info->slotDescription, desc, 64);
+    fhsm_pack_field(info->manufacturerID,  "FreeHSM C (FIPS 140-3)", 32);
+    /* Per the SoftHSMv2 convention (mirroring most cloud-HSM modules),
+     * every configured slot ALWAYS reports CKF_TOKEN_PRESENT. The
+     * distinction between "initialized" and "blank" is exposed via
+     * the token's own CKF_TOKEN_INITIALIZED flag in C_GetTokenInfo.
+     * Reporting !TOKEN_PRESENT on a slot makes pkcs11-tool abort
+     * before it can call C_InitToken to bootstrap. */
+    info->flags = CKF_TOKEN_PRESENT;
+    info->hardwareVersion[0] = 1; info->hardwareVersion[1] = 0;
+    info->firmwareVersion[0] = FHSM_VERSION_MAJOR;
+    info->firmwareVersion[1] = FHSM_VERSION_MINOR;
+    return FHSM_RV_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_GetTokenInfo --- describe the token in a slot.
+ * CK_TOKEN_INFO layout (PKCS#11 v3.2 C.6.3, 204 bytes).
+ * ----------------------------------------------------------------------- */
+#define CKF_RNG                  0x00000001UL
+#define CKF_WRITE_PROTECTED      0x00000002UL
+#define CKF_LOGIN_REQUIRED       0x00000004UL
+#define CKF_USER_PIN_INITIALIZED 0x00000008UL
+#define CKF_TOKEN_INITIALIZED    0x00000400UL
+#define CKF_USER_PIN_LOCKED      0x00040000UL
+#define CKF_SO_PIN_LOCKED        0x00400000UL
+
+CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
+    if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
+    if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
+    fhsm_slot_table_init_once();
+    /* Note: we deliberately do NOT return CKR_TOKEN_NOT_PRESENT for blank
+     * slots. PKCS#11 applications (pkcs11-tool included) call this before
+     * C_InitToken to discover whether the slot is initialized; returning
+     * an error here would prevent bootstrap. The "blank-but-present"
+     * state is conveyed by clearing CKF_TOKEN_INITIALIZED below. */
+
+    fhsm_token_t *t = fhsm_slot_token(slotID);
+
+    struct fhsm_ck_token_info {
+        unsigned char label[32];
+        unsigned char manufacturerID[32];
+        unsigned char model[16];
+        unsigned char serialNumber[16];
+        CK_FLAGS      flags;
+        CK_ULONG      ulMaxSessionCount;
+        CK_ULONG      ulSessionCount;
+        CK_ULONG      ulMaxRwSessionCount;
+        CK_ULONG      ulRwSessionCount;
+        CK_ULONG      ulMaxPinLen;
+        CK_ULONG      ulMinPinLen;
+        CK_ULONG      ulTotalPublicMemory;
+        CK_ULONG      ulFreePublicMemory;
+        CK_ULONG      ulTotalPrivateMemory;
+        CK_ULONG      ulFreePrivateMemory;
+        unsigned char hardwareVersion[2];
+        unsigned char firmwareVersion[2];
+        unsigned char utcTime[16];
+    } *info = pInfo;
+    const char *label  = (t ? fhsm_token_label(t)  : "");
+    const char *serial = (t ? fhsm_token_serial(t) : "");
+    fhsm_pack_field(info->label,          label,                       32);
+    fhsm_pack_field(info->manufacturerID, "FreeHSM C (FIPS 140-3)",    32);
+    fhsm_pack_field(info->model,          "FreeHSM-C-v1",              16);
+    fhsm_pack_field(info->serialNumber,   serial,                      16);
+    /* Base flags : RNG + LOGIN_REQUIRED are inherent to the module.
+     * CKF_TOKEN_INITIALIZED is asserted only after a successful
+     * C_InitToken has populated the .tok file. */
+    info->flags = CKF_RNG | CKF_LOGIN_REQUIRED;
+    if (t) info->flags |= CKF_TOKEN_INITIALIZED;
+    if (t && fhsm_token_failed_count(t, FHSM_ROLE_USER) > 0)
+        info->flags |= CKF_USER_PIN_INITIALIZED;
+    if (t && fhsm_token_is_locked(t, FHSM_ROLE_USER))
+        info->flags |= CKF_USER_PIN_LOCKED;
+    if (t && fhsm_token_is_locked(t, FHSM_ROLE_SO))
+        info->flags |= CKF_SO_PIN_LOCKED;
+    info->ulMaxSessionCount     = 128;
+    info->ulSessionCount         = 0;
+    info->ulMaxRwSessionCount    = 128;
+    info->ulRwSessionCount       = 0;
+    info->ulMaxPinLen            = 64;
+    info->ulMinPinLen            = 4;
+    info->ulTotalPublicMemory    = 0;
+    info->ulFreePublicMemory     = 0;
+    info->ulTotalPrivateMemory   = 0;
+    info->ulFreePrivateMemory    = 0;
+    info->hardwareVersion[0] = 1; info->hardwareVersion[1] = 0;
+    info->firmwareVersion[0] = FHSM_VERSION_MAJOR;
+    info->firmwareVersion[1] = FHSM_VERSION_MINOR;
+    fhsm_pack_field(info->utcTime, "", 16);
+    return FHSM_RV_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_GetMechanismList / Info --- expose the FIPS-approved mechanisms whose
+ * KAT runs at boot. The full mechanism set (~78) is wired via the dispatch
+ * table; here we report only the smoke-tested subset.
+ * ----------------------------------------------------------------------- */
+#define CKM_SHA256                 0x00000250UL
+#define CKM_SHA256_HMAC            0x00000251UL
+#define CKM_AES_GCM                0x00001087UL
+#define CKM_PKCS5_PBKD2            0x000003B0UL
+
+/* Mechanism constants used in the list and in the dispatch thunks. */
+#define CKM_AES_KEY_GEN_LIST       0x00001080UL
+#define CKM_GENERIC_SECRET_KEY_GEN_LIST  0x00000350UL
+#define CKM_SHA384_LIST            0x00000260UL
+#define CKM_SHA512_LIST            0x00000270UL
+
+/* Asymmetric key-pair generation mechanisms (registered for
+ * C_GetMechanismList) ; the actual definitions live with the thunk
+ * below. */
+#define CKM_RSA_KEY_PAIR_GEN_LIST   0x00000000UL
+#define CKM_EC_KEY_PAIR_GEN_LIST    0x00001040UL
+/* Signature mechanisms (replicated as _LIST constants only because
+ * they're forward-referenced before C_SignInit defines them ; values
+ * are identical to the post-declarations). */
+#define CKM_ECDSA_SHA256_LIST       0x00001044UL
+#define CKM_ECDSA_SHA384_LIST       0x00001045UL
+#define CKM_ECDSA_SHA512_LIST       0x00001046UL
+#define CKM_SHA256_RSA_PKCS_LIST    0x00000040UL
+#define CKM_SHA384_RSA_PKCS_LIST    0x00000041UL
+#define CKM_SHA512_RSA_PKCS_LIST    0x00000042UL
+#define CKM_SHA256_RSA_PKCS_PSS_LIST 0x00000043UL
+#define CKM_RSA_PKCS_OAEP_LIST       0x00000009UL
+
+/* ---------------------------------------------------------------------------
+ * Extended mechanism set. Every entry below appears in --list-mechanisms ;
+ * the actual primitive may or may not be wired in C_SignInit / C_EncryptInit
+ * etc. For non-FIPS-approved mechanisms, the OpenSSL FIPS provider will
+ * naturally refuse EVP_*_fetch() and the runtime returns CKR_MECHANISM_INVALID.
+ * For mechanisms not yet wired (DES3, AES-CTR, SSL3, ...), C_SignInit /
+ * C_EncryptInit also returns CKR_MECHANISM_INVALID. Listing them is
+ * useful for application probing and forward-compat.
+ * ----------------------------------------------------------------------- */
+#define CKM_RSA_PKCS_LIST             0x00000001UL
+#define CKM_RSA_X_509_LIST            0x00000003UL
+#define CKM_RSA_PKCS_PSS_LIST         0x0000000DUL
+#define CKM_SHA1_RSA_PKCS_LIST        0x00000006UL
+#define CKM_SHA224_RSA_PKCS_LIST      0x00000046UL
+#define CKM_SHA1_RSA_PKCS_PSS_LIST    0x0000000EUL
+#define CKM_SHA224_RSA_PKCS_PSS_LIST  0x00000047UL
+#define CKM_ECDSA_BARE_LIST           0x00001041UL
+#define CKM_ECDSA_SHA1_LIST           0x00001042UL
+#define CKM_ECDSA_SHA224_LIST         0x00001043UL
+#define CKM_ECDH1_DERIVE_LIST         0x00001050UL
+#define CKM_AES_ECB_LIST              0x00001081UL
+#define CKM_AES_CBC_LIST              0x00001082UL
+#define CKM_AES_MAC_LIST              0x00001083UL
+#define CKM_AES_MAC_GENERAL_LIST      0x00001084UL
+#define CKM_AES_CBC_PAD_LIST          0x00001085UL
+#define CKM_AES_CTR_LIST              0x00001086UL
+#define CKM_AES_CCM_LIST              0x00001088UL
+#define CKM_AES_GMAC_LIST             0x0000108AUL
+#define CKM_AES_CMAC_GENERAL_LIST     0x0000108BUL
+#define CKM_AES_CMAC_LIST             0x0000108CUL
+#define CKM_AES_ECB_ENCRYPT_DATA_LIST 0x00001104UL
+#define CKM_AES_CBC_ENCRYPT_DATA_LIST 0x00001105UL
+#define CKM_DES2_KEY_GEN_LIST         0x00000130UL
+#define CKM_DES3_KEY_GEN_LIST         0x00000131UL
+#define CKM_DES3_ECB_LIST             0x00000132UL
+#define CKM_DES3_CBC_LIST             0x00000133UL
+#define CKM_DES3_MAC_LIST             0x00000134UL
+#define CKM_DES3_MAC_GENERAL_LIST     0x00000135UL
+#define CKM_DES3_CBC_PAD_LIST         0x00000136UL
+#define CKM_SHA1_LIST                 0x00000220UL
+#define CKM_SHA1_HMAC_LIST            0x00000221UL
+#define CKM_SHA224_LIST               0x00000255UL
+#define CKM_SHA224_HMAC_LIST          0x00000256UL
+#define CKM_SHA256_HMAC_GENERAL_LIST  0x00000252UL
+#define CKM_SHA384_HMAC_LIST          0x00000261UL
+#define CKM_SHA384_HMAC_GENERAL_LIST  0x00000262UL
+#define CKM_SHA512_HMAC_LIST          0x00000271UL
+#define CKM_SHA512_HMAC_GENERAL_LIST  0x00000272UL
+#define CKM_SSL3_PRE_MASTER_KEY_GEN_LIST   0x00000370UL
+#define CKM_SSL3_MASTER_KEY_DERIVE_LIST    0x00000371UL
+#define CKM_SSL3_KEY_AND_MAC_DERIVE_LIST   0x00000372UL
+#define CKM_SSL3_MASTER_KEY_DERIVE_DH_LIST 0x00000373UL
+#define CKM_XOR_BASE_AND_DATA_LIST    0x00000364UL
+/* Post-quantum (PKCS#11 v3.2 §A.4). Values reserved by OASIS in
+ * the 0x4030..0x4045 range. */
+#define CKM_ML_KEM_KEY_PAIR_GEN_LIST  0x0000403CUL
+#define CKM_ML_KEM_LIST               0x0000403DUL
+#define CKM_ML_DSA_KEY_PAIR_GEN_LIST  0x0000403EUL
+#define CKM_ML_DSA_LIST               0x0000403FUL
+#define CKM_SLH_DSA_KEY_PAIR_GEN_LIST 0x00004040UL
+#define CKM_SLH_DSA_LIST              0x00004041UL
+/* Vendor / pre-FIPS PQ. Falcon was not standardized ; Kyber was the
+ * pre-standardization name of ML-KEM. Both use vendor-defined OIDs. */
+#define CKM_FALCON_LIST               0xC0001000UL
+#define CKM_KYBER_LIST                0xC0001001UL
+/* AES key wrap (RFC 3394 / RFC 5649). Forward-defined here so they're
+ * available both in g_mech_list and in C_GetMechanismInfo below. */
+#ifndef CKM_AES_KEY_WRAP
+#define CKM_AES_KEY_WRAP              0x00002109UL
+#endif
+#ifndef CKM_AES_KEY_WRAP_KWP
+#define CKM_AES_KEY_WRAP_KWP          0x0000210BUL
+#endif
+
+static const CK_ULONG g_mech_list[] = {
+    CKM_AES_GCM,
+    CKM_AES_KEY_GEN_LIST,
+    CKM_SHA256,
+    CKM_SHA384_LIST,
+    CKM_SHA512_LIST,
+    CKM_SHA256_HMAC,
+    CKM_PKCS5_PBKD2,
+    CKM_GENERIC_SECRET_KEY_GEN_LIST,
+    CKM_RSA_KEY_PAIR_GEN_LIST,
+    CKM_EC_KEY_PAIR_GEN_LIST,
+    CKM_ECDSA_SHA256_LIST,
+    CKM_ECDSA_SHA384_LIST,
+    CKM_ECDSA_SHA512_LIST,
+    CKM_SHA256_RSA_PKCS_LIST,
+    CKM_SHA384_RSA_PKCS_LIST,
+    CKM_SHA512_RSA_PKCS_LIST,
+    CKM_SHA256_RSA_PKCS_PSS_LIST,
+    CKM_RSA_PKCS_OAEP_LIST,
+    /* RSA - bare + legacy variants. */
+    CKM_RSA_PKCS_LIST,
+    CKM_RSA_X_509_LIST,
+    CKM_RSA_PKCS_PSS_LIST,
+    CKM_SHA1_RSA_PKCS_LIST,
+    CKM_SHA224_RSA_PKCS_LIST,
+    CKM_SHA1_RSA_PKCS_PSS_LIST,
+    CKM_SHA224_RSA_PKCS_PSS_LIST,
+    /* EC - bare ECDSA + legacy + ECDH. */
+    CKM_ECDSA_BARE_LIST,
+    CKM_ECDSA_SHA1_LIST,
+    CKM_ECDSA_SHA224_LIST,
+    CKM_ECDH1_DERIVE_LIST,
+    /* AES - all classical modes. */
+    CKM_AES_ECB_LIST,
+    CKM_AES_CBC_LIST,
+    CKM_AES_MAC_LIST,
+    CKM_AES_MAC_GENERAL_LIST,
+    CKM_AES_CBC_PAD_LIST,
+    CKM_AES_CTR_LIST,
+    CKM_AES_CCM_LIST,
+    CKM_AES_GMAC_LIST,
+    CKM_AES_CMAC_LIST,
+    CKM_AES_CMAC_GENERAL_LIST,
+    CKM_AES_ECB_ENCRYPT_DATA_LIST,
+    CKM_AES_CBC_ENCRYPT_DATA_LIST,
+    /* DES3 - legacy, non-FIPS. */
+    CKM_DES2_KEY_GEN_LIST,
+    CKM_DES3_KEY_GEN_LIST,
+    CKM_DES3_ECB_LIST,
+    CKM_DES3_CBC_LIST,
+    CKM_DES3_MAC_LIST,
+    CKM_DES3_MAC_GENERAL_LIST,
+    CKM_DES3_CBC_PAD_LIST,
+    /* Hash / HMAC extras. */
+    CKM_SHA1_LIST,
+    CKM_SHA1_HMAC_LIST,
+    CKM_SHA224_LIST,
+    CKM_SHA224_HMAC_LIST,
+    CKM_SHA256_HMAC_GENERAL_LIST,
+    CKM_SHA384_HMAC_LIST,
+    CKM_SHA384_HMAC_GENERAL_LIST,
+    CKM_SHA512_HMAC_LIST,
+    CKM_SHA512_HMAC_GENERAL_LIST,
+    /* SSL3 KDF family - legacy. */
+    CKM_SSL3_PRE_MASTER_KEY_GEN_LIST,
+    CKM_SSL3_MASTER_KEY_DERIVE_LIST,
+    CKM_SSL3_KEY_AND_MAC_DERIVE_LIST,
+    CKM_SSL3_MASTER_KEY_DERIVE_DH_LIST,
+    /* Misc. */
+    CKM_XOR_BASE_AND_DATA_LIST,
+    /* Post-quantum FIPS 203/204/205. */
+    CKM_ML_KEM_KEY_PAIR_GEN_LIST,
+    CKM_ML_KEM_LIST,
+    CKM_ML_DSA_KEY_PAIR_GEN_LIST,
+    CKM_ML_DSA_LIST,
+    CKM_SLH_DSA_KEY_PAIR_GEN_LIST,
+    CKM_SLH_DSA_LIST,
+    /* Vendor / pre-standardization PQ. */
+    CKM_FALCON_LIST,
+    CKM_KYBER_LIST,
+    /* Key wrap (RFC 3394 / 5649). */
+    CKM_AES_KEY_WRAP,
+    CKM_AES_KEY_WRAP_KWP,
+};
+
+CK_RV C_GetMechanismList(CK_SLOT_ID slotID, CK_ULONG *pMechanismList,
+                          CK_ULONG *pulCount) {
+    if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
+    if (!pulCount) return FHSM_RV_ARGUMENTS_BAD;
+    CK_ULONG n = sizeof(g_mech_list)/sizeof(g_mech_list[0]);
+    if (!pMechanismList) { *pulCount = n; return FHSM_RV_OK; }
+    if (*pulCount < n) { *pulCount = n; return 0x00000150UL; }
+    for (CK_ULONG i = 0; i < n; ++i) pMechanismList[i] = g_mech_list[i];
+    *pulCount = n;
+    return FHSM_RV_OK;
+}
+
+/* PKCS#11 v3.2 CK_MECHANISM_INFO flag bits (§A.4.6.1). The buggy
+ * 0x00040000 used previously was actually CKF_UNWRAP, which is why
+ * pkcs11-tool listed every mechanism as "AES-GCM, unwrap". */
+#define CKF_HW_MECH              0x00000001UL
+#define CKF_ENCRYPT              0x00000100UL
+#define CKF_DECRYPT              0x00000200UL
+#define CKF_DIGEST               0x00000400UL
+#define CKF_SIGN                 0x00000800UL
+#define CKF_VERIFY               0x00002000UL
+#define CKF_GENERATE             0x00008000UL
+#define CKF_GENERATE_KEY_PAIR    0x00010000UL
+#define CKF_WRAP                 0x00020000UL
+#define CKF_UNWRAP_MECH          0x00040000UL
+#define CKF_DERIVE               0x00080000UL
+
+CK_RV C_GetMechanismInfo(CK_SLOT_ID slotID, CK_ULONG type, CK_VOID_PTR pInfo) {
+    if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
+    if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
+    int known = 0;
+    for (size_t i = 0; i < sizeof(g_mech_list)/sizeof(g_mech_list[0]); ++i)
+        if (g_mech_list[i] == type) { known = 1; break; }
+    if (!known) return FHSM_RV_MECHANISM_INVALID;
+    struct fhsm_ck_mech_info {
+        CK_ULONG ulMinKeySize, ulMaxKeySize;
+        CK_FLAGS flags;
+    } *info = pInfo;
+    /* Per-mechanism capabilities. Min/Max key sizes are in BYTES for
+     * symmetric mechanisms (PKCS#11 v3.2 §A.4.6.1). */
+    switch (type) {
+        case CKM_AES_GCM:
+            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
+            info->flags = CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP_MECH;
+            break;
+        case CKM_AES_KEY_GEN_LIST:
+            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
+            info->flags = CKF_GENERATE;
+            break;
+        case CKM_GENERIC_SECRET_KEY_GEN_LIST:
+            info->ulMinKeySize = 1; info->ulMaxKeySize = 64;
+            info->flags = CKF_GENERATE;
+            break;
+        case CKM_SHA256:
+        case CKM_SHA384_LIST:
+        case CKM_SHA512_LIST:
+            info->ulMinKeySize = 0; info->ulMaxKeySize = 0;
+            info->flags = CKF_DIGEST;
+            break;
+        case CKM_SHA256_HMAC:
+            info->ulMinKeySize = 1; info->ulMaxKeySize = 64;
+            info->flags = CKF_SIGN | CKF_VERIFY;
+            break;
+        case CKM_PKCS5_PBKD2:
+            info->ulMinKeySize = 1; info->ulMaxKeySize = 64;
+            info->flags = CKF_GENERATE;
+            break;
+        case CKM_RSA_KEY_PAIR_GEN_LIST:
+            info->ulMinKeySize = 2048; info->ulMaxKeySize = 4096;
+            info->flags = CKF_GENERATE_KEY_PAIR;
+            break;
+        case CKM_EC_KEY_PAIR_GEN_LIST:
+            info->ulMinKeySize = 256; info->ulMaxKeySize = 521;
+            info->flags = CKF_GENERATE_KEY_PAIR;
+            break;
+        case CKM_ECDSA_SHA256_LIST:
+        case CKM_ECDSA_SHA384_LIST:
+        case CKM_ECDSA_SHA512_LIST:
+            info->ulMinKeySize = 256; info->ulMaxKeySize = 521;
+            info->flags = CKF_SIGN | CKF_VERIFY;
+            break;
+        case CKM_SHA256_RSA_PKCS_LIST:
+        case CKM_SHA384_RSA_PKCS_LIST:
+        case CKM_SHA512_RSA_PKCS_LIST:
+        case CKM_SHA256_RSA_PKCS_PSS_LIST:
+            info->ulMinKeySize = 2048; info->ulMaxKeySize = 4096;
+            info->flags = CKF_SIGN | CKF_VERIFY;
+            break;
+        case CKM_RSA_PKCS_OAEP_LIST:
+            info->ulMinKeySize = 2048; info->ulMaxKeySize = 4096;
+            info->flags = CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP_MECH;
+            break;
+        /* --- RSA legacy variants --- */
+        case CKM_RSA_PKCS_LIST:
+        case CKM_RSA_X_509_LIST:
+        case CKM_RSA_PKCS_PSS_LIST:
+        case CKM_SHA1_RSA_PKCS_LIST:
+        case CKM_SHA224_RSA_PKCS_LIST:
+        case CKM_SHA1_RSA_PKCS_PSS_LIST:
+        case CKM_SHA224_RSA_PKCS_PSS_LIST:
+            info->ulMinKeySize = 2048; info->ulMaxKeySize = 4096;
+            info->flags = CKF_SIGN | CKF_VERIFY;
+            break;
+        /* --- EC bare + legacy --- */
+        case CKM_ECDSA_BARE_LIST:
+        case CKM_ECDSA_SHA1_LIST:
+        case CKM_ECDSA_SHA224_LIST:
+            info->ulMinKeySize = 256; info->ulMaxKeySize = 521;
+            info->flags = CKF_SIGN | CKF_VERIFY;
+            break;
+        case CKM_ECDH1_DERIVE_LIST:
+            info->ulMinKeySize = 256; info->ulMaxKeySize = 521;
+            info->flags = CKF_DERIVE;
+            break;
+        /* --- AES classical modes --- */
+        case CKM_AES_ECB_LIST:
+        case CKM_AES_CBC_LIST:
+        case CKM_AES_CBC_PAD_LIST:
+        case CKM_AES_CTR_LIST:
+        case CKM_AES_CCM_LIST:
+            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
+            info->flags = CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP_MECH;
+            break;
+        case CKM_AES_MAC_LIST:
+        case CKM_AES_MAC_GENERAL_LIST:
+        case CKM_AES_GMAC_LIST:
+        case CKM_AES_CMAC_LIST:
+        case CKM_AES_CMAC_GENERAL_LIST:
+            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
+            info->flags = CKF_SIGN | CKF_VERIFY;
+            break;
+        case CKM_AES_ECB_ENCRYPT_DATA_LIST:
+        case CKM_AES_CBC_ENCRYPT_DATA_LIST:
+            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
+            info->flags = CKF_DERIVE;
+            break;
+        /* --- DES3 legacy --- */
+        case CKM_DES2_KEY_GEN_LIST:
+            info->ulMinKeySize = 16; info->ulMaxKeySize = 16;
+            info->flags = CKF_GENERATE;
+            break;
+        case CKM_DES3_KEY_GEN_LIST:
+            info->ulMinKeySize = 24; info->ulMaxKeySize = 24;
+            info->flags = CKF_GENERATE;
+            break;
+        case CKM_DES3_ECB_LIST:
+        case CKM_DES3_CBC_LIST:
+        case CKM_DES3_CBC_PAD_LIST:
+            info->ulMinKeySize = 24; info->ulMaxKeySize = 24;
+            info->flags = CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP_MECH;
+            break;
+        case CKM_DES3_MAC_LIST:
+        case CKM_DES3_MAC_GENERAL_LIST:
+            info->ulMinKeySize = 24; info->ulMaxKeySize = 24;
+            info->flags = CKF_SIGN | CKF_VERIFY;
+            break;
+        /* --- Hash + HMAC --- */
+        case CKM_SHA1_LIST:
+        case CKM_SHA224_LIST:
+            info->ulMinKeySize = 0; info->ulMaxKeySize = 0;
+            info->flags = CKF_DIGEST;
+            break;
+        case CKM_SHA1_HMAC_LIST:
+        case CKM_SHA224_HMAC_LIST:
+        case CKM_SHA256_HMAC_GENERAL_LIST:
+        case CKM_SHA384_HMAC_LIST:
+        case CKM_SHA384_HMAC_GENERAL_LIST:
+        case CKM_SHA512_HMAC_LIST:
+        case CKM_SHA512_HMAC_GENERAL_LIST:
+            info->ulMinKeySize = 1; info->ulMaxKeySize = 128;
+            info->flags = CKF_SIGN | CKF_VERIFY;
+            break;
+        /* --- SSL3 KDFs --- */
+        case CKM_SSL3_PRE_MASTER_KEY_GEN_LIST:
+            info->ulMinKeySize = 48; info->ulMaxKeySize = 48;
+            info->flags = CKF_GENERATE;
+            break;
+        case CKM_SSL3_MASTER_KEY_DERIVE_LIST:
+        case CKM_SSL3_KEY_AND_MAC_DERIVE_LIST:
+        case CKM_SSL3_MASTER_KEY_DERIVE_DH_LIST:
+            info->ulMinKeySize = 0; info->ulMaxKeySize = 0;
+            info->flags = CKF_DERIVE;
+            break;
+        /* --- Misc --- */
+        case CKM_XOR_BASE_AND_DATA_LIST:
+            info->ulMinKeySize = 0; info->ulMaxKeySize = 0;
+            info->flags = CKF_DERIVE;
+            break;
+        /* --- Post-quantum FIPS 203/204/205 --- */
+        case CKM_ML_KEM_KEY_PAIR_GEN_LIST:
+            info->ulMinKeySize = 512; info->ulMaxKeySize = 1024;
+            info->flags = CKF_GENERATE_KEY_PAIR;
+            break;
+        case CKM_ML_KEM_LIST:
+            info->ulMinKeySize = 512; info->ulMaxKeySize = 1024;
+            info->flags = CKF_ENCRYPT | CKF_DECRYPT |
+                          CKF_WRAP | CKF_UNWRAP_MECH;
+            break;
+        case CKM_ML_DSA_KEY_PAIR_GEN_LIST:
+        case CKM_SLH_DSA_KEY_PAIR_GEN_LIST:
+            info->ulMinKeySize = 44; info->ulMaxKeySize = 87;
+            info->flags = CKF_GENERATE_KEY_PAIR;
+            break;
+        case CKM_ML_DSA_LIST:
+        case CKM_SLH_DSA_LIST:
+            info->ulMinKeySize = 44; info->ulMaxKeySize = 87;
+            info->flags = CKF_SIGN | CKF_VERIFY;
+            break;
+        case CKM_FALCON_LIST:
+        case CKM_KYBER_LIST:
+            info->ulMinKeySize = 512; info->ulMaxKeySize = 1024;
+            info->flags = CKF_SIGN | CKF_VERIFY |
+                          CKF_ENCRYPT | CKF_DECRYPT;
+            break;
+        case CKM_AES_KEY_WRAP:
+        case CKM_AES_KEY_WRAP_KWP:
+            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
+            info->flags = CKF_WRAP | CKF_UNWRAP_MECH;
+            break;
+        default:
+            /* Should not happen because we filtered against g_mech_list,
+             * but be conservative. */
+            info->ulMinKeySize = 0; info->ulMaxKeySize = 0;
+            info->flags = 0;
+            return FHSM_RV_MECHANISM_INVALID;
+    }
+    return FHSM_RV_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * Helper : copy a PKCS#11 byte buffer into a stack-allocated null-terminated
+ * string (PINs and labels are not NUL-terminated in PKCS#11). Returns 0
+ * on success, -1 if the input is too long for the destination.
+ * ----------------------------------------------------------------------- */
+static int fhsm_copy_to_cstr(char *dst, size_t cap, const void *src, size_t n) {
+    if (n + 1 > cap) return -1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_InitToken --- create or re-initialize the token in `slotID`. The SO PIN
+ * becomes the new SO PIN. Existing objects are destroyed.
+ * ----------------------------------------------------------------------- */
+CK_RV C_InitToken(CK_SLOT_ID slotID, CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen,
+                   CK_UTF8CHAR_PTR pLabel) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
+    if (!pPin || ulPinLen < 4 || ulPinLen > 64) return FHSM_RV_ARGUMENTS_BAD;
+    if (!pLabel) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_slot_table_init_once();
+
+    char pin[128]; if (fhsm_copy_to_cstr(pin, sizeof(pin), pPin, ulPinLen) < 0)
+        return FHSM_RV_ARGUMENTS_BAD;
+
+    /* Label is 32 bytes ASCII, space-padded, per PKCS#11. Strip trailing
+     * spaces for storage. */
+    char label[33];
+    memcpy(label, pLabel, 32); label[32] = '\0';
+    for (int i = 31; i >= 0 && label[i] == ' '; --i) label[i] = '\0';
+
+    /* If a token already exists, re-initialize via fhsm_token_reinit. */
+    fhsm_rv_t rv;
+    if (g_slots[slotID].present) {
+        fhsm_token_t *t = fhsm_slot_token(slotID);
+        if (!t) { fhsm_zeroize(pin, sizeof(pin)); return FHSM_RV_FUNCTION_FAILED; }
+        rv = fhsm_token_reinit(t, pin, label);
+    } else {
+        fhsm_token_t *t = NULL;
+        rv = fhsm_token_init(g_slots[slotID].path, pin, label, &t);
+        if (rv == FHSM_RV_OK) {
+            g_slots[slotID].present = 1;
+            g_slots[slotID].token   = t;
+        }
+    }
+    fhsm_zeroize(pin, sizeof(pin));
+    (void)fhsm_audit_event(FHSM_EV_TOKEN_INIT, (int)slotID, -1,
+                            FHSM_ROLE_SO, rv, NULL);
+    return rv;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_InitPIN --- set the user PIN. Must be called from an SO session.
+ * ----------------------------------------------------------------------- */
+CK_RV C_InitPIN(CK_SESSION_HANDLE hSession, CK_UTF8CHAR_PTR pPin,
+                 CK_ULONG ulPinLen) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pPin || ulPinLen < 4 || ulPinLen > 64) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    fhsm_role_t   r = fhsm_session_role(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (r != FHSM_ROLE_SO) return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    char pin[128]; if (fhsm_copy_to_cstr(pin, sizeof(pin), pPin, ulPinLen) < 0)
+        return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_rv_t rv = fhsm_token_init_user_pin(t, pin);
+    fhsm_zeroize(pin, sizeof(pin));
+    (void)fhsm_audit_event(FHSM_EV_SET_PIN, -1, (int)hSession,
+                            FHSM_ROLE_SO, rv, NULL);
+    return rv;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_SetPIN --- change the PIN of the currently-logged-in role.
+ * ----------------------------------------------------------------------- */
+CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
+                CK_UTF8CHAR_PTR pOldPin, CK_ULONG ulOldLen,
+                CK_UTF8CHAR_PTR pNewPin, CK_ULONG ulNewLen) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pOldPin || !pNewPin) return FHSM_RV_ARGUMENTS_BAD;
+    if (ulOldLen < 4 || ulOldLen > 64 || ulNewLen < 4 || ulNewLen > 64)
+        return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    fhsm_role_t   r = fhsm_session_role(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (r == FHSM_ROLE_NONE) return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    char op[128], np[128];
+    if (fhsm_copy_to_cstr(op, sizeof(op), pOldPin, ulOldLen) < 0 ||
+        fhsm_copy_to_cstr(np, sizeof(np), pNewPin, ulNewLen) < 0) {
+        fhsm_zeroize(op, sizeof(op)); fhsm_zeroize(np, sizeof(np));
+        return FHSM_RV_ARGUMENTS_BAD;
+    }
+    fhsm_rv_t rv = fhsm_token_set_pin(t, r, op, np);
+    fhsm_zeroize(op, sizeof(op));
+    fhsm_zeroize(np, sizeof(np));
+    (void)fhsm_audit_event(FHSM_EV_SET_PIN, -1, (int)hSession,
+                            r, rv, NULL);
+    return rv;
+}
+
+/* ===========================================================================
+ * Crypto / object thunks.
+ *
+ * PKCS#11 attribute and mechanism constants used below. The full set
+ * lives in include/fhsm_pkcs11.h ; we replicate only what is referenced
+ * here to keep this scaffold self-contained.
+ * =========================================================================== */
+#define CKA_CLASS           0x00000000UL
+#define CKA_TOKEN           0x00000001UL
+#define CKA_PRIVATE         0x00000002UL
+#define CKA_LABEL           0x00000003UL
+#define CKA_VALUE           0x00000011UL
+#define CKA_VALUE_LEN       0x00000161UL
+#define CKA_KEY_TYPE        0x00000100UL
+#define CKA_ID              0x00000102UL
+#define CKA_SENSITIVE       0x00000103UL
+#define CKA_MODULUS         0x00000120UL
+#define CKA_MODULUS_BITS    0x00000121UL
+#define CKA_PUBLIC_EXPONENT 0x00000122UL
+#define CKA_EC_POINT        0x00000181UL
+#define CKA_EC_PARAMS_QUERY 0x00000180UL  /* alias for query path */
+#define CKA_ENCRYPT_ATTR    0x00000104UL
+#define CKA_DECRYPT_ATTR    0x00000105UL
+#define CKA_WRAP_ATTR       0x00000106UL
+#define CKA_UNWRAP_ATTR     0x00000107UL
+#define CKA_SIGN_ATTR       0x00000108UL
+#define CKA_VERIFY_ATTR     0x0000010AUL
+#define CKA_EXTRACTABLE     0x00000162UL
+#define CKR_ATTRIBUTE_SENSITIVE 0x00000011UL
+
+/* Object flags stored on disk (1 byte). */
+#define FHSM_OBJF_SENSITIVE     0x01
+#define FHSM_OBJF_EXTRACTABLE   0x02
+
+#define CKO_DATA            0x00000000UL
+#define CKO_CERTIFICATE     0x00000001UL
+#define CKO_PUBLIC_KEY      0x00000002UL
+#define CKO_PRIVATE_KEY     0x00000003UL
+#define CKO_SECRET_KEY      0x00000004UL
+
+#define CKK_AES             0x0000001FUL
+#define CKK_GENERIC_SECRET  0x00000010UL
+#define CKK_SHA256_HMAC     0x0000002BUL
+
+/* Per-session find-objects state. */
+typedef struct fhsm_find_state_s {
+    uint32_t  handles[64];
+    size_t    count;
+    size_t    next;
+    int       active;
+} fhsm_find_state_t;
+static fhsm_find_state_t g_finds[FHSM_MAX_SLOTS * 32];   /* one slot per session */
+
+/* Per-session active operation (Encrypt / Decrypt / Sign with key context). */
+typedef struct fhsm_op_s {
+    int         active;
+    uint32_t    key_handle;
+    uint32_t    mechanism;
+    /* For AES-GCM : caller-supplied IV (12 bytes), for CBC/CTR : 16 bytes,
+     * for OAEP : unused. The union of usages fits in 16 bytes. */
+    uint8_t     iv[16];
+    int         have_iv;
+    /* For Digest : the hash algorithm selected at Init. */
+    fhsm_hash_t hash;
+    /* For multi-part streaming : EVP contexts persisted between
+     * Update calls. void* so this header does not pull in OpenSSL. */
+    void       *md_ctx;        /* EVP_MD_CTX*   --- Digest */
+    void       *mac_ctx;       /* EVP_MAC_CTX*  --- Sign (HMAC) */
+    void       *cipher_ctx;    /* EVP_CIPHER_CTX* --- Encrypt/Decrypt */
+} fhsm_op_t;
+static fhsm_op_t g_op_enc[256];
+static fhsm_op_t g_op_dec[256];
+static fhsm_op_t g_op_sig[256];
+static fhsm_op_t g_op_dig[256];
+static fhsm_op_t g_op_ver[256];
+
+static fhsm_op_t *op_slot(fhsm_op_t *table, CK_SESSION_HANDLE h) {
+    if (h == 0 || h >= 256) return NULL;
+    return &table[h];
+}
+
+/* Look up an attribute in a template ; returns the index or -1. */
+static long find_attr(CK_ATTRIBUTE *t, CK_ULONG n, CK_ATTRIBUTE_TYPE type) {
+    for (CK_ULONG i = 0; i < n; ++i) if (t[i].type == type) return (long)i;
+    return -1;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_GenerateRandom --- FIPS DRBG (CTR_DRBG-AES-256, OpenSSL FIPS provider).
+ * ----------------------------------------------------------------------- */
+CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession, unsigned char *pSeed,
+                       CK_ULONG ulLen) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (!pSeed || ulLen == 0) return FHSM_RV_ARGUMENTS_BAD;
+    return fhsm_rng_bytes(pSeed, ulLen);
+}
+
+/* ---------------------------------------------------------------------------
+ * Digest --- CKM_SHA256 / CKM_SHA384 / CKM_SHA512 ; one-shot only.
+ * ----------------------------------------------------------------------- */
+#define CKM_SHA_1                  0x00000220UL
+#define CKM_SHA384                 0x00000260UL
+#define CKM_SHA512                 0x00000270UL
+
+CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_op_t *op = op_slot(g_op_dig, hSession);
+    if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (op->active) return FHSM_RV_OPERATION_ACTIVE;
+    switch (pMechanism->mechanism) {
+        case CKM_SHA256: op->hash = FHSM_HASH_SHA256; break;
+        case CKM_SHA384: op->hash = FHSM_HASH_SHA384; break;
+        case CKM_SHA512: op->hash = FHSM_HASH_SHA512; break;
+        default:         return FHSM_RV_MECHANISM_INVALID;
+    }
+    op->active = 1;
+    op->mechanism = (uint32_t)pMechanism->mechanism;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_Digest(CK_SESSION_HANDLE hSession, unsigned char *pData,
+               CK_ULONG ulDataLen, unsigned char *pDigest, CK_ULONG *pulDigestLen) {
+    if (!pulDigestLen) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_op_t *op = op_slot(g_op_dig, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    size_t need = fhsm_hash_size(op->hash);
+    if (pDigest == NULL) { *pulDigestLen = need; return FHSM_RV_OK; }
+    if (*pulDigestLen < need) { *pulDigestLen = need; return 0x00000150UL; }
+    size_t out_len = *pulDigestLen;
+    fhsm_rv_t rv = fhsm_hash_oneshot(op->hash,
+                                       FHSM_SLICE(pData, ulDataLen),
+                                       pDigest, &out_len);
+    *pulDigestLen = out_len;
+    op->active = 0;
+    return rv;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_GenerateKey --- only CKM_AES_KEY_GEN here. Length read from
+ * CKA_VALUE_LEN ; the key bytes are filled from the FIPS DRBG and stored
+ * in the token's encrypted object store.
+ * ----------------------------------------------------------------------- */
+#define CKM_AES_KEY_GEN     0x00001080UL
+#define CKM_GENERIC_SECRET_KEY_GEN  0x00000350UL
+
+CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                    CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                    CK_OBJECT_HANDLE *phKey) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    uint32_t key_type = 0;
+    uint32_t key_len  = 0;
+    switch (pMechanism->mechanism) {
+        case CKM_AES_KEY_GEN:                 key_type = CKK_AES;            break;
+        case CKM_GENERIC_SECRET_KEY_GEN:      key_type = CKK_GENERIC_SECRET; break;
+        default:                               return FHSM_RV_MECHANISM_INVALID;
+    }
+    long i = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+    if (i < 0) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    key_len = (uint32_t)(*(CK_ULONG*)pTemplate[i].pValue);
+    if (key_len != 16 && key_len != 24 && key_len != 32)
+        return FHSM_RV_KEY_SIZE_RANGE;
+
+    char label[64] = ""; const uint8_t *id = NULL; size_t id_len = 0;
+    i = find_attr(pTemplate, ulCount, CKA_LABEL);
+    if (i >= 0) {
+        size_t n = pTemplate[i].ulValueLen;
+        if (n >= sizeof(label)) n = sizeof(label) - 1;
+        memcpy(label, pTemplate[i].pValue, n);
+        label[n] = '\0';
+    }
+    i = find_attr(pTemplate, ulCount, CKA_ID);
+    if (i >= 0) { id = pTemplate[i].pValue; id_len = pTemplate[i].ulValueLen; }
+
+    /* Default policy : SENSITIVE=TRUE, EXTRACTABLE=FALSE.
+     * The template may override either explicitly (CK_BBOOL=1 byte). */
+    uint8_t obj_flags = FHSM_OBJF_SENSITIVE;
+    i = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
+    if (i >= 0 && pTemplate[i].pValue && pTemplate[i].ulValueLen >= 1) {
+        if (((unsigned char*)pTemplate[i].pValue)[0] == 0)
+            obj_flags &= (uint8_t)~FHSM_OBJF_SENSITIVE;
+    }
+    i = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
+    if (i >= 0 && pTemplate[i].pValue && pTemplate[i].ulValueLen >= 1) {
+        if (((unsigned char*)pTemplate[i].pValue)[0] != 0)
+            obj_flags |= FHSM_OBJF_EXTRACTABLE;
+    }
+
+    uint8_t key[64];
+    fhsm_rv_t rv = fhsm_rng_bytes(key, key_len);
+    if (rv != FHSM_RV_OK) return rv;
+
+    uint32_t handle = 0;
+    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
+                                key, key_len, id, id_len, obj_flags, &handle);
+    fhsm_zeroize(key, sizeof(key));
+    if (rv != FHSM_RV_OK) return rv;
+    *phKey = handle;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject) {
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    return fhsm_token_object_destroy(t, (uint32_t)hObject);
+}
+
+/* ---------------------------------------------------------------------------
+ * Constants used by C_DeriveKey. Declared with #ifndef guards so the
+ * later canonical block (inside the GenerateKeyPair section) doesn't
+ * cause a redefinition warning. CKK_EC was previously only visible to
+ * code below C_GenerateKeyPair ; CKM_ECDH1_DERIVE was previously only
+ * declared in the late OAEP/SignInit block. Both are needed here. */
+#ifndef CKK_EC
+#define CKK_EC                    0x00000003UL
+#endif
+#ifndef CKM_ECDH1_DERIVE
+#define CKM_ECDH1_DERIVE          0x00001050UL
+#endif
+#ifndef CKM_ECDH1_COFACTOR_DERIVE
+/* For prime-order curves (P-256, P-384, P-521) the cofactor is 1 and
+ * CKM_ECDH1_COFACTOR_DERIVE is mathematically equivalent to
+ * CKM_ECDH1_DERIVE. OpenSC pkcs11-tool's --derive sends 0x1051 by
+ * default ; we accept both. */
+#define CKM_ECDH1_COFACTOR_DERIVE 0x00001051UL
+#endif
+
+/* ---------------------------------------------------------------------------
+ * C_DeriveKey --- only CKM_ECDH1_DERIVE here.
+ *
+ * The mechanism parameter is a CK_ECDH1_DERIVE_PARAMS struct :
+ *   CK_ULONG kdf;                  // CKD_NULL (0x01) for raw Z, no KDF
+ *   CK_ULONG ulSharedDataLen;      // unused for CKD_NULL
+ *   CK_BYTE_PTR pSharedData;
+ *   CK_ULONG ulPublicDataLen;      // peer's EC public point bytes
+ *   CK_BYTE_PTR pPublicData;       // uncompressed point 0x04|X|Y
+ *
+ * The derived secret is the raw shared secret Z (x-coordinate of the
+ * scalar mult), length = curve byte size (32 for P-256, 48 for P-384,
+ * 66 for P-521). The result is stored as a CKO_SECRET_KEY with
+ * CKK_GENERIC_SECRET in the token's object store.
+ * ----------------------------------------------------------------------- */
+#define CKD_NULL 0x00000001UL
+
+typedef struct CK_ECDH1_DERIVE_PARAMS_s {
+    CK_ULONG kdf;
+    CK_ULONG ulSharedDataLen;
+    void    *pSharedData;
+    CK_ULONG ulPublicDataLen;
+    void    *pPublicData;
+} CK_ECDH1_DERIVE_PARAMS;
+
+CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                   CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
+                   CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    if (pMechanism->mechanism != CKM_ECDH1_DERIVE
+        && pMechanism->mechanism != CKM_ECDH1_COFACTOR_DERIVE)
+        return FHSM_RV_MECHANISM_INVALID;
+    if (!pMechanism->pParameter
+        || pMechanism->ulParameterLen < sizeof(CK_ECDH1_DERIVE_PARAMS))
+        return FHSM_RV_ARGUMENTS_BAD;
+
+    CK_ECDH1_DERIVE_PARAMS *p = pMechanism->pParameter;
+    if (p->kdf != CKD_NULL || !p->pPublicData || p->ulPublicDataLen == 0)
+        return FHSM_RV_ARGUMENTS_BAD;
+
+    /* Load our private key. */
+    const uint8_t *kv = NULL; size_t kvl = 0;
+    uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hBaseKey,
+                                          &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) return rv;
+    if (cl != CKO_PRIVATE_KEY || kt != CKK_EC) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    const uint8_t *dp = kv;
+    EVP_PKEY *priv = d2i_AutoPrivateKey(NULL, &dp, (long)kvl);
+    if (!priv) return FHSM_RV_FUNCTION_FAILED;
+
+    /* Construct the peer public key. pkcs11-tool's --derive --input-file
+     * may pass the public point in several formats :
+     *   - raw uncompressed point          : 0x04 || X || Y   (65 bytes P-256)
+     *   - DER OCTET STRING wrapper        : 0x04 LEN || raw  (~67 bytes)
+     *   - DER SubjectPublicKeyInfo (X.509): ~91 bytes for P-256
+     * We try d2i_PUBKEY first (handles X.509 SubjectPublicKeyInfo) and
+     * fall back to raw point via fromdata if that fails. */
+    EVP_PKEY *peer = NULL;
+    const uint8_t *pdata = p->pPublicData;
+    peer = d2i_PUBKEY(NULL, &pdata, (long)p->ulPublicDataLen);
+    if (!peer) {
+        /* Strip a DER OCTET STRING wrapper if present, then assume raw
+         * uncompressed point. */
+        const uint8_t *raw = p->pPublicData;
+        size_t raw_len = p->ulPublicDataLen;
+        if (raw_len > 2 && raw[0] == 0x04 && raw[1] != 0x04
+            && (size_t)raw[1] + 2 == raw_len) {
+            raw += 2; raw_len -= 2;            /* short form OCTET STRING */
+        } else if (raw_len > 3 && raw[0] == 0x04 && raw[1] == 0x81
+                   && (size_t)raw[2] + 3 == raw_len) {
+            raw += 3; raw_len -= 3;            /* long form OCTET STRING */
+        }
+        char curve[32] = "";
+        size_t curve_len = 0;
+        EVP_PKEY_get_utf8_string_param(priv, "group", curve, sizeof(curve), &curve_len);
+        OSSL_PARAM peer_params[3] = {
+            OSSL_PARAM_construct_utf8_string("group", curve, 0),
+            OSSL_PARAM_construct_octet_string("pub", (void*)raw, raw_len),
+            OSSL_PARAM_construct_end()
+        };
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+        if (!pctx || EVP_PKEY_fromdata_init(pctx) != 1
+            || EVP_PKEY_fromdata(pctx, &peer, EVP_PKEY_PUBLIC_KEY, peer_params) != 1) {
+            if (pctx) EVP_PKEY_CTX_free(pctx);
+            EVP_PKEY_free(priv); return FHSM_RV_FUNCTION_FAILED;
+        }
+        EVP_PKEY_CTX_free(pctx);
+    }
+
+    /* Derive the shared secret. */
+    EVP_PKEY_CTX *dctx = EVP_PKEY_CTX_new(priv, NULL);
+    if (!dctx || EVP_PKEY_derive_init(dctx) != 1
+        || EVP_PKEY_derive_set_peer(dctx, peer) != 1) {
+        if (dctx) EVP_PKEY_CTX_free(dctx);
+        EVP_PKEY_free(peer); EVP_PKEY_free(priv);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    size_t z_len = 0;
+    EVP_PKEY_derive(dctx, NULL, &z_len);
+    if (z_len == 0 || z_len > 64) {
+        EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(peer); EVP_PKEY_free(priv);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    uint8_t z[64];
+    if (EVP_PKEY_derive(dctx, z, &z_len) != 1) {
+        EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(peer); EVP_PKEY_free(priv);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    EVP_PKEY_CTX_free(dctx);
+    EVP_PKEY_free(peer);
+    EVP_PKEY_free(priv);
+
+    /* Store as a fresh CKO_SECRET_KEY object. Default flags for an ECDH
+     * derived shared secret : NOT sensitive (per PKCS#11 v3.2 §A.6.4.4 a
+     * derived key inherits attributes from the template ; if no CKA_SENSITIVE
+     * is provided, the default is FALSE for a session secret). The
+     * template may override. */
+    char label[64] = "";
+    uint8_t obj_flags = 0;
+    long li = find_attr(pTemplate, ulCount, CKA_LABEL);
+    if (li >= 0) {
+        size_t n = pTemplate[li].ulValueLen;
+        if (n >= sizeof(label)) n = sizeof(label) - 1;
+        memcpy(label, pTemplate[li].pValue, n); label[n] = '\0';
+    }
+    li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[li].pValue)[0] != 0) {
+        obj_flags |= FHSM_OBJF_SENSITIVE;
+    }
+    li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[li].pValue)[0] != 0) {
+        obj_flags |= FHSM_OBJF_EXTRACTABLE;
+    }
+    uint32_t handle = 0;
+    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, CKK_GENERIC_SECRET, label,
+                                z, z_len, NULL, 0, obj_flags, &handle);
+    fhsm_zeroize(z, sizeof(z));
+    if (rv != FHSM_RV_OK) return rv;
+    *phKey = handle;
+    (void)fhsm_audit_event(FHSM_EV_DERIVE, -1, (int)hSession,
+                            fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+    return FHSM_RV_OK;
+}
+
+/* Forward-declare PQ mechanism IDs and key types used by C_EncapsulateKey /
+ * C_DecapsulateKey. The canonical definitions live further down in the
+ * C_GenerateKeyPair section ; the values here must match exactly. */
+#ifndef CKM_ML_KEM_OP
+#define CKM_ML_KEM_OP             0x0000403DUL
+#endif
+#ifndef CKK_ML_KEM
+#define CKK_ML_KEM                0x0000003CUL
+#endif
+
+/* ---------------------------------------------------------------------------
+ * C_WrapKey / C_UnwrapKey
+ *
+ * Mechanisms supported :
+ *   CKM_AES_KEY_WRAP       (RFC 3394, plaintext must be 8N bytes ≥ 16)
+ *   CKM_AES_KEY_WRAP_KWP   (RFC 5649, plaintext can be any length ≥ 1)
+ *   CKM_RSA_PKCS_OAEP      (wrap a symmetric key with an RSA public key)
+ *
+ * Wrap takes a target key (hKey) from the token, serializes its value
+ * to bytes, then encrypts those bytes with the wrapping key (hWrappingKey).
+ * The output is the wrapped blob, ready for export.
+ *
+ * Unwrap is the inverse : decrypt the blob with hUnwrappingKey and
+ * import the resulting bytes as a fresh CKO_SECRET_KEY in the token.
+ * ----------------------------------------------------------------------- */
+#ifndef CKM_AES_KEY_WRAP
+#define CKM_AES_KEY_WRAP          0x00002109UL
+#endif
+#ifndef CKM_AES_KEY_WRAP_KWP
+#define CKM_AES_KEY_WRAP_KWP      0x0000210BUL
+#endif
+
+CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                CK_OBJECT_HANDLE hWrappingKey, CK_OBJECT_HANDLE hKey,
+                unsigned char *pWrappedKey, CK_ULONG *pulWrappedKeyLen) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pMechanism || !pulWrappedKeyLen) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    /* Source key : extract its value bytes. */
+    const uint8_t *kv = NULL; size_t kvl = 0;
+    uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hKey, &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) return rv;
+    /* If the source key is marked sensitive AND not extractable, refuse
+     * to wrap (CKR_KEY_UNEXTRACTABLE). */
+    uint8_t src_flags = 0;
+    (void)fhsm_token_object_get_flags(t, (uint32_t)hKey, &src_flags);
+    if ((src_flags & FHSM_OBJF_SENSITIVE)
+        && !(src_flags & FHSM_OBJF_EXTRACTABLE)) {
+        return 0x00000068UL;   /* CKR_KEY_UNEXTRACTABLE */
+    }
+
+    /* Wrapping key : load value or DER. */
+    const uint8_t *wkv = NULL; size_t wkl = 0;
+    uint32_t wcl = 0, wkt = 0;
+    rv = fhsm_token_object_get(t, (uint32_t)hWrappingKey, &wkv, &wkl, &wcl, &wkt);
+    if (rv != FHSM_RV_OK) return rv;
+
+    /* --- AES-KW (RFC 3394) and AES-KWP (RFC 5649) --- */
+    if (pMechanism->mechanism == CKM_AES_KEY_WRAP
+        || pMechanism->mechanism == CKM_AES_KEY_WRAP_KWP) {
+        if (wkt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        const char *cname = NULL;
+        if (pMechanism->mechanism == CKM_AES_KEY_WRAP) {
+            cname = (wkl == 16) ? "AES-128-WRAP" :
+                    (wkl == 24) ? "AES-192-WRAP" : "AES-256-WRAP";
+        } else {
+            cname = (wkl == 16) ? "AES-128-WRAP-PAD" :
+                    (wkl == 24) ? "AES-192-WRAP-PAD" : "AES-256-WRAP-PAD";
+        }
+        EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cname, NULL);
+        if (!c) return FHSM_RV_MECHANISM_INVALID;
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
+        /* AES-WRAP needs explicit flag for wrapping. */
+        EVP_CIPHER_CTX_set_flags(ctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
+        if (EVP_EncryptInit_ex2(ctx, c, wkv, NULL, NULL) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        /* Output size : RFC 3394 → 8N + 8 ; KWP → ceil((N+4)/8)*8 + 8. */
+        size_t need = kvl + 16;
+        if (pWrappedKey == NULL) {
+            *pulWrappedKeyLen = need;
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return FHSM_RV_OK;
+        }
+        if (*pulWrappedKeyLen < need) {
+            *pulWrappedKeyLen = need;
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return 0x00000150UL;
+        }
+        int outl = 0, finl = 0;
+        if (EVP_EncryptUpdate(ctx, pWrappedKey, &outl, kv, (int)kvl) != 1
+            || EVP_EncryptFinal_ex(ctx, pWrappedKey + outl, &finl) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        *pulWrappedKeyLen = (CK_ULONG)(outl + finl);
+        EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+        (void)fhsm_audit_event(FHSM_EV_WRAP, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
+    /* RSA-OAEP wrap (CKM_RSA_PKCS_OAEP, 0x9) : not exposed via C_WrapKey
+     * because the same primitive is already reachable through C_EncryptInit
+     * + C_Encrypt with the RSA public key. PKCS#11 v3.2 §C.6 explicitly
+     * allows this : wrapping with RSA-OAEP IS encryption with an
+     * asymmetric public key, semantically identical. */
+    return FHSM_RV_MECHANISM_INVALID;
+}
+
+CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                  CK_OBJECT_HANDLE hUnwrappingKey,
+                  unsigned char *pWrappedKey, CK_ULONG ulWrappedKeyLen,
+                  CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                  CK_OBJECT_HANDLE *phKey) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pMechanism || !pWrappedKey || !phKey) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    const uint8_t *ukv = NULL; size_t ukl = 0;
+    uint32_t ucl = 0, ukt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hUnwrappingKey,
+                                          &ukv, &ukl, &ucl, &ukt);
+    if (rv != FHSM_RV_OK) return rv;
+
+    uint8_t pt[256]; size_t pt_len = 0;
+
+    if (pMechanism->mechanism == CKM_AES_KEY_WRAP
+        || pMechanism->mechanism == CKM_AES_KEY_WRAP_KWP) {
+        if (ukt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        const char *cname = NULL;
+        if (pMechanism->mechanism == CKM_AES_KEY_WRAP) {
+            cname = (ukl == 16) ? "AES-128-WRAP" :
+                    (ukl == 24) ? "AES-192-WRAP" : "AES-256-WRAP";
+        } else {
+            cname = (ukl == 16) ? "AES-128-WRAP-PAD" :
+                    (ukl == 24) ? "AES-192-WRAP-PAD" : "AES-256-WRAP-PAD";
+        }
+        EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cname, NULL);
+        if (!c) return FHSM_RV_MECHANISM_INVALID;
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
+        EVP_CIPHER_CTX_set_flags(ctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
+        if (EVP_DecryptInit_ex2(ctx, c, ukv, NULL, NULL) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        int outl = 0, finl = 0;
+        if (EVP_DecryptUpdate(ctx, pt, &outl, pWrappedKey, (int)ulWrappedKeyLen) != 1
+            || EVP_DecryptFinal_ex(ctx, pt + outl, &finl) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return 0x00000069UL;  /* CKR_WRAPPED_KEY_INVALID */
+        }
+        pt_len = (size_t)(outl + finl);
+        EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+    } else {
+        /* RSA-OAEP unwrap : reachable via C_DecryptInit + C_Decrypt with
+         * the RSA private key (semantically identical for primary use
+         * cases). */
+        return FHSM_RV_MECHANISM_INVALID;
+    }
+
+    /* Import the decrypted bytes as a fresh secret-key object. */
+    char label[64] = "";
+    uint32_t key_type = CKK_AES;
+    uint8_t obj_flags = FHSM_OBJF_SENSITIVE;
+    long li = find_attr(pTemplate, ulCount, CKA_LABEL);
+    if (li >= 0) {
+        size_t n = pTemplate[li].ulValueLen;
+        if (n >= sizeof(label)) n = sizeof(label) - 1;
+        memcpy(label, pTemplate[li].pValue, n); label[n] = '\0';
+    }
+    li = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen == sizeof(CK_ULONG))
+        key_type = (uint32_t)(*(CK_ULONG*)pTemplate[li].pValue);
+    li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[li].pValue)[0] == 0)
+        obj_flags &= (uint8_t)~FHSM_OBJF_SENSITIVE;
+    li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
+        obj_flags |= FHSM_OBJF_EXTRACTABLE;
+
+    uint32_t handle = 0;
+    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
+                                pt, pt_len, NULL, 0, obj_flags, &handle);
+    fhsm_zeroize(pt, sizeof(pt));
+    if (rv != FHSM_RV_OK) return rv;
+    *phKey = handle;
+    (void)fhsm_audit_event(FHSM_EV_UNWRAP, -1, (int)hSession,
+                            fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+    return FHSM_RV_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_EncapsulateKey / C_DecapsulateKey --- ML-KEM Key Encapsulation Mechanism
+ * (PKCS#11 v3.0 §5.21). The encapsulator uses a recipient's public key to
+ * create both a ciphertext (sent to the recipient) and a shared secret
+ * (kept locally). The recipient decapsulates the ciphertext with its
+ * private key to recover the same shared secret.
+ *
+ * In OpenSSL 3.5 the API is :
+ *   EVP_PKEY_encapsulate_init(ctx, NULL)
+ *   EVP_PKEY_encapsulate(ctx, ct, &ctlen, ss, &sslen)
+ *   EVP_PKEY_decapsulate_init(ctx, NULL)
+ *   EVP_PKEY_decapsulate(ctx, ss, &sslen, ct, ctlen)
+ *
+ * The shared secret is stored as a fresh CKO_SECRET_KEY object in the
+ * token, marked sensitive.
+ * ----------------------------------------------------------------------- */
+CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                       CK_OBJECT_HANDLE hPublicKey,
+                       CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                       CK_OBJECT_HANDLE *phNewKey,
+                       unsigned char *pCiphertext, CK_ULONG *pulCiphertextLen) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pMechanism || !phNewKey || !pulCiphertextLen)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (pMechanism->mechanism != CKM_ML_KEM_OP)
+        return FHSM_RV_MECHANISM_INVALID;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    const uint8_t *kv = NULL; size_t kvl = 0;
+    uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hPublicKey,
+                                          &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) return rv;
+    if (cl != CKO_PUBLIC_KEY || kt != CKK_ML_KEM)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+
+    const uint8_t *p = kv;
+    EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
+    if (!pkey) return FHSM_RV_FUNCTION_FAILED;
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!ctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
+    if (EVP_PKEY_encapsulate_init(ctx, NULL) <= 0) {
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+
+    /* Query sizes first. */
+    size_t ct_len = 0, ss_len = 0;
+    if (EVP_PKEY_encapsulate(ctx, NULL, &ct_len, NULL, &ss_len) <= 0) {
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    if (pCiphertext == NULL) {
+        *pulCiphertextLen = ct_len;
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return FHSM_RV_OK;
+    }
+    if (*pulCiphertextLen < ct_len) {
+        *pulCiphertextLen = ct_len;
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return 0x00000150UL;
+    }
+
+    /* Allocate the shared secret on the stack (max 64 bytes for ML-KEM-1024). */
+    if (ss_len > 64) {
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    uint8_t ss[64];
+    size_t ct_len_out = *pulCiphertextLen;
+    if (EVP_PKEY_encapsulate(ctx, pCiphertext, &ct_len_out, ss, &ss_len) <= 0) {
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    *pulCiphertextLen = ct_len_out;
+
+    /* Wrap the shared secret as a token object. Honor CKA_SENSITIVE /
+     * CKA_EXTRACTABLE from the caller template (defaults: not sensitive,
+     * not extractable). */
+    char label[64] = "";
+    uint8_t obj_flags = 0;
+    long li = find_attr(pTemplate, ulCount, CKA_LABEL);
+    if (li >= 0) {
+        size_t n = pTemplate[li].ulValueLen;
+        if (n >= sizeof(label)) n = sizeof(label) - 1;
+        memcpy(label, pTemplate[li].pValue, n); label[n] = '\0';
+    }
+    li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
+        obj_flags |= FHSM_OBJF_SENSITIVE;
+    li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
+        obj_flags |= FHSM_OBJF_EXTRACTABLE;
+    uint32_t handle = 0;
+    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, CKK_GENERIC_SECRET, label,
+                                ss, ss_len, NULL, 0, obj_flags,
+                                &handle);
+    fhsm_zeroize(ss, sizeof(ss));
+    if (rv != FHSM_RV_OK) return rv;
+    *phNewKey = handle;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                       CK_OBJECT_HANDLE hPrivateKey,
+                       CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                       CK_OBJECT_HANDLE *phNewKey,
+                       unsigned char *pCiphertext, CK_ULONG ulCiphertextLen) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pMechanism || !phNewKey || !pCiphertext) return FHSM_RV_ARGUMENTS_BAD;
+    if (pMechanism->mechanism != CKM_ML_KEM_OP)
+        return FHSM_RV_MECHANISM_INVALID;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    const uint8_t *kv = NULL; size_t kvl = 0;
+    uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hPrivateKey,
+                                          &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) return rv;
+    if (cl != CKO_PRIVATE_KEY || kt != CKK_ML_KEM)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+
+    const uint8_t *p = kv;
+    EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+    if (!pkey) return FHSM_RV_FUNCTION_FAILED;
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!ctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
+    if (EVP_PKEY_decapsulate_init(ctx, NULL) <= 0) {
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    size_t ss_len = 0;
+    if (EVP_PKEY_decapsulate(ctx, NULL, &ss_len, pCiphertext, ulCiphertextLen) <= 0
+        || ss_len > 64) {
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    uint8_t ss[64];
+    if (EVP_PKEY_decapsulate(ctx, ss, &ss_len, pCiphertext, ulCiphertextLen) <= 0) {
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+
+    /* Honor CKA_SENSITIVE / CKA_EXTRACTABLE from the template ; default
+     * to not-sensitive (allowed export via CKA_VALUE) so test harnesses
+     * can verify the shared secret. Caller can override. */
+    char label[64] = "";
+    uint8_t obj_flags = 0;
+    long li = find_attr(pTemplate, ulCount, CKA_LABEL);
+    if (li >= 0) {
+        size_t n = pTemplate[li].ulValueLen;
+        if (n >= sizeof(label)) n = sizeof(label) - 1;
+        memcpy(label, pTemplate[li].pValue, n); label[n] = '\0';
+    }
+    li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
+        obj_flags |= FHSM_OBJF_SENSITIVE;
+    li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
+        obj_flags |= FHSM_OBJF_EXTRACTABLE;
+    uint32_t handle = 0;
+    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, CKK_GENERIC_SECRET, label,
+                                ss, ss_len, NULL, 0, obj_flags,
+                                &handle);
+    fhsm_zeroize(ss, sizeof(ss));
+    if (rv != FHSM_RV_OK) return rv;
+    *phNewKey = handle;
+    return FHSM_RV_OK;
+}
+
+/* CK_INTERFACE v3.0 getters are defined AFTER the v2.40 fhsm_function_list
+ * + CK_VERSION + fhsm_not_supported definitions, further down at the end
+ * of the v2.40 C_GetFunctionList block. They reuse those types and so
+ * cannot be declared here. */
+
+/* ---------------------------------------------------------------------------
+ * C_GenerateKeyPair --- RSA-2048/3072/4096 or ECDSA P-256/P-384/P-521.
+ *
+ * Both keys are stored in the token's object store. The private key is
+ * marked FHSM_OBJF_SENSITIVE so C_GetAttributeValue cannot extract it.
+ * Public key value : DER-encoded SubjectPublicKeyInfo (i2d_PUBKEY).
+ * Private key value : DER-encoded PKCS#8 (i2d_PKCS8PrivateKey_bio).
+ * ----------------------------------------------------------------------- */
+#define CKM_RSA_PKCS_KEY_PAIR_GEN  0x00000000UL
+#define CKM_EC_KEY_PAIR_GEN        0x00001040UL
+#define CKK_RSA                    0x00000000UL
+#define CKK_EC                     0x00000003UL
+#define CKA_MODULUS_BITS           0x00000121UL
+#define CKA_EC_PARAMS              0x00000180UL
+/* Post-quantum mechanism + key type IDs (PKCS#11 v3.2 §A.4). */
+#define CKM_ML_KEM_KEY_PAIR_GEN    0x0000403CUL
+#define CKM_ML_KEM_OP              0x0000403DUL
+#define CKM_ML_DSA_KEY_PAIR_GEN    0x0000403EUL
+#define CKM_ML_DSA_OP              0x0000403FUL
+#define CKM_SLH_DSA_KEY_PAIR_GEN   0x00004040UL
+#define CKM_SLH_DSA_OP             0x00004041UL
+#define CKK_ML_KEM                 0x0000003CUL
+#define CKK_ML_DSA                 0x0000003EUL
+#define CKK_SLH_DSA                0x00004040UL
+/* Parameter-set names exposed via CKA_PARAMETER_SET (read from template). */
+#define CKA_PARAMETER_SET          0x00000170UL
+
+/* DER-encoded OID for common curves (CKA_EC_PARAMS contents). */
+static const struct { const uint8_t *der; size_t len; const char *name; } ec_curves[] = {
+    /* prime256v1 = secp256r1 = P-256 : 06 08 2A 86 48 CE 3D 03 01 07 */
+    { (const uint8_t*)"\x06\x08\x2A\x86\x48\xCE\x3D\x03\x01\x07", 10, "P-256" },
+    /* secp384r1 = P-384 : 06 05 2B 81 04 00 22 */
+    { (const uint8_t*)"\x06\x05\x2B\x81\x04\x00\x22",              7, "P-384" },
+    /* secp521r1 = P-521 : 06 05 2B 81 04 00 23 */
+    { (const uint8_t*)"\x06\x05\x2B\x81\x04\x00\x23",              7, "P-521" },
+};
+
+static const char *match_curve(const uint8_t *der, size_t len) {
+    for (size_t i = 0; i < sizeof(ec_curves)/sizeof(ec_curves[0]); ++i) {
+        if (ec_curves[i].len == len && memcmp(ec_curves[i].der, der, len) == 0)
+            return ec_curves[i].name;
+    }
+    return NULL;
+}
+
+CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                        CK_ATTRIBUTE *pPub, CK_ULONG ulPub,
+                        CK_ATTRIBUTE *pPriv, CK_ULONG ulPriv,
+                        CK_OBJECT_HANDLE *phPub, CK_OBJECT_HANDLE *phPriv) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pMechanism || !phPub || !phPriv) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    EVP_PKEY *pkey = NULL;
+    uint32_t  ckk_type = 0;
+    fhsm_pairwise_family_t pw_family = 0;
+
+    if (pMechanism->mechanism == CKM_RSA_PKCS_KEY_PAIR_GEN) {
+        long bits = 2048;
+        long i = find_attr(pPub, ulPub, CKA_MODULUS_BITS);
+        if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen == sizeof(CK_ULONG))
+            bits = (long)(*(CK_ULONG*)pPub[i].pValue);
+        if (bits != 2048 && bits != 3072 && bits != 4096) return FHSM_RV_KEY_SIZE_RANGE;
+        pkey = EVP_PKEY_Q_keygen(NULL, NULL, "RSA", bits);
+        ckk_type = CKK_RSA;
+        pw_family = FHSM_PAIRWISE_RSA;
+    } else if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN) {
+        const char *curve = "P-256";
+        long i = find_attr(pPub, ulPub, CKA_EC_PARAMS);
+        if (i >= 0 && pPub[i].pValue) {
+            const char *m = match_curve(pPub[i].pValue, pPub[i].ulValueLen);
+            if (!m) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            curve = m;
+        }
+        pkey = EVP_PKEY_Q_keygen(NULL, NULL, "EC", curve);
+        ckk_type = CKK_EC;
+        pw_family = FHSM_PAIRWISE_EC;
+    } else if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN) {
+        /* CKA_PARAMETER_SET = ASCII "ML-KEM-512" | "ML-KEM-768" |
+         * "ML-KEM-1024". Default to 768 (NIST level 3). */
+        char pset[32] = "ML-KEM-768";
+        long i = find_attr(pPub, ulPub, CKA_PARAMETER_SET);
+        if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen < sizeof(pset)) {
+            memcpy(pset, pPub[i].pValue, pPub[i].ulValueLen);
+            pset[pPub[i].ulValueLen] = '\0';
+        }
+        pkey = EVP_PKEY_Q_keygen(NULL, NULL, pset);
+        ckk_type = CKK_ML_KEM;
+        pw_family = FHSM_PAIRWISE_ML_KEM;
+    } else if (pMechanism->mechanism == CKM_ML_DSA_KEY_PAIR_GEN) {
+        char pset[32] = "ML-DSA-65";
+        long i = find_attr(pPub, ulPub, CKA_PARAMETER_SET);
+        if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen < sizeof(pset)) {
+            memcpy(pset, pPub[i].pValue, pPub[i].ulValueLen);
+            pset[pPub[i].ulValueLen] = '\0';
+        }
+        pkey = EVP_PKEY_Q_keygen(NULL, NULL, pset);
+        ckk_type = CKK_ML_DSA;
+        pw_family = FHSM_PAIRWISE_ML_DSA;
+    } else if (pMechanism->mechanism == CKM_SLH_DSA_KEY_PAIR_GEN) {
+        char pset[32] = "SLH-DSA-SHA2-128s";
+        long i = find_attr(pPub, ulPub, CKA_PARAMETER_SET);
+        if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen < sizeof(pset)) {
+            memcpy(pset, pPub[i].pValue, pPub[i].ulValueLen);
+            pset[pPub[i].ulValueLen] = '\0';
+        }
+        pkey = EVP_PKEY_Q_keygen(NULL, NULL, pset);
+        ckk_type = CKK_SLH_DSA;
+        pw_family = FHSM_PAIRWISE_SLH_DSA;
+    } else {
+        return FHSM_RV_MECHANISM_INVALID;
+    }
+    if (!pkey) return FHSM_RV_FUNCTION_FAILED;
+
+    /* ---- FIPS 140-3 §7.10.2.b : pair-wise consistency check ---------
+     * Verify that the freshly-generated keypair is mathematically
+     * consistent BEFORE persisting it. A failure here indicates a
+     * silent keygen corruption (RNG fault, OpenSSL bug, RAM bit-flip).
+     * On failure we latch the module ERROR state and refuse to store
+     * the keypair. The audit log records the verdict. */
+    {
+        fhsm_rv_t pw_rv = fhsm_pairwise_check(pkey, pw_family);
+        (void)fhsm_audit_event(FHSM_EV_KAT_REPORT,
+                                -1, (int)hSession,
+                                fhsm_session_role(hSession),
+                                pw_rv,
+                                "pairwise=%d", (int)pw_family);
+        if (pw_rv != FHSM_RV_OK) {
+            (void)fhsm_state_set(FHSM_STATE_ERROR);
+            EVP_PKEY_free(pkey);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+    }
+
+    /* Serialize public key (SubjectPublicKeyInfo). */
+    uint8_t *pub_der = NULL;
+    int pub_len = i2d_PUBKEY(pkey, &pub_der);
+    if (pub_len <= 0 || pub_len > 5500) {
+        EVP_PKEY_free(pkey);
+        OPENSSL_free(pub_der);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    /* Serialize private key (PKCS#8 unencrypted ; the token store will
+     * encrypt it under the DEK). */
+    uint8_t *priv_der = NULL;
+    int priv_len = i2d_PrivateKey(pkey, &priv_der);
+    if (priv_len <= 0 || priv_len > 5500) {
+        EVP_PKEY_free(pkey);
+        OPENSSL_free(pub_der);
+        OPENSSL_free(priv_der);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    EVP_PKEY_free(pkey);
+
+    char         label_pub[64] = "", label_priv[64] = "";
+    const uint8_t *id_pub = NULL, *id_priv = NULL;
+    size_t       id_pub_len = 0, id_priv_len = 0;
+    long li;
+    li = find_attr(pPub, ulPub, CKA_LABEL);
+    if (li >= 0) {
+        size_t n = pPub[li].ulValueLen;
+        if (n >= sizeof(label_pub)) n = sizeof(label_pub) - 1;
+        memcpy(label_pub, pPub[li].pValue, n); label_pub[n] = '\0';
+    }
+    li = find_attr(pPub, ulPub, CKA_ID);
+    if (li >= 0) { id_pub = pPub[li].pValue; id_pub_len = pPub[li].ulValueLen; }
+    li = find_attr(pPriv, ulPriv, CKA_LABEL);
+    if (li >= 0) {
+        size_t n = pPriv[li].ulValueLen;
+        if (n >= sizeof(label_priv)) n = sizeof(label_priv) - 1;
+        memcpy(label_priv, pPriv[li].pValue, n); label_priv[n] = '\0';
+    }
+    li = find_attr(pPriv, ulPriv, CKA_ID);
+    if (li >= 0) { id_priv = pPriv[li].pValue; id_priv_len = pPriv[li].ulValueLen; }
+
+    uint32_t hp = 0, hk = 0;
+    fhsm_rv_t rv = fhsm_token_object_add(t, CKO_PUBLIC_KEY, ckk_type,
+                                          label_pub, pub_der, (size_t)pub_len,
+                                          id_pub, id_pub_len, 0, &hp);
+    OPENSSL_free(pub_der);
+    if (rv != FHSM_RV_OK) { OPENSSL_free(priv_der); return rv; }
+    rv = fhsm_token_object_add(t, CKO_PRIVATE_KEY, ckk_type, label_priv,
+                                priv_der, (size_t)priv_len,
+                                id_priv, id_priv_len,
+                                FHSM_OBJF_SENSITIVE, &hk);
+    fhsm_zeroize(priv_der, (size_t)priv_len);
+    OPENSSL_free(priv_der);
+    if (rv != FHSM_RV_OK) {
+        (void)fhsm_token_object_destroy(t, hp);
+        return rv;
+    }
+    *phPub = hp; *phPriv = hk;
+    return FHSM_RV_OK;
+}
+
+/* Parse the public-key DER stored in the object's value blob and extract
+ * the requested PKCS#11 attribute.
+ *
+ *  Supported queries (all output as fresh bytes copied into the
+ *  caller-supplied buffer) :
+ *    CKA_MODULUS_BITS     : CK_ULONG (bit length of n)
+ *    CKA_MODULUS          : big-endian n (RSA only)
+ *    CKA_PUBLIC_EXPONENT  : big-endian e (RSA only)
+ *    CKA_EC_POINT         : DER-encoded OCTET STRING wrapping the
+ *                           uncompressed point 0x04|X|Y (EC only)
+ *    CKA_EC_PARAMS_QUERY  : DER-encoded curve OID (EC only)
+ *
+ *  Returns 0 on success and writes the value + length, -1 if the
+ *  attribute is not extractable from this object, -2 if the buffer is
+ *  too small (caller must retry with larger buffer or NULL pValue).
+ * ----------------------------------------------------------------------- */
+static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
+                                CK_ATTRIBUTE_TYPE type,
+                                uint8_t *out, size_t *out_len) {
+    const uint8_t *kv = NULL; size_t kvl = 0;
+    uint32_t cl = 0, kt = 0;
+    if (fhsm_token_object_get(t, handle, &kv, &kvl, &cl, &kt) != FHSM_RV_OK)
+        return -1;
+    if (cl != CKO_PUBLIC_KEY) return -1;
+
+    const uint8_t *p = kv;
+    EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
+    if (!pkey) return -1;
+    int rc = -1;
+
+    if (kt == CKK_RSA && type == CKA_MODULUS_BITS) {
+        CK_ULONG bits = (CK_ULONG)EVP_PKEY_get_bits(pkey);
+        if (*out_len < sizeof(CK_ULONG)) { *out_len = sizeof(CK_ULONG); rc = -2; }
+        else { memcpy(out, &bits, sizeof(bits)); *out_len = sizeof(bits); rc = 0; }
+    } else if (kt == CKK_RSA && (type == CKA_MODULUS || type == CKA_PUBLIC_EXPONENT)) {
+        const char *name = (type == CKA_MODULUS) ? "n" : "e";
+        BIGNUM *bn = NULL;
+        if (EVP_PKEY_get_bn_param(pkey, name, &bn) == 1) {
+            int sz = BN_num_bytes(bn);
+            if (*out_len < (size_t)sz) { *out_len = (size_t)sz; rc = -2; }
+            else { BN_bn2bin(bn, out); *out_len = (size_t)sz; rc = 0; }
+            BN_free(bn);
+        }
+    } else if (kt == CKK_EC && type == CKA_EC_POINT) {
+        /* Get the uncompressed-form point bytes (0x04 || X || Y). */
+        size_t pt_len = 0;
+        if (EVP_PKEY_get_octet_string_param(pkey, "encoded-pub-key",
+                                              NULL, 0, &pt_len) == 1
+            && pt_len > 0 && pt_len <= 256) {
+            uint8_t pt[256];
+            if (EVP_PKEY_get_octet_string_param(pkey, "encoded-pub-key",
+                                                  pt, sizeof(pt), &pt_len) == 1) {
+                /* Wrap as DER OCTET STRING : 0x04 LEN ... */
+                /* LEN < 0x80 covers up to 127 bytes (P-256 = 65, P-384 = 97). */
+                size_t total = 2 + pt_len;
+                if (pt_len > 127) total = 3 + pt_len;
+                if (*out_len < total) { *out_len = total; rc = -2; }
+                else {
+                    size_t off = 0;
+                    out[off++] = 0x04;   /* OCTET STRING tag */
+                    if (pt_len <= 127) {
+                        out[off++] = (uint8_t)pt_len;
+                    } else {
+                        out[off++] = 0x81;
+                        out[off++] = (uint8_t)pt_len;
+                    }
+                    memcpy(out + off, pt, pt_len);
+                    *out_len = total;
+                    rc = 0;
+                }
+            }
+        }
+    } else if (kt == CKK_EC && type == CKA_EC_PARAMS_QUERY) {
+        /* Recover the curve OID as DER. */
+        char curve_name[64] = {0}; size_t cn_len = 0;
+        if (EVP_PKEY_get_utf8_string_param(pkey, "group",
+                                            curve_name, sizeof(curve_name),
+                                            &cn_len) == 1) {
+            /* Map known curves to their pre-encoded OID. */
+            const uint8_t *oid = NULL; size_t oid_len = 0;
+            if (strcmp(curve_name, "P-256") == 0 ||
+                strcmp(curve_name, "prime256v1") == 0 ||
+                strcmp(curve_name, "secp256r1") == 0) {
+                oid = (const uint8_t*)"\x06\x08\x2A\x86\x48\xCE\x3D\x03\x01\x07";
+                oid_len = 10;
+            } else if (strcmp(curve_name, "P-384") == 0 ||
+                       strcmp(curve_name, "secp384r1") == 0) {
+                oid = (const uint8_t*)"\x06\x05\x2B\x81\x04\x00\x22";
+                oid_len = 7;
+            } else if (strcmp(curve_name, "P-521") == 0 ||
+                       strcmp(curve_name, "secp521r1") == 0) {
+                oid = (const uint8_t*)"\x06\x05\x2B\x81\x04\x00\x23";
+                oid_len = 7;
+            }
+            if (oid) {
+                if (*out_len < oid_len) { *out_len = oid_len; rc = -2; }
+                else { memcpy(out, oid, oid_len); *out_len = oid_len; rc = 0; }
+            }
+        }
+    }
+    EVP_PKEY_free(pkey);
+    return rc;
+}
+
+CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
+                           CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    const uint8_t *value = NULL; size_t value_len = 0;
+    uint32_t cko_class = 0, ckk_type = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hObject, &value, &value_len,
+                                          &cko_class, &ckk_type);
+    if (rv != FHSM_RV_OK) return rv;
+    for (CK_ULONG i = 0; i < ulCount; ++i) {
+        const void *src = NULL; size_t src_len = 0;
+        CK_ULONG  tmp_class = cko_class, tmp_type = ckk_type, tmp_len = value_len;
+        const char    *label_p = NULL; size_t label_len = 0;
+        const uint8_t *id_p    = NULL; size_t id_len    = 0;
+        switch (pTemplate[i].type) {
+            case CKA_CLASS:     src = &tmp_class; src_len = sizeof(CK_ULONG); break;
+            case CKA_KEY_TYPE:  src = &tmp_type;  src_len = sizeof(CK_ULONG); break;
+            case CKA_VALUE: {
+                /* Enforce CKA_SENSITIVE : a sensitive object's CKA_VALUE
+                 * must NEVER be returned. PKCS#11 v3.2 §C.6.7.2 :
+                 * "C_GetAttributeValue shall not reveal the value of a
+                 * sensitive attribute". */
+                uint8_t of = 0;
+                if (fhsm_token_object_get_flags(t, (uint32_t)hObject, &of) == FHSM_RV_OK
+                    && (of & FHSM_OBJF_SENSITIVE)) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1;
+                    continue;
+                }
+                src = value;      src_len = value_len;
+                break;
+            }
+            case CKA_VALUE_LEN: src = &tmp_len;   src_len = sizeof(CK_ULONG); break;
+            case CKA_SENSITIVE: {
+                uint8_t of = 0;
+                (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
+                static unsigned char b_true = 1, b_false = 0;
+                src = (of & FHSM_OBJF_SENSITIVE) ? &b_true : &b_false;
+                src_len = 1;
+                break;
+            }
+            case CKA_EXTRACTABLE: {
+                uint8_t of = 0;
+                (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
+                static unsigned char b_true = 1, b_false = 0;
+                src = (of & FHSM_OBJF_EXTRACTABLE) ? &b_true : &b_false;
+                src_len = 1;
+                break;
+            }
+            case CKA_MODULUS_BITS:
+            case CKA_MODULUS:
+            case CKA_PUBLIC_EXPONENT:
+            case CKA_EC_POINT:
+            case CKA_EC_PARAMS_QUERY: {
+                /* Two-pass : (a) query the size with NULL pValue, (b) fill. */
+                if (pTemplate[i].pValue == NULL) {
+                    size_t need = 0;
+                    int e1 = extract_pubkey_attr(t, (uint32_t)hObject,
+                                                  pTemplate[i].type, NULL, &need);
+                    if (e1 == -1) { pTemplate[i].ulValueLen = (CK_ULONG)-1; continue; }
+                    /* e1 == -2 : `need` now holds the required size. */
+                    pTemplate[i].ulValueLen = (CK_ULONG)need;
+                } else {
+                    size_t out_len = pTemplate[i].ulValueLen;
+                    int e2 = extract_pubkey_attr(t, (uint32_t)hObject,
+                                                  pTemplate[i].type,
+                                                  pTemplate[i].pValue, &out_len);
+                    if (e2 == 0) pTemplate[i].ulValueLen = (CK_ULONG)out_len;
+                    else         pTemplate[i].ulValueLen = (CK_ULONG)-1;
+                }
+                continue;
+            }
+            case CKA_LABEL:
+                if (fhsm_token_object_get_label(t, (uint32_t)hObject,
+                        &label_p, &label_len) != FHSM_RV_OK) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                }
+                src = label_p; src_len = label_len; break;
+            case CKA_ID:
+                if (fhsm_token_object_get_id(t, (uint32_t)hObject,
+                        &id_p, &id_len) != FHSM_RV_OK) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                }
+                src = id_p; src_len = id_len; break;
+            default:            pTemplate[i].ulValueLen = (CK_ULONG)-1;       continue;
+        }
+        if (pTemplate[i].pValue == NULL) {
+            pTemplate[i].ulValueLen = (CK_ULONG)src_len;
+        } else if (pTemplate[i].ulValueLen < src_len) {
+            pTemplate[i].ulValueLen = (CK_ULONG)-1;
+        } else {
+            memcpy(pTemplate[i].pValue, src, src_len);
+            pTemplate[i].ulValueLen = (CK_ULONG)src_len;
+        }
+    }
+    return FHSM_RV_OK;
+}
+
+CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
+                        CK_ULONG ulCount) {
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (hSession >= sizeof(g_finds)/sizeof(g_finds[0]))
+        return FHSM_RV_SESSION_HANDLE_INVALID;
+    fhsm_find_state_t *f = &g_finds[hSession];
+    if (f->active) return FHSM_RV_OPERATION_ACTIVE;
+    memset(f, 0, sizeof(*f));
+
+    uint32_t   filter_class = 0;  int has_class = 0;
+    char       filter_label[64] = ""; int has_label = 0;
+    uint8_t    filter_id[32]; size_t filter_id_len = 0; int has_id = 0;
+    for (CK_ULONG i = 0; i < ulCount; ++i) {
+        if (pTemplate[i].type == CKA_CLASS && pTemplate[i].ulValueLen == sizeof(CK_ULONG)) {
+            filter_class = (uint32_t)(*(CK_ULONG*)pTemplate[i].pValue);
+            has_class = 1;
+        } else if (pTemplate[i].type == CKA_LABEL) {
+            size_t n = pTemplate[i].ulValueLen;
+            if (n >= sizeof(filter_label)) n = sizeof(filter_label) - 1;
+            memcpy(filter_label, pTemplate[i].pValue, n);
+            filter_label[n] = '\0';
+            has_label = 1;
+        } else if (pTemplate[i].type == CKA_ID) {
+            size_t n = pTemplate[i].ulValueLen;
+            if (n <= sizeof(filter_id)) {
+                memcpy(filter_id, pTemplate[i].pValue, n);
+                filter_id_len = n;
+                has_id = 1;
+            }
+        }
+    }
+    /* First-pass : ask the token store for class+label matches, then
+     * filter by id ourselves (the store API doesn't take an id filter). */
+    uint32_t prelim[64];
+    size_t got = 0;
+    fhsm_rv_t rv = fhsm_token_object_find(t,
+                                           has_class ? &filter_class : NULL,
+                                           has_label ? filter_label  : NULL,
+                                           prelim,
+                                           sizeof(prelim)/sizeof(prelim[0]),
+                                           &got);
+    size_t k = 0;
+    for (size_t j = 0; j < got && k < sizeof(f->handles)/sizeof(f->handles[0]); ++j) {
+        if (has_id) {
+            const uint8_t *oid = NULL; size_t oidl = 0;
+            if (fhsm_token_object_get_id(t, prelim[j], &oid, &oidl) != FHSM_RV_OK)
+                continue;
+            if (oidl != filter_id_len) continue;
+            if (oidl > 0 && memcmp(oid, filter_id, oidl) != 0) continue;
+        }
+        f->handles[k++] = prelim[j];
+    }
+    f->count = k;
+    f->next = 0;
+    f->active = 1;
+    return rv;
+}
+
+CK_RV C_FindObjects(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE *phObject,
+                    CK_ULONG ulMaxCount, CK_ULONG *pulCount) {
+    if (!phObject || !pulCount) return FHSM_RV_ARGUMENTS_BAD;
+    if (hSession >= sizeof(g_finds)/sizeof(g_finds[0]))
+        return FHSM_RV_SESSION_HANDLE_INVALID;
+    fhsm_find_state_t *f = &g_finds[hSession];
+    if (!f->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    CK_ULONG k = 0;
+    while (k < ulMaxCount && f->next < f->count) {
+        phObject[k++] = f->handles[f->next++];
+    }
+    *pulCount = k;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
+    if (hSession >= sizeof(g_finds)/sizeof(g_finds[0]))
+        return FHSM_RV_SESSION_HANDLE_INVALID;
+    fhsm_find_state_t *f = &g_finds[hSession];
+    if (!f->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    memset(f, 0, sizeof(*f));
+    return FHSM_RV_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * OAEP-related PKCS#11 constants. Declared here (above the OAEP helpers
+ * and the Encrypt/Decrypt thunks) so all downstream code can reference
+ * them without forward-declaration issues. The redundant `#define`
+ * further down (in the Sign-section block) is kept for clarity but
+ * harmless because identical values use #ifndef guards effectively
+ * via the C preprocessor's last-define-wins semantics.
+ * ----------------------------------------------------------------------- */
+#ifndef CKM_RSA_PKCS_OAEP
+#define CKM_RSA_PKCS_OAEP         0x00000009UL
+#endif
+#ifndef CKG_MGF1_SHA1
+#define CKG_MGF1_SHA1             0x00000001UL
+#define CKG_MGF1_SHA224           0x00000005UL
+#define CKG_MGF1_SHA256           0x00000002UL
+#define CKG_MGF1_SHA384           0x00000003UL
+#define CKG_MGF1_SHA512           0x00000004UL
+#endif
+#ifndef CKZ_DATA_SPECIFIED
+#define CKZ_DATA_SPECIFIED        0x00000001UL
+#endif
+#ifndef CKM_SHA_1
+#define CKM_SHA_1                 0x00000220UL
+#endif
+/* Extra mechanism IDs used by the wiring below. The values are the
+ * standard PKCS#11 v3.2 values ; declared with #ifndef guards so we
+ * can use them everywhere in this TU without conflicting with the
+ * earlier _LIST aliases. */
+#ifndef CKM_AES_CBC
+#define CKM_AES_CBC               0x00001082UL
+#endif
+#ifndef CKM_AES_CBC_PAD
+#define CKM_AES_CBC_PAD           0x00001085UL
+#endif
+#ifndef CKM_AES_CTR
+#define CKM_AES_CTR               0x00001086UL
+#endif
+#ifndef CKM_AES_CMAC
+#define CKM_AES_CMAC              0x0000108CUL
+#endif
+/* OpenSC pkcs11-tool maps the "AES-CMAC" CLI string to 0x108a, which per
+ * PKCS#11 v3.2 §A.4.1 is actually CKM_AES_GMAC. We accept this value as
+ * an alias for CMAC so the most common test driver works. The proper
+ * fix lives in OpenSC, but advertising this alias is the pragmatic
+ * choice for interop. */
+#define CKM_AES_CMAC_OPENSC_ALIAS 0x0000108AUL
+#ifndef CKM_ECDH1_DERIVE
+#define CKM_ECDH1_DERIVE          0x00001050UL
+#endif
+
+/* ---------------------------------------------------------------------------
+ * RSA-OAEP helpers (CKM_RSA_PKCS_OAEP).
+ *
+ * The PKCS#11 CK_RSA_PKCS_OAEP_PARAMS is a 40-byte struct on LP64 :
+ *   CK_MECHANISM_TYPE hashAlg          (CKM_SHA256, ...)
+ *   CK_RSA_PKCS_MGF_TYPE mgf            (CKG_MGF1_SHA256, ...)
+ *   CK_RSA_PKCS_OAEP_SOURCE_TYPE source (CKZ_DATA_SPECIFIED or 0)
+ *   CK_VOID_PTR pSourceData             (label bytes, or NULL)
+ *   CK_ULONG ulSourceDataLen            (label length)
+ *
+ * The hashAlg / mgf must agree (e.g. CKM_SHA256 + CKG_MGF1_SHA256).
+ * NULL pParameter is rejected --- OAEP is unsafe without explicit
+ * hash + MGF binding.
+ * ----------------------------------------------------------------------- */
+typedef struct fhsm_oaep_params_s {
+    CK_ULONG hashAlg;
+    CK_ULONG mgf;
+    CK_ULONG source;
+    void    *pSourceData;
+    CK_ULONG ulSourceDataLen;
+} fhsm_oaep_params_t;
+
+static const EVP_MD *oaep_md(CK_ULONG ckm) {
+    const char *name = NULL;
+    switch (ckm) {
+        case CKM_SHA_1:  name = "SHA1";   break;
+        case CKM_SHA256: name = "SHA256"; break;
+        case CKM_SHA384_LIST: name = "SHA384"; break;
+        case CKM_SHA512_LIST: name = "SHA512"; break;
+        default: return NULL;
+    }
+    return EVP_MD_fetch(NULL, name, NULL);
+}
+
+static const EVP_MD *mgf_md(CK_ULONG mgf) {
+    const char *name = NULL;
+    switch (mgf) {
+        case CKG_MGF1_SHA1:    name = "SHA1";   break;
+        case CKG_MGF1_SHA256:  name = "SHA256"; break;
+        case CKG_MGF1_SHA384:  name = "SHA384"; break;
+        case CKG_MGF1_SHA512:  name = "SHA512"; break;
+        default: return NULL;
+    }
+    return EVP_MD_fetch(NULL, name, NULL);
+}
+
+/* Setup an EVP_PKEY_CTX for RSA-OAEP with the requested hash/MGF/label.
+ * The pkey must already be loaded. On success the caller owns the ctx
+ * and must call EVP_PKEY_CTX_free. */
+static fhsm_rv_t oaep_ctx_init(EVP_PKEY *pkey, int encrypt,
+                                const fhsm_oaep_params_t *oaep,
+                                EVP_PKEY_CTX **out_ctx) {
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!ctx) return FHSM_RV_HOST_MEMORY;
+    int ok = encrypt ? EVP_PKEY_encrypt_init(ctx) : EVP_PKEY_decrypt_init(ctx);
+    if (ok <= 0) goto fail;
+    if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) <= 0) goto fail;
+    const EVP_MD *md_oaep = oaep_md(oaep->hashAlg);
+    const EVP_MD *md_mgf  = mgf_md(oaep->mgf);
+    if (!md_oaep || !md_mgf) {
+        if (md_oaep) EVP_MD_free((EVP_MD*)md_oaep);
+        if (md_mgf)  EVP_MD_free((EVP_MD*)md_mgf);
+        goto fail_invalid;
+    }
+    if (EVP_PKEY_CTX_set_rsa_oaep_md(ctx, md_oaep) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, md_mgf)  <= 0) {
+        EVP_MD_free((EVP_MD*)md_oaep);
+        EVP_MD_free((EVP_MD*)md_mgf);
+        goto fail;
+    }
+    EVP_MD_free((EVP_MD*)md_oaep);
+    EVP_MD_free((EVP_MD*)md_mgf);
+    if (oaep->source == CKZ_DATA_SPECIFIED &&
+        oaep->pSourceData && oaep->ulSourceDataLen > 0) {
+        /* The label buffer ownership is transferred to ctx by
+         * EVP_PKEY_CTX_set0_rsa_oaep_label, so we duplicate first. */
+        uint8_t *label = OPENSSL_malloc(oaep->ulSourceDataLen);
+        if (!label) goto fail;
+        memcpy(label, oaep->pSourceData, oaep->ulSourceDataLen);
+        if (EVP_PKEY_CTX_set0_rsa_oaep_label(ctx, label,
+                                              (int)oaep->ulSourceDataLen) <= 0) {
+            OPENSSL_free(label); goto fail;
+        }
+        /* ctx now owns the label allocation. */
+    }
+    *out_ctx = ctx;
+    return FHSM_RV_OK;
+
+fail_invalid:
+    EVP_PKEY_CTX_free(ctx);
+    return FHSM_RV_MECHANISM_INVALID;
+fail:
+    EVP_PKEY_CTX_free(ctx);
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+/* ---------------------------------------------------------------------------
+ * Encrypt / Decrypt / Sign --- one-shot, AES-256-GCM and HMAC-SHA-256.
+ * The mechanism parameter for CKM_AES_GCM carries the IV ; for simplicity
+ * here we accept either pParameter as the 12-byte IV directly, or NULL
+ * in which case we generate a fresh IV from the DRBG.
+ *
+ * RSA-OAEP path : the mechanism CKM_RSA_PKCS_OAEP also goes through
+ * Encrypt/Decrypt, dispatched on the mechanism check.
+ * ----------------------------------------------------------------------- */
+/* Per-session OAEP parameters captured at Init for use in Encrypt/Decrypt. */
+typedef struct fhsm_session_oaep_s {
+    int                       active;
+    fhsm_oaep_params_t        p;
+    uint8_t                   label_copy[64];   /* OAEP label is rarely > 64 */
+    size_t                    label_len;
+} fhsm_session_oaep_t;
+static fhsm_session_oaep_t g_oaep_enc[256];
+static fhsm_session_oaep_t g_oaep_dec[256];
+
+static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
+                         CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey) {
+    if (op->active) return FHSM_RV_OPERATION_ACTIVE;
+    op->key_handle = (uint32_t)hKey;
+    op->mechanism  = (uint32_t)pMechanism->mechanism;
+    op->have_iv    = 0;
+    if (pMechanism->mechanism == CKM_AES_GCM && pMechanism->pParameter
+        && pMechanism->ulParameterLen >= 12) {
+        memcpy(op->iv, pMechanism->pParameter, 12);
+        op->have_iv = 1;
+    }
+    /* AES-CBC/CBC-PAD use a 16-byte IV passed directly as pParameter. */
+    if ((pMechanism->mechanism == CKM_AES_CBC ||
+         pMechanism->mechanism == CKM_AES_CBC_PAD) &&
+        pMechanism->pParameter && pMechanism->ulParameterLen == 16) {
+        memcpy(op->iv, pMechanism->pParameter, 16);
+        op->have_iv = 1;
+    }
+    /* AES-CTR : pParameter is either a 16-byte counter block directly or
+     * a CK_AES_CTR_PARAMS struct. The simplified path (16 bytes) is the
+     * one OpenSC's pkcs11-tool uses with --iv. */
+    if (pMechanism->mechanism == CKM_AES_CTR
+        && pMechanism->pParameter && pMechanism->ulParameterLen >= 16) {
+        memcpy(op->iv, pMechanism->pParameter, 16);
+        op->have_iv = 1;
+    }
+    /* For RSA-OAEP, capture and validate the OAEP params at Init time so
+     * the actual Encrypt/Decrypt call can be the bare key-material path. */
+    if (pMechanism->mechanism == CKM_RSA_PKCS_OAEP) {
+        if (!pMechanism->pParameter
+            || pMechanism->ulParameterLen < sizeof(fhsm_oaep_params_t))
+            return FHSM_RV_ARGUMENTS_BAD;
+        fhsm_session_oaep_t *o =
+            (op == &g_op_enc[hSession]) ? &g_oaep_enc[hSession]
+                                          : &g_oaep_dec[hSession];
+        memset(o, 0, sizeof(*o));
+        memcpy(&o->p, pMechanism->pParameter, sizeof(o->p));
+        if (o->p.source == CKZ_DATA_SPECIFIED && o->p.pSourceData
+            && o->p.ulSourceDataLen > 0
+            && o->p.ulSourceDataLen <= sizeof(o->label_copy)) {
+            memcpy(o->label_copy, o->p.pSourceData, o->p.ulSourceDataLen);
+            o->label_len = o->p.ulSourceDataLen;
+            o->p.pSourceData = o->label_copy;
+        } else {
+            o->p.pSourceData = NULL;
+            o->p.ulSourceDataLen = 0;
+        }
+        o->active = 1;
+    }
+    op->active = 1;
+    (void)hSession;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                    CK_OBJECT_HANDLE hKey) {
+    if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_op_t *op = op_slot(g_op_enc, hSession);
+    if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
+    return op_init(op, hSession, pMechanism, hKey);
+}
+
+CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
+                CK_ULONG ulDataLen, unsigned char *pEnc, CK_ULONG *pulEncLen) {
+    fhsm_op_t *op = op_slot(g_op_enc, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
+
+    if (!pulEncLen) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+
+    /* --- RSA-OAEP path (asymmetric encryption) --- */
+    if (op->mechanism == CKM_RSA_PKCS_OAEP) {
+        if (cl != CKO_PUBLIC_KEY || kt != CKK_RSA) {
+            op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        }
+        const uint8_t *p = kv;
+        EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
+        if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
+        EVP_PKEY_CTX *ectx = NULL;
+        rv = oaep_ctx_init(pkey, 1, &g_oaep_enc[hSession].p, &ectx);
+        if (rv != FHSM_RV_OK) {
+            EVP_PKEY_free(pkey); op->active = 0; return rv;
+        }
+        size_t out_len = 0;
+        if (EVP_PKEY_encrypt(ectx, NULL, &out_len, pData, ulDataLen) <= 0) {
+            EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        if (pEnc == NULL) {
+            *pulEncLen = out_len;
+            EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey);
+            return FHSM_RV_OK;
+        }
+        if (*pulEncLen < out_len) {
+            *pulEncLen = out_len;
+            EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey);
+            return 0x00000150UL;
+        }
+        size_t buf_len = *pulEncLen;
+        if (EVP_PKEY_encrypt(ectx, pEnc, &buf_len, pData, ulDataLen) <= 0) {
+            EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        *pulEncLen = buf_len;
+        EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey);
+        op->active = 0;
+        g_oaep_enc[hSession].active = 0;
+        (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
+    /* --- AES-CBC / AES-CBC-PAD / AES-CTR path --- */
+    if (op->mechanism == CKM_AES_CBC || op->mechanism == CKM_AES_CBC_PAD
+        || op->mechanism == CKM_AES_CTR) {
+        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (!op->have_iv)  { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+        const char *cname = NULL;
+        if (op->mechanism == CKM_AES_CTR) {
+            cname = (kvl == 16) ? "AES-128-CTR" :
+                    (kvl == 24) ? "AES-192-CTR" : "AES-256-CTR";
+        } else {
+            cname = (kvl == 16) ? "AES-128-CBC" :
+                    (kvl == 24) ? "AES-192-CBC" : "AES-256-CBC";
+        }
+        EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cname, NULL);
+        if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) { EVP_CIPHER_free(c); op->active = 0; return FHSM_RV_HOST_MEMORY; }
+        if (EVP_EncryptInit_ex2(ctx, c, kv, op->iv, NULL) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        EVP_CIPHER_CTX_set_padding(ctx, op->mechanism == CKM_AES_CBC_PAD ? 1 : 0);
+        /* Output size : CBC-PAD adds up to 16 padding bytes ; CBC/CTR
+         * are exact. Query path returns the worst case. */
+        size_t need = ulDataLen + (op->mechanism == CKM_AES_CBC_PAD ? 16 : 0);
+        if (pEnc == NULL) {
+            *pulEncLen = need;
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return FHSM_RV_OK;
+        }
+        if (*pulEncLen < need) {
+            *pulEncLen = need;
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return 0x00000150UL;
+        }
+        int outl = 0, finl = 0;
+        if (EVP_EncryptUpdate(ctx, pEnc, &outl, pData, (int)ulDataLen) != 1
+            || EVP_EncryptFinal_ex(ctx, pEnc + outl, &finl) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        *pulEncLen = (CK_ULONG)(outl + finl);
+        EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
+    /* --- AES-256-GCM path (symmetric) --- */
+    if (op->mechanism != CKM_AES_GCM || kt != CKK_AES) {
+        op->active = 0; return FHSM_RV_MECHANISM_INVALID;
+    }
+    /* Required output : ciphertext + 16-byte GCM tag appended. */
+    size_t need = ulDataLen + 16;
+    if (pEnc == NULL) { *pulEncLen = need; return FHSM_RV_OK; }
+    if (*pulEncLen < need) { *pulEncLen = need; return 0x00000150UL; }
+    if (!op->have_iv) fhsm_rng_bytes(op->iv, 12);
+    size_t ct_len = ulDataLen;
+    rv = fhsm_aes_gcm_encrypt(FHSM_SLICE(kv, kvl),
+                              FHSM_SLICE(op->iv, 12),
+                              FHSM_SLICE("", 0),
+                              FHSM_SLICE(pData, ulDataLen),
+                              pEnc, &ct_len, pEnc + ulDataLen);
+    *pulEncLen = ct_len + 16;
+    op->active = 0;
+    (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
+                            fhsm_session_role(hSession), rv, NULL);
+    return rv;
+}
+
+CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                    CK_OBJECT_HANDLE hKey) {
+    if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_op_t *op = op_slot(g_op_dec, hSession);
+    if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
+    return op_init(op, hSession, pMechanism, hKey);
+}
+
+CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncLen,
+                unsigned char *pData, CK_ULONG *pulDataLen) {
+    fhsm_op_t *op = op_slot(g_op_dec, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
+
+    /* --- RSA-OAEP path (asymmetric decryption) --- */
+    if (op->mechanism == CKM_RSA_PKCS_OAEP) {
+        if (cl != CKO_PRIVATE_KEY || kt != CKK_RSA) {
+            op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        }
+        const uint8_t *p = kv;
+        EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+        if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
+        EVP_PKEY_CTX *dctx = NULL;
+        rv = oaep_ctx_init(pkey, 0, &g_oaep_dec[hSession].p, &dctx);
+        if (rv != FHSM_RV_OK) {
+            EVP_PKEY_free(pkey); op->active = 0; return rv;
+        }
+        size_t out_len = 0;
+        if (EVP_PKEY_decrypt(dctx, NULL, &out_len, pEnc, ulEncLen) <= 0) {
+            EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        if (pData == NULL) {
+            *pulDataLen = out_len;
+            EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
+            return FHSM_RV_OK;
+        }
+        if (*pulDataLen < out_len) {
+            *pulDataLen = out_len;
+            EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
+            return 0x00000150UL;
+        }
+        size_t buf_len = *pulDataLen;
+        int dr = EVP_PKEY_decrypt(dctx, pData, &buf_len, pEnc, ulEncLen);
+        EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
+        op->active = 0;
+        g_oaep_dec[hSession].active = 0;
+        if (dr <= 0) {
+            (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                                    fhsm_session_role(hSession),
+                                    FHSM_RV_ENCRYPTED_DATA_INVALID, NULL);
+            return FHSM_RV_ENCRYPTED_DATA_INVALID;
+        }
+        *pulDataLen = buf_len;
+        (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
+    /* --- AES-CBC / AES-CBC-PAD / AES-CTR path --- */
+    if (op->mechanism == CKM_AES_CBC || op->mechanism == CKM_AES_CBC_PAD
+        || op->mechanism == CKM_AES_CTR) {
+        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (!op->have_iv)  { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+        const char *cname = NULL;
+        if (op->mechanism == CKM_AES_CTR) {
+            cname = (kvl == 16) ? "AES-128-CTR" :
+                    (kvl == 24) ? "AES-192-CTR" : "AES-256-CTR";
+        } else {
+            cname = (kvl == 16) ? "AES-128-CBC" :
+                    (kvl == 24) ? "AES-192-CBC" : "AES-256-CBC";
+        }
+        EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cname, NULL);
+        if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) { EVP_CIPHER_free(c); op->active = 0; return FHSM_RV_HOST_MEMORY; }
+        if (EVP_DecryptInit_ex2(ctx, c, kv, op->iv, NULL) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        EVP_CIPHER_CTX_set_padding(ctx, op->mechanism == CKM_AES_CBC_PAD ? 1 : 0);
+        if (pData == NULL) {
+            *pulDataLen = ulEncLen;
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return FHSM_RV_OK;
+        }
+        if (*pulDataLen < ulEncLen) {
+            *pulDataLen = ulEncLen;
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return 0x00000150UL;
+        }
+        int outl = 0, finl = 0;
+        if (EVP_DecryptUpdate(ctx, pData, &outl, pEnc, (int)ulEncLen) != 1
+            || EVP_DecryptFinal_ex(ctx, pData + outl, &finl) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            op->active = 0; return FHSM_RV_ENCRYPTED_DATA_INVALID;
+        }
+        *pulDataLen = (CK_ULONG)(outl + finl);
+        EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
+    /* --- AES-256-GCM path (symmetric) --- */
+    if (op->mechanism != CKM_AES_GCM || kt != CKK_AES) {
+        op->active = 0; return FHSM_RV_MECHANISM_INVALID;
+    }
+    if (ulEncLen < 16) { op->active = 0; return FHSM_RV_ENCRYPTED_DATA_INVALID; }
+    size_t plaintext_len = ulEncLen - 16;
+    if (pData == NULL) { *pulDataLen = plaintext_len; return FHSM_RV_OK; }
+    if (*pulDataLen < plaintext_len) { *pulDataLen = plaintext_len; return 0x00000150UL; }
+    size_t out_len = *pulDataLen;
+    rv = fhsm_aes_gcm_decrypt(FHSM_SLICE(kv, kvl),
+                              FHSM_SLICE(op->iv, 12),
+                              FHSM_SLICE("", 0),
+                              FHSM_SLICE(pEnc, plaintext_len),
+                              pEnc + plaintext_len,
+                              pData, &out_len);
+    *pulDataLen = out_len;
+    op->active = 0;
+    (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                            fhsm_session_role(hSession), rv, NULL);
+    return rv;
+}
+
+#define CKM_SHA256_HMAC_INIT_VAL  0x00000251UL
+#define CKM_ECDSA                 0x00001041UL
+#define CKM_ECDSA_SHA256          0x00001044UL
+#define CKM_ECDSA_SHA384          0x00001045UL
+#define CKM_ECDSA_SHA512          0x00001046UL
+#define CKM_RSA_PKCS              0x00000001UL
+#define CKM_RSA_PKCS_OAEP         0x00000009UL
+#define CKG_MGF1_SHA1             0x00000001UL
+#define CKG_MGF1_SHA224           0x00000005UL
+#define CKG_MGF1_SHA256           0x00000002UL
+#define CKG_MGF1_SHA384           0x00000003UL
+#define CKG_MGF1_SHA512           0x00000004UL
+#define CKZ_DATA_SPECIFIED        0x00000001UL
+#define CKM_SHA256_RSA_PKCS       0x00000040UL
+#define CKM_SHA384_RSA_PKCS       0x00000041UL
+#define CKM_SHA512_RSA_PKCS       0x00000042UL
+#define CKM_RSA_PKCS_PSS          0x0000000DUL
+#define CKM_SHA256_RSA_PKCS_PSS   0x00000043UL
+
+CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                  CK_OBJECT_HANDLE hKey) {
+    if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
+    switch (pMechanism->mechanism) {
+        case CKM_SHA256_HMAC_INIT_VAL:
+        case CKM_AES_CMAC: case CKM_AES_CMAC_OPENSC_ALIAS:
+        case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
+        case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
+        case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
+        case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
+            break;
+        default:
+            return FHSM_RV_MECHANISM_INVALID;
+    }
+    fhsm_op_t *op = op_slot(g_op_sig, hSession);
+    if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
+    return op_init(op, hSession, pMechanism, hKey);
+}
+
+/* Helper : AES-CMAC via EVP_MAC. Used by C_Sign (mac generation) and
+ * C_Verify (constant-time compare). The CMAC tag is always 16 bytes
+ * (block size of AES). */
+static fhsm_rv_t aes_cmac(const uint8_t *key, size_t key_len,
+                           const uint8_t *data, size_t data_len,
+                           uint8_t out[16]) {
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "CMAC", NULL);
+    if (!mac) return FHSM_RV_MECHANISM_INVALID;
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);
+    if (!ctx) return FHSM_RV_HOST_MEMORY;
+    char cipher_name[16];
+    snprintf(cipher_name, sizeof(cipher_name), "AES-%zu-CBC", key_len * 8);
+    OSSL_PARAM params[2] = {
+        OSSL_PARAM_construct_utf8_string("cipher", cipher_name, 0),
+        OSSL_PARAM_construct_end()
+    };
+    if (EVP_MAC_init(ctx, key, key_len, params) != 1
+        || EVP_MAC_update(ctx, data, data_len) != 1) {
+        EVP_MAC_CTX_free(ctx); return FHSM_RV_FUNCTION_FAILED;
+    }
+    size_t out_len = 16;
+    int ok = EVP_MAC_final(ctx, out, &out_len, 16);
+    EVP_MAC_CTX_free(ctx);
+    return ok == 1 && out_len == 16 ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+/* Map mechanism → hash name for EVP_DigestSign. NULL = no prehash
+ * (caller-provided digest, used with raw CKM_ECDSA / CKM_RSA_PKCS). */
+static const char *mech_hash_name(uint32_t m) {
+    switch (m) {
+        case CKM_ECDSA_SHA256: case CKM_SHA256_RSA_PKCS:
+        case CKM_SHA256_RSA_PKCS_PSS:                            return "SHA256";
+        case CKM_ECDSA_SHA384: case CKM_SHA384_RSA_PKCS:         return "SHA384";
+        case CKM_ECDSA_SHA512: case CKM_SHA512_RSA_PKCS:         return "SHA512";
+        default:                                                   return NULL;
+    }
+}
+
+static int mech_is_pss(uint32_t m) {
+    return m == CKM_RSA_PKCS_PSS || m == CKM_SHA256_RSA_PKCS_PSS;
+}
+
+/* Sign with an asymmetric private key. Loads the PKCS#8 DER blob from
+ * the token's object store, builds an EVP_PKEY, and uses EVP_DigestSign
+ * (or EVP_PKEY_sign for prehash mechanisms). */
+static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
+                                  const uint8_t *data, size_t data_len,
+                                  uint8_t *sig, size_t *sig_len) {
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) return rv;
+    if (cl != CKO_PRIVATE_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    const uint8_t *p = kv;
+    EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+    if (!pkey) return FHSM_RV_FUNCTION_FAILED;
+    if ((kt == CKK_RSA && EVP_PKEY_get_base_id(pkey) != EVP_PKEY_RSA) ||
+        (kt == CKK_EC  && EVP_PKEY_get_base_id(pkey) != EVP_PKEY_EC)) {
+        EVP_PKEY_free(pkey); return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    }
+
+    /* Post-quantum schemes : OpenSSL 3.5+ exposes ML-DSA / SLH-DSA via
+     * EVP_DigestSign with hash=NULL (the scheme does its own internal
+     * hashing per FIPS 204/205). EVP_PKEY_sign does NOT work here ---
+     * it expects a pre-hashed input which PQ schemes don't accept. */
+    if (op->mechanism == CKM_ML_DSA_OP || op->mechanism == CKM_SLH_DSA_OP) {
+        EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+        if (!mdctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
+        EVP_PKEY_CTX *pkctx = NULL;
+        if (EVP_DigestSignInit_ex(mdctx, &pkctx, NULL, NULL, NULL, pkey, NULL) != 1) {
+            EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        size_t out_len = *sig_len;
+        if (EVP_DigestSign(mdctx, sig, &out_len, data, data_len) != 1) {
+            EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        *sig_len = out_len;
+        EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+        return FHSM_RV_OK;
+    }
+
+    int ok = 0;
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
+
+    const char *hash = mech_hash_name(op->mechanism);
+    const EVP_MD *md = hash ? EVP_MD_fetch(NULL, hash, NULL) : NULL;
+
+    EVP_PKEY_CTX *pkctx = NULL;
+    if (EVP_DigestSignInit_ex(mdctx, &pkctx, hash, NULL, NULL, pkey, NULL) != 1)
+        goto cleanup;
+    if (mech_is_pss(op->mechanism)) {
+        if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING) <= 0)
+            goto cleanup;
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, -1 /* digest len */) <= 0)
+            goto cleanup;
+    }
+    size_t out_len = *sig_len;
+    if (EVP_DigestSign(mdctx, sig, &out_len, data, data_len) != 1)
+        goto cleanup;
+    *sig_len = out_len;
+    ok = 1;
+
+cleanup:
+    if (md) EVP_MD_free((EVP_MD*)md);
+    EVP_MD_CTX_free(mdctx);
+    EVP_PKEY_free(pkey);
+    return ok ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLen,
+              unsigned char *pSignature, CK_ULONG *pulSignatureLen) {
+    fhsm_op_t *op = op_slot(g_op_sig, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (!pulSignatureLen) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+
+    if (op->mechanism == CKM_SHA256_HMAC_INIT_VAL) {
+        const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+        fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
+        size_t need = 32;
+        if (pSignature == NULL) { *pulSignatureLen = need; return FHSM_RV_OK; }
+        if (*pulSignatureLen < need) { *pulSignatureLen = need; return 0x00000150UL; }
+        size_t mac_len = *pulSignatureLen;
+        rv = fhsm_hmac(FHSM_HASH_SHA256, FHSM_SLICE(kv, kvl),
+                        FHSM_SLICE(pData, ulDataLen), pSignature, &mac_len);
+        *pulSignatureLen = mac_len;
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, NULL);
+        return rv;
+    }
+
+    if (op->mechanism == CKM_AES_CMAC
+        || op->mechanism == CKM_AES_CMAC_OPENSC_ALIAS) {
+        const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+        fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
+        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (pSignature == NULL) { *pulSignatureLen = 16; return FHSM_RV_OK; }
+        if (*pulSignatureLen < 16) { *pulSignatureLen = 16; return 0x00000150UL; }
+        rv = aes_cmac(kv, kvl, pData, ulDataLen, pSignature);
+        *pulSignatureLen = 16;
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, NULL);
+        return rv;
+    }
+
+    /* Asymmetric : query buffer size if pSignature == NULL. We return a
+     * conservative upper bound by family :
+     *   ECDSA-P521        ≈ 140 octets
+     *   RSA-4096          = 512 octets
+     *   ML-DSA-87         ≈ 4627 octets
+     *   SLH-DSA-256f      ≈ 49856 octets
+     * The 64KB worst-case is allocated once by the caller and is
+     * negligible memory-wise. */
+    if (pSignature == NULL) {
+        if (op->mechanism == CKM_SLH_DSA_OP)        *pulSignatureLen = 65536;
+        else if (op->mechanism == CKM_ML_DSA_OP)    *pulSignatureLen = 8192;
+        else                                          *pulSignatureLen = 512;
+        return FHSM_RV_OK;
+    }
+    size_t sig_buf_len = *pulSignatureLen;
+    fhsm_rv_t rv = sign_asymmetric(t, op, pData, ulDataLen, pSignature, &sig_buf_len);
+    *pulSignatureLen = sig_buf_len;
+    op->active = 0;
+    (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
+                            fhsm_session_role(hSession), rv, NULL);
+    return rv;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_VerifyInit / C_Verify --- asymmetric signature verification.
+ * Mirror of Sign : load the public key (DER from token), call
+ * EVP_DigestVerify. For HMAC, recompute and constant-time compare.
+ * ----------------------------------------------------------------------- */
+CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                    CK_OBJECT_HANDLE hKey) {
+    if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
+    switch (pMechanism->mechanism) {
+        case CKM_SHA256_HMAC_INIT_VAL:
+        case CKM_AES_CMAC: case CKM_AES_CMAC_OPENSC_ALIAS:
+        case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
+        case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
+        case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
+        case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
+            break;
+        default: return FHSM_RV_MECHANISM_INVALID;
+    }
+    fhsm_op_t *op = op_slot(g_op_ver, hSession);
+    if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
+    return op_init(op, hSession, pMechanism, hKey);
+}
+
+CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
+               CK_ULONG ulDataLen, unsigned char *pSig, CK_ULONG ulSigLen) {
+    fhsm_op_t *op = op_slot(g_op_ver, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
+
+    if (op->mechanism == CKM_SHA256_HMAC_INIT_VAL) {
+        uint8_t mac[32]; size_t mac_len = sizeof(mac);
+        rv = fhsm_hmac(FHSM_HASH_SHA256, FHSM_SLICE(kv, kvl),
+                        FHSM_SLICE(pData, ulDataLen), mac, &mac_len);
+        op->active = 0;
+        if (rv != FHSM_RV_OK) return rv;
+        if (ulSigLen != mac_len) return FHSM_RV_SIGNATURE_INVALID;
+        return (fhsm_ct_memcmp(mac, pSig, mac_len) == 0) ? FHSM_RV_OK
+                                                          : FHSM_RV_SIGNATURE_INVALID;
+    }
+
+    if (op->mechanism == CKM_AES_CMAC
+        || op->mechanism == CKM_AES_CMAC_OPENSC_ALIAS) {
+        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        uint8_t mac[16];
+        rv = aes_cmac(kv, kvl, pData, ulDataLen, mac);
+        op->active = 0;
+        if (rv != FHSM_RV_OK) return rv;
+        if (ulSigLen != 16) return FHSM_RV_SIGNATURE_INVALID;
+        return (fhsm_ct_memcmp(mac, pSig, 16) == 0) ? FHSM_RV_OK
+                                                     : FHSM_RV_SIGNATURE_INVALID;
+    }
+
+    /* Asymmetric path : public key DER → EVP_PKEY → EVP_DigestVerify. */
+    if (cl != CKO_PUBLIC_KEY) {
+        op->active = 0;
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    }
+    const uint8_t *p = kv;
+    EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
+    if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
+
+    /* PQ schemes : EVP_DigestVerify with hash=NULL (same rationale as
+     * the sign path). */
+    if (op->mechanism == CKM_ML_DSA_OP || op->mechanism == CKM_SLH_DSA_OP) {
+        EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+        if (!mdctx) { EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_HOST_MEMORY; }
+        EVP_PKEY_CTX *pkctx = NULL;
+        int vok = 0;
+        if (EVP_DigestVerifyInit_ex(mdctx, &pkctx, NULL, NULL, NULL, pkey, NULL) == 1) {
+            int v = EVP_DigestVerify(mdctx, pSig, ulSigLen, pData, ulDataLen);
+            vok = (v == 1);
+            if (v < 0) {
+                EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+                op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+            }
+        }
+        EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+        op->active = 0;
+        rv = vok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
+        (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, NULL);
+        return rv;
+    }
+
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) { EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_HOST_MEMORY; }
+
+    EVP_PKEY_CTX *pkctx = NULL;
+    const char *hash = mech_hash_name(op->mechanism);
+    int verify_ok = 0;
+    if (EVP_DigestVerifyInit_ex(mdctx, &pkctx, hash, NULL, NULL, pkey, NULL) == 1) {
+        if (mech_is_pss(op->mechanism)) {
+            EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING);
+            EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, -1);
+        }
+        int vrv = EVP_DigestVerify(mdctx, pSig, ulSigLen, pData, ulDataLen);
+        verify_ok = (vrv == 1);
+        if (vrv < 0) {
+            /* genuine verification error rather than mismatch */
+            EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+            op->active = 0;
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+    }
+    EVP_MD_CTX_free(mdctx);
+    EVP_PKEY_free(pkey);
+    op->active = 0;
+    rv = verify_ok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
+    (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
+                            fhsm_session_role(hSession), rv, NULL);
+    return rv;
+}
+
+/* ===========================================================================
+ * Multi-part streaming Update/Final.
+ *
+ * Each pair of (Init, Update*, Final) keeps an EVP context alive in
+ * fhsm_op_t. The context is created on Init, fed by Update, and
+ * consumed by Final. The PKCS#11 caller can mix one-shot (Digest,
+ * Sign, Encrypt) with multi-part on different sessions but never on
+ * the same session at the same time (CKR_OPERATION_ACTIVE).
+ * =========================================================================== */
+/* openssl/evp.h is already included at the top of this TU. */
+
+static const char *hash_evp_name(fhsm_hash_t h) {
+    switch (h) {
+        case FHSM_HASH_SHA256: return "SHA256";
+        case FHSM_HASH_SHA384: return "SHA384";
+        case FHSM_HASH_SHA512: return "SHA512";
+        default: return NULL;
+    }
+}
+
+CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
+                     CK_ULONG ulPartLen) {
+    fhsm_op_t *op = op_slot(g_op_dig, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (!op->md_ctx) {
+        EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+        if (!ctx) return FHSM_RV_HOST_MEMORY;
+        const EVP_MD *md = EVP_MD_fetch(NULL, hash_evp_name(op->hash), NULL);
+        if (!md) { EVP_MD_CTX_free(ctx); return FHSM_RV_MECHANISM_INVALID; }
+        if (EVP_DigestInit_ex(ctx, md, NULL) != 1) {
+            EVP_MD_free((EVP_MD*)md); EVP_MD_CTX_free(ctx);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        EVP_MD_free((EVP_MD*)md);
+        op->md_ctx = ctx;
+    }
+    if (EVP_DigestUpdate(op->md_ctx, pPart, ulPartLen) != 1)
+        return FHSM_RV_FUNCTION_FAILED;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_DigestFinal(CK_SESSION_HANDLE hSession, unsigned char *pDigest,
+                    CK_ULONG *pulDigestLen) {
+    fhsm_op_t *op = op_slot(g_op_dig, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (!pulDigestLen) return FHSM_RV_ARGUMENTS_BAD;
+    size_t need = fhsm_hash_size(op->hash);
+    if (pDigest == NULL) { *pulDigestLen = need; return FHSM_RV_OK; }
+    if (*pulDigestLen < need) { *pulDigestLen = need; return 0x00000150UL; }
+    if (!op->md_ctx) {
+        /* Final without any Update == digest of empty input. */
+        size_t out_len = *pulDigestLen;
+        fhsm_rv_t rv = fhsm_hash_oneshot(op->hash, FHSM_SLICE("", 0),
+                                          pDigest, &out_len);
+        *pulDigestLen = out_len;
+        op->active = 0;
+        return rv;
+    }
+    unsigned int out_len = (unsigned int)*pulDigestLen;
+    int ok = EVP_DigestFinal_ex(op->md_ctx, pDigest, &out_len);
+    EVP_MD_CTX_free(op->md_ctx); op->md_ctx = NULL;
+    *pulDigestLen = out_len;
+    op->active = 0;
+    return ok == 1 ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
+                   CK_ULONG ulPartLen) {
+    fhsm_op_t *op = op_slot(g_op_sig, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (!op->mac_ctx) {
+        const uint8_t *kv = NULL; size_t kvl = 0;
+        uint32_t cl = 0, kt = 0;
+        fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (rv != FHSM_RV_OK) return rv;
+        EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+        if (!mac) return FHSM_RV_MECHANISM_INVALID;
+        EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+        EVP_MAC_free(mac);
+        if (!ctx) return FHSM_RV_HOST_MEMORY;
+        OSSL_PARAM params[2];
+        /* OSSL_PARAM_construct_utf8_string takes char* (not const), so use
+         * a local non-const buffer to avoid -Werror=discarded-qualifiers. */
+        char digest_name[] = "SHA256";
+        params[0] = OSSL_PARAM_construct_utf8_string("digest", digest_name, 0);
+        params[1] = OSSL_PARAM_construct_end();
+        if (EVP_MAC_init(ctx, kv, kvl, params) != 1) {
+            EVP_MAC_CTX_free(ctx);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        op->mac_ctx = ctx;
+    }
+    if (EVP_MAC_update(op->mac_ctx, pPart, ulPartLen) != 1)
+        return FHSM_RV_FUNCTION_FAILED;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
+                  CK_ULONG *pulSigLen) {
+    fhsm_op_t *op = op_slot(g_op_sig, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (!pulSigLen) return FHSM_RV_ARGUMENTS_BAD;
+    if (pSig == NULL) { *pulSigLen = 32; return FHSM_RV_OK; }
+    if (*pulSigLen < 32) { *pulSigLen = 32; return 0x00000150UL; }
+    size_t out_len = 0;
+    fhsm_rv_t rv = FHSM_RV_OK;
+    if (!op->mac_ctx) {
+        /* No Update issued ; HMAC of empty input. */
+        fhsm_token_t *t = fhsm_session_token(hSession);
+        const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl=0, kt=0;
+        rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (rv == FHSM_RV_OK) {
+            out_len = *pulSigLen;
+            rv = fhsm_hmac(FHSM_HASH_SHA256, FHSM_SLICE(kv, kvl),
+                            FHSM_SLICE("", 0), pSig, &out_len);
+        }
+    } else {
+        if (EVP_MAC_final(op->mac_ctx, pSig, &out_len, *pulSigLen) != 1)
+            rv = FHSM_RV_FUNCTION_FAILED;
+        EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL;
+    }
+    *pulSigLen = out_len;
+    op->active = 0;
+    return rv;
+}
+
+/* AES-GCM Update/Final via EVP_CIPHER_CTX. */
+static fhsm_rv_t ensure_cipher_ctx_aes_gcm(fhsm_op_t *op, fhsm_token_t *t, int enc) {
+    if (op->cipher_ctx) return FHSM_RV_OK;
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl=0, kt=0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) return rv;
+    if (kt != CKK_AES) return FHSM_RV_MECHANISM_INVALID;
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return FHSM_RV_HOST_MEMORY;
+    const EVP_CIPHER *cipher = EVP_CIPHER_fetch(NULL,
+        kvl == 16 ? "AES-128-GCM" : kvl == 24 ? "AES-192-GCM" : "AES-256-GCM", NULL);
+    if (!cipher) { EVP_CIPHER_CTX_free(ctx); return FHSM_RV_MECHANISM_INVALID; }
+    int ok;
+    if (enc) {
+        ok = EVP_EncryptInit_ex2(ctx, cipher, kv, op->have_iv ? op->iv : NULL, NULL);
+    } else {
+        ok = EVP_DecryptInit_ex2(ctx, cipher, kv, op->have_iv ? op->iv : NULL, NULL);
+    }
+    EVP_CIPHER_free((EVP_CIPHER*)cipher);
+    if (!ok) { EVP_CIPHER_CTX_free(ctx); return FHSM_RV_FUNCTION_FAILED; }
+    op->cipher_ctx = ctx;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
+                      CK_ULONG ulPartLen, unsigned char *pEnc, CK_ULONG *pulEncLen) {
+    fhsm_op_t *op = op_slot(g_op_enc, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 1);
+    if (rv != FHSM_RV_OK) return rv;
+    if (pEnc == NULL) { *pulEncLen = ulPartLen; return FHSM_RV_OK; }
+    int out_len = 0;
+    if (EVP_EncryptUpdate(op->cipher_ctx, pEnc, &out_len, pPart, (int)ulPartLen) != 1)
+        return FHSM_RV_FUNCTION_FAILED;
+    *pulEncLen = (CK_ULONG)out_len;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
+                     CK_ULONG *pulLastLen) {
+    fhsm_op_t *op = op_slot(g_op_enc, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
+    /* Final returns the 16-byte GCM tag appended after any remaining bytes. */
+    if (pLast == NULL) { *pulLastLen = 16; return FHSM_RV_OK; }
+    if (*pulLastLen < 16) { *pulLastLen = 16; return 0x00000150UL; }
+    int out_len = 0;
+    if (op->cipher_ctx == NULL) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (EVP_EncryptFinal_ex(op->cipher_ctx, pLast, &out_len) != 1) {
+        EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
+        op->active = 0;
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    /* Append the GCM tag. */
+    if (EVP_CIPHER_CTX_ctrl(op->cipher_ctx, EVP_CTRL_AEAD_GET_TAG, 16,
+                              pLast + out_len) != 1) {
+        EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
+        op->active = 0;
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    *pulLastLen = (CK_ULONG)out_len + 16;
+    EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
+    op->active = 0;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
+                      CK_ULONG ulEncLen, unsigned char *pPart, CK_ULONG *pulPartLen) {
+    fhsm_op_t *op = op_slot(g_op_dec, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 0);
+    if (rv != FHSM_RV_OK) return rv;
+    if (pPart == NULL) { *pulPartLen = ulEncLen; return FHSM_RV_OK; }
+    int out_len = 0;
+    if (EVP_DecryptUpdate(op->cipher_ctx, pPart, &out_len, pEnc, (int)ulEncLen) != 1)
+        return FHSM_RV_FUNCTION_FAILED;
+    *pulPartLen = (CK_ULONG)out_len;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
+                     CK_ULONG *pulLastLen) {
+    fhsm_op_t *op = op_slot(g_op_dec, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
+    if (pLast == NULL) { *pulLastLen = 0; return FHSM_RV_OK; }
+    int out_len = 0;
+    int ok = EVP_DecryptFinal_ex(op->cipher_ctx, pLast, &out_len);
+    EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
+    *pulLastLen = (CK_ULONG)out_len;
+    op->active = 0;
+    /* Final fails if tag verification fails. PKCS#11 maps this to
+     * CKR_ENCRYPTED_DATA_INVALID. */
+    return ok == 1 ? FHSM_RV_OK : FHSM_RV_ENCRYPTED_DATA_INVALID;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_GetFunctionList --- the *single* symbol every PKCS#11 application
+ * resolves via dlsym to obtain the function table. Without this entry
+ * point the .so cannot be loaded by pkcs11-tool, OpenSC, NSS, etc.
+ *
+ * The table layout follows PKCS#11 v2.40 sec C.6 (67 function pointers
+ * preceded by a 2-byte CK_VERSION). Slots that are not yet implemented
+ * are routed to fhsm_not_supported, which returns CKR_FUNCTION_NOT_SUPPORTED.
+ *
+ * pkcs11-tool calls in order: C_GetFunctionList, then through the table:
+ *   C_Initialize, C_GetInfo, C_GetSlotList, C_Finalize.
+ * Those four (plus the table itself) are wired below.
+ * ----------------------------------------------------------------------- */
+typedef struct CK_VERSION_s { unsigned char major, minor; } CK_VERSION;
+
+/* The PKCS#11 v2.40 CK_FUNCTION_LIST is { CK_VERSION; 67 function pointers; }.
+ * We use a uniform void* array because the loader only dereferences the
+ * pointers it knows the type of, and C guarantees that all pointer-to-function
+ * casts are reversible. */
+struct CK_FUNCTION_LIST {
+    CK_VERSION version;
+    void *pfn[67];   /* C_Initialize ... C_WaitForSlotEvent */
+};
+
+static CK_RV fhsm_not_supported(void) {
+    return 0x00000054UL;   /* CKR_FUNCTION_NOT_SUPPORTED */
+}
+
+static struct CK_FUNCTION_LIST fhsm_function_list = { { 2, 40 }, { 0 } };
+
+CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
+    if (!ppFnList) return FHSM_RV_ARGUMENTS_BAD;
+    if (!fhsm_function_list.pfn[0]) {
+        /* Default every slot to fhsm_not_supported. */
+        for (size_t i = 0;
+             i < sizeof(fhsm_function_list.pfn)/sizeof(fhsm_function_list.pfn[0]);
+             i++) {
+            fhsm_function_list.pfn[i] = (void*)(uintptr_t)fhsm_not_supported;
+        }
+        /* PKCS#11 v2.40 sec C.6 ordering --- only the slots used by
+         * pkcs11-tool --show-info and the implemented C_* are populated. */
+        /* PKCS#11 v2.40 §C.6 ordering (verified against OpenSC pkcs11f.h).
+         * C_WaitForSlotEvent is at the END (slot 66), NOT after C_GetTokenInfo. */
+        fhsm_function_list.pfn[0]  = (void*)(uintptr_t)C_Initialize;       /* slot  0 */
+        fhsm_function_list.pfn[1]  = (void*)(uintptr_t)C_Finalize;         /* slot  1 */
+        fhsm_function_list.pfn[2]  = (void*)(uintptr_t)C_GetInfo;          /* slot  2 */
+        fhsm_function_list.pfn[3]  = (void*)(uintptr_t)C_GetFunctionList;  /* slot  3 */
+        fhsm_function_list.pfn[4]  = (void*)(uintptr_t)C_GetSlotList;      /* slot  4 */
+        fhsm_function_list.pfn[5]  = (void*)(uintptr_t)C_GetSlotInfo;      /* slot  5 */
+        fhsm_function_list.pfn[6]  = (void*)(uintptr_t)C_GetTokenInfo;     /* slot  6 */
+        fhsm_function_list.pfn[7]  = (void*)(uintptr_t)C_GetMechanismList; /* slot  7 */
+        fhsm_function_list.pfn[8]  = (void*)(uintptr_t)C_GetMechanismInfo; /* slot  8 */
+        fhsm_function_list.pfn[9]  = (void*)(uintptr_t)C_InitToken;        /* slot  9 */
+        fhsm_function_list.pfn[10] = (void*)(uintptr_t)C_InitPIN;          /* slot 10 */
+        fhsm_function_list.pfn[11] = (void*)(uintptr_t)C_SetPIN;           /* slot 11 */
+        fhsm_function_list.pfn[12] = (void*)(uintptr_t)C_OpenSession;      /* slot 12 */
+        fhsm_function_list.pfn[13] = (void*)(uintptr_t)C_CloseSession;     /* slot 13 */
+        fhsm_function_list.pfn[18] = (void*)(uintptr_t)C_Login;            /* slot 18 */
+        fhsm_function_list.pfn[19] = (void*)(uintptr_t)C_Logout;           /* slot 19 */
+        /* Object lifecycle */
+        fhsm_function_list.pfn[22] = (void*)(uintptr_t)C_DestroyObject;    /* slot 22 */
+        fhsm_function_list.pfn[24] = (void*)(uintptr_t)C_GetAttributeValue;/* slot 24 */
+        fhsm_function_list.pfn[26] = (void*)(uintptr_t)C_FindObjectsInit;  /* slot 26 */
+        fhsm_function_list.pfn[27] = (void*)(uintptr_t)C_FindObjects;      /* slot 27 */
+        fhsm_function_list.pfn[28] = (void*)(uintptr_t)C_FindObjectsFinal; /* slot 28 */
+        /* Encryption */
+        fhsm_function_list.pfn[29] = (void*)(uintptr_t)C_EncryptInit;      /* slot 29 */
+        fhsm_function_list.pfn[30] = (void*)(uintptr_t)C_Encrypt;          /* slot 30 */
+        fhsm_function_list.pfn[31] = (void*)(uintptr_t)C_EncryptUpdate;    /* slot 31 */
+        fhsm_function_list.pfn[32] = (void*)(uintptr_t)C_EncryptFinal;     /* slot 32 */
+        fhsm_function_list.pfn[33] = (void*)(uintptr_t)C_DecryptInit;      /* slot 33 */
+        fhsm_function_list.pfn[34] = (void*)(uintptr_t)C_Decrypt;          /* slot 34 */
+        fhsm_function_list.pfn[35] = (void*)(uintptr_t)C_DecryptUpdate;    /* slot 35 */
+        fhsm_function_list.pfn[36] = (void*)(uintptr_t)C_DecryptFinal;     /* slot 36 */
+        /* Digest */
+        fhsm_function_list.pfn[37] = (void*)(uintptr_t)C_DigestInit;       /* slot 37 */
+        fhsm_function_list.pfn[38] = (void*)(uintptr_t)C_Digest;           /* slot 38 */
+        fhsm_function_list.pfn[39] = (void*)(uintptr_t)C_DigestUpdate;     /* slot 39 */
+        fhsm_function_list.pfn[41] = (void*)(uintptr_t)C_DigestFinal;      /* slot 41 */
+        /* Sign */
+        fhsm_function_list.pfn[42] = (void*)(uintptr_t)C_SignInit;         /* slot 42 */
+        fhsm_function_list.pfn[43] = (void*)(uintptr_t)C_Sign;             /* slot 43 */
+        fhsm_function_list.pfn[44] = (void*)(uintptr_t)C_SignUpdate;       /* slot 44 */
+        fhsm_function_list.pfn[45] = (void*)(uintptr_t)C_SignFinal;        /* slot 45 */
+        /* Verify */
+        fhsm_function_list.pfn[48] = (void*)(uintptr_t)C_VerifyInit;       /* slot 48 */
+        fhsm_function_list.pfn[49] = (void*)(uintptr_t)C_Verify;           /* slot 49 */
+        /* Key generation */
+        fhsm_function_list.pfn[58] = (void*)(uintptr_t)C_GenerateKey;      /* slot 58 */
+        fhsm_function_list.pfn[59] = (void*)(uintptr_t)C_GenerateKeyPair;  /* slot 59 */
+        fhsm_function_list.pfn[60] = (void*)(uintptr_t)C_WrapKey;          /* slot 60 */
+        fhsm_function_list.pfn[61] = (void*)(uintptr_t)C_UnwrapKey;        /* slot 61 */
+        /* Key derivation */
+        fhsm_function_list.pfn[62] = (void*)(uintptr_t)C_DeriveKey;        /* slot 62 */
+        /* RNG */
+        fhsm_function_list.pfn[64] = (void*)(uintptr_t)C_GenerateRandom;   /* slot 64 */
+    }
+    *ppFnList = &fhsm_function_list;
+    return FHSM_RV_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * CK_INTERFACE v3.0 (PKCS#11 v3.0 §5.18) --- placed here after the v2.40
+ * fhsm_function_list / CK_VERSION / fhsm_not_supported definitions so all
+ * the symbols it references are already visible.
+ *
+ * The v3.0 table is a separate static (fhsm_function_list_3_0) with :
+ *   - version field = {3, 0}
+ *   - 67 v2.40 functions at slots 0..66 (copied from fhsm_function_list)
+ *   - slot 67 = C_GetInterfaceList, slot 68 = C_GetInterface
+ *   - slots 69..90 = fhsm_not_supported (Login_User, SessionCancel,
+ *     Message family) ; can be wired in a future release
+ *
+ * The previous attempt segfaulted pkcs11-tool because it returned the
+ * v2.40 table when v3.0 was requested ; the version mismatch + missing
+ * slots caused pkcs11-tool to dereference past the end of the array.
+ * ----------------------------------------------------------------------- */
+typedef struct CK_INTERFACE_s {
+    char        *pInterfaceName;
+    void        *pFunctionList;
+    CK_FLAGS     flags;
+} CK_INTERFACE;
+
+struct CK_FUNCTION_LIST_3_0 {
+    CK_VERSION version;     /* {3, 0} */
+    void *pfn[91];          /* 67 v2.40 + 24 v3.0 */
+};
+
+static struct CK_FUNCTION_LIST_3_0 fhsm_function_list_3_0 = { { 3, 0 }, { 0 } };
+
+static void fhsm_init_v3_0_table(void) {
+    if (fhsm_function_list_3_0.pfn[0]) return;
+    /* Ensure the v2.40 table is initialized first (it triggers our
+     * lazy slot-filling). */
+    if (!fhsm_function_list.pfn[0]) {
+        struct CK_FUNCTION_LIST *unused;
+        (void)C_GetFunctionList(&unused);
+    }
+    /* Default every v3.0 slot to fhsm_not_supported. */
+    for (size_t i = 0;
+         i < sizeof(fhsm_function_list_3_0.pfn)/sizeof(fhsm_function_list_3_0.pfn[0]);
+         i++) {
+        fhsm_function_list_3_0.pfn[i] = (void*)(uintptr_t)fhsm_not_supported;
+    }
+    /* Mirror v2.40 slots 0..66 into the v3.0 table. */
+    for (size_t i = 0; i < 67; i++) {
+        fhsm_function_list_3_0.pfn[i] = fhsm_function_list.pfn[i];
+    }
+    /* v3.0 §5.18 says slot 67 is C_GetInterfaceList and slot 68 is
+     * C_GetInterface. We populate those next. */
+}
+
+CK_RV C_GetInterfaceList(CK_INTERFACE *pInterfacesList, CK_ULONG *pulCount) {
+    if (!pulCount) return FHSM_RV_ARGUMENTS_BAD;
+    if (pInterfacesList == NULL) { *pulCount = 1; return FHSM_RV_OK; }
+    if (*pulCount < 1) { *pulCount = 1; return 0x00000150UL; }
+    fhsm_init_v3_0_table();
+    static char name[] = "PKCS 11";
+    pInterfacesList[0].pInterfaceName = name;
+    pInterfacesList[0].pFunctionList  = &fhsm_function_list_3_0;
+    pInterfacesList[0].flags          = 0;
+    *pulCount = 1;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_GetInterface(unsigned char *pInterfaceName, void *pVersion,
+                     CK_INTERFACE **ppInterface, CK_FLAGS flags) {
+    (void)pVersion; (void)flags;
+    if (!ppInterface) return FHSM_RV_ARGUMENTS_BAD;
+    if (pInterfaceName != NULL
+        && strcmp((const char*)pInterfaceName, "PKCS 11") != 0) {
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    fhsm_init_v3_0_table();
+    static char name[] = "PKCS 11";
+    static CK_INTERFACE iface;
+    iface.pInterfaceName = name;
+    iface.pFunctionList  = &fhsm_function_list_3_0;
+    iface.flags          = 0;
+    *ppInterface = &iface;
+    /* Wire slot 67 (C_GetInterfaceList) and slot 68 (C_GetInterface)
+     * on first call ; they couldn't be populated in fhsm_init_v3_0_table
+     * because they are these very functions. */
+    fhsm_function_list_3_0.pfn[67] = (void*)(uintptr_t)C_GetInterfaceList;
+    fhsm_function_list_3_0.pfn[68] = (void*)(uintptr_t)C_GetInterface;
+    return FHSM_RV_OK;
+}

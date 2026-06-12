@@ -1,0 +1,301 @@
+# ===========================================================================
+# .gitlab-ci.yml
+#
+# GitLab CI/CD pipeline for FreeHSM C. Equivalent of the GitHub Actions
+# workflows in .github/workflows/.
+#
+# Stages :
+#   lint       --- SPDX header presence + LICENSE/NOTICE sanity
+#   build      --- Build the .so in the pinned Debian 13 + OpenSSL 3.5 FIPS image
+#   test       --- Smoke + full PKCS#11 coverage matrix (legacy + FIPS modes)
+#   repro      --- Two-build reproducibility check
+#   release    --- Tagged-release builder (only on v*-FIPS* tags)
+#
+# Required CI/CD variables (Settings → CI/CD → Variables) :
+#   RELEASE_GPG_KEY        : ASCII-armored private GPG key for tarball signing
+#                            (type : "File", masked NOT possible because multi-line)
+#   RELEASE_GPG_PASSPHRASE : passphrase for the above (type : "Variable", masked)
+#
+# Required container images (push them once to your GitLab Container Registry) :
+#   $CI_REGISTRY_IMAGE/build:debian13-openssl-3.5
+#   $CI_REGISTRY_IMAGE/test:debian13-pkcs11-tools
+#
+# The Dockerfiles for these images live in Dockerfile.build + Dockerfile.test.
+# ===========================================================================
+
+stages:
+  - lint
+  - build
+  - test
+  - repro
+  - release
+
+variables:
+  # Reproducible-build epoch (Unix timestamp of release base date).
+  # Override per-release if needed.
+  SOURCE_DATE_EPOCH: "1717977600"
+  # Fast-fail on first error.
+  GIT_DEPTH: "0"
+  # Disable git LFS for speed (we don't use it).
+  GIT_LFS_SKIP_SMUDGE: "1"
+
+# ---------------------------------------------------------------------------
+# Default rules : run on every push and every merge request, schedule
+# nightly on the protected default branch.
+# ---------------------------------------------------------------------------
+default:
+  interruptible: true
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+# ===========================================================================
+# Stage : lint
+# ===========================================================================
+
+lint:spdx-headers:
+  stage: lint
+  image: debian:13-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  before_script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends bash
+  script:
+    - bash scripts/add_copyright_header.sh --check
+
+lint:license-notice:
+  stage: lint
+  image: debian:13-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - test -f LICENSE
+    - test -f NOTICE
+    - grep -q "Afchine Madjlessi" NOTICE
+    - grep -q "Apache License" LICENSE
+
+# ===========================================================================
+# Stage : build
+# ===========================================================================
+
+build:default:
+  stage: build
+  image: $CI_REGISTRY_IMAGE/build:debian13-openssl-3.5
+  needs: ["lint:spdx-headers", "lint:license-notice"]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_TAG =~ /^v.*-FIPS/
+  script:
+    - make clean
+    - make 2>&1 | tee build.log
+    - test -f libfreehsm-fips.so
+    - make integrity 2>&1 | tee integrity.log
+    - ls -la libfreehsm-fips.so
+    - sha256sum libfreehsm-fips.so | tee libfreehsm-fips.so.sha256
+  artifacts:
+    name: "freehsm-c-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 14 days
+    paths:
+      - libfreehsm-fips.so
+      - libfreehsm-fips.so.sha256
+      - tests/test_smoke
+      - tests/mlkem_e2e
+      - tests/mldsa_e2e
+      - tests/slhdsa_e2e
+      - build.log
+      - integrity.log
+
+# ===========================================================================
+# Stage : test
+# ===========================================================================
+
+test:smoke:
+  stage: test
+  image: $CI_REGISTRY_IMAGE/build:debian13-openssl-3.5
+  needs: ["build:default"]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    # The static-linked smoke harness needs the integrity bypass since its
+    # embedded digest is never patched (see CONTRIBUTING.md §5).
+    - FHSM_INTEGRITY_ALLOW_UNSIGNED=1 ./tests/test_smoke
+    - echo "smoke OK"
+
+test:coverage-matrix:legacy:
+  stage: test
+  image: $CI_REGISTRY_IMAGE/test:debian13-pkcs11-tools
+  needs: ["build:default"]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  before_script:
+    - mkdir -p /opt/freehsm/lib
+    - install -m 755 libfreehsm-fips.so /opt/freehsm/lib/
+    - id freehsm 2>/dev/null || useradd -r -d /var/lib/freehsm -m freehsm
+    - chown -R freehsm: /var/lib/freehsm
+  script:
+    - bash tests/coverage_matrix.sh 2>&1 | tee matrix-legacy.log
+    - tail -1 matrix-legacy.log | grep -q "ALL ASSERTIONS PASS"
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - matrix-legacy.log
+      - /tmp/freehsm-coverage.tsv
+
+test:coverage-matrix:fips:
+  stage: test
+  image: $CI_REGISTRY_IMAGE/test:debian13-pkcs11-tools
+  needs: ["build:default"]
+  variables:
+    FHSM_MODE: "fips"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  before_script:
+    - mkdir -p /opt/freehsm/lib
+    - install -m 755 libfreehsm-fips.so /opt/freehsm/lib/
+    - id freehsm 2>/dev/null || useradd -r -d /var/lib/freehsm -m freehsm
+    - chown -R freehsm: /var/lib/freehsm
+  script:
+    - bash tests/coverage_matrix.sh 2>&1 | tee matrix-fips.log
+    - tail -1 matrix-fips.log | grep -q "ALL ASSERTIONS PASS"
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - matrix-fips.log
+
+# ===========================================================================
+# Stage : repro --- two-build reproducibility check
+# ===========================================================================
+
+repro:rebuild-and-compare:
+  stage: repro
+  image: $CI_REGISTRY_IMAGE/build:debian13-openssl-3.5
+  needs: ["build:default"]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_TAG =~ /^v.*-FIPS/
+  script:
+    # Re-build from scratch with the SAME SOURCE_DATE_EPOCH ; the digest
+    # must match the artefact from build:default.
+    - make clean
+    - make
+    - sha256sum libfreehsm-fips.so > /tmp/build2.sha256
+    - cat libfreehsm-fips.so.sha256
+    - cat /tmp/build2.sha256
+    - cmp <(awk '{print $1}' libfreehsm-fips.so.sha256) <(awk '{print $1}' /tmp/build2.sha256)
+    - echo "Reproducibility VERIFIED"
+
+# ===========================================================================
+# Stage : release --- only triggered by signed tag push
+# ===========================================================================
+
+release:tarballs:
+  stage: release
+  image: $CI_REGISTRY_IMAGE/build:debian13-openssl-3.5
+  needs: ["build:default", "test:coverage-matrix:legacy", "test:coverage-matrix:fips", "repro:rebuild-and-compare"]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v.*-FIPS/
+  before_script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends gpg
+  script:
+    - TAG="${CI_COMMIT_TAG}"
+    - echo "Building release tarballs for $TAG"
+
+    # 1. Verify the tag is GPG-signed.
+    - git verify-tag "$TAG" || { echo "tag is not signed --- aborting" >&2; exit 1; }
+
+    # 2. Source tarball.
+    - mkdir -p dist
+    - git archive --format=tar.xz --prefix="freehsm-c-${TAG}/" -o "dist/freehsm-c-${TAG}-src.tar.xz" HEAD
+    - sha256sum "dist/freehsm-c-${TAG}-src.tar.xz" > "dist/freehsm-c-${TAG}-src.tar.xz.sha256"
+
+    # 3. Binary tarball (header bundle).
+    - mkdir -p "dist/freehsm-c-${TAG}/lib" "dist/freehsm-c-${TAG}/include"
+    - cp libfreehsm-fips.so "dist/freehsm-c-${TAG}/lib/"
+    - cp include/*.h        "dist/freehsm-c-${TAG}/include/"
+    - cp NOTICE LICENSE README.md CHANGELOG.md SECURITY.md "dist/freehsm-c-${TAG}/"
+    - tar -cJf "dist/freehsm-c-${TAG}-bin.tar.xz" -C dist "freehsm-c-${TAG}"
+    - sha256sum "dist/freehsm-c-${TAG}-bin.tar.xz" > "dist/freehsm-c-${TAG}-bin.tar.xz.sha256"
+
+    # 4. GPG-sign both tarballs.
+    - |
+      if [ -n "${RELEASE_GPG_KEY:-}" ]; then
+        gpg --batch --import "$RELEASE_GPG_KEY"
+        for f in dist/*.tar.xz; do
+          gpg --batch --pinentry-mode loopback \
+              --passphrase "$RELEASE_GPG_PASSPHRASE" \
+              --armor --detach-sign "$f"
+        done
+        echo "Tarballs signed."
+      else
+        echo "WARNING : RELEASE_GPG_KEY missing --- skipping signature step."
+      fi
+
+    # 5. Print the manifest for the release notes.
+    - echo "==== Release manifest ===="
+    - ls -la dist/
+    - sha256sum dist/* || true
+
+  artifacts:
+    name: "freehsm-c-${CI_COMMIT_TAG}"
+    expire_in: never
+    paths:
+      - dist/*.tar.xz
+      - dist/*.tar.xz.asc
+      - dist/*.sha256
+      - libfreehsm-fips.so
+      - libfreehsm-fips.so.sha256
+
+# ---------------------------------------------------------------------------
+# Optional : push to the GitLab Generic Package Registry so the artefacts
+# are downloadable via stable URLs (https://<gitlab>/.../packages/...).
+# Uncomment after creating a "freehsm-c" package in Settings → Packages.
+# ---------------------------------------------------------------------------
+# release:package-registry:
+#   stage: release
+#   image: curlimages/curl:8.5.0
+#   needs: ["release:tarballs"]
+#   rules:
+#     - if: $CI_COMMIT_TAG =~ /^v.*-FIPS/
+#   script:
+#     - |
+#       for f in dist/*.tar.xz dist/*.asc dist/*.sha256; do
+#         curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+#              --upload-file "$f" \
+#              "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/freehsm-c/${CI_COMMIT_TAG}/$(basename $f)"
+#       done
+
+# ===========================================================================
+# Documentation : how a release is triggered
+# ===========================================================================
+#
+# 1. Maintainer creates a GPG-signed annotated tag on main :
+#        ./scripts/tag-v1.1.0-FIPS.sh
+#
+# 2. Push the tag :
+#        git push origin v1.1.0-FIPS
+#
+# 3. GitLab automatically runs the `release` stage of THIS pipeline.
+#
+# 4. Tarballs + signatures + checksums appear under :
+#        Project → CI/CD → Pipelines → release:tarballs → Artefacts
+#    AND (if uncommented) in :
+#        Project → Packages and registries → Package registry
+#
+# 5. Maintainer creates a Release entry pointing to these artefacts :
+#        Project → Deployments → Releases → New release
+#    and links the v1.1.0-FIPS tag.
+# ===========================================================================

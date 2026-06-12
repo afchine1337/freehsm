@@ -1,0 +1,50 @@
+FreeHSM C
+Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+
+This product includes software developed by Afchine Madjlessi.
+
+------------------------------------------------------------------------------
+
+This product depends on software developed by third parties. The dependencies
+are linked dynamically and their respective licenses apply :
+
+  * OpenSSL 3.x (Apache License 2.0)
+    https://www.openssl.org/source/license-openssl-ssleay.txt
+
+  * tpm2-tools (BSD-3-Clause, optional, runtime-only)
+    https://github.com/tpm2-software/tpm2-tools/blob/master/LICENSE
+
+  * liboqs / oqsprovider (MIT, optional, only when post-quantum extensions
+    Falcon / LMS / XMSS / HQC are enabled in legacy mode)
+    https://github.com/open-quantum-safe/liboqs/blob/main/LICENSE.txt
+
+------------------------------------------------------------------------------
+
+Standards documents referenced (informative ; their text is NOT distributed
+with this software) :
+
+  * FIPS 140-3      : NIST, Security Requirements for Cryptographic Modules
+  * FIPS 197        : NIST, Advanced Encryption Standard (AES)
+  * FIPS 198-1      : NIST, The Keyed-Hash Message Authentication Code (HMAC)
+  * FIPS 202        : NIST, SHA-3 Standard
+  * FIPS 203        : NIST, Module-Lattice-Based Key-Encapsulation Mechanism
+  * FIPS 204        : NIST, Module-Lattice-Based Digital Signature Standard
+  * FIPS 205        : NIST, Stateless Hash-Based Digital Signature Standard
+  * NIST SP 800-38D : Galois/Counter Mode (GCM) of Operation
+  * NIST SP 800-90A : Recommendation for Random Number Generation Using
+                     Deterministic Random Bit Generators
+  * NIST SP 800-90B : Recommendation for the Entropy Sources Used for
+                     Random Bit Generation
+  * NIST SP 800-90C : Recommendation for Random Bit Generator (RBG)
+                     Constructions
+  * NIST SP 800-131A: Transitioning the Use of Cryptographic Algorithms and
+                     Key Lengths
+  * NIST SP 800-132 : Recommendation for Password-Based Key Derivation
+  * NIST SP 800-208 : Recommendation for Stateful Hash-Based Signature Schemes
+  * OASIS PKCS#11 v3.2 : Cryptographic Token Interface Base Specification
+  * Common Criteria v3.1 Rev 5 : Information technology --- Security
+                                 techniques --- Evaluation criteria for
+                                 IT security
+
+NIST documents are in the public domain. CC and OASIS documents are
+available from their respective publishers under their own terms.

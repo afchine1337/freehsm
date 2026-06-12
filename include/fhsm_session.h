@@ -1,0 +1,44 @@
+/* ===========================================================================
+ * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ * ========================================================================= */
+#ifndef FHSM_SESSION_H
+#define FHSM_SESSION_H
+#include "fhsm_common.h"
+
+/* Opaque token handle, defined in fhsm_token.h. Forward-declared here so
+ * fhsm_session.h does not need to pull in the full token header. */
+typedef struct fhsm_token_s fhsm_token_t;
+
+fhsm_rv_t fhsm_session_open(unsigned long slot, unsigned long flags,
+                             unsigned long *out_handle);
+fhsm_rv_t fhsm_session_close(unsigned long h);
+fhsm_rv_t fhsm_session_login(unsigned long h, fhsm_role_t role,
+                              const char *pin, size_t pin_len);
+fhsm_rv_t fhsm_session_logout(unsigned long h);
+
+/* Attach the slot's token to a session. Called by C_OpenSession after a
+ * successful fhsm_session_open. The token pointer is owned by the slot
+ * registry; the session only borrows it. */
+fhsm_rv_t fhsm_session_attach_token(unsigned long h, fhsm_token_t *t);
+
+/* Accessors used by C_InitPIN / C_SetPIN / C_FindObjects to retrieve the
+ * session's current token and role without exposing the internal session
+ * table. Returns NULL / FHSM_ROLE_NONE if the handle is invalid. */
+fhsm_token_t *fhsm_session_token(unsigned long h);
+fhsm_role_t   fhsm_session_role(unsigned long h);
+
+#endif

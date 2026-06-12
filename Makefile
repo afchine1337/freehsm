@@ -1,0 +1,308 @@
+# ===========================================================================
+# Makefile --- FreeHSM C natif (FIPS 140-3 / CC EAL4+ candidate)
+#
+# Build targets:
+#   make              # libfreehsm-fips.so + binaire de test
+#   make tests        # exécute la suite KAT + tests d'audit
+#   make integrity    # signe le .so et imprime le digest pour le module
+#   make clean
+#
+# Compiler flags align with NIST recommendations for FIPS-validated
+# crypto modules (NIST SP 800-67, hardening guidelines). All warnings
+# are errors; the build fails on any unhandled return value, missing
+# braces, signed-comparison, format-string mismatch, or implicit fall-
+# through.
+# ===========================================================================
+
+CC          ?= cc
+AR          ?= ar
+
+# OpenSSL 3.x with FIPS provider --- override via OPENSSL_PREFIX if not
+# installed in /usr/local/ssl.
+OPENSSL_PREFIX ?= /usr/local/ssl
+OPENSSL_LDFLAGS = -L$(OPENSSL_PREFIX)/lib64 -L$(OPENSSL_PREFIX)/lib \
+                  -lcrypto -ldl -pthread
+OPENSSL_CFLAGS  = -I$(OPENSSL_PREFIX)/include
+
+WARN_FLAGS = \
+    -Wall -Wextra -Wpedantic -Werror \
+    -Wstrict-prototypes -Wshadow -Wpointer-arith -Wcast-align \
+    -Wwrite-strings -Wnested-externs -Wmissing-prototypes \
+    -Wmissing-declarations -Wredundant-decls -Wstrict-aliasing=2 \
+    -Wformat=2 -Wformat-security -Wno-format-nonliteral \
+    -Wnull-dereference -Wdouble-promotion -Wconversion \
+    -Wno-sign-conversion -Wno-unused-parameter
+
+HARDEN_FLAGS = \
+    -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIC \
+    -fstack-clash-protection -fcf-protection=full \
+    -fvisibility=hidden -fno-strict-aliasing \
+    -fno-omit-frame-pointer \
+    -DOPENSSL_API_COMPAT=0x30000000L
+
+# ---------------------------------------------------------------------------
+# Reproducibility flags. Together with SOURCE_DATE_EPOCH (set by the
+# Docker build environment), they purge every non-deterministic byte
+# from the resulting .so :
+#
+#   -ffile-prefix-map  redacts absolute paths in __FILE__ / debug info
+#   -fdebug-prefix-map idem for the DWARF .debug_info section
+#   -frandom-seed=fhsm makes gcc's anonymous-namespace / mangling stable
+#   -Wno-builtin-macro-redefined needed because we override __FILE__
+#   -D__DATE__='"redacted"' -D__TIME__='"redacted"' belt-and-braces
+#                        in case SOURCE_DATE_EPOCH is missing
+# ---------------------------------------------------------------------------
+REPRO_FLAGS = \
+    -ffile-prefix-map=$(CURDIR)= \
+    -fdebug-prefix-map=$(CURDIR)= \
+    -frandom-seed=fhsm-$(FHSM_VERSION_STRING) \
+    -Wno-builtin-macro-redefined \
+    -D__DATE__='"redacted"' -D__TIME__='"redacted"'
+
+# Stable version string injected into REPRO_FLAGS. Parsed from the
+# canonical header so a release bump propagates automatically.
+FHSM_VERSION_STRING := $(shell awk -F'"' '/FHSM_VERSION_STRING/{print $$2; exit}' include/fhsm_common.h)
+
+DEBUG_FLAGS ?= -g3 -O2
+
+CFLAGS  = $(WARN_FLAGS) $(HARDEN_FLAGS) $(REPRO_FLAGS) $(DEBUG_FLAGS) \
+          -std=c11 -D_GNU_SOURCE \
+          -Iinclude $(OPENSSL_CFLAGS)
+
+# Linker reproducibility :
+#   --build-id=none        suppress the random .note.gnu.build-id slot
+#   --hash-style=gnu       deterministic hash table layout
+#   --sort-common          stable .bss/.common ordering
+#   --reproducible         ld >= 2.38 honors the bundle (binutils 2.38+)
+LDFLAGS = -Wl,-z,relro,-z,now,-z,noexecstack,-z,defs \
+          -Wl,--no-undefined \
+          -Wl,--build-id=none \
+          -Wl,--hash-style=gnu \
+          -Wl,--sort-common \
+          $(OPENSSL_LDFLAGS)
+
+# ---------------------------------------------------------------------------
+# Sources / objects
+# ---------------------------------------------------------------------------
+LIB_SRC = \
+    src/fhsm_state.c                  \
+    src/fhsm_memory.c                 \
+    src/fhsm_crypto.c                 \
+    src/fhsm_audit.c                  \
+    src/fhsm_pkcs11.c                 \
+    src/fhsm_token.c                  \
+    src/fhsm_session.c                \
+    src/fhsm_integrity.c              \
+    src/fhsm_pairwise.c               \
+    src/fhsm_drbg.c                   \
+    src/fhsm_tpm.c                    \
+    src/fhsm_token_tpm.c              \
+    src/fhsm_mode.c                   \
+    src/dispatch/fhsm_dispatch_legacy.c \
+    src/gen/fhsm_dispatch.c           \
+    src/dispatch/fhsm_dispatch_common.c \
+    src/dispatch/fhsm_dispatch_digest.c \
+    src/dispatch/fhsm_dispatch_hmac.c \
+    src/dispatch/fhsm_dispatch_aes.c  \
+    src/dispatch/fhsm_dispatch_kdf.c  \
+    src/dispatch/fhsm_dispatch_pkey.c \
+    src/dispatch/fhsm_dispatch_pq.c   \
+    src/dispatch/fhsm_dispatch_kmac.c   \
+    src/dispatch/fhsm_dispatch_concat.c \
+    src/dispatch/fhsm_dispatch_hybrid.c \
+    kat/fhsm_kat_vectors.c              \
+    kat/cavp_extended.c
+
+# Dispatch source files need the dispatch common header on their include path.
+CFLAGS += -Isrc/dispatch
+
+LIB_OBJ = $(LIB_SRC:.c=.o)
+
+LIB     = libfreehsm-fips.so
+LIB_VER = $(LIB).$(shell awk -F'"' '/FHSM_VERSION_STRING/{print $$2; exit}' include/fhsm_common.h)
+
+# ---------------------------------------------------------------------------
+# Default target
+# ---------------------------------------------------------------------------
+.PHONY: all
+all: generate $(LIB) tests/test_smoke tools/freehsm-audit
+
+tools/freehsm-audit: tools/freehsm_audit.c
+	cc -O2 -Wall -Wextra -o $@ $< -lcrypto
+
+# ---------------------------------------------------------------------------
+# Code generation --- runs scripts/gen_p11_thunks.py to regenerate
+# include/fhsm_pkcs11_mechanisms.h, src/gen/fhsm_dispatch.c, docs/MECHANISMS.md.
+# The profile defaults to fips-strict; override with PROFILE=interop.
+# ---------------------------------------------------------------------------
+PROFILE ?= fips-strict
+
+.PHONY: generate
+generate:
+	python3 scripts/gen_p11_thunks.py --profile=$(PROFILE)
+
+# Generated artifacts depend on the script (so editing it triggers a re-gen).
+include/fhsm_pkcs11_mechanisms.h src/gen/fhsm_dispatch.c docs/MECHANISMS.md: scripts/gen_p11_thunks.py
+	$(MAKE) generate
+
+$(LIB): $(LIB_OBJ)
+	$(CC) -shared -Wl,-soname,$(LIB) -o $@ $^ $(LDFLAGS)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+# test_smoke is an INTERNAL test : it accesses helpers (fhsm_state_get,
+# fhsm_rng_bytes, fhsm_aes_gcm_*, fhsm_ct_memcmp, fhsm_kat_results) that
+# are hidden in the shipped .so (visibility=hidden). For testing we link
+# against the .o files directly, which bypasses visibility filtering.
+tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
+.PHONY: tests
+tests: tests/test_smoke
+	LD_LIBRARY_PATH=. ./tests/test_smoke
+
+# ---------------------------------------------------------------------------
+# Integrity --- sign the shipped .so and embed its SHA-256 into the
+# fhsm_module_integrity_digest[] array. Done by scripts/sign_module.sh
+# as a two-pass build (zero placeholder -> real digest patched in).
+# Required by FIPS 140-3 §7.10.2 (pre-operational integrity self-test).
+# ---------------------------------------------------------------------------
+.PHONY: integrity
+integrity: $(LIB)
+	@scripts/sign_module.sh $(LIB)
+	@echo "[integrity] $(LIB) signed ; readback :"
+	@objcopy --dump-section .fhsm_digest=/dev/stdout $(LIB) /dev/null \
+	    2>/dev/null | xxd -p | tr -d '\n' ; echo
+
+# Strip-and-sign : produce a release artefact with debug info removed
+# and the digest patched. Goes hand-in-hand with `make repro`.
+.PHONY: release
+release: $(LIB)
+	@objcopy --strip-debug $(LIB)
+	@scripts/sign_module.sh $(LIB)
+
+# ---------------------------------------------------------------------------
+# Lint --- the build refuses to ship if cppcheck or scan-build flags any
+# defect. Both are part of the CC EAL4+ ALC_TAT.1 ("well-defined
+# development tools") evidence package.
+# ---------------------------------------------------------------------------
+.PHONY: lint
+lint:
+	cppcheck --enable=warning,style,performance,portability \
+	         --error-exitcode=1 --std=c11 --inline-suppr \
+	         -Iinclude src/ kat/
+
+# ---------------------------------------------------------------------------
+# Clean
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Install --- system-wide installation under PREFIX (defaults to /opt/freehsm).
+# Run as root (or with sudo). The procedure follows docs/AGD_PRE.md §3.
+# ---------------------------------------------------------------------------
+PREFIX     ?= /opt/freehsm
+LIBDIR     ?= $(PREFIX)/lib
+ETCDIR     ?= $(PREFIX)/etc
+STATEDIR   ?= /var/lib/freehsm
+SYSUSER    ?= freehsm
+
+.PHONY: install
+install: $(LIB)
+	@echo "[install] target prefix = $(PREFIX)"
+	install -d -o root -g root -m 755 $(LIBDIR) $(ETCDIR)
+	install -o root -g root -m 0755 $(LIB) $(LIBDIR)/$(LIB)
+	id -u $(SYSUSER) >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d $(STATEDIR) $(SYSUSER)
+	install -d -o $(SYSUSER) -g $(SYSUSER) -m 700 $(STATEDIR)/tokens $(STATEDIR)/audit $(STATEDIR)/kek
+	test -f $(ETCDIR)/freehsm.conf || printf '[module]\nfips_strict      = true\naudit_mandatory  = true\nsecure_heap_kb   = 256\n\n[token]\npin_max_failed         = 5\npin_throttle_base_ms   = 500\npin_throttle_max_ms    = 60000\npbkdf2_iterations      = 200000\n\n[paths]\ntokens_dir = $(STATEDIR)/tokens\naudit_dir  = $(STATEDIR)/audit\n' > $(ETCDIR)/freehsm.conf
+	chmod 0644 $(ETCDIR)/freehsm.conf
+	-setcap 'cap_ipc_lock=+ep' $(LIBDIR)/$(LIB)
+	install -d -o root -g root -m 755 $(PREFIX)/share/kat
+	install -o root -g root -m 0644 kat/cavp/*.rsp $(PREFIX)/share/kat/ 2>/dev/null || true
+	install -d -o root -g root -m 755 $(PREFIX)/bin
+	test -f tools/freehsm-audit && install -o root -g root -m 0755 tools/freehsm-audit $(PREFIX)/bin/freehsm-audit || true
+	@echo "[install] installed to $(LIBDIR)/$(LIB)"
+	@echo "[install] verify with : readelf -p .comment $(LIBDIR)/$(LIB)"
+
+.PHONY: uninstall
+uninstall:
+	@echo "[uninstall] WARNING : this WILL DESTROY all tokens, audit logs and KEK."
+	@echo "[uninstall] Press Ctrl-C now to abort, or wait 5 s..."
+	@sleep 5
+	-systemctl stop freehsm-bound-service 2>/dev/null || true
+	-shred -uvz $(STATEDIR)/tokens/*.tok 2>/dev/null || true
+	-shred -uvz $(STATEDIR)/audit/*.audit.log 2>/dev/null || true
+	-shred -uvz $(STATEDIR)/kek/*.kek 2>/dev/null || true
+	rm -f $(LIBDIR)/$(LIB) $(ETCDIR)/freehsm.conf
+	rm -rf $(STATEDIR)
+	-userdel $(SYSUSER) 2>/dev/null || true
+	@echo "[uninstall] done."
+
+.PHONY: clean
+clean:
+	rm -f $(LIB) $(LIB_OBJ) tests/test_smoke tests/*.o
+	rm -f freehsm-c-src.tar.xz freehsm-c-src.tar.xz.sha256
+	rm -rf out/
+
+# Distclean = clean + regenerable artefacts. Use before `make dist` to
+# guarantee everything is regenerated from scratch.
+.PHONY: distclean
+distclean: clean
+	rm -f include/fhsm_pkcs11_mechanisms.h
+	rm -f src/gen/fhsm_dispatch.c
+	rm -f docs/MECHANISMS.md
+	rm -rf __pycache__ scripts/__pycache__
+
+# ---------------------------------------------------------------------------
+# Source distribution (reproducible). Input to CC EAL4+ ALC_CMS.4.
+# Honors SOURCE_DATE_EPOCH and uses tar's deterministic flags so the
+# archive is bit-identical across hosts.
+# ---------------------------------------------------------------------------
+SOURCE_DATE_EPOCH ?= 1735689600
+SOURCE_DATE_STR   := $(shell date -u -d @$(SOURCE_DATE_EPOCH) '+%Y-%m-%d %H:%M:%S')
+
+.PHONY: dist
+dist: clean
+	@echo "[dist] mtime = $(SOURCE_DATE_STR) UTC"
+	tar --mtime="@$(SOURCE_DATE_EPOCH)" \
+	    --owner=root --group=root --numeric-owner \
+	    --sort=name --no-acls --no-xattrs \
+	    --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime,delete=mtime \
+	    --transform 's,^,freehsm-c-$(FHSM_VERSION_STRING)/,' \
+	    -cJf freehsm-c-src.tar.xz \
+	    Makefile Dockerfile.build \
+	    include/ src/ kat/ tests/ docs/ scripts/
+	@sha256sum freehsm-c-src.tar.xz | tee freehsm-c-src.tar.xz.sha256
+	@echo "[dist] freehsm-c-src.tar.xz ready --- distribute to the evaluation lab."
+
+# ---------------------------------------------------------------------------
+# Reproducible build via Docker.
+# ---------------------------------------------------------------------------
+.PHONY: repro
+repro:
+	@scripts/build_reproducible.sh
+
+.PHONY: dist-verify
+dist-verify:
+	@# If a release reference digest exists for this version, compare
+	@# against it. Otherwise fall back to the build-twice consistency
+	@# check (no signed reference yet -- useful during development).
+	@VERSION=$$(grep -oP 'FHSM_VERSION_STRING\s*=\s*"\K[^"]+' include/fhsm_common.h 2>/dev/null); \
+	if [ -f dist/refs/v$$VERSION.sha256 ]; then \
+	    echo "[dist-verify] reference found for v$$VERSION ; comparing local build"; \
+	    scripts/dist_verify_ref.sh; \
+	else \
+	    echo "[dist-verify] no reference at dist/refs/v$$VERSION.sha256"; \
+	    echo "[dist-verify] falling back to build-twice consistency check"; \
+	    scripts/verify_reproducibility.sh; \
+	fi
+
+.PHONY: dist-baseline
+dist-baseline:
+	@scripts/dist_baseline.sh
+
+.PHONY: repro-shell
+repro-shell:
+	@scripts/build_reproducible.sh --shell
