@@ -36,9 +36,9 @@ jobs:
 
       # -------- GitLab --------
       - name: Push to GitLab
-        if: ${{ secrets.GITLAB_SSH_KEY != '' }}
         env:
           SSH_KEY: ${{ secrets.GITLAB_SSH_KEY }}
+        if: env.SSH_KEY != ''
         run: |
           mkdir -p ~/.ssh
           echo "$SSH_KEY" > ~/.ssh/gitlab_key
@@ -49,9 +49,9 @@ jobs:
 
       # -------- Codeberg --------
       - name: Push to Codeberg
-        if: ${{ secrets.CODEBERG_SSH_KEY != '' }}
         env:
           SSH_KEY: ${{ secrets.CODEBERG_SSH_KEY }}
+        if: env.SSH_KEY != ''
         run: |
           mkdir -p ~/.ssh
           echo "$SSH_KEY" > ~/.ssh/codeberg_key
