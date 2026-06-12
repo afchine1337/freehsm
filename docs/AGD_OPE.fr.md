@@ -180,7 +180,7 @@ Les erreurs critiques verrouillent l'état module ERROR. La seule récupération
 | Trimestriel | Tester `make repro` contre un checkout neuf                        |
 | Annuel    | Re-lancer pen-testing ; mettre à jour pins OE.OS / OE.OPENSSL        |
 
-## 7bis. Modes runtime (v1.1.0-FIPS.1)
+## 7bis. Modes runtime (v1.1.0)
 
 Le module choisit entre **legacy** (défaut) et **FIPS strict** au runtime via `FHSM_MODE` ou la directive `mode =` dans `/etc/freehsm/freehsm.conf`.
 

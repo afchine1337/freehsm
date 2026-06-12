@@ -5,7 +5,7 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.1.0-FIPS.1] --- 2026-06-11
+## [1.1.0] --- 2026-06-11
 
 The "CST pre-submission" refresh. Closes 8 of the 11 items on the NIST CST lab checklist, adds runtime-mode switching, and ships a hardened DRBG layer with NIST SP 800-90B health tests.
 
@@ -41,7 +41,7 @@ The "CST pre-submission" refresh. Closes 8 of the 11 items on the NIST CST lab c
 
 ---
 
-## [1.1.0-FIPS] --- 2026-06-10
+## [1.1.0-pre] --- 2026-06-10
 
 The "Debian 13 / OpenSSL 3.5" release. Module ported, validated by three
 independent PKCS#11 clients, full asymmetric / symmetric / PQ surface wired.

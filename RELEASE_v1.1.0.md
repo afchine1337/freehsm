@@ -1,6 +1,6 @@
-# FreeHSM C — v1.1.0-FIPS Release Notes
+# FreeHSM C — v1.1.0 Release Notes
 
-**Tag** : `v1.1.0-FIPS`
+**Tag** : `v1.1.0`
 **Date** : 2026-06-11
 **Maintainer** : Afchine Madjlessi <afchine.mad@gmail.com>
 
@@ -8,7 +8,7 @@
 
 ## TL;DR
 
-FreeHSM C v1.1.0-FIPS is a **PKCS#11 v3.2 cryptographic module** written in C11, candidate for **NIST FIPS 140-3 Level 1** and **Common Criteria EAL4+ augmented** (ALC_FLR.2 + AVA_VAN.5) certification.
+FreeHSM C v1.1.0 is a **PKCS#11 v3.2 cryptographic module** written in C11, candidate for **NIST FIPS 140-3 Level 1** and **Common Criteria EAL4+ augmented** (ALC_FLR.2 + AVA_VAN.5) certification.
 
 This release includes the `.1` refresh : 11 task items closing 8 of the 11 NIST CST checklist items, a hardened DRBG layer, TPM 2.0 sealing, runtime mode switching between legacy and FIPS strict, and full bilingual documentation.
 
@@ -25,7 +25,7 @@ This release includes the `.1` refresh : 11 task items closing 8 of the 11 NIST 
 | **TPM 2.0 sealing** | Companion-file approach, opt-in via `FHSM_TPM_SEALING=1` |
 | **Runtime mode switch** | Default = legacy ; `FHSM_MODE=fips` enables FIPS strict |
 | **Coverage matrix** | 27 PASS / 5 SKIP / 0 FAIL (5 SKIP = OpenSC CLI limitations only) |
-| **Documentation** | Fully bilingual (EN + FR) for every CC class artefact ; 5 new docs for v1.1.0-FIPS.1 |
+| **Documentation** | Fully bilingual (EN + FR) for every CC class artefact ; 5 new docs for v1.1.0 |
 
 ---
 
@@ -33,21 +33,21 @@ This release includes the `.1` refresh : 11 task items closing 8 of the 11 NIST 
 
 ```bash
 # Verify the tag is signed
-git verify-tag v1.1.0-FIPS
+git verify-tag v1.1.0
 
 # Verify the source tarball signature
-gpg --verify freehsm-c-v1.1.0-FIPS-src.tar.xz.asc
+gpg --verify freehsm-c-v1.1.0-src.tar.xz.asc
 
 # Verify the source tarball digest
-sha256sum -c freehsm-c-v1.1.0-FIPS-src.tar.xz.sha256
+sha256sum -c freehsm-c-v1.1.0-src.tar.xz.sha256
 
 # Verify the binary tarball
-gpg --verify freehsm-c-v1.1.0-FIPS-bin.tar.xz.asc
-sha256sum -c freehsm-c-v1.1.0-FIPS-bin.tar.xz.sha256
+gpg --verify freehsm-c-v1.1.0-bin.tar.xz.asc
+sha256sum -c freehsm-c-v1.1.0-bin.tar.xz.sha256
 
 # Reproduce the build locally
-tar xJf freehsm-c-v1.1.0-FIPS-src.tar.xz
-cd freehsm-c-v1.1.0-FIPS/
+tar xJf freehsm-c-v1.1.0-src.tar.xz
+cd freehsm-c-v1.1.0/
 make repro
 sha256sum libfreehsm-fips.so
 # Compare to the digest published in the release artefacts.
@@ -94,7 +94,7 @@ See [`docs/AGD_PRE.md`](docs/AGD_PRE.md) for the full preparative guidance.
 
 ## Upgrading
 
-From `v1.1.0-FIPS` (no `.1` suffix) :
+From `v1.1.0` (no `.1` suffix) :
 
 1. Pull the new sources.
 2. Re-run `make clean && make && make integrity`.

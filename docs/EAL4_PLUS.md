@@ -151,7 +151,7 @@ The TOE is designed to resist attacks with attack potential **Beyond-High**, the
 
 The TOE is delivered as a signed `.tar.xz` source archive (`make dist`) and a binary RPM/DEB package built reproducibly. Both bundles are signed with the same GPG key. Customers verify the signature and the SHA-256 digest published on the project website over HTTPS.
 
-## 9. TSF list — v1.1.0-FIPS.1 additions
+## 9. TSF list — v1.1.0 additions
 
 The CST pre-submission refresh adds 4 transverse TSFs that complement the EAL4+ functional family coverage:
 

@@ -8,11 +8,11 @@ Ce wrapper français fournit le contexte général et les conventions de lecture
 
 ## Synthèse
 
-- **78+ mécanismes** déclarés. Depuis v1.1.0-FIPS.1, 5 IDs PKCS#11 réservés en plus : Kyber (alias ML-KEM), Falcon, LMS, XMSS, HQC — voir [`POST_QUANTUM.md`](POST_QUANTUM.md).
+- **78+ mécanismes** déclarés. Depuis v1.1.0, 5 IDs PKCS#11 réservés en plus : Kyber (alias ML-KEM), Falcon, LMS, XMSS, HQC — voir [`POST_QUANTUM.md`](POST_QUANTUM.md).
 - **66 approuvés FIPS** (dispatchables en mode FIPS strict)
-- **12 legacy non-approuvés** : comportement piloté **au runtime** par `FHSM_MODE` (v1.1.0-FIPS.1) plutôt qu'au build time.
+- **12 legacy non-approuvés** : comportement piloté **au runtime** par `FHSM_MODE` (v1.1.0) plutôt qu'au build time.
 
-## Mode runtime (v1.1.0-FIPS.1)
+## Mode runtime (v1.1.0)
 
 Le profil n'est plus figé au build. Sélection au runtime via `FHSM_MODE` (ou `mode =` dans `/etc/freehsm/freehsm.conf`) :
 

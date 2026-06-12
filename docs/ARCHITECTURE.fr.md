@@ -121,7 +121,7 @@ Le TOE C lit et écrit le **format JSON de token exact** du POC Python. Une orga
 
 Ceci est vérifié par `tests/test_token_interop.c`, qui génère un token sous Python, l'ouvre sous C, effectue un round-trip encrypt/decrypt, et vérifie que les ciphertexts AES-GCM produits sont identiques bit-à-bit.
 
-## 11. Ajouts couches v1.1.0-FIPS.1
+## 11. Ajouts couches v1.1.0
 
 Le rafraîchissement pré-soumission CST ajoute 4 modules transverses qui s'insèrent à la même couche architecturale que les primitives crypto mais sont câblés à des étapes différentes du cycle de vie :
 

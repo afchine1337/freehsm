@@ -1,7 +1,7 @@
 # ===========================================================================
 # .github/workflows/release.yml
 #
-# Tagged release builder. Triggered on push of a tag matching v*-FIPS*.
+# Tagged release builder. Triggered on push of a tag matching v*.
 #
 #   1. Verify the tag is GPG-signed by an approved maintainer.
 #   2. Build the .so reproducibly in the pinned image.
@@ -16,7 +16,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*-FIPS*'
+      - 'v*'
 
 jobs:
   release:

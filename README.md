@@ -100,7 +100,7 @@ Flags de durcissement appliqués (cf. `Makefile`) :
 -Wl,-z,relro,-z,now,-z,noexecstack,-z,defs -Wl,--no-undefined
 ```
 
-## Modes runtime (v1.1.0-FIPS.1)
+## Modes runtime (v1.1.0)
 
 Depuis la sous-version `.1`, le module distingue **deux modes** sélectionnés au runtime via la variable d'environnement `FHSM_MODE` (ou la directive `mode =` dans `/etc/freehsm/freehsm.conf`) :
 

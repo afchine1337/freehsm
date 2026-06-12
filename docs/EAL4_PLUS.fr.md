@@ -153,7 +153,7 @@ La TOE est conçue pour résister à des attaquants avec potentiel d'attaque **a
 
 La TOE est livrée sous forme d'archive source `.tar.xz` signée (`make dist`) et un package binaire RPM/DEB compilé reproductiblement. Les deux bundles sont signés par la même clé GPG. Les clients vérifient la signature et l'empreinte SHA-256 publiée sur le site du projet via HTTPS.
 
-## 9. Liste des TSF — ajouts v1.1.0-FIPS.1
+## 9. Liste des TSF — ajouts v1.1.0
 
 Le rafraîchissement pré-soumission CST ajoute 4 TSF transverses qui complètent la couverture fonctionnelle EAL4+ :
 

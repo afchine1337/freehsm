@@ -9,7 +9,7 @@
 #   build      --- Build the .so in the pinned Debian 13 + OpenSSL 3.5 FIPS image
 #   test       --- Smoke + full PKCS#11 coverage matrix (legacy + FIPS modes)
 #   repro      --- Two-build reproducibility check
-#   release    --- Tagged-release builder (only on v*-FIPS* tags)
+#   release    --- Tagged-release builder (only on v* tags)
 #
 # Required CI/CD variables (Settings → CI/CD → Variables) :
 #   RELEASE_GPG_KEY        : ASCII-armored private GPG key for tarball signing
@@ -91,7 +91,7 @@ build:default:
     - if: $CI_PIPELINE_SOURCE == "push"
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_PIPELINE_SOURCE == "schedule"
-    - if: $CI_COMMIT_TAG =~ /^v.*-FIPS/
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]/
   script:
     - make clean
     - make 2>&1 | tee build.log
@@ -186,7 +186,7 @@ repro:rebuild-and-compare:
   needs: ["build:default"]
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
-    - if: $CI_COMMIT_TAG =~ /^v.*-FIPS/
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]/
   script:
     # Re-build from scratch with the SAME SOURCE_DATE_EPOCH ; the digest
     # must match the artefact from build:default.
@@ -207,7 +207,7 @@ release:tarballs:
   image: $CI_REGISTRY_IMAGE/build:debian13-openssl-3.5
   needs: ["build:default", "test:coverage-matrix:legacy", "test:coverage-matrix:fips", "repro:rebuild-and-compare"]
   rules:
-    - if: $CI_COMMIT_TAG =~ /^v.*-FIPS/
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]/
   before_script:
     - apt-get update -qq && apt-get install -y --no-install-recommends gpg
   script:
@@ -269,7 +269,7 @@ release:tarballs:
 #   image: curlimages/curl:8.5.0
 #   needs: ["release:tarballs"]
 #   rules:
-#     - if: $CI_COMMIT_TAG =~ /^v.*-FIPS/
+#     - if: $CI_COMMIT_TAG =~ /^v[0-9]/
 #   script:
 #     - |
 #       for f in dist/*.tar.xz dist/*.asc dist/*.sha256; do
@@ -283,10 +283,10 @@ release:tarballs:
 # ===========================================================================
 #
 # 1. Maintainer creates a GPG-signed annotated tag on main :
-#        ./scripts/tag-v1.1.0-FIPS.sh
+#        ./scripts/tag-v1.1.0.sh
 #
 # 2. Push the tag :
-#        git push origin v1.1.0-FIPS
+#        git push origin v1.1.0
 #
 # 3. GitLab automatically runs the `release` stage of THIS pipeline.
 #
@@ -297,5 +297,5 @@ release:tarballs:
 #
 # 5. Maintainer creates a Release entry pointing to these artefacts :
 #        Project → Deployments → Releases → New release
-#    and links the v1.1.0-FIPS tag.
+#    and links the v1.1.0 tag.
 # ===========================================================================

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# scripts/tag-v1.1.0-FIPS.sh
+# scripts/tag-v1.1.0.sh
 #
-# Tag and sign the v1.1.0-FIPS release. Run this from the project root,
+# Tag and sign the v1.1.0 release. Run this from the project root,
 # AFTER all commits for the release have landed on main.
 #
 # Pre-requisites :
@@ -17,11 +17,11 @@
 #   - Prints push instructions (does NOT push automatically).
 #
 # Usage :
-#   ./scripts/tag-v1.1.0-FIPS.sh
+#   ./scripts/tag-v1.1.0.sh
 # ===========================================================================
 set -euo pipefail
 
-TAG="v1.1.0-FIPS"
+TAG="v1.1.0"
 AUTHOR='Afchine Madjlessi <afchine.mad@gmail.com>'
 
 echo "==> Pre-flight checks"
@@ -82,14 +82,14 @@ echo "   test_smoke : OK"
 
 echo "==> Creating signed tag"
 
-# 9. Compose the tag message from RELEASE_v1.1.0-FIPS.md.
+# 9. Compose the tag message from RELEASE_v1.1.0.md.
 MSG_FILE=$(mktemp)
 {
     echo "FreeHSM C $TAG"
     echo ""
     echo "Released by $AUTHOR"
     echo ""
-    cat RELEASE_v1.1.0-FIPS.md | head -80
+    cat RELEASE_v1.1.0.md | head -80
 } > "$MSG_FILE"
 
 git tag -s "$TAG" -F "$MSG_FILE"

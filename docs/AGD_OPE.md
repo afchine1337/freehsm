@@ -200,7 +200,7 @@ Critical errors latch the module ERROR state. The only recovery is to restart th
 | Quarterly | Test `make repro` against a fresh checkout ; confirm digest still matches deployed binary |
 | Yearly    | Re-run penetration-testing tooling ; update OE.OS / OE.OPENSSL pins if needed (triggers re-evaluation per ALC_CMC.md §8) |
 
-## 7bis. Runtime modes (v1.1.0-FIPS.1)
+## 7bis. Runtime modes (v1.1.0)
 
 The module selects between **legacy** (default) and **FIPS strict** mode at runtime. The choice is read from the `FHSM_MODE` environment variable first, then from the `mode =` directive in `/etc/freehsm/freehsm.conf`.
 

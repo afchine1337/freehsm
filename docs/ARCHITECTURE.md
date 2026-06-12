@@ -151,7 +151,7 @@ The C TOE reads and writes the *exact same JSON token format* as the Python POC.
 
 This is enforced by `tests/test_token_interop.c`, which generates a token under Python, opens it under C, performs an encrypt/decrypt round trip, and verifies both implementations agree on the resulting ciphertext + tag.
 
-## 11. v1.1.0-FIPS.1 layered additions
+## 11. v1.1.0 layered additions
 
 The CST pre-submission refresh adds 4 transverse modules. They sit at the same architectural layer as the existing crypto primitives but are wired into different lifecycle stages:
 
