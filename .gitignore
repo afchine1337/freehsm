@@ -61,3 +61,11 @@ secrets/
 
 # Local test scaffolding
 /tmp/freehsm-*
+
+# Local secrets (NEVER commit)
+CODEBERG_SSH_KEY
+GITLAB_SSH_KEY
+RELEASE_GPG_PASSPHRASE
+RELEASE_GPG_KEY
+*.gpg.key
+deploy-key*
