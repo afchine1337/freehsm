@@ -8,6 +8,45 @@ Project lead : **Afchine Madjlessi** ([`afchine.mad@gmail.com`](mailto:afchine.m
 
 ---
 
+## Maintainer GPG key rotation — 2026-06-12
+
+The maintainer GPG signing key has been rotated. The previous key
+`743A6A5904A1461A646408DE48560162DBBF28A2` (Ed25519, generated 2026-06-12)
+was **compromised** : an ASCII-armored export of the private key was
+accidentally committed to the public repository in commit `922c6f7`
+during the initial open-source release.
+
+Mitigations completed on 2026-06-12 :
+
+- A revocation certificate was generated with reason **"Key has been
+  compromised"** and pushed to `keys.openpgp.org` and
+  `keyserver.ubuntu.com`. The old key now appears as `[revoked]` on
+  any synchronized client.
+- A new release signing key was generated :
+  `743A6A5904A1461A646408DE48560162DBBF28A2` (Ed25519, valid until
+  2028-06-11), published on the same keyservers.
+- The git history on GitHub, GitLab and Codeberg was rewritten with
+  `git-filter-repo --invert-paths --path afchine-secret-BACKUP.asc`
+  to remove every blob reference to the leaked file. The current
+  `git log -- afchine-secret-BACKUP.asc` is empty on all three
+  mirrors.
+- The release tag `v1.1.0` was re-signed with the new key and
+  force-pushed.
+
+If you cloned `freehsm-c` between 2026-06-12 morning and 2026-06-12
+evening, your local clone may still contain the leaked file in
+`.git/objects/`. You should re-clone from scratch:
+
+```bash
+rm -rf freehsm-c
+git clone git@github.com:afchine1337/freehsm-c.git
+```
+
+If you previously verified the `v1.1.0` tag with the old key, please
+re-verify with the new key — the signature has changed.
+
+---
+
 ## Supported versions
 
 | Version | Supported |
