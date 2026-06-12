@@ -29,12 +29,21 @@ on:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    env:
+      # Opt-in to Node.js 24 ahead of the June 2026 forced switch (avoids
+      # the deprecation warning printed by Node.js 20 actions).
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # full history + tags
 
       # -------- GitLab --------
+      # We deliberately do NOT use `git push --mirror` because it pushes
+      # remote-tracking refs (refs/remotes/origin/*) and pull-request
+      # synthetic refs (refs/pull/*) which GitLab rejects with
+      # "deny updating a hidden ref". We push the local branches and
+      # tags explicitly.
       - name: Push to GitLab
         env:
           SSH_KEY: ${{ secrets.GITLAB_SSH_KEY }}
@@ -45,7 +54,10 @@ jobs:
           chmod 600 ~/.ssh/gitlab_key
           ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
           GIT_SSH_COMMAND="ssh -i ~/.ssh/gitlab_key -o StrictHostKeyChecking=yes" \
-            git push --mirror git@gitlab.com:afchine.mad/freehsm-c.git
+            git push --force --prune \
+              git@gitlab.com:afchine.mad/freehsm-c.git \
+              "refs/remotes/origin/*:refs/heads/*" \
+              "refs/tags/*:refs/tags/*"
 
       # -------- Codeberg --------
       - name: Push to Codeberg
@@ -58,4 +70,7 @@ jobs:
           chmod 600 ~/.ssh/codeberg_key
           ssh-keyscan codeberg.org >> ~/.ssh/known_hosts
           GIT_SSH_COMMAND="ssh -i ~/.ssh/codeberg_key -o StrictHostKeyChecking=yes" \
-            git push --mirror git@codeberg.org:afchine1337/freehsm-c.git
+            git push --force --prune \
+              git@codeberg.org:afchine1337/freehsm-c.git \
+              "refs/remotes/origin/*:refs/heads/*" \
+              "refs/tags/*:refs/tags/*"
