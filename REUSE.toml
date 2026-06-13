@@ -13,7 +13,7 @@ SPDX-PackageDownloadLocation = "https://github.com/afchine1337/freehsm-c"
 path = [
     "CHANGELOG.md",
     "README.md",
-    "README.en.md",
+    "README.fr.md",
     "NOTICE",
     "SECURITY.md",
     "CONTRIBUTING.md",
