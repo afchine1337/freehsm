@@ -55,3 +55,47 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Afchine Madjlessi <afchine.mad@gmail.com>"
 SPDX-License-Identifier = "Apache-2.0"
 
+# Build tooling : Makefile, Dockerfile, etc.
+[[annotations]]
+path = [
+    "Makefile",
+    "Dockerfile.build",
+    "Dockerfile.test",
+    "**/*.mk",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Afchine Madjlessi <afchine.mad@gmail.com>"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Shell scripts (cannot carry inline SPDX header reliably without
+# disturbing shebang on every platform).
+[[annotations]]
+path = [
+    "scripts/**/*.sh",
+    "tests/**/*.sh",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Afchine Madjlessi <afchine.mad@gmail.com>"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Python helper scripts.
+[[annotations]]
+path = [
+    "scripts/**/*.py",
+    "tests/**/*.py",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Afchine Madjlessi <afchine.mad@gmail.com>"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Generated sources — produced by scripts/gen_p11_thunks.py.
+[[annotations]]
+path = [
+    "include/fhsm_pkcs11_mechanisms.h",
+    "src/gen/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Afchine Madjlessi <afchine.mad@gmail.com>"
+SPDX-License-Identifier = "Apache-2.0"
+SPDX-FileComment = "Auto-generated from scripts/gen_p11_thunks.py + the mechanism DB."
+

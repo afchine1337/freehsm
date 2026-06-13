@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
 # ===========================================================================
+# Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+# ===========================================================================
 # gen_p11_thunks.py --- PKCS#11 v3.2 mechanism dispatch generator.
 #
 # Single source of truth for the mechanism table. Reading this script
@@ -26,7 +36,6 @@
 #                  from legacy systems; the audit log records every
 #                  call to a non-approved mechanism.
 #
-# Copyright (c) 2026 FreeHSM authors. SPDX-License-Identifier: MIT.
 # ===========================================================================
 
 from __future__ import annotations

@@ -69,3 +69,4 @@ RELEASE_GPG_PASSPHRASE
 RELEASE_GPG_KEY
 *.gpg.key
 deploy-key*
+build.log
