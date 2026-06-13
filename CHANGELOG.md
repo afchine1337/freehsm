@@ -5,6 +5,30 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] --- 2026-06-13
+
+The "container-based reproducible build" release. Restores production-grade FIPS 140-3 / CC EAL4+ reproducibility claims for tagged releases by running the release pipeline inside a pinned Docker image.
+
+### Added
+
+* **GitHub Actions `build-image.yml`** is now operational : on manual dispatch (or `Dockerfile.build` change), it builds and pushes `ghcr.io/<owner>/freehsm-c-build:debian13-openssl-3.5` and `:latest` to GitHub Container Registry.
+* **`release.yml`** now runs every step inside the pinned image. Toolchain versions are no longer subject to silent bumps from `ubuntu-latest`.
+
+### Changed
+
+* `Dockerfile.build` switched from a placeholder Debian 12.5 digest (non-existent on docker.io) to **Debian 13 (trixie) slim** by tag, with Debian-packaged OpenSSL 3.5.x instead of from-source FIPS provider compilation. Apt versions intentionally unpinned for the v1.1.x transitional pipeline ; pinning + digest lock is tracked for v2.0 / formal CST submission.
+* `.github/workflows/release.yml` :
+  - Re-introduced `container:` directive pointing to the pinned image.
+  - Removed the `Install build dependencies` step (image already has everything).
+  - `.sha256` files now contain basename-only paths (write from inside `dist/` so `sha256sum -c file.sha256` works for downstream users without recreating the dist/ layout).
+* `.gitlab-ci.yml` and `release.yml` tag filter regex unchanged (still `v*` / `/^v[0-9]/`) — applies cleanly to v1.1.2.
+
+### Fixed
+
+* `sha256sum -c` on v1.1.1 release artefacts failed with `dist/freehsm-c-...: No such file or directory` because the workflow wrote the full path. Fixed in v1.1.2 ; v1.1.1 verification can be done by running `sed -i 's|dist/||' file.sha256` before `sha256sum -c`.
+
+---
+
 ## [1.1.1] --- 2026-06-13
 
 The "OSS-ready" release. No functional change to the cryptographic module; this version finalises the open-source publication pipeline and recovers from a maintainer GPG private-key leak.
