@@ -4,20 +4,18 @@
 # Tagged release builder. Triggered on push of a tag matching v*.
 #
 #   1. Verify the tag is GPG-signed by an approved maintainer.
-#   2. Build the .so (reproducibly in production via pinned Docker image,
-#      inline for RC/test runs until the image is published to ghcr.io).
+#   2. Build the .so reproducibly inside the pinned Docker image
+#      ghcr.io/<owner>/freehsm-c-build:debian13-openssl-3.5
+#      (built by .github/workflows/build-image.yml from Dockerfile.build).
 #   3. Sign the digest, embed it, re-sign.
 #   4. Produce source tarball + binary tarball.
 #   5. Sign both with the release GPG key.
 #   6. Publish to GitHub Releases.
 #
 # NOTE on reproducibility (FIPS 140-3 / CC EAL4+) :
-#   Production releases MUST be built inside the pinned image
-#   ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
-#   built from Dockerfile.build with SOURCE_DATE_EPOCH pinned. The current
-#   workflow runs directly on ubuntu-latest because the pinned image has
-#   not yet been published to ghcr.io. Re-add the `container:` directive
-#   once the image is uploaded (see .github/workflows/build-image.yml).
+#   v1.1.x uses Debian 13 trixie tagged base + apt versions in the image.
+#   For v2.0 / formal CST submission : pin the Debian digest, freeze apt
+#   versions, document the SBOM in docs/REPRODUCIBLE_BUILD.md.
 # ===========================================================================
 
 name: Release
@@ -32,25 +30,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-              build-essential \
-              libssl-dev \
-              pkg-config \
-              python3 \
-              python3-pip \
-              xz-utils \
-              gnupg2 \
-              git \
-              ca-certificates
 
       - name: Mark workspace as safe
         run: |
