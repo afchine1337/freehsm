@@ -97,10 +97,12 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           mkdir -p dist
-          git archive --format=tar.xz \
+          # git archive only knows tar (or tar.gz/zip) natively. Pipe through
+          # xz for .tar.xz output.
+          git archive --format=tar \
               --prefix="freehsm-c-${TAG}/" \
-              -o dist/freehsm-c-${TAG}-src.tar.xz \
-              HEAD
+              HEAD \
+            | xz -9 > dist/freehsm-c-${TAG}-src.tar.xz
           sha256sum dist/freehsm-c-${TAG}-src.tar.xz > dist/freehsm-c-${TAG}-src.tar.xz.sha256
 
       - name: Build binary tarball
