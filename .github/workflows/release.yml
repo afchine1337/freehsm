@@ -103,7 +103,10 @@ jobs:
               --prefix="freehsm-c-${TAG}/" \
               HEAD \
             | xz -9 > dist/freehsm-c-${TAG}-src.tar.xz
-          sha256sum dist/freehsm-c-${TAG}-src.tar.xz > dist/freehsm-c-${TAG}-src.tar.xz.sha256
+          # Compute sha256 from inside dist/ so the .sha256 file references
+          # the basename only -- downstream users can run
+          # `sha256sum -c file.sha256` without recreating the dist/ directory.
+          ( cd dist && sha256sum "freehsm-c-${TAG}-src.tar.xz" > "freehsm-c-${TAG}-src.tar.xz.sha256" )
 
       - name: Build binary tarball
         run: |
@@ -114,7 +117,7 @@ jobs:
           cp NOTICE LICENSE README.md CHANGELOG.md SECURITY.md dist/freehsm-c-${TAG}/
           tar -cJf dist/freehsm-c-${TAG}-bin.tar.xz \
               -C dist freehsm-c-${TAG}
-          sha256sum dist/freehsm-c-${TAG}-bin.tar.xz > dist/freehsm-c-${TAG}-bin.tar.xz.sha256
+          ( cd dist && sha256sum "freehsm-c-${TAG}-bin.tar.xz" > "freehsm-c-${TAG}-bin.tar.xz.sha256" )
 
       - name: GPG-sign artefacts
         env:
