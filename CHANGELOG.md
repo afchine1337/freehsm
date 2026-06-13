@@ -5,6 +5,49 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] --- 2026-06-13
+
+The "OSS-ready" release. No functional change to the cryptographic module; this version finalises the open-source publication pipeline and recovers from a maintainer GPG private-key leak.
+
+### Added
+
+* **REUSE 3.3 compliance** (`LICENSES/` directory with `Apache-2.0`, `CC0-1.0`, `LicenseRef-NIST-PD`; `REUSE.toml` with bulk SPDX annotations for build tooling, scripts, generated headers and tests). 123 / 123 files SPDX-headered. See `reuse lint` output.
+* **OpenSSF Best Practices registration** : project ID **13190** at https://www.bestpractices.dev/projects/13190 with pre-filled answers covering passing + silver tier criteria. See `docs/OPENSSF_BEST_PRACTICES.md`.
+* **README badges** : License (Apache-2.0), REUSE status, OpenSSF Best Practices, CI, Mirror — all wired to the live endpoints.
+* **GitHub Actions `mirror.yml`** workflow : replicates the GitHub repo to GitLab (`gitlab.com/afchine.mad/freehsm-c`) and Codeberg (`codeberg.org/afchine1337/freehsm-c`) on every push and tag. Replaces the unavailable Pull-mirror on GitLab Free.
+* **GitHub Actions `release.yml`** workflow : on tag `v*`, builds the `.so` (apt deps inline on `ubuntu-latest`, with `Dockerfile.build` ready for future reintroduction), produces source + binary `.tar.xz`, GPG-signs the tarballs with the release key embedded in GitHub Secrets, publishes a GitHub Release.
+* **GitHub Actions `build-image.yml`** workflow : on manual dispatch or `Dockerfile.build` change, builds and pushes the pinned reproducible-build image to `ghcr.io/<owner>/freehsm-c-build:debian13-openssl-3.5`. Required for restoring full bit-identical reproducibility under FIPS 140-3 / CC EAL4+ claims.
+* **`scripts/setup-release-secrets.sh`** : helper that exports the maintainer GPG private key + passphrase to local secret files, then prints the exact paste-instructions for the two GitHub Secrets `RELEASE_GPG_KEY` and `RELEASE_GPG_PASSPHRASE`.
+* **`scripts/tag-rc.sh`** : tags + signs + pushes a release-candidate (or production) tag, validates the GPG signature locally before pushing.
+
+### Changed
+
+* **README.md** is now in **English by default**, French moved to **`README.fr.md`** — aligns with the convention already used in `docs/` (base name = English, `.fr.md` = French).
+* **`docs/INDEX.md`** : language columns inverted to reflect the new convention, updated text explaining the new defaults.
+* **`SECURITY.md`** : added a public disclosure note documenting the GPG key rotation of 2026-06-12 (see Security below).
+
+### Fixed
+
+* `include/fhsm_common.h` and `scripts/gen_p11_thunks.py` : replaced the leftover `Copyright (c) 2026 FreeHSM authors. SPDX-License-Identifier: MIT.` cartouches with the canonical Apache-2.0 header consistent with the rest of the codebase.
+* `.gitignore` : added `CODEBERG_SSH_KEY`, `GITLAB_SSH_KEY`, `RELEASE_GPG_PASSPHRASE`, `RELEASE_GPG_KEY`, `*.gpg.key`, `deploy-key*` to prevent accidental commit of operator secrets.
+* `.gitlab-ci.yml` and `.github/workflows/release.yml` : tag regex changed from `v*-FIPS*` to `v*` (removes the FIPS marketing suffix from version strings) and from `/^v.*-FIPS/` to `/^v[0-9]/`.
+
+### Security
+
+* **Maintainer GPG signing key rotated** on 2026-06-12. The previous key `B79726CB087375CF990E00E4A0BC5BB2FB1EE342` (Ed25519) was **compromised** : its ASCII-armored private export was accidentally committed to the public repository in commit `922c6f7` (the initial open-source release). Mitigations completed on the same day :
+  - Revocation certificate generated (reason : KEY_COMPROMISED, "Private key accidentally committed to public git repo") and published on `keys.openpgp.org` and `keyserver.ubuntu.com`.
+  - New release signing key generated : `743A6A5904A1461A646408DE48560162DBBF28A2` (Ed25519, valid until 2028-06-11).
+  - Git history rewritten with `git filter-repo --invert-paths --path afchine-secret-BACKUP.asc` on origin (GitHub), gitlab and codeberg. The leaked file no longer appears in any blob on any mirror.
+  - The `v1.1.0` release tag was re-signed with the new key.
+  - Anyone who cloned `freehsm-c` between 2026-06-12 morning and 2026-06-12 evening must re-clone.
+
+### Operational
+
+* Branch protection on `main` enabled on GitHub **and** GitLab (force push forbidden, Maintainers-only). Codeberg branch protection : TBD.
+* Pipeline `release.yml` validated end-to-end via `v1.1.1-rc1` : tag verification → build → tarballs → GPG signing → GitHub Release publication, all green.
+
+---
+
 ## [1.1.0] --- 2026-06-11
 
 The "CST pre-submission" refresh. Closes 8 of the 11 items on the NIST CST lab checklist, adds runtime-mode switching, and ships a hardened DRBG layer with NIST SP 800-90B health tests.
