@@ -1,0 +1,67 @@
+# ===========================================================================
+# .github/workflows/build-image.yml
+#
+# Build and publish the pinned reproducible-build Docker image used by
+# release.yml (production releases) and CI.
+#
+# Output image:
+#   ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+#
+# Triggered:
+#   - On manual dispatch (Actions tab -> "Build Docker build image" -> Run)
+#   - On push to main when Dockerfile.build changes
+#
+# Once the image is published, re-add the `container:` directive to
+# release.yml so production releases run inside the pinned environment
+# required for FIPS 140-3 / CC EAL4+ reproducibility claims.
+# ===========================================================================
+
+name: Build Docker build image
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile.build'
+      - '.github/workflows/build-image.yml'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase owner
+        id: meta
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lc=$OWNER_LC" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.build
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner_lc }}/freehsm-c-build:debian13-openssl-3.5
+            ghcr.io/${{ steps.meta.outputs.owner_lc }}/freehsm-c-build:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
