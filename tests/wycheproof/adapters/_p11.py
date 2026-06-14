@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+# ===========================================================================
+# Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+# ===========================================================================
+# adapters/_p11.py --- minimal PKCS#11 v3.x ctypes binding shared by all
+# Wycheproof adapters in this directory. Exposes just what the adapters
+# need : module load + initialize, session open/close, generic
+# C_CreateObject with an attribute template, mechanism wrapping,
+# Verify, and graceful zeroize on close.
+#
+# We bind to the symbol C_<Name> directly on the SO instead of going
+# through C_GetFunctionList because (a) freehsm-fips exports every
+# function and (b) the ctypes plumbing for the function-list struct is
+# substantial and offers no benefit here.
+#
+# Quick usage :
+#     from _p11 import P11Module, A
+#     m = P11Module("/path/to/libfreehsm-fips.so")
+#     sess = m.open_session()
+#     pubkey = sess.create_object([
+#         A.CLASS(A.CKO_PUBLIC_KEY),
+#         A.KEY_TYPE(A.CKK_EC),
+#         A.TOKEN(False),
+#         A.VERIFY(True),
+#         A.EC_PARAMS(curve_oid_der),
+#         A.EC_POINT(point_der_octet_string),
+#     ])
+#     ok = sess.verify(pubkey, A.MECH(A.CKM_ECDSA), data_hashed, signature_raw)
+#     sess.destroy(pubkey)
+#     sess.close()
+#     m.close()
+# ===========================================================================
+
+from __future__ import annotations
+
+import ctypes
+import os
+from ctypes import (
+    CDLL, RTLD_GLOBAL, POINTER, Structure, byref, cast, sizeof,
+    c_char, c_ubyte, c_uint8, c_ulong, c_void_p,
+)
+
+# --- Type aliases --------------------------------------------------------
+
+CK_BBOOL = c_ubyte
+CK_BYTE = c_ubyte
+CK_ULONG = c_ulong
+CK_VOID_P = c_void_p
+CK_BYTE_P = POINTER(c_ubyte)
+
+
+# --- Common return codes ------------------------------------------------
+
+CKR_OK = 0x00000000
+CKR_GENERAL_ERROR = 0x00000005
+CKR_FUNCTION_FAILED = 0x00000006
+CKR_DATA_INVALID = 0x00000020
+CKR_DATA_LEN_RANGE = 0x00000021
+CKR_KEY_HANDLE_INVALID = 0x00000060
+CKR_MECHANISM_INVALID = 0x00000070
+CKR_OBJECT_HANDLE_INVALID = 0x00000082
+CKR_SIGNATURE_INVALID = 0x000000C0
+CKR_SIGNATURE_LEN_RANGE = 0x000000C1
+CKR_TEMPLATE_INCONSISTENT = 0x000000D1
+CKR_TEMPLATE_INCOMPLETE = 0x000000D0
+
+
+# --- Object class / key type / attribute / mechanism constants ----------
+
+CKO_DATA = 0x00000000
+CKO_CERTIFICATE = 0x00000001
+CKO_PUBLIC_KEY = 0x00000002
+CKO_PRIVATE_KEY = 0x00000003
+CKO_SECRET_KEY = 0x00000004
+
+CKK_RSA = 0x00000000
+CKK_EC = 0x00000003
+CKK_AES = 0x0000001F
+CKK_GENERIC_SECRET = 0x00000010
+CKK_EC_EDWARDS = 0x00000040
+
+CKA_CLASS = 0x00000000
+CKA_TOKEN = 0x00000001
+CKA_KEY_TYPE = 0x00000100
+CKA_SENSITIVE = 0x00000103
+CKA_VERIFY = 0x0000010A
+CKA_EC_PARAMS = 0x00000180
+CKA_EC_POINT = 0x00000181
+
+CKM_RSA_PKCS = 0x00000001
+CKM_RSA_PKCS_OAEP = 0x00000009
+CKM_RSA_PKCS_PSS = 0x0000000D
+CKM_SHA256_RSA_PKCS_PSS = 0x00000043
+CKM_ECDSA = 0x00001041
+CKM_ECDSA_SHA256 = 0x00001044
+CKM_ECDSA_SHA384 = 0x00001045
+CKM_ECDSA_SHA512 = 0x00001046
+CKM_EDDSA = 0x00001057
+CKM_AES_GCM = 0x00001087
+CKM_SHA256_HMAC = 0x00000251
+
+CKF_SERIAL_SESSION = 0x00000004
+CKF_RW_SESSION = 0x00000002
+
+
+# --- Native PKCS#11 structures ------------------------------------------
+
+class CK_ATTRIBUTE(Structure):
+    _fields_ = [
+        ("type", CK_ULONG),
+        ("pValue", CK_VOID_P),
+        ("ulValueLen", CK_ULONG),
+    ]
+
+
+class CK_MECHANISM(Structure):
+    _fields_ = [
+        ("mechanism", CK_ULONG),
+        ("pParameter", CK_VOID_P),
+        ("ulParameterLen", CK_ULONG),
+    ]
+
+
+# --- Attribute builder ---------------------------------------------------
+#
+# A handful of small constructors that take a Python value and return a
+# tuple (CK_ATTRIBUTE struct, owning buffer) -- the owning buffer keeps
+# pValue alive until C_CreateObject returns.
+# ---------------------------------------------------------------------------
+
+class _AttrBuilder:
+    """Tiny DSL: A.CLASS(A.CKO_PUBLIC_KEY) -> (attr, keepalive)."""
+
+    # Re-export constants for the DSL.
+    CKO_PUBLIC_KEY = CKO_PUBLIC_KEY
+    CKO_PRIVATE_KEY = CKO_PRIVATE_KEY
+    CKK_EC = CKK_EC
+    CKK_RSA = CKK_RSA
+    CKK_EC_EDWARDS = CKK_EC_EDWARDS
+    CKM_ECDSA = CKM_ECDSA
+    CKM_ECDSA_SHA256 = CKM_ECDSA_SHA256
+    CKM_ECDSA_SHA384 = CKM_ECDSA_SHA384
+    CKM_ECDSA_SHA512 = CKM_ECDSA_SHA512
+    CKM_EDDSA = CKM_EDDSA
+
+    @staticmethod
+    def _ulong(attr_type, value):
+        buf = CK_ULONG(value)
+        return (CK_ATTRIBUTE(attr_type, cast(byref(buf), CK_VOID_P),
+                             CK_ULONG(sizeof(buf))), buf)
+
+    @staticmethod
+    def _bbool(attr_type, value):
+        buf = CK_BBOOL(1 if value else 0)
+        return (CK_ATTRIBUTE(attr_type, cast(byref(buf), CK_VOID_P),
+                             CK_ULONG(sizeof(buf))), buf)
+
+    @staticmethod
+    def _bytes(attr_type, value: bytes):
+        buf = (c_ubyte * len(value))(*value)
+        return (CK_ATTRIBUTE(attr_type, cast(buf, CK_VOID_P),
+                             CK_ULONG(len(value))), buf)
+
+    @classmethod
+    def CLASS(cls, v): return cls._ulong(CKA_CLASS, v)
+    @classmethod
+    def KEY_TYPE(cls, v): return cls._ulong(CKA_KEY_TYPE, v)
+    @classmethod
+    def TOKEN(cls, v): return cls._bbool(CKA_TOKEN, v)
+    @classmethod
+    def VERIFY(cls, v): return cls._bbool(CKA_VERIFY, v)
+    @classmethod
+    def EC_PARAMS(cls, v: bytes): return cls._bytes(CKA_EC_PARAMS, v)
+    @classmethod
+    def EC_POINT(cls, v: bytes): return cls._bytes(CKA_EC_POINT, v)
+
+    @staticmethod
+    def MECH(mech_type, param: bytes | None = None) -> CK_MECHANISM:
+        if param is None:
+            return CK_MECHANISM(mech_type, None, CK_ULONG(0))
+        buf = (c_ubyte * len(param))(*param)
+        m = CK_MECHANISM(mech_type, cast(buf, CK_VOID_P), CK_ULONG(len(param)))
+        m._keep = buf  # keep alive
+        return m
+
+
+A = _AttrBuilder  # short alias for callers
+
+
+# --- Module / session wrappers ------------------------------------------
+
+class P11Error(RuntimeError):
+    def __init__(self, fn: str, rv: int):
+        super().__init__(f"{fn} failed : 0x{rv:08x}")
+        self.fn = fn
+        self.rv = rv
+
+
+class P11Module:
+    def __init__(self, path: str):
+        # Allow integrity bypass for the smoke / test binary -- the
+        # embedded digest is not patched at build time.
+        os.environ.setdefault("FHSM_INTEGRITY_ALLOW_UNSIGNED", "1")
+        self.lib = CDLL(path, mode=RTLD_GLOBAL)
+
+        for name in (
+            "C_Initialize", "C_Finalize",
+            "C_OpenSession", "C_CloseSession",
+            "C_InitToken", "C_InitPIN", "C_Login", "C_Logout",
+            "C_CreateObject", "C_DestroyObject",
+            "C_VerifyInit", "C_Verify",
+        ):
+            try:
+                getattr(self.lib, name).restype = CK_ULONG
+            except AttributeError:
+                pass  # symbol absent -- caller will get a clear error later
+
+        rv = self.lib.C_Initialize(None)
+        if rv != CKR_OK:
+            raise P11Error("C_Initialize", rv)
+        self._closed = False
+
+    def open_session(self, slot_id: int = 0) -> "P11Session":
+        h = CK_ULONG()
+        flags = CKF_SERIAL_SESSION | CKF_RW_SESSION
+        rv = self.lib.C_OpenSession(
+            CK_ULONG(slot_id), CK_ULONG(flags),
+            None, None, byref(h),
+        )
+        if rv != CKR_OK:
+            raise P11Error("C_OpenSession", rv)
+        return P11Session(self, h.value)
+
+    def close(self) -> None:
+        if not self._closed:
+            self.lib.C_Finalize(None)
+            self._closed = True
+
+    def __enter__(self): return self
+    def __exit__(self, *_): self.close()
+
+
+class P11Session:
+    def __init__(self, mod: P11Module, h: int):
+        self.mod = mod
+        self.h = h
+        self._closed = False
+
+    def create_object(self, attrs: list) -> int:
+        """Pass [(CK_ATTRIBUTE, keepalive), ...]; returns object handle."""
+        n = len(attrs)
+        tmpl = (CK_ATTRIBUTE * n)(*(a for a, _ in attrs))
+        keep = [k for _, k in attrs]  # noqa: F841 -- keep buffers alive
+        obj = CK_ULONG()
+        rv = self.mod.lib.C_CreateObject(
+            CK_ULONG(self.h), tmpl, CK_ULONG(n), byref(obj),
+        )
+        if rv != CKR_OK:
+            raise P11Error("C_CreateObject", rv)
+        return obj.value
+
+    def destroy(self, obj_handle: int) -> None:
+        self.mod.lib.C_DestroyObject(CK_ULONG(self.h), CK_ULONG(obj_handle))
+
+    def verify(self, key: int, mech: CK_MECHANISM,
+               data: bytes, signature: bytes) -> int:
+        """Returns the raw CKR_* code from C_Verify."""
+        rv = self.mod.lib.C_VerifyInit(CK_ULONG(self.h), byref(mech),
+                                       CK_ULONG(key))
+        if rv != CKR_OK:
+            return rv
+        d = (c_ubyte * len(data))(*data) if data else None
+        s = (c_ubyte * len(signature))(*signature) if signature else None
+        rv = self.mod.lib.C_Verify(
+            CK_ULONG(self.h),
+            d, CK_ULONG(len(data) if data else 0),
+            s, CK_ULONG(len(signature) if signature else 0),
+        )
+        return rv
+
+    def close(self) -> None:
+        if not self._closed:
+            self.mod.lib.C_CloseSession(CK_ULONG(self.h))
+            self._closed = True
+
+    def __enter__(self): return self
+    def __exit__(self, *_): self.close()

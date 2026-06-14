@@ -1,51 +1,58 @@
 #!/usr/bin/env python3
 # ===========================================================================
 # Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
 # SPDX-License-Identifier: Apache-2.0
 # ===========================================================================
 # adapters/ecdsa.py --- ECDSA signature verification against Wycheproof.
 #
-# Wycheproof JSON shape (extract) :
-#     {
-#       "algorithm": "ECDSA",
-#       "testGroups": [
-#         {
-#           "type":    "EcdsaVerify",
-#           "publicKey": { "curve": "secp256r1", "uncompressed": "04..." },
-#           "sha":     "SHA-256",
-#           "tests": [
-#             { "tcId": 1, "msg": "313233", "sig": "30...",
-#               "result": "valid"|"invalid"|"acceptable",
-#               "comment": "..." },
-#             ...
-#           ]
-#         }, ...
-#       ]
-#     }
+# For each Wycheproof EcdsaVerify test we :
+#   1. Hash the message ourselves with the schema's `sha` digest.
+#   2. Decode the DER signature {SEQ {INT r} {INT s}} to raw r||s.
+#   3. Import the public key as a SESSION public-key object
+#      (CKO_PUBLIC_KEY, CKK_EC, EC_PARAMS=curve OID, EC_POINT=DER-wrapped
+#      uncompressed SEC1 point).
+#   4. Call C_VerifyInit + C_Verify with mechanism CKM_ECDSA (raw, since
+#      we pre-hashed the message ourselves).
+#   5. Compare the CKR_* return code with the Wycheproof expected result.
 #
-# We load the public key as a session object via C_CreateObject and call
-# C_VerifyInit / C_Verify on the message+sig pair. "match" means our
-# Verify return value agrees with `result`.
+# Note on pre-hashing : we use the pure CKM_ECDSA mechanism rather than
+# CKM_ECDSA_SHAxxx because (a) it keeps the adapter independent of which
+# digest mechanisms the module exposes, (b) Wycheproof publishes the
+# expected hash in the schema, so we can pre-hash deterministically.
 # ===========================================================================
 
 from __future__ import annotations
 
-# Import path is set up by run_wycheproof.py before this is imported.
+import hashlib
+
 from run_wycheproof import Adapter  # type: ignore
 
-CURVE_OID = {
+# Local imports : adapters/ is on sys.path (set by run_wycheproof.py).
+import _p11
+from _p11 import A, P11Module, P11Error  # type: ignore
+from _der import (  # type: ignore
+    DERError, encode_octet_string, parse_ecdsa_sig_to_raw,
+)
+
+# Curve OID encoded as DER (TAG=OID, the value bytes come from RFC 5480 / SEC 2).
+CURVE_OID_DER = {
     "secp256r1": bytes.fromhex("06082a8648ce3d030107"),
     "secp384r1": bytes.fromhex("06052b81040022"),
     "secp521r1": bytes.fromhex("06052b81040023"),
-    # Brainpool, secp256k1 etc. would go here.
 }
 
-HASH_TO_CKM = {
-    "SHA-256": "CKM_ECDSA_SHA256",
-    "SHA-384": "CKM_ECDSA_SHA384",
-    "SHA-512": "CKM_ECDSA_SHA512",
+# Curve scalar byte size, used for DER signature -> raw r||s padding.
+CURVE_BYTES = {
+    "secp256r1": 32,
+    "secp384r1": 48,
+    "secp521r1": 66,
+}
+
+# Map Wycheproof "sha" field to a Python hashlib name.
+HASHLIB_NAME = {
+    "SHA-256": "sha256",
+    "SHA-384": "sha384",
+    "SHA-512": "sha512",
 }
 
 
@@ -55,48 +62,97 @@ class EcdsaAdapter(Adapter):
 
     def __init__(self, module_path: str):
         super().__init__(module_path)
-        # Lazy import : python-pkcs11 only needed in adapters, not in main.
         try:
-            import pkcs11  # type: ignore
-            self.pkcs11 = pkcs11
-            self.lib = pkcs11.lib(module_path)
-            tokens = list(self.lib.get_tokens())
-            if not tokens:
-                raise RuntimeError("no tokens visible from libfreehsm-fips.so")
-            self.token = tokens[0]
-        except ImportError:
-            # python-pkcs11 missing : we want the run to be a clean skip
-            # instead of crashing the suite.
-            self.pkcs11 = None
-        except Exception as exc:  # noqa: BLE001
+            self.module = P11Module(module_path)
+            self.session = self.module.open_session()
+            self.ready = True
+        except (P11Error, OSError) as exc:
+            # Bail out gracefully -- the orchestrator will count this as
+            # an init-failure equivalent to "skip" for every vector.
             print(f"[ecdsa] init failed : {exc!r}")
-            self.pkcs11 = None
+            self.module = None
+            self.session = None
+            self.ready = False
+
+    def __del__(self):
+        try:
+            if self.session is not None:
+                self.session.close()
+            if self.module is not None:
+                self.module.close()
+        except Exception:
+            pass
+
+    # --- main per-test logic ------------------------------------------
 
     def run(self, group: dict, test: dict) -> str:
-        if self.pkcs11 is None:
+        if not self.ready:
             return "skip"
 
-        # Curve filtering : skip curves we do not support.
-        curve = group.get("publicKey", {}).get("curve")
-        if curve not in CURVE_OID:
+        pub = group.get("publicKey") or group.get("key") or {}
+        curve = pub.get("curve")
+        if curve not in CURVE_OID_DER:
             return "skip"
 
-        hash_alg = group.get("sha", "SHA-256")
-        ckm = HASH_TO_CKM.get(hash_alg)
-        if ckm is None:
+        hash_name = HASHLIB_NAME.get(group.get("sha", ""))
+        if hash_name is None:
             return "skip"
 
-        msg = bytes.fromhex(test["msg"])
-        sig = bytes.fromhex(test["sig"])
-        expected = test["result"]  # "valid" / "invalid" / "acceptable"
+        uncompressed = pub.get("uncompressed") or pub.get("publicKey")
+        if not uncompressed:
+            return "skip"
 
-        # python-pkcs11 doesn't expose raw C_CreateObject for an EC public
-        # key from raw point bytes cleanly. The actual implementation will
-        # use ctypes against the symbols of libfreehsm-fips.so. For the
-        # scaffolding stub we return "skip" so the runner runs cleanly
-        # against a yet-to-be-implemented adapter.
-        # TODO : implement via ctypes-level CK_FUNCTION_LIST.
-        return "skip"
+        msg = bytes.fromhex(test.get("msg", ""))
+        sig_der = bytes.fromhex(test.get("sig", ""))
+        expected = test.get("result", "")  # "valid"/"invalid"/"acceptable"
+
+        # 1. Pre-hash the message.
+        digest = hashlib.new(hash_name, msg).digest()
+
+        # 2. DER signature -> raw r||s. A decode failure on an "invalid"
+        # test vector counts as a correct rejection ; on a "valid" test
+        # it counts as a violation (the signature is supposed to parse).
+        try:
+            sig_raw = parse_ecdsa_sig_to_raw(sig_der, CURVE_BYTES[curve])
+        except (DERError, IndexError, ValueError):
+            if expected == "valid":
+                return "violation"
+            return "match"  # invalid / acceptable : rejection is fine.
+
+        # 3. Import the public key as a session object.
+        point_bytes = bytes.fromhex(uncompressed)
+        ec_point = encode_octet_string(point_bytes)
+
+        try:
+            pubkey = self.session.create_object([
+                A.CLASS(A.CKO_PUBLIC_KEY),
+                A.KEY_TYPE(A.CKK_EC),
+                A.TOKEN(False),
+                A.VERIFY(True),
+                A.EC_PARAMS(CURVE_OID_DER[curve]),
+                A.EC_POINT(ec_point),
+            ])
+        except P11Error:
+            # Module refused the key import : if Wycheproof expected
+            # "valid", that is a violation. Otherwise it is fine.
+            return "violation" if expected == "valid" else "match"
+
+        # 4. Verify.
+        try:
+            rv = self.session.verify(
+                pubkey, A.MECH(A.CKM_ECDSA), digest, sig_raw,
+            )
+        finally:
+            self.session.destroy(pubkey)
+
+        # 5. Cross-check result.
+        accepted = (rv == _p11.CKR_OK)
+        if expected == "valid":
+            return "match" if accepted else "violation"
+        if expected == "invalid":
+            return "match" if not accepted else "violation"
+        # "acceptable" : either outcome is allowed.
+        return "match"
 
 
 ADAPTER = EcdsaAdapter
