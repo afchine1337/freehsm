@@ -1,0 +1,13 @@
+# Downloaded vectors (~30 MB JSON, pinned by VECTORS_SHA)
+vectors/
+
+# Runner output reports
+results/*.json
+results/*.md
+!results/.gitkeep
+
+# Python cache
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/

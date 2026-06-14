@@ -1,0 +1,76 @@
+# ===========================================================================
+# .github/workflows/wycheproof.yml
+#
+# Nightly run of the Wycheproof crypto test vector suite against the
+# libfreehsm-fips.so built from the current main branch. Publishes the
+# JSON report as a build artefact and fails the run if any "valid"
+# vector is rejected or any "invalid" vector is accepted.
+#
+# See tests/wycheproof/README.md for details.
+# ===========================================================================
+
+name: Wycheproof
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # nightly 02:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  wycheproof:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Mark workspace as safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install Python deps
+        run: |
+          pip3 install --break-system-packages python-pkcs11
+
+      - name: Build libfreehsm-fips.so
+        run: |
+          make clean
+          make
+
+      - name: Fetch Wycheproof vectors
+        run: |
+          chmod +x tests/wycheproof/fetch_vectors.sh
+          tests/wycheproof/fetch_vectors.sh
+
+      - name: Run Wycheproof full suite
+        run: |
+          chmod +x tests/wycheproof/run_wycheproof.py
+          tests/wycheproof/run_wycheproof.py \
+              --module "$PWD/libfreehsm-fips.so"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wycheproof-report-${{ github.run_number }}
+          path: tests/wycheproof/results/full.json
+          retention-days: 30
+
+  wycheproof-smoke:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Smoke
+        run: |
+          pip3 install --break-system-packages python-pkcs11
+          make
+          chmod +x tests/wycheproof/fetch_vectors.sh tests/wycheproof/run_wycheproof.py
+          tests/wycheproof/fetch_vectors.sh
+          tests/wycheproof/run_wycheproof.py \
+              --module "$PWD/libfreehsm-fips.so" --smoke

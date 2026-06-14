@@ -1,0 +1,14 @@
+# Pin a specific upstream commit of github.com/C2SP/wycheproof so the
+# runner is reproducible. Bump this SHA when relevant new vectors are
+# published upstream and re-run the suite.
+#
+# How to bump :
+#   1. cd tests/wycheproof
+#   2. git ls-remote https://github.com/C2SP/wycheproof.git HEAD
+#   3. Copy the SHA from the first column into VECTORS_SHA (no newline)
+#   4. ./fetch_vectors.sh   # downloads the new tree
+#   5. ./run_wycheproof.py  # confirm no regression
+#   6. git commit -s -m "tests(wycheproof): bump VECTORS_SHA to <short>"
+#
+# Last bumped : 2026-06-13 (initial pin)
+ad84c9f1b80e7cc8f6c41cbb56b0a7bd1ec98c54

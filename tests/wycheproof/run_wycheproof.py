@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+# ===========================================================================
+# Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+# ===========================================================================
+# tests/wycheproof/run_wycheproof.py --- Wycheproof orchestrator
+#
+# Discovers test vectors under tests/wycheproof/vectors/, dispatches each
+# one to the matching adapter under tests/wycheproof/adapters/, and
+# accumulates a global pass/fail report.
+#
+# Exit code :
+#     0  --- every "valid" vector accepted and every "invalid" rejected
+#     1  --- at least one violation (P1 incident, see README)
+#     2  --- runner / module setup failure (P0)
+#
+# Usage :
+#     ./run_wycheproof.py --module /path/to/libfreehsm-fips.so [--smoke] [--only <name>]
+#
+# The "smoke" mode picks the first 10 % of each schema's tests, capped at
+# 50, to keep wall-clock under ~30 seconds for per-push CI.
+# ===========================================================================
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+HERE = Path(__file__).resolve().parent
+VECTORS_DIR = HERE / "vectors"
+ADAPTERS_DIR = HERE / "adapters"
+RESULTS_DIR = HERE / "results"
+sys.path.insert(0, str(ADAPTERS_DIR))
+
+
+# --- Adapter registry ------------------------------------------------------
+#
+# Each adapter declares the JSON `algorithm` strings it handles. When a
+# vector file's `algorithm` field matches, the adapter's run() callable is
+# invoked with (testGroup, test) and must return one of:
+#     "match"     --- the module accepted/rejected as expected
+#     "violation" --- the module disagreed with the expected result
+#     "skip"      --- the test is out of scope (e.g. unsupported curve)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AdapterStats:
+    match: int = 0
+    violation: int = 0
+    skip: int = 0
+    violations: list = field(default_factory=list)
+
+
+class Adapter:
+    """Base class. Subclasses live under adapters/ and import this."""
+
+    name: str = "abstract"
+    algorithms: tuple[str, ...] = ()
+
+    def __init__(self, module_path: str):
+        self.module_path = module_path
+
+    def run(self, group: dict, test: dict) -> str:
+        raise NotImplementedError
+
+
+def discover_adapters(only: str | None = None) -> list[type[Adapter]]:
+    import importlib
+
+    found = []
+    for path in sorted(ADAPTERS_DIR.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        modname = path.stem
+        if only and modname != only:
+            continue
+        mod = importlib.import_module(modname)
+        if hasattr(mod, "ADAPTER"):
+            found.append(mod.ADAPTER)
+    return found
+
+
+# --- Main loop -------------------------------------------------------------
+
+def run_file(adapter: Adapter, path: Path, smoke: bool) -> AdapterStats:
+    stats = AdapterStats()
+    with path.open() as f:
+        data = json.load(f)
+
+    if data.get("algorithm") not in adapter.algorithms:
+        return stats
+
+    groups = data.get("testGroups", [])
+    for group in groups:
+        tests = group.get("tests", [])
+        if smoke:
+            n = max(1, min(50, len(tests) // 10))
+            tests = tests[:n]
+        for test in tests:
+            try:
+                outcome = adapter.run(group, test)
+            except Exception as exc:  # noqa: BLE001
+                outcome = "violation"
+                stats.violations.append({
+                    "file": path.name,
+                    "tcId": test.get("tcId"),
+                    "reason": f"adapter raised : {exc!r}",
+                })
+            if outcome == "match":
+                stats.match += 1
+            elif outcome == "violation":
+                stats.violation += 1
+                stats.violations.append({
+                    "file": path.name,
+                    "tcId": test.get("tcId"),
+                    "comment": test.get("comment", ""),
+                    "expected": test.get("result"),
+                })
+            else:
+                stats.skip += 1
+    return stats
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--module", required=True,
+                        help="path to libfreehsm-fips.so")
+    parser.add_argument("--smoke", action="store_true",
+                        help="run only ~10 %% of vectors per file")
+    parser.add_argument("--only", default=None,
+                        help="run a single adapter by name (no .py)")
+    args = parser.parse_args()
+
+    if not Path(args.module).exists():
+        print(f"ERROR : module {args.module} not found", file=sys.stderr)
+        return 2
+    if not VECTORS_DIR.exists():
+        print("ERROR : vectors/ is empty. Run ./fetch_vectors.sh first.",
+              file=sys.stderr)
+        return 2
+
+    adapter_classes = discover_adapters(args.only)
+    if not adapter_classes:
+        print("ERROR : no adapters discovered", file=sys.stderr)
+        return 2
+
+    adapters = [cls(args.module) for cls in adapter_classes]
+    files = sorted(VECTORS_DIR.glob("*.json"))
+
+    overall: dict[str, AdapterStats] = defaultdict(AdapterStats)
+    t_start = time.time()
+    for adapter in adapters:
+        for f in files:
+            stats = run_file(adapter, f, args.smoke)
+            overall[adapter.name].match += stats.match
+            overall[adapter.name].violation += stats.violation
+            overall[adapter.name].skip += stats.skip
+            overall[adapter.name].violations.extend(stats.violations)
+    elapsed = time.time() - t_start
+
+    # --- Report ------------------------------------------------------------
+    print()
+    print("=" * 72)
+    print("WYCHEPROOF SUMMARY")
+    print("=" * 72)
+    print(f"  module    : {args.module}")
+    print(f"  mode      : {'smoke' if args.smoke else 'full'}")
+    print(f"  elapsed   : {elapsed:.1f} s")
+    print()
+    total_violations = 0
+    for name, st in sorted(overall.items()):
+        print(f"  {name:12s}  match={st.match:6d}  viol={st.violation:4d}  skip={st.skip:5d}")
+        total_violations += st.violation
+    print()
+
+    # Dump a JSON report for CI artefacts.
+    RESULTS_DIR.mkdir(exist_ok=True)
+    out = RESULTS_DIR / ("smoke.json" if args.smoke else "full.json")
+    with out.open("w") as f:
+        json.dump({
+            name: {
+                "match": st.match,
+                "violation": st.violation,
+                "skip": st.skip,
+                "violations": st.violations,
+            }
+            for name, st in overall.items()
+        }, f, indent=2)
+    print(f"  report    : {out}")
+    print("=" * 72)
+
+    return 0 if total_violations == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
