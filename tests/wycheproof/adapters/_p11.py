@@ -103,6 +103,19 @@ CKM_SHA256_HMAC = 0x00000251
 CKF_SERIAL_SESSION = 0x00000004
 CKF_RW_SESSION = 0x00000002
 
+CKU_SO = 0x00000000
+CKU_USER = 0x00000001
+
+CKR_TOKEN_NOT_PRESENT = 0x000000E0
+CKR_USER_PIN_NOT_INITIALIZED = 0x000000A0
+
+# Wycheproof bootstrap defaults --- must match the dev token bootstrap
+# documented in tests/full_crypto_pkcs11.sh. The label is arbitrary, the
+# PINs are dev-only and never leave the test container.
+BOOTSTRAP_SO_PIN = b"00000000"
+BOOTSTRAP_USER_PIN = b"user0000"
+BOOTSTRAP_LABEL = b"wycheproof".ljust(32, b" ")  # PKCS#11 label is 32 bytes
+
 
 # --- Native PKCS#11 structures ------------------------------------------
 
@@ -202,9 +215,16 @@ class P11Module:
         # Allow integrity bypass for the smoke / test binary -- the
         # embedded digest is not patched at build time. The Wycheproof
         # harness is dev-only ; both env vars are forbidden in any
-        # FIPS 140-3 deployment (see AGD_PRE §7.5).
+        # FIPS 140-3 deployment (see AGD_PRE §7.5 / §7.5bis).
         os.environ.setdefault("FHSM_INTEGRITY_ALLOW_UNSIGNED", "1")
         os.environ.setdefault("FHSM_KAT_ALLOW_FAIL", "1")
+        # Default token store under /tmp so the harness is self-
+        # contained and re-runnable. The runner cleans this up.
+        os.environ.setdefault(
+            "FHSM_TOKENS_DIR",
+            os.path.join("/tmp", "freehsm-wycheproof"),
+        )
+        os.makedirs(os.environ["FHSM_TOKENS_DIR"], mode=0o700, exist_ok=True)
         self.lib = CDLL(path, mode=RTLD_GLOBAL)
 
         for name in (
@@ -223,6 +243,69 @@ class P11Module:
         if rv != CKR_OK:
             raise P11Error("C_Initialize", rv)
         self._closed = False
+
+        # Bootstrap slot 0 token if absent. Wycheproof verify tests do
+        # not need a USER login (pubkey objects are SESSION-only and
+        # CKA_PRIVATE=false), but C_OpenSession on an uninitialized
+        # token returns CKR_TOKEN_NOT_PRESENT. We do C_InitToken+InitPIN
+        # idempotently so re-runs are safe.
+        self._bootstrap_token(slot_id=0)
+
+    def _bootstrap_token(self, slot_id: int) -> None:
+        """Ensure slot N has a token initialized with the dev PINs."""
+        # Try a quick C_OpenSession ; if it works, the token is already
+        # there from a previous run -- just close and continue.
+        probe = CK_ULONG()
+        probe_rv = self.lib.C_OpenSession(
+            CK_ULONG(slot_id),
+            CK_ULONG(CKF_SERIAL_SESSION | CKF_RW_SESSION),
+            None, None, byref(probe),
+        )
+        if probe_rv == CKR_OK:
+            self.lib.C_CloseSession(probe)
+            return
+
+        if probe_rv != CKR_TOKEN_NOT_PRESENT:
+            raise P11Error("C_OpenSession (probe)", probe_rv)
+
+        # Token absent : run C_InitToken with the dev SO PIN.
+        so_pin = (c_ubyte * len(BOOTSTRAP_SO_PIN))(*BOOTSTRAP_SO_PIN)
+        label = (c_ubyte * len(BOOTSTRAP_LABEL))(*BOOTSTRAP_LABEL)
+        rv = self.lib.C_InitToken(
+            CK_ULONG(slot_id),
+            so_pin, CK_ULONG(len(BOOTSTRAP_SO_PIN)),
+            label,
+        )
+        if rv != CKR_OK:
+            raise P11Error("C_InitToken (bootstrap)", rv)
+
+        # SO login + InitPIN to set the user PIN. Without this, future
+        # C_Login(USER) calls would fail, but verify itself does not
+        # need it ; we still do it to make the token consistent for any
+        # follow-up adapter that needs USER (private-key import).
+        sess = CK_ULONG()
+        rv = self.lib.C_OpenSession(
+            CK_ULONG(slot_id),
+            CK_ULONG(CKF_SERIAL_SESSION | CKF_RW_SESSION),
+            None, None, byref(sess),
+        )
+        if rv != CKR_OK:
+            raise P11Error("C_OpenSession (post-init)", rv)
+        rv = self.lib.C_Login(sess, CK_ULONG(CKU_SO),
+                              so_pin, CK_ULONG(len(BOOTSTRAP_SO_PIN)))
+        if rv != CKR_OK:
+            self.lib.C_CloseSession(sess)
+            raise P11Error("C_Login (SO bootstrap)", rv)
+        user_pin = (c_ubyte * len(BOOTSTRAP_USER_PIN))(*BOOTSTRAP_USER_PIN)
+        rv = self.lib.C_InitPIN(sess, user_pin, CK_ULONG(len(BOOTSTRAP_USER_PIN)))
+        # On a fresh token InitPIN succeeds ; if the token already had a
+        # USER PIN we ignore CKR_USER_PIN_NOT_INITIALIZED (race / re-init).
+        if rv != CKR_OK and rv != CKR_USER_PIN_NOT_INITIALIZED:
+            self.lib.C_Logout(sess)
+            self.lib.C_CloseSession(sess)
+            raise P11Error("C_InitPIN (bootstrap)", rv)
+        self.lib.C_Logout(sess)
+        self.lib.C_CloseSession(sess)
 
     def open_session(self, slot_id: int = 0) -> "P11Session":
         h = CK_ULONG()
