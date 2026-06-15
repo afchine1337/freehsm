@@ -187,6 +187,37 @@ def main() -> int:
         total_violations += st.violation
     print()
 
+    # --- Violation categorization -----------------------------------------
+    # Group violations by (expected, comment-prefix) so the operator can
+    # see at a glance whether the divergences are :
+    #   - "expected=invalid" failures : module accepted a bad signature
+    #     (false positive --- potentially exploitable)
+    #   - "expected=valid"   failures : module rejected a good signature
+    #     (false negative --- broken implementation)
+    # Comment prefix is the first 4 words ; this folds the ~3000 unique
+    # Wycheproof comments down to a few dozen categories.
+    if total_violations > 0:
+        print("  --- violation breakdown (top 15 categories) ---")
+        buckets: dict[tuple, int] = defaultdict(int)
+        for name, st in sorted(overall.items()):
+            for v in st.violations:
+                comment = (v.get("comment") or "").strip()
+                # Adapter-internal exceptions get their own bucket.
+                if not comment and "reason" in v:
+                    comment = v["reason"]
+                prefix = " ".join(comment.split()[:4]) or "(no comment)"
+                key = (v.get("expected", "?"), prefix)
+                buckets[key] += 1
+        for (expected, prefix), n in sorted(
+                buckets.items(), key=lambda x: -x[1])[:15]:
+            label = {
+                "valid":      "FN good-sig-rejected",
+                "invalid":    "FP bad-sig-accepted ",
+                "acceptable": "?? acceptable-divrg ",
+            }.get(expected, f"?? {expected:18s}")
+            print(f"    {n:5d}  {label}  : {prefix}")
+        print()
+
     # Dump a JSON report for CI artefacts.
     RESULTS_DIR.mkdir(exist_ok=True)
     out = RESULTS_DIR / ("smoke.json" if args.smoke else "full.json")
