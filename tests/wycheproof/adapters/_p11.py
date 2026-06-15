@@ -218,6 +218,10 @@ class P11Module:
         # FIPS 140-3 deployment (see AGD_PRE §7.5 / §7.5bis).
         os.environ.setdefault("FHSM_INTEGRITY_ALLOW_UNSIGNED", "1")
         os.environ.setdefault("FHSM_KAT_ALLOW_FAIL", "1")
+        # Some FreeHSM-build OpenSSL installs ship an openssl.cnf that
+        # forces fips=yes on every EVP fetch. In dev mode we want the
+        # default provider to serve fetches with no FIPS bias.
+        os.environ.setdefault("OPENSSL_CONF", "/dev/null")
         # Default token store under /tmp so the harness is self-
         # contained and re-runnable. The runner cleans this up.
         os.environ.setdefault(

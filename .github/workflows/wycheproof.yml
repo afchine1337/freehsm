@@ -47,11 +47,15 @@ jobs:
       - name: Run Wycheproof full suite
         env:
           # Dev-only bypass --- forbidden in any FIPS deployment, see
-          # AGD_PRE §7.5. We need it because the .fhsm_digest is not
-          # patched in the test artefact and the FIPS provider is not
-          # configured in the build container.
+          # AGD_PRE §7.5 / §7.5bis. We need it because the .fhsm_digest
+          # is not patched in the test artefact and the FIPS provider
+          # is not configured in the build container.
           FHSM_INTEGRITY_ALLOW_UNSIGNED: '1'
           FHSM_KAT_ALLOW_FAIL: '1'
+          # Override the global /usr/local/ssl/openssl.cnf which forces
+          # FIPS-only mode --- in dev mode we want the default provider
+          # to serve EVP fetches with no FIPS property bias.
+          OPENSSL_CONF: /dev/null
         run: |
           chmod +x tests/wycheproof/run_wycheproof.py
           tests/wycheproof/run_wycheproof.py \
@@ -74,6 +78,7 @@ jobs:
     env:
       FHSM_INTEGRITY_ALLOW_UNSIGNED: '1'
       FHSM_KAT_ALLOW_FAIL: '1'
+      OPENSSL_CONF: /dev/null
     steps:
       - uses: actions/checkout@v4
       - name: Smoke
