@@ -280,6 +280,21 @@ sudo grep -r FHSM_INTEGRITY_ALLOW_UNSIGNED /etc/ /lib/systemd/ /usr/lib/systemd/
     echo "OK : variable absente du PATH système"
 ```
 
+### 7.5bis Variable `FHSM_KAT_ALLOW_FAIL`
+
+Cette variable d'environnement, **uniquement effective si `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` est aussi positionné**, permet à `fhsm_crypto_init()` de poursuivre l'initialisation même si un Known Answer Test (KAT) a échoué. Sa seule raison d'être est l'exécution d'harnais de test externes (Wycheproof, fuzz, interop) contre une image de développement non signée où la configuration de la couche `OpenSSL FIPS provider` est absente du conteneur.
+
+**Cas d'usage légitime :** workflow `wycheproof.yml` dans un conteneur de build Debian-13 où le FIPS provider OpenSSL n'est pas configuré, donc certains KAT échouent par construction.
+
+**Strictement interdite en production / sur build certifié** : FIPS 140-3 §7.10.2 impose que tout échec KAT latche l'état ERROR. Contrôle de pré-livraison :
+
+```bash
+sudo grep -r FHSM_KAT_ALLOW_FAIL /etc/ /lib/systemd/ /usr/lib/systemd/ || \
+    echo "OK : variable absente du PATH système"
+```
+
+Quand le bypass est actif, `libfreehsm-fips.so` émet sur `stderr` un avertissement explicite ainsi que la liste des KAT en échec, ce qui rend toute exécution audit-traceable et écarte toute confusion avec un build conforme.
+
 ### 7.6 Diagnostic : harnais KAT externalisé
 
 `fhsm_kat_results()` est exporté (`visibility=default`) pour permettre à un harnais externe de lire le rapport KAT après `C_Initialize`, **sans** exposer de matière clé. Exemple d'utilisation à des fins de diagnostic uniquement :

@@ -200,8 +200,11 @@ class P11Error(RuntimeError):
 class P11Module:
     def __init__(self, path: str):
         # Allow integrity bypass for the smoke / test binary -- the
-        # embedded digest is not patched at build time.
+        # embedded digest is not patched at build time. The Wycheproof
+        # harness is dev-only ; both env vars are forbidden in any
+        # FIPS 140-3 deployment (see AGD_PRE §7.5).
         os.environ.setdefault("FHSM_INTEGRITY_ALLOW_UNSIGNED", "1")
+        os.environ.setdefault("FHSM_KAT_ALLOW_FAIL", "1")
         self.lib = CDLL(path, mode=RTLD_GLOBAL)
 
         for name in (

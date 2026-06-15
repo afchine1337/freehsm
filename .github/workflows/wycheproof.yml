@@ -45,6 +45,13 @@ jobs:
           tests/wycheproof/fetch_vectors.sh
 
       - name: Run Wycheproof full suite
+        env:
+          # Dev-only bypass --- forbidden in any FIPS deployment, see
+          # AGD_PRE §7.5. We need it because the .fhsm_digest is not
+          # patched in the test artefact and the FIPS provider is not
+          # configured in the build container.
+          FHSM_INTEGRITY_ALLOW_UNSIGNED: '1'
+          FHSM_KAT_ALLOW_FAIL: '1'
         run: |
           chmod +x tests/wycheproof/run_wycheproof.py
           tests/wycheproof/run_wycheproof.py \
@@ -64,10 +71,14 @@ jobs:
       image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
       options: --user root
     if: github.event_name == 'push'
+    env:
+      FHSM_INTEGRITY_ALLOW_UNSIGNED: '1'
+      FHSM_KAT_ALLOW_FAIL: '1'
     steps:
       - uses: actions/checkout@v4
       - name: Smoke
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip3 install --break-system-packages python-pkcs11
           make
           chmod +x tests/wycheproof/fetch_vectors.sh tests/wycheproof/run_wycheproof.py

@@ -41,6 +41,7 @@
 #include <openssl/rand.h>
 
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -139,16 +140,40 @@ static void crypto_init_once(void) {
     }
 
     /* Run KAT before declaring init success. Any KAT failure latches
-     * the module ERROR state and propagates FHSM_RV_KAT_FAILED. */
+     * the module ERROR state and propagates FHSM_RV_KAT_FAILED.
+     *
+     * DEV-ONLY BYPASS : when BOTH FHSM_INTEGRITY_ALLOW_UNSIGNED=1 and
+     * FHSM_KAT_ALLOW_FAIL=1 are set, we report KAT failures to stderr
+     * but continue init so external test harnesses (Wycheproof, fuzz,
+     * etc.) can still exercise the module. This is STRICTLY forbidden
+     * in any deployment claiming FIPS 140-3 conformance --- both env
+     * vars are unset in the AGD_PRE-mandated systemd unit. */
     fhsm_rv_t kat_rv = fhsm_kat_run_all(g_kat, FHSM_KAT_MAX, &g_kat_count);
     if (kat_rv != FHSM_RV_OK) {
-        OSSL_PROVIDER_unload(g_base_prov);
-        OSSL_PROVIDER_unload(g_fips_prov);
-        g_base_prov = NULL;
-        g_fips_prov = NULL;
-        g_crypto_init_rv = FHSM_RV_KAT_FAILED;
-        fhsm_state_latch_error("KAT failed at module init");
-        return;
+        int dev_bypass = (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED") != NULL)
+                      && (getenv("FHSM_KAT_ALLOW_FAIL") != NULL);
+        if (!dev_bypass) {
+            OSSL_PROVIDER_unload(g_base_prov);
+            OSSL_PROVIDER_unload(g_fips_prov);
+            g_base_prov = NULL;
+            g_fips_prov = NULL;
+            g_crypto_init_rv = FHSM_RV_KAT_FAILED;
+            fhsm_state_latch_error("KAT failed at module init");
+            return;
+        }
+        /* Dev bypass : list which KATs failed on stderr but do NOT
+         * latch ERROR. The KAT report is still readable via
+         * fhsm_kat_results() so a harness can inspect it. */
+        fprintf(stderr,
+            "[freehsm-c] WARNING : FHSM_KAT_ALLOW_FAIL active --- "
+            "module exposes services WITHOUT a passing KAT. This is "
+            "INVALID for any FIPS 140-3 / CC EAL4+ deployment.\n");
+        for (size_t i = 0; i < g_kat_count; i++) {
+            if (!g_kat[i].passed) {
+                fprintf(stderr, "[freehsm-c]   KAT FAIL : %s / %s\n",
+                        g_kat[i].algorithm, g_kat[i].vector_id);
+            }
+        }
     }
 
     g_crypto_init_rv = FHSM_RV_OK;
