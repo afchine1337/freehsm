@@ -88,25 +88,30 @@ static void crypto_init_once(void) {
      * /usr/local/ssl/fipsmodule.cnf) MUST list the module's integrity
      * MAC. The OpenSSL FIPS provider runs its own integrity self-test
      * on load --- if that fails, OSSL_PROVIDER_load returns NULL and
-     * we latch the module ERROR state. */
-    g_fips_prov = OSSL_PROVIDER_load(NULL, "fips");
-    if (g_fips_prov == NULL) {
-        /* In a dev build (test_smoke) the FIPS provider config may not be
-         * accessible. Allow opt-in fall-back to the default provider so
-         * the harness can still exercise KAT vectors. Production runs
-         * MUST have the FIPS provider configured. */
-        if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED") == NULL) {
+     * we latch the module ERROR state.
+     *
+     * DEV-ONLY shortcut : when the integrity bypass is active, skip
+     * the FIPS attempt entirely. Trying to load it from a container
+     * with no FIPS config produces noisy ERR-stack pollution and may
+     * leave OpenSSL in a state where subsequent EVP fetches still
+     * demand the FIPS property even though no provider satisfies it. */
+    int dev_mode = (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED") != NULL);
+
+    if (!dev_mode) {
+        g_fips_prov = OSSL_PROVIDER_load(NULL, "fips");
+        if (g_fips_prov == NULL) {
             fhsm_state_latch_error("OpenSSL FIPS provider load failed");
             return;
         }
-        /* fall through : continue without FIPS provider in dev mode */
     }
 
     /* Base provider provides only PEM/DER encoders/decoders --- no
-     * primitives. Required to serialize keys to disk. */
-    g_base_prov = OSSL_PROVIDER_load(NULL, "base");
-    if (g_base_prov == NULL) {
-        if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED") == NULL) {
+     * primitives. Required to serialize keys to disk.
+     * In dev mode the default provider supersedes both base+fips, so
+     * we skip the explicit load (which can fail in minimal containers). */
+    if (!dev_mode) {
+        g_base_prov = OSSL_PROVIDER_load(NULL, "base");
+        if (g_base_prov == NULL) {
             if (g_fips_prov) OSSL_PROVIDER_unload(g_fips_prov);
             g_fips_prov = NULL;
             fhsm_state_latch_error("OpenSSL base provider load failed");
@@ -141,15 +146,22 @@ static void crypto_init_once(void) {
      * auto-loading "default" on first EVP fetch. Without this, every
      * EVP fetch (AES-GCM included) would return NULL.
      * Note : in this mode the module is NOT FIPS-conformant. */
-    if (g_fips_prov == NULL) {
+    if (dev_mode) {
+        /* Defensive : if any earlier libcrypto path turned the FIPS
+         * default property on, every EVP fetch would still demand a
+         * non-existent FIPS provider. Force it off so the default
+         * provider can service the fetches. */
+        (void)EVP_default_properties_enable_fips(NULL, 0);
         g_default_prov = OSSL_PROVIDER_load(NULL, "default");
-        /* If even the default provider cannot load, primitives will
-         * not work. We do not latch ERROR here (the bypass is meant
-         * to be permissive) but log to stderr so the cause is clear. */
         if (g_default_prov == NULL) {
             fprintf(stderr,
                 "[freehsm-c] WARNING : OpenSSL default provider failed "
                 "to load --- AES-GCM and other primitives will fail.\n");
+        } else {
+            fprintf(stderr,
+                "[freehsm-c] NOTE : dev mode active (no FIPS provider) --- "
+                "OpenSSL default provider services EVP fetches. "
+                "This build is NOT FIPS-conformant.\n");
         }
     }
 
