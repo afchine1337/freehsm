@@ -51,6 +51,7 @@
  * FIPS provider only. */
 static OSSL_PROVIDER *g_fips_prov = NULL;
 static OSSL_PROVIDER *g_base_prov = NULL;  /* needed for encoders only */
+static OSSL_PROVIDER *g_default_prov = NULL;  /* dev fallback when FIPS absent */
 
 static pthread_once_t  g_crypto_once = PTHREAD_ONCE_INIT;
 static fhsm_rv_t       g_crypto_init_rv = FHSM_RV_FUNCTION_FAILED;
@@ -114,15 +115,42 @@ static void crypto_init_once(void) {
     }
 
     /* Force FIPS as the default property --- any EVP_*_fetch with no
-     * explicit property goes through the FIPS provider only. */
-    if (EVP_default_properties_enable_fips(NULL, 1) != 1) {
-        OSSL_PROVIDER_unload(g_base_prov);
-        OSSL_PROVIDER_unload(g_fips_prov);
-        g_base_prov = NULL;
-        g_fips_prov = NULL;
-        g_crypto_init_rv = FHSM_RV_FIPS_NOT_APPROVED;
-        fhsm_state_latch_error("FIPS default property failed");
-        return;
+     * explicit property goes through the FIPS provider only.
+     *
+     * DEV-ONLY guard : if the FIPS provider failed to load and the
+     * integrity bypass is active, we must NOT enable the FIPS default
+     * property : doing so would force every EVP fetch through a
+     * provider that does not exist, breaking every primitive (incl.
+     * AES-GCM in fhsm_token_init). In that case we fall back to the
+     * default provider which is auto-loaded by OpenSSL ; this is
+     * STRICTLY a dev path (gated on FHSM_INTEGRITY_ALLOW_UNSIGNED). */
+    if (g_fips_prov != NULL) {
+        if (EVP_default_properties_enable_fips(NULL, 1) != 1) {
+            OSSL_PROVIDER_unload(g_base_prov);
+            OSSL_PROVIDER_unload(g_fips_prov);
+            g_base_prov = NULL;
+            g_fips_prov = NULL;
+            g_crypto_init_rv = FHSM_RV_FIPS_NOT_APPROVED;
+            fhsm_state_latch_error("FIPS default property failed");
+            return;
+        }
+    }
+    /* If g_fips_prov is NULL we already fell through with the bypass
+     * env var. We must explicitly load the default provider because
+     * once any OSSL_PROVIDER_load has run (here, "base"), OpenSSL stops
+     * auto-loading "default" on first EVP fetch. Without this, every
+     * EVP fetch (AES-GCM included) would return NULL.
+     * Note : in this mode the module is NOT FIPS-conformant. */
+    if (g_fips_prov == NULL) {
+        g_default_prov = OSSL_PROVIDER_load(NULL, "default");
+        /* If even the default provider cannot load, primitives will
+         * not work. We do not latch ERROR here (the bypass is meant
+         * to be permissive) but log to stderr so the cause is clear. */
+        if (g_default_prov == NULL) {
+            fprintf(stderr,
+                "[freehsm-c] WARNING : OpenSSL default provider failed "
+                "to load --- AES-GCM and other primitives will fail.\n");
+        }
     }
 
     /* Initialise the hardened DRBG layer (multi-source seed +
@@ -185,8 +213,9 @@ fhsm_rv_t fhsm_crypto_init(void) {
 }
 
 void fhsm_crypto_finalize(void) {
-    if (g_base_prov) { OSSL_PROVIDER_unload(g_base_prov); g_base_prov = NULL; }
-    if (g_fips_prov) { OSSL_PROVIDER_unload(g_fips_prov); g_fips_prov = NULL; }
+    if (g_base_prov)    { OSSL_PROVIDER_unload(g_base_prov);    g_base_prov    = NULL; }
+    if (g_fips_prov)    { OSSL_PROVIDER_unload(g_fips_prov);    g_fips_prov    = NULL; }
+    if (g_default_prov) { OSSL_PROVIDER_unload(g_default_prov); g_default_prov = NULL; }
     fhsm_zeroize(g_kat, sizeof(g_kat));
     g_kat_count = 0;
 }
