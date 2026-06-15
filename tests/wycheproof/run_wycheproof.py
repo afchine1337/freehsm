@@ -209,7 +209,14 @@ def main() -> int:
                     comment = v["reason"]
                     is_adapter = True
                 if is_adapter:
-                    prefix = comment[:90] or "(no comment)"
+                    # Drop the long .so path prefix so the actual error
+                    # message (symbol name, etc.) is visible inside our
+                    # display window.
+                    short = comment.replace(
+                        "/__w/freehsm-c/freehsm-c/libfreehsm-fips.so",
+                        "[lib]",
+                    )
+                    prefix = short[:150] or "(no comment)"
                 else:
                     prefix = " ".join(comment.split()[:4]) or "(no comment)"
                 key = (v.get("expected", "?"), prefix)

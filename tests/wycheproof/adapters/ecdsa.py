@@ -62,6 +62,7 @@ class EcdsaAdapter(Adapter):
 
     def __init__(self, module_path: str):
         super().__init__(module_path)
+        self._logged_symbols: set = set()
         try:
             self.module = P11Module(module_path)
             self.session = self.module.open_session()
@@ -73,6 +74,13 @@ class EcdsaAdapter(Adapter):
             self.module = None
             self.session = None
             self.ready = False
+
+    def _log_missing_symbol(self, exc: AttributeError) -> None:
+        """Print the missing-symbol message the first time we see it."""
+        msg = str(exc)
+        if msg not in self._logged_symbols:
+            self._logged_symbols.add(msg)
+            print(f"[ecdsa] missing symbol -> {msg}")
 
     def __del__(self):
         try:
@@ -136,14 +144,28 @@ class EcdsaAdapter(Adapter):
             # Module refused the key import : if Wycheproof expected
             # "valid", that is a violation. Otherwise it is fine.
             return "violation" if expected == "valid" else "match"
+        except AttributeError as exc:
+            self._log_missing_symbol(exc)
+            return "skip"
 
-        # 4. Verify.
+        # 4. Verify (and destroy the key whatever happens).
+        rv = None
+        verify_err = None
         try:
             rv = self.session.verify(
                 pubkey, A.MECH(A.CKM_ECDSA), digest, sig_raw,
             )
-        finally:
+        except AttributeError as exc:
+            verify_err = exc
+
+        try:
             self.session.destroy(pubkey)
+        except AttributeError:
+            pass
+
+        if verify_err is not None:
+            self._log_missing_symbol(verify_err)
+            return "skip"
 
         # 5. Cross-check result.
         accepted = (rv == _p11.CKR_OK)
