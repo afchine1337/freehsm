@@ -202,10 +202,16 @@ def main() -> int:
         for name, st in sorted(overall.items()):
             for v in st.violations:
                 comment = (v.get("comment") or "").strip()
-                # Adapter-internal exceptions get their own bucket.
+                # Adapter-internal exceptions get their own bucket and a
+                # longer slice so we can see the actual symbol / message.
+                is_adapter = False
                 if not comment and "reason" in v:
                     comment = v["reason"]
-                prefix = " ".join(comment.split()[:4]) or "(no comment)"
+                    is_adapter = True
+                if is_adapter:
+                    prefix = comment[:90] or "(no comment)"
+                else:
+                    prefix = " ".join(comment.split()[:4]) or "(no comment)"
                 key = (v.get("expected", "?"), prefix)
                 buckets[key] += 1
         for (expected, prefix), n in sorted(
