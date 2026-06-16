@@ -92,10 +92,26 @@ CKM_RSA_PKCS = 0x00000001
 CKM_RSA_PKCS_OAEP = 0x00000009
 CKM_RSA_PKCS_PSS = 0x0000000D
 CKM_SHA256_RSA_PKCS_PSS = 0x00000043
+CKM_SHA384_RSA_PKCS_PSS = 0x00000044
+CKM_SHA512_RSA_PKCS_PSS = 0x00000045
 CKM_ECDSA = 0x00001041
 CKM_ECDSA_SHA256 = 0x00001044
 CKM_ECDSA_SHA384 = 0x00001045
 CKM_ECDSA_SHA512 = 0x00001046
+
+# Hash mechanism identifiers used inside CK_RSA_PKCS_PSS_PARAMS.hashAlg.
+CKM_SHA256 = 0x00000250
+CKM_SHA384 = 0x00000260
+CKM_SHA512 = 0x00000270
+
+# MGF identifiers.
+CKG_MGF1_SHA256 = 0x00000002
+CKG_MGF1_SHA384 = 0x00000003
+CKG_MGF1_SHA512 = 0x00000004
+
+# Attribute types for RSA public-key import.
+CKA_MODULUS = 0x00000120
+CKA_PUBLIC_EXPONENT = 0x00000122
 CKM_EDDSA = 0x00001057
 CKM_AES_GCM = 0x00001087
 CKM_SHA256_HMAC = 0x00000251
@@ -187,6 +203,10 @@ class _AttrBuilder:
     def EC_PARAMS(cls, v: bytes): return cls._bytes(CKA_EC_PARAMS, v)
     @classmethod
     def EC_POINT(cls, v: bytes): return cls._bytes(CKA_EC_POINT, v)
+    @classmethod
+    def MODULUS(cls, v: bytes): return cls._bytes(CKA_MODULUS, v)
+    @classmethod
+    def PUBLIC_EXPONENT(cls, v: bytes): return cls._bytes(CKA_PUBLIC_EXPONENT, v)
 
     @staticmethod
     def MECH(mech_type, param: bytes | None = None) -> CK_MECHANISM:
