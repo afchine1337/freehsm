@@ -114,8 +114,26 @@ class RsaPssAdapter(Adapter):
         else:
             self.diag["salt_neq_hashlen"] += 1
 
-        n_hex = group.get("n") or group.get("modulus") or ""
-        e_hex = group.get("e") or group.get("publicExponent") or ""
+        # RsassaPssVerify groups place the key under publicKey :
+        #   group["publicKey"]["modulus"] (hex)
+        #   group["publicKey"]["publicExponent"] (hex)
+        # Older Wycheproof revisions kept them at the top level ; we
+        # accept both layouts.
+        pubkey_dict = group.get("publicKey") or {}
+        n_hex = (
+            pubkey_dict.get("modulus")
+            or pubkey_dict.get("n")
+            or group.get("n")
+            or group.get("modulus")
+            or ""
+        )
+        e_hex = (
+            pubkey_dict.get("publicExponent")
+            or pubkey_dict.get("e")
+            or group.get("e")
+            or group.get("publicExponent")
+            or ""
+        )
         if not n_hex or not e_hex:
             return "skip"
 
