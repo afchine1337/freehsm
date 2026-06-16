@@ -1377,6 +1377,9 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 #ifndef CKK_RSA_CREATEOBJECT
 #define CKK_RSA_CREATEOBJECT 0x00000000UL  /* CKK_RSA */
 #endif
+#ifndef CKK_EC_EDWARDS_CREATEOBJECT
+#define CKK_EC_EDWARDS_CREATEOBJECT 0x00000040UL  /* CKK_EC_EDWARDS */
+#endif
 #ifndef CKR_TEMPLATE_INCOMPLETE
 #define CKR_TEMPLATE_INCOMPLETE   0x000000D0UL
 #endif
@@ -1512,6 +1515,49 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
             OSSL_PARAM_construct_end()
         };
         pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+        if (!pctx || EVP_PKEY_fromdata_init(pctx) != 1
+            || EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) != 1) {
+            if (pctx) EVP_PKEY_CTX_free(pctx);
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        }
+        EVP_PKEY_CTX_free(pctx);
+
+    } else if (ckk == CKK_EC_EDWARDS_CREATEOBJECT) {
+        /* Ed25519 / Ed448 : CKA_EC_PARAMS carries the curve OID DER and
+         * CKA_EC_POINT carries the raw public key wrapped in an OCTET
+         * STRING. OpenSSL's "ED25519" / "ED448" providers accept the
+         * raw key directly via OSSL_PARAM "pub", same shape as the
+         * Edwards-EC path in EC. */
+        long ip = find_attr(pTemplate, ulCount, CKA_EC_PARAMS);
+        long ipt = find_attr(pTemplate, ulCount, CKA_EC_POINT);
+        if (ip < 0 || ipt < 0) return CKR_TEMPLATE_INCOMPLETE;
+        const uint8_t *oid = (const uint8_t *)pTemplate[ip].pValue;
+        size_t oid_len = pTemplate[ip].ulValueLen;
+        /* Ed25519 : 1.3.101.112  -> DER 06 03 2B 65 70
+         * Ed448   : 1.3.101.113  -> DER 06 03 2B 65 71 */
+        static const uint8_t k_ed25519[] = { 0x06, 0x03, 0x2b, 0x65, 0x70 };
+        static const uint8_t k_ed448[]   = { 0x06, 0x03, 0x2b, 0x65, 0x71 };
+        const char *algo = NULL;
+        if (oid_len == sizeof(k_ed25519) && memcmp(oid, k_ed25519, oid_len) == 0)
+            algo = "ED25519";
+        else if (oid_len == sizeof(k_ed448) && memcmp(oid, k_ed448, oid_len) == 0)
+            algo = "ED448";
+        else
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+
+        const uint8_t *point = NULL;
+        size_t point_len = 0;
+        if (!fhsm_strip_octet_string(
+                (const uint8_t *)pTemplate[ipt].pValue,
+                pTemplate[ipt].ulValueLen,
+                &point, &point_len))
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+
+        OSSL_PARAM params[2] = {
+            OSSL_PARAM_construct_octet_string("pub", (void *)point, point_len),
+            OSSL_PARAM_construct_end()
+        };
+        pctx = EVP_PKEY_CTX_new_from_name(NULL, algo, NULL);
         if (!pctx || EVP_PKEY_fromdata_init(pctx) != 1
             || EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) != 1) {
             if (pctx) EVP_PKEY_CTX_free(pctx);
@@ -3140,6 +3186,9 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
 #define CKM_ECDSA_SHA256          0x00001044UL
 #define CKM_ECDSA_SHA384          0x00001045UL
 #define CKM_ECDSA_SHA512          0x00001046UL
+#ifndef CKM_EDDSA
+#define CKM_EDDSA                 0x00001057UL
+#endif
 #define CKM_RSA_PKCS              0x00000001UL
 #define CKM_RSA_PKCS_OAEP         0x00000009UL
 #define CKG_MGF1_SHA1             0x00000001UL
@@ -3168,10 +3217,12 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA256_HMAC_INIT_VAL:
         case CKM_AES_CMAC: case CKM_AES_CMAC_OPENSC_ALIAS:
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
+        case CKM_EDDSA:
         case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
         case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
+        case CKM_EDDSA:
             break;
         default:
             return FHSM_RV_MECHANISM_INVALID;
@@ -3247,11 +3298,14 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
         EVP_PKEY_free(pkey); return FHSM_RV_KEY_TYPE_INCONSISTENT;
     }
 
-    /* Post-quantum schemes : OpenSSL 3.5+ exposes ML-DSA / SLH-DSA via
-     * EVP_DigestSign with hash=NULL (the scheme does its own internal
-     * hashing per FIPS 204/205). EVP_PKEY_sign does NOT work here ---
-     * it expects a pre-hashed input which PQ schemes don't accept. */
-    if (op->mechanism == CKM_ML_DSA_OP || op->mechanism == CKM_SLH_DSA_OP) {
+    /* Post-quantum schemes + EdDSA : OpenSSL 3.x exposes ML-DSA,
+     * SLH-DSA and Ed25519 / Ed448 via EVP_DigestSign with hash=NULL
+     * (the scheme does its own internal hashing per FIPS 204/205 or
+     * RFC 8032). EVP_PKEY_sign does NOT work here --- it expects a
+     * pre-hashed input which these schemes don't accept. */
+    if (op->mechanism == CKM_ML_DSA_OP
+        || op->mechanism == CKM_SLH_DSA_OP
+        || op->mechanism == CKM_EDDSA) {
         EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
         if (!mdctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
         EVP_PKEY_CTX *pkctx = NULL;
@@ -3376,6 +3430,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA256_HMAC_INIT_VAL:
         case CKM_AES_CMAC: case CKM_AES_CMAC_OPENSC_ALIAS:
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
+        case CKM_EDDSA:
         case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
         case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
@@ -3430,9 +3485,12 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
     EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
     if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
 
-    /* PQ schemes : EVP_DigestVerify with hash=NULL (same rationale as
-     * the sign path). */
-    if (op->mechanism == CKM_ML_DSA_OP || op->mechanism == CKM_SLH_DSA_OP) {
+    /* PQ schemes + EdDSA : EVP_DigestVerify with hash=NULL. EdDSA is a
+     * single-shot signature with no separate pre-hash step, so the
+     * same plumbing applies. */
+    if (op->mechanism == CKM_ML_DSA_OP
+        || op->mechanism == CKM_SLH_DSA_OP
+        || op->mechanism == CKM_EDDSA) {
         EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
         if (!mdctx) { EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_HOST_MEMORY; }
         EVP_PKEY_CTX *pkctx = NULL;
