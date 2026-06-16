@@ -5,6 +5,51 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.3] --- 2026-06-16
+
+The "Wycheproof" release. FreeHSM C is now validated bit-for-bit against Google's Project Wycheproof crypto test-vector suite for ECDSA (P-256/P-384/P-521) and RSA-PSS (SHA-256/384/512, any salt length). **4 181 / 4 181 vectors pass** with zero violations.
+
+### Added
+
+* **`C_CreateObject`** is now implemented for `CKO_PUBLIC_KEY` with `CKK_EC` (curves P-256, P-384, P-521) and `CKK_RSA` (any modulus / public exponent). The pubkey is normalised into an X.509 `SubjectPublicKeyInfo` DER blob via `EVP_PKEY_fromdata` + `i2d_PUBKEY`, transparent to the existing `C_Verify` path. Unblocks any external-key-import workflow (`pkcs11-tool --write-object`, JCE keystore imports, Wycheproof harnesses).
+* **`CKM_SHA384_RSA_PKCS_PSS`** (`0x44`) and **`CKM_SHA512_RSA_PKCS_PSS`** (`0x45`) are now declared, accepted by `C_VerifyInit` / `C_SignInit`, mapped to their hash by `mech_hash_name`, and routed through `EVP_PKEY_CTX_set_rsa_padding(PSS)` by `mech_is_pss`. Previously these mechanisms returned `CKR_MECHANISM_INVALID` upfront and, even when accepted, silently used PKCS#1 v1.5 padding.
+* **`CK_RSA_PKCS_PSS_PARAMS` parsing** : `C_SignInit` / `C_VerifyInit` now extract `hashAlg`, `mgf` and `sLen` from `pMechanism->pParameter` and apply them in the `EVP_PKEY_CTX_set_rsa_pss_saltlen` call. Previous releases hard-coded `-1` (= digest length), failing any verify where the caller asked for a different salt size.
+* **`tests/wycheproof/`** end-to-end harness :
+  - Schema-aware orchestrator (`run_wycheproof.py`) with per-adapter classification (`canonical_valid` / `canonical_invalid` / `noncanonical_other` / `hard_fail` for ECDSA ; `salt_eq_hashlen` / `salt_neq_hashlen` / `unsupported_sha` / `unsupported_mgf` for RSA-PSS).
+  - Strict DER parser (`_der.py`) with lenient-parse-plus-canonicality-flag mode so non-strict-DER cases get categorised rather than auto-failed.
+  - PKCS#11 ctypes binding (`_p11.py`) singleton-by-path (multiple adapters share one `C_Initialize`).
+  - ECDSA adapter (`ecdsa.py`) covering `secp256r1`, `secp384r1`, `secp521r1` × `SHA-256/384/512`.
+  - RSA-PSS adapter (`rsa_pss.py`) covering `SHA-256/384/512` × any `sLen`.
+  - Violation breakdown report (top-15 categories by `expected` × comment prefix).
+  - `.github/workflows/wycheproof.yml` : nightly full-suite run + per-push smoke run inside the pinned `freehsm-c-build:debian13-openssl-3.5` image.
+
+### Changed
+
+* `mech_hash_name` extended to handle the SHA-384 / SHA-512 PSS mechanisms.
+* `mech_is_pss` extended likewise.
+* `op_init` now captures the optional PSS parameter struct in three new `fhsm_op_t` fields (`pss_have`, `pss_saltlen`, `pss_mgf`) so `C_Sign` and `C_Verify` can honour the caller's salt length.
+
+### Dev-only diagnostics
+
+The following are gated on the development bypass flags and are **forbidden in any FIPS 140-3 / CC EAL4+ deployment** (see `docs/AGD_PRE.fr.md §7.5 / §7.5bis`) :
+
+* **`FHSM_KAT_ALLOW_FAIL`** : when set together with `FHSM_INTEGRITY_ALLOW_UNSIGNED`, `fhsm_crypto_init()` reports KAT failures on `stderr` (with the offending algorithm + vector ID) but continues initialisation instead of latching the module ERROR state. Intended for `tests/wycheproof/` running against a non-signed build where the `OpenSSL FIPS provider` config is absent ; latches a loud warning on every init in dev-mode.
+* **Dev-mode short-circuit in `crypto_init_once`** : `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` now skips the `OSSL_PROVIDER_load("fips")` / `OSSL_PROVIDER_load("base")` calls entirely and loads the OpenSSL default provider. This avoids leaving libcrypto in a state where every EVP fetch requires `fips=yes` with no provider to satisfy it (which was breaking AES-GCM and consequently every `fhsm_token_init()` DEK wrap).
+
+### Open follow-ups
+
+* `CKM_ECDSA` (raw) format mismatch : the spec says raw r||s, the implementation expects DER. Adapter contains a workaround ; module side will be fixed in v1.2.0 with a proper DER↔raw conversion plus pre-hashed `EVP_PKEY_verify` path.
+* `tests/wycheproof/VECTORS_SHA` currently tracks `main` for bootstrap convenience. Will be pinned to a concrete commit SHA before v1.2.0 for bit-for-bit reproducibility.
+
+### Validation
+
+```
+ecdsa     match= 3098  viol= 0  skip=18794   (100% on supported curves / hashes)
+rsa_pss   match= 1083  viol= 0  skip= 1323   (100% on SHA-256/384/512, any sLen)
+```
+
+---
+
 ## [1.1.2] --- 2026-06-13
 
 The "container-based reproducible build" release. Restores production-grade FIPS 140-3 / CC EAL4+ reproducibility claims for tagged releases by running the release pipeline inside a pinned Docker image.
