@@ -27,18 +27,34 @@
 
 from __future__ import annotations
 
+import struct
+
 from run_wycheproof import Adapter  # type: ignore
 
 import _p11
 from _p11 import A, P11Module, P11Error  # type: ignore
 
 
-# Wycheproof "sha" -> (CKM_SHAxxx_RSA_PKCS_PSS, hash length in bytes).
+# Wycheproof "sha" -> (CKM_SHAxxx_RSA_PKCS_PSS, hash length, CKM_SHAxxx,
+# CKG_MGF1_SHAxxx).
 HASH_TO_PSS = {
-    "SHA-256": (_p11.CKM_SHA256_RSA_PKCS_PSS, 32),
-    "SHA-384": (_p11.CKM_SHA384_RSA_PKCS_PSS, 48),
-    "SHA-512": (_p11.CKM_SHA512_RSA_PKCS_PSS, 64),
+    "SHA-256": (
+        _p11.CKM_SHA256_RSA_PKCS_PSS, 32, _p11.CKM_SHA256, _p11.CKG_MGF1_SHA256,
+    ),
+    "SHA-384": (
+        _p11.CKM_SHA384_RSA_PKCS_PSS, 48, _p11.CKM_SHA384, _p11.CKG_MGF1_SHA384,
+    ),
+    "SHA-512": (
+        _p11.CKM_SHA512_RSA_PKCS_PSS, 64, _p11.CKM_SHA512, _p11.CKG_MGF1_SHA512,
+    ),
 }
+
+
+def _pack_pss_params(hash_mech: int, mgf: int, s_len: int) -> bytes:
+    """CK_RSA_PKCS_PSS_PARAMS = { CK_ULONG hashAlg ; CK_ULONG mgf ; CK_ULONG sLen }
+    on a 64-bit ABI. Three little-endian unsigned longs.
+    """
+    return struct.pack("@QQQ", hash_mech, mgf, s_len)
 
 
 class RsaPssAdapter(Adapter):
@@ -96,7 +112,7 @@ class RsaPssAdapter(Adapter):
         if not pss:
             self.diag["unsupported_sha"] += 1
             return "skip"
-        mech_id, hash_len = pss
+        mech_id, hash_len, hash_mech, mgf_mech = pss
 
         # Only MGF1 with the same hash as the signature hash is supported
         # by the module's hard-coded PSS init. Anything else -> skip.
@@ -162,11 +178,15 @@ class RsaPssAdapter(Adapter):
             return "skip"
 
         # Verify (and destroy the key whatever happens).
+        # Pass the CK_RSA_PKCS_PSS_PARAMS so the module sets the salt
+        # length correctly (instead of falling back to its digest-length
+        # default).
+        pss_params = _pack_pss_params(hash_mech, mgf_mech, s_len)
         rv = None
         verify_err = None
         try:
             rv = self.session.verify(
-                pubkey, A.MECH(mech_id), msg, sig,
+                pubkey, A.MECH(mech_id, pss_params), msg, sig,
             )
         except AttributeError as exc:
             verify_err = exc

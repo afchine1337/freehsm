@@ -1208,6 +1208,12 @@ typedef struct fhsm_op_s {
     void       *md_ctx;        /* EVP_MD_CTX*   --- Digest */
     void       *mac_ctx;       /* EVP_MAC_CTX*  --- Sign (HMAC) */
     void       *cipher_ctx;    /* EVP_CIPHER_CTX* --- Encrypt/Decrypt */
+    /* RSA-PSS parameters captured from CK_RSA_PKCS_PSS_PARAMS at
+     * VerifyInit/SignInit time. pss_have=0 means "use the digest-length
+     * default" (back-compat with callers that pass no parameter). */
+    int         pss_have;
+    long        pss_saltlen;   /* salt length in bytes */
+    uint32_t    pss_mgf;       /* CKG_MGF1_SHA* identifier */
 } fhsm_op_t;
 static fhsm_op_t g_op_enc[256];
 static fhsm_op_t g_op_dec[256];
@@ -2834,6 +2840,25 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         }
         o->active = 1;
     }
+    /* RSA-PSS : CK_RSA_PKCS_PSS_PARAMS = { hashAlg, mgf, sLen } each
+     * a CK_ULONG (3 * 8 = 24 bytes on a 64-bit ABI). Optional ; when
+     * absent we fall back to digest-length salt + MGF1 with the same
+     * hash as the signature mechanism (the previous hard-coded
+     * behaviour). */
+    op->pss_have    = 0;
+    op->pss_saltlen = 0;
+    op->pss_mgf     = 0;
+    if (mech_is_pss(op->mechanism)
+        && pMechanism->pParameter
+        && pMechanism->ulParameterLen >= 3 * sizeof(CK_ULONG)) {
+        const CK_ULONG *p = (const CK_ULONG *)pMechanism->pParameter;
+        /* p[0] = hashAlg (we already know it from the mechanism),
+         * p[1] = mgf,
+         * p[2] = sLen */
+        op->pss_mgf     = (uint32_t)p[1];
+        op->pss_saltlen = (long)p[2];
+        op->pss_have    = 1;
+    }
     op->active = 1;
     (void)hSession;
     return FHSM_RV_OK;
@@ -3252,7 +3277,8 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
     if (mech_is_pss(op->mechanism)) {
         if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING) <= 0)
             goto cleanup;
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, -1 /* digest len */) <= 0)
+        long saltlen = op->pss_have ? op->pss_saltlen : -1;
+        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen) <= 0)
             goto cleanup;
     }
     size_t out_len = *sig_len;
@@ -3431,7 +3457,10 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
     if (EVP_DigestVerifyInit_ex(mdctx, &pkctx, hash, NULL, NULL, pkey, NULL) == 1) {
         if (mech_is_pss(op->mechanism)) {
             EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING);
-            EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, -1);
+            /* Use the caller-supplied salt length when CK_RSA_PKCS_PSS_PARAMS
+             * was provided ; otherwise fall back to digest length (-1). */
+            long saltlen = op->pss_have ? op->pss_saltlen : -1;
+            EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen);
         }
         int vrv = EVP_DigestVerify(mdctx, pSig, ulSigLen, pData, ulDataLen);
         verify_ok = (vrv == 1);
