@@ -3123,6 +3123,12 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
 #define CKM_SHA512_RSA_PKCS       0x00000042UL
 #define CKM_RSA_PKCS_PSS          0x0000000DUL
 #define CKM_SHA256_RSA_PKCS_PSS   0x00000043UL
+#ifndef CKM_SHA384_RSA_PKCS_PSS
+#define CKM_SHA384_RSA_PKCS_PSS   0x00000044UL
+#endif
+#ifndef CKM_SHA512_RSA_PKCS_PSS
+#define CKM_SHA512_RSA_PKCS_PSS   0x00000045UL
+#endif
 
 CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                   CK_OBJECT_HANDLE hKey) {
@@ -3134,6 +3140,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
         case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
+        case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
             break;
         default:
@@ -3177,14 +3184,19 @@ static const char *mech_hash_name(uint32_t m) {
     switch (m) {
         case CKM_ECDSA_SHA256: case CKM_SHA256_RSA_PKCS:
         case CKM_SHA256_RSA_PKCS_PSS:                            return "SHA256";
-        case CKM_ECDSA_SHA384: case CKM_SHA384_RSA_PKCS:         return "SHA384";
-        case CKM_ECDSA_SHA512: case CKM_SHA512_RSA_PKCS:         return "SHA512";
+        case CKM_ECDSA_SHA384: case CKM_SHA384_RSA_PKCS:
+        case CKM_SHA384_RSA_PKCS_PSS:                            return "SHA384";
+        case CKM_ECDSA_SHA512: case CKM_SHA512_RSA_PKCS:
+        case CKM_SHA512_RSA_PKCS_PSS:                            return "SHA512";
         default:                                                   return NULL;
     }
 }
 
 static int mech_is_pss(uint32_t m) {
-    return m == CKM_RSA_PKCS_PSS || m == CKM_SHA256_RSA_PKCS_PSS;
+    return m == CKM_RSA_PKCS_PSS
+        || m == CKM_SHA256_RSA_PKCS_PSS
+        || m == CKM_SHA384_RSA_PKCS_PSS
+        || m == CKM_SHA512_RSA_PKCS_PSS;
 }
 
 /* Sign with an asymmetric private key. Loads the PKCS#8 DER blob from
@@ -3335,6 +3347,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
         case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
+        case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
             break;
         default: return FHSM_RV_MECHANISM_INVALID;
