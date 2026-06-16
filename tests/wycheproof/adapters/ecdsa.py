@@ -63,6 +63,17 @@ class EcdsaAdapter(Adapter):
     def __init__(self, module_path: str):
         super().__init__(module_path)
         self._logged_symbols: set = set()
+        # Diagnostics : count how many tests went through each DER
+        # branch so the operator can tell A-front (parser) from B-front
+        # (module verify) violations at a glance.
+        self.diag = {
+            "der_canonical_valid":      0,
+            "der_canonical_invalid":    0,
+            "der_canonical_acceptable": 0,
+            "der_noncanonical_valid":   0,
+            "der_noncanonical_other":   0,
+            "der_hard_fail":            0,
+        }
         try:
             self.module = P11Module(module_path)
             self.session = self.module.open_session()
@@ -132,9 +143,21 @@ class EcdsaAdapter(Adapter):
             )
         except (DERError, IndexError, ValueError):
             # Hard parse failure : structurally broken. Always rejected.
+            self.diag["der_hard_fail"] += 1
             if expected == "valid":
                 return "violation"
             return "match"
+
+        if canonical:
+            self.diag["der_canonical_" + (
+                expected if expected in ("valid", "invalid", "acceptable")
+                else "acceptable"
+            )] += 1
+        else:
+            if expected == "valid":
+                self.diag["der_noncanonical_valid"] += 1
+            else:
+                self.diag["der_noncanonical_other"] += 1
 
         # Non-canonical encoding : surface it as a harness-level
         # rejection ONLY when Wycheproof flagged the test as not-valid.

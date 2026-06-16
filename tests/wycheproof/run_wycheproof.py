@@ -187,6 +187,18 @@ def main() -> int:
         total_violations += st.violation
     print()
 
+    # Adapter-level diagnostics : tells us if violations are DER-parser
+    # artefacts or real C_Verify divergences.
+    for adapter in adapters:
+        diag = getattr(adapter, "diag", None)
+        if not diag:
+            continue
+        print(f"  --- {adapter.name} DER classification ---")
+        for k, v in diag.items():
+            if v:
+                print(f"    {k:32s} {v:6d}")
+        print()
+
     # --- Violation categorization -----------------------------------------
     # Group violations by (expected, comment-prefix) so the operator can
     # see at a glance whether the divergences are :
