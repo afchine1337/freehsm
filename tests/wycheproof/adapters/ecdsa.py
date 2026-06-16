@@ -55,6 +55,16 @@ HASHLIB_NAME = {
     "SHA-512": "sha512",
 }
 
+# Map Wycheproof "sha" field to the matching PKCS#11 mechanism that
+# does the hash itself (the module's CKM_ECDSA raw mechanism is buggy --
+# it routes through EVP_DigestVerify with no hash configured, which
+# ends up double-hashing the message).
+ECDSA_HASH_MECH = {
+    "SHA-256": 0x00001044,  # CKM_ECDSA_SHA256
+    "SHA-384": 0x00001045,  # CKM_ECDSA_SHA384
+    "SHA-512": 0x00001046,  # CKM_ECDSA_SHA512
+}
+
 
 class EcdsaAdapter(Adapter):
     name = "ecdsa"
@@ -125,8 +135,12 @@ class EcdsaAdapter(Adapter):
         sig_der = bytes.fromhex(test.get("sig", ""))
         expected = test.get("result", "")  # "valid"/"invalid"/"acceptable"
 
-        # 1. Pre-hash the message.
+        # 1. Pre-hash the message (kept for the diag block and as a
+        #    fallback path ; the module uses CKM_ECDSA_SHA{256,384,512}
+        #    which hashes inside C_Verify, so we pass `msg` not `digest`
+        #    below).
         digest = hashlib.new(hash_name, msg).digest()
+        sha_name = group.get("sha", "")
 
         # 2. DER signature -> raw r||s.
         #
@@ -192,17 +206,24 @@ class EcdsaAdapter(Adapter):
 
         # 4. Verify (and destroy the key whatever happens).
         #
+        # NOTE on mechanism : we use CKM_ECDSA_SHA{256,384,512} rather
+        # than raw CKM_ECDSA. The FreeHSM C path for raw CKM_ECDSA goes
+        # through EVP_DigestVerify with hash=NULL, which would double-
+        # hash an already-pre-hashed digest. The "with hash" mechanisms
+        # let the module do the hashing inside EVP_DigestVerify, which
+        # matches the signature's expectations.
+        #
         # NOTE on signature format : PKCS#11 v3.2 specifies raw r||s for
-        # CKM_ECDSA, but the FreeHSM C implementation uses OpenSSL's
+        # CKM_ECDSA*, but the FreeHSM C implementation uses OpenSSL's
         # EVP_DigestVerify which expects DER {SEQ r s}. We pass the DER
-        # sig directly to match what the module actually consumes. When
-        # the module is fixed to accept raw r||s per spec, this becomes
-        # `sig_raw` again.
+        # sig directly. When the module is fixed to accept raw r||s per
+        # spec, both `mech` and `signature` change.
+        mech_id = ECDSA_HASH_MECH.get(sha_name, A.CKM_ECDSA)
         rv = None
         verify_err = None
         try:
             rv = self.session.verify(
-                pubkey, A.MECH(A.CKM_ECDSA), digest, sig_der,
+                pubkey, A.MECH(mech_id), msg, sig_der,
             )
         except AttributeError as exc:
             verify_err = exc
