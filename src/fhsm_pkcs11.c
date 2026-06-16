@@ -3222,7 +3222,6 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
         case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
-        case CKM_EDDSA:
             break;
         default:
             return FHSM_RV_MECHANISM_INVALID;

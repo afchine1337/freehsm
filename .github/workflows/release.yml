@@ -70,6 +70,11 @@ jobs:
         env:
           SOURCE_DATE_EPOCH: '1717977600'
         run: |
+          # Defensive : restore the exec bit in case actions/checkout
+          # dropped it on the way in. The release container is one of
+          # the few places where shell scripts must actually run.
+          chmod +x scripts/*.sh tests/*.sh tests/wycheproof/*.sh \
+                   tests/wycheproof/*.py 2>/dev/null || true
           make clean
           make
           make integrity || echo "WARN: make integrity failed (expected outside Docker image)"
