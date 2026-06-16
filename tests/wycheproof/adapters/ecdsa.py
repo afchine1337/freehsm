@@ -191,11 +191,18 @@ class EcdsaAdapter(Adapter):
             return "skip"
 
         # 4. Verify (and destroy the key whatever happens).
+        #
+        # NOTE on signature format : PKCS#11 v3.2 specifies raw r||s for
+        # CKM_ECDSA, but the FreeHSM C implementation uses OpenSSL's
+        # EVP_DigestVerify which expects DER {SEQ r s}. We pass the DER
+        # sig directly to match what the module actually consumes. When
+        # the module is fixed to accept raw r||s per spec, this becomes
+        # `sig_raw` again.
         rv = None
         verify_err = None
         try:
             rv = self.session.verify(
-                pubkey, A.MECH(A.CKM_ECDSA), digest, sig_raw,
+                pubkey, A.MECH(A.CKM_ECDSA), digest, sig_der,
             )
         except AttributeError as exc:
             verify_err = exc
