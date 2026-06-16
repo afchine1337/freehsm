@@ -34,101 +34,116 @@ class DERError(ValueError):
     pass
 
 
-def _read_length_strict(buf: bytes, offset: int) -> tuple[int, int]:
-    """Strict DER length parse. Rejects :
-        - indefinite form
-        - long form for lengths < 128 (must be short form)
-        - long form with leading 0x00 padding (must be minimal)
-        - truncated length field
-    """
+def _encode_length_minimal(length: int) -> bytes:
+    """Canonical DER length encoding."""
+    if length < 128:
+        return bytes([length])
+    body = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(body)]) + body
+
+
+def _read_length_lenient(buf: bytes, offset: int) -> tuple[int, int, bool]:
+    """Lenient DER length parse. Accepts any structurally well-formed
+    length encoding. Returns (length, next_offset, is_canonical).
+    Raises DERError only on truncation or indefinite form (which we
+    cannot recover from)."""
     if offset >= len(buf):
         raise DERError("truncated length field")
     first = buf[offset]
     if first < 0x80:
-        return first, offset + 1
+        # Short form : always canonical.
+        return first, offset + 1, True
     n = first & 0x7F
     if n == 0:
+        # Indefinite form : not valid for DER and we cannot recover.
         raise DERError("indefinite length not supported")
     if n > 4:
         raise DERError(f"length field too large : {n} bytes")
     if offset + 1 + n > len(buf):
         raise DERError("truncated length field")
     raw = buf[offset + 1 : offset + 1 + n]
-    if raw[0] == 0x00:
-        raise DERError("non-minimal length encoding (leading 0x00)")
     length = int.from_bytes(raw, "big")
-    if length < 128:
-        raise DERError("non-minimal length encoding (long form for <128)")
-    return length, offset + 1 + n
+    canonical = (raw[0] != 0x00) and (length >= 128)
+    return length, offset + 1 + n, canonical
 
 
-def _read_strict_integer(buf: bytes, offset: int) -> tuple[bytes, int]:
-    """Strict DER INTEGER parse. Returns (sign-stripped value, next offset).
-    Rejects :
-        - tag != 0x02
-        - zero length
-        - leading 0x00 byte that is not required for sign disambiguation
-        - negative INTEGER (high bit of first byte set without 0x00 prefix)
-    """
+def _read_lenient_integer(buf: bytes, offset: int) -> tuple[bytes, int, bool]:
+    """Lenient DER INTEGER parse. Returns (sign-stripped value, next
+    offset, is_canonical). Strict rules surfaced as canonical=False
+    rather than DERError so the caller can decide what to do."""
     if offset >= len(buf):
         raise DERError("truncated INTEGER tag")
     if buf[offset] != 0x02:
         raise DERError(f"expected INTEGER tag : 0x{buf[offset]:02x}")
-    length, next_off = _read_length_strict(buf, offset + 1)
+    length, next_off, len_canonical = _read_length_lenient(buf, offset + 1)
     if length == 0:
+        # Zero-length INTEGER : impossible to convert to a value.
         raise DERError("zero-length INTEGER")
     if next_off + length > len(buf):
         raise DERError("INTEGER truncated")
     raw = buf[next_off : next_off + length]
 
-    # Negative INTEGER : high bit of first byte set without a 0x00 sign
-    # prefix is forbidden for ECDSA r/s (must be positive).
+    int_canonical = True
+
+    # Negative INTEGER : high bit of first byte set without 0x00 prefix.
+    # ECDSA r and s are positive, so this is always non-canonical.
     if raw[0] & 0x80:
-        raise DERError("negative INTEGER (high bit set without 0x00 prefix)")
+        int_canonical = False
 
     # Non-minimal : leading 0x00 byte while next byte's high bit is 0.
     if length >= 2 and raw[0] == 0x00 and (raw[1] & 0x80) == 0:
-        raise DERError("non-minimal INTEGER (unnecessary leading 0x00)")
+        int_canonical = False
 
     # Strip the legitimate 0x00 sign-byte, if any.
     if raw[0] == 0x00:
         raw = raw[1:]
-    return raw, next_off + length
+    return raw, next_off + length, len_canonical and int_canonical
 
 
 def parse_ecdsa_sig_to_raw(der: bytes, curve_bytes: int) -> bytes:
-    """Strict DER decode of an ECDSA signature -> raw r||s.
+    """Strict DER decode (back-compat). Raises DERError on any non-
+    canonical encoding. Prefer parse_ecdsa_sig_with_flag() for the
+    Wycheproof harness so non-canonical encodings can be classified
+    separately from genuine cryptographic failures."""
+    raw, canonical = parse_ecdsa_sig_with_flag(der, curve_bytes)
+    if not canonical:
+        raise DERError("non-canonical DER encoding")
+    return raw
 
-    Enforces every Wycheproof-relevant DER rule so vectors flagged
-    "invalid" purely because of DER strictness (long-form length,
-    leading 0x00 in INTEGER, trailing bytes, etc.) are rejected before
-    the signature even reaches the module.
 
-    Args:
-        der: DER-encoded `SEQUENCE { INTEGER r, INTEGER s }`.
-        curve_bytes: byte length of the curve scalar (e.g. 32 for P-256).
+def parse_ecdsa_sig_with_flag(der: bytes, curve_bytes: int) -> tuple[bytes, bool]:
+    """Lenient parse of an ECDSA signature DER -> (raw r||s, is_canonical).
 
-    Returns:
-        bytes of exactly `2 * curve_bytes` length.
+    Always returns r||s padded to curve_bytes each when the structure
+    parses successfully ; raises DERError only when the bytes cannot be
+    interpreted as a SEQUENCE of two INTEGERs at all.
+
+    `is_canonical` is True iff the input is *exactly* the canonical DER
+    encoding for the (r, s) value pair (minimal length forms, no
+    leading 0x00 padding except for sign disambiguation, no trailing
+    bytes after the SEQUENCE).
     """
     if not der:
         raise DERError("empty signature")
     if der[0] != 0x30:
         raise DERError(f"not a SEQUENCE : tag=0x{der[0]:02x}")
-    seq_len, off = _read_length_strict(der, 1)
+    seq_len, off, seq_len_canonical = _read_length_lenient(der, 1)
+    seq_canonical = seq_len_canonical
+    if off + seq_len > len(der):
+        raise DERError(f"SEQUENCE truncated : end={off + seq_len} "
+                       f"total={len(der)}")
     if off + seq_len != len(der):
-        # Strict : no trailing bytes after the SEQUENCE content, and no
-        # truncation.
-        raise DERError(
-            f"trailing bytes / truncated : seq_end={off + seq_len} "
-            f"total={len(der)}"
-        )
+        # Trailing bytes after SEQUENCE : non-canonical, but recoverable
+        # (we still parse the SEQUENCE content).
+        seq_canonical = False
 
-    r_bytes, off = _read_strict_integer(der, off)
-    s_bytes, off = _read_strict_integer(der, off)
+    seq_end = off + seq_len
+    r_bytes, off, r_canonical = _read_lenient_integer(der, off)
+    s_bytes, off, s_canonical = _read_lenient_integer(der, off)
 
-    if off != len(der):
-        raise DERError("trailing bytes after second INTEGER")
+    if off != seq_end:
+        # Bytes inside the SEQUENCE that are not part of r/s.
+        seq_canonical = False
 
     if len(r_bytes) > curve_bytes or len(s_bytes) > curve_bytes:
         raise DERError(
@@ -136,11 +151,12 @@ def parse_ecdsa_sig_to_raw(der: bytes, curve_bytes: int) -> bytes:
             f"curve_bytes={curve_bytes}"
         )
 
-    # After sign-strip, an INTEGER of value zero is now an empty bytes
-    # object. ECDSA requires both r > 0 and s > 0.
+    # An INTEGER of value zero would have been stripped to empty bytes.
+    # ECDSA requires both r > 0 and s > 0. We still surface the structure
+    # as parseable, but the adapter will need to know.
     if not r_bytes or not s_bytes:
         raise DERError("r or s is zero")
 
     r_padded = r_bytes.rjust(curve_bytes, b"\x00")
     s_padded = s_bytes.rjust(curve_bytes, b"\x00")
-    return r_padded + s_padded
+    return r_padded + s_padded, (seq_canonical and r_canonical and s_canonical)
