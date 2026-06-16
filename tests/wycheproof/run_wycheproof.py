@@ -104,6 +104,18 @@ def run_file(adapter: Adapter, path: Path, smoke: bool) -> AdapterStats:
     if data.get("algorithm") not in adapter.algorithms:
         return stats
 
+    # Schema-level dispatch : Wycheproof ships two ECDSA file variants
+    # under the same `algorithm = "ECDSA"` label : EcdsaVerify (DER
+    # signatures) and EcdsaP1363Verify (raw r||s signatures). The
+    # adapter declares which schemas it consumes via the optional
+    # `schemas` tuple ; files not in the tuple are skipped (counted as
+    # no stats), so a P1363 adapter can be added separately without the
+    # DER adapter scoring its tests as hard-fail.
+    schemas = getattr(adapter, "schemas", None)
+    if schemas is not None:
+        if data.get("schema") not in schemas:
+            return stats
+
     groups = data.get("testGroups", [])
     for group in groups:
         tests = group.get("tests", [])

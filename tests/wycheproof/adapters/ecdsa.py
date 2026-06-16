@@ -69,6 +69,10 @@ ECDSA_HASH_MECH = {
 class EcdsaAdapter(Adapter):
     name = "ecdsa"
     algorithms = ("ECDSA",)
+    # We consume DER-encoded ECDSA signatures only. The raw r||s variant
+    # ships under schema "EcdsaP1363Verify" and needs a separate adapter
+    # (no DER parsing required).
+    schemas = ("EcdsaVerify",)
 
     def __init__(self, module_path: str):
         super().__init__(module_path)
