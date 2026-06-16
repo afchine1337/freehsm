@@ -70,9 +70,14 @@ class EcdsaAdapter(Adapter):
     name = "ecdsa"
     algorithms = ("ECDSA",)
     # We consume DER-encoded ECDSA signatures only. The raw r||s variant
-    # ships under schema "EcdsaP1363Verify" and needs a separate adapter
-    # (no DER parsing required).
-    schemas = ("EcdsaVerify",)
+    # ships under schema "ecdsa_p1363_verify_schema.json" and needs its
+    # own adapter (no DER parsing required). The schema field varies
+    # slightly across Wycheproof revisions, so we accept both the
+    # historical and modern names.
+    schemas = (
+        "ecdsa_verify_schema.json",
+        "ecdsa_verify_schema_v1.json",
+    )
 
     def __init__(self, module_path: str):
         super().__init__(module_path)
