@@ -60,6 +60,10 @@
 #include <openssl/crypto.h>
 #include <openssl/hmac.h>
 #include <openssl/rsa.h>      /* RSA_PKCS1_PSS_PADDING */
+#include <openssl/bn.h>       /* BN_bin2bn (C_CreateObject RSA path) */
+#include <openssl/core.h>     /* OSSL_PARAM */
+#include <openssl/core_names.h>
+#include <openssl/param_build.h> /* OSSL_PARAM_BLD */
 
 /* CK_RV is identical to fhsm_rv_t numerically. */
 typedef unsigned long  CK_RV;
@@ -186,6 +190,9 @@ FHSM_EXPORT CK_RV C_GetInterface(unsigned char *pInterfaceName,
                                   void *pVersion,
                                   struct CK_INTERFACE_s **ppInterface,
                                   CK_FLAGS flags);
+FHSM_EXPORT CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
+                                  CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                                  CK_OBJECT_HANDLE *phObject);
 FHSM_EXPORT CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession,
                                    CK_OBJECT_HANDLE hObject);
 FHSM_EXPORT CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession,
@@ -1338,6 +1345,224 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_zeroize(key, sizeof(key));
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
+    return FHSM_RV_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * C_CreateObject --- create an object from a fully-specified attribute
+ * template. PKCS#11 v3.2 §C.3.3.5.
+ *
+ * Currently supported : CKO_PUBLIC_KEY with CKK_EC (EC_PARAMS + EC_POINT)
+ * and CKK_RSA (MODULUS + PUBLIC_EXPONENT). The pubkey is normalised into
+ * an X.509 SubjectPublicKeyInfo DER blob and stored as the object's
+ * VALUE so the existing C_VerifyInit / C_Verify path (which does
+ * `d2i_PUBKEY` on `kv`) can use it without changes.
+ *
+ * Other object classes (CKO_SECRET_KEY, CKO_PRIVATE_KEY, certificates,
+ * data objects) are not handled here yet --- they return
+ * CKR_TEMPLATE_INCONSISTENT until a real need surfaces.
+ * ----------------------------------------------------------------------- */
+#ifndef CKA_EC_PARAMS
+#define CKA_EC_PARAMS        0x00000180UL
+#endif
+#ifndef CKK_EC_CREATEOBJECT
+#define CKK_EC_CREATEOBJECT  0x00000003UL  /* CKK_EC */
+#endif
+#ifndef CKK_RSA_CREATEOBJECT
+#define CKK_RSA_CREATEOBJECT 0x00000000UL  /* CKK_RSA */
+#endif
+#ifndef CKR_TEMPLATE_INCOMPLETE
+#define CKR_TEMPLATE_INCOMPLETE   0x000000D0UL
+#endif
+#ifndef CKR_TEMPLATE_INCONSISTENT
+#define CKR_TEMPLATE_INCONSISTENT 0x000000D1UL
+#endif
+
+/* Map a DER-encoded curve OID (CKA_EC_PARAMS) to the OpenSSL group name
+ * accepted by EVP_PKEY_CTX_new_from_name("EC")+OSSL_PARAM("group", ...).
+ * Returns NULL if the OID is unknown to us. Adding curves here is a
+ * one-line change once the corresponding OID DER is known. */
+static const char *fhsm_ec_oid_to_group(const uint8_t *oid, size_t oid_len) {
+    /* secp256r1 / P-256 :  1.2.840.10045.3.1.7  */
+    static const uint8_t k_p256[] = {
+        0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07
+    };
+    /* secp384r1 / P-384 :  1.3.132.0.34         */
+    static const uint8_t k_p384[] = {
+        0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22
+    };
+    /* secp521r1 / P-521 :  1.3.132.0.35         */
+    static const uint8_t k_p521[] = {
+        0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23
+    };
+    if (oid_len == sizeof(k_p256) && memcmp(oid, k_p256, oid_len) == 0)
+        return "P-256";
+    if (oid_len == sizeof(k_p384) && memcmp(oid, k_p384, oid_len) == 0)
+        return "P-384";
+    if (oid_len == sizeof(k_p521) && memcmp(oid, k_p521, oid_len) == 0)
+        return "P-521";
+    return NULL;
+}
+
+/* Strip a DER OCTET STRING wrapper. CKA_EC_POINT is the OCTET STRING
+ * encoding of the SEC1 uncompressed point. Same logic as the ECDH peer
+ * key reconstruction above. Sets *out / *out_len on success. Returns 0
+ * if the OCTET STRING shape is wrong (e.g. caller passed the raw point). */
+static int fhsm_strip_octet_string(const uint8_t *in, size_t in_len,
+                                    const uint8_t **out, size_t *out_len) {
+    if (in_len > 2 && in[0] == 0x04 && in[1] != 0x04
+        && (size_t)in[1] + 2 == in_len) {
+        *out = in + 2;
+        *out_len = in_len - 2;
+        return 1;
+    }
+    if (in_len > 3 && in[0] == 0x04 && in[1] == 0x81
+        && (size_t)in[2] + 3 == in_len) {
+        *out = in + 3;
+        *out_len = in_len - 3;
+        return 1;
+    }
+    if (in_len > 4 && in[0] == 0x04 && in[1] == 0x82) {
+        size_t l = ((size_t)in[2] << 8) | in[3];
+        if (l + 4 == in_len) {
+            *out = in + 4;
+            *out_len = l;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
+                      CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                      CK_OBJECT_HANDLE *phObject) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pTemplate || !phObject || ulCount == 0) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+
+    long i;
+    /* Required : CKA_CLASS, CKA_KEY_TYPE. */
+    i = find_attr(pTemplate, ulCount, CKA_CLASS);
+    if (i < 0 || pTemplate[i].ulValueLen < sizeof(CK_ULONG))
+        return CKR_TEMPLATE_INCOMPLETE;
+    CK_ULONG cko = 0;
+    memcpy(&cko, pTemplate[i].pValue, sizeof(CK_ULONG));
+
+    i = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+    if (i < 0 || pTemplate[i].ulValueLen < sizeof(CK_ULONG))
+        return CKR_TEMPLATE_INCOMPLETE;
+    CK_ULONG ckk = 0;
+    memcpy(&ckk, pTemplate[i].pValue, sizeof(CK_ULONG));
+
+    /* For now only handle public-key imports : everything else is out of
+     * scope for the Wycheproof harness that drove this implementation. */
+    if (cko != CKO_PUBLIC_KEY) return CKR_TEMPLATE_INCONSISTENT;
+
+    /* Optional : CKA_LABEL, CKA_ID. */
+    char label_buf[64] = "";
+    i = find_attr(pTemplate, ulCount, CKA_LABEL);
+    if (i >= 0) {
+        size_t n = pTemplate[i].ulValueLen;
+        if (n >= sizeof(label_buf)) n = sizeof(label_buf) - 1;
+        memcpy(label_buf, pTemplate[i].pValue, n);
+        label_buf[n] = '\0';
+    }
+    const uint8_t *id_data = NULL;
+    size_t         id_len  = 0;
+    i = find_attr(pTemplate, ulCount, CKA_ID);
+    if (i >= 0) {
+        id_data = (const uint8_t *)pTemplate[i].pValue;
+        id_len  = pTemplate[i].ulValueLen;
+    }
+
+    /* ---- Build an EVP_PKEY then serialize as SubjectPublicKeyInfo. ---- */
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *pctx = NULL;
+
+    if (ckk == CKK_EC_CREATEOBJECT) {
+        long ip = find_attr(pTemplate, ulCount, CKA_EC_PARAMS);
+        long ipt = find_attr(pTemplate, ulCount, CKA_EC_POINT);
+        if (ip < 0 || ipt < 0) return CKR_TEMPLATE_INCOMPLETE;
+        const uint8_t *oid = (const uint8_t *)pTemplate[ip].pValue;
+        size_t oid_len = pTemplate[ip].ulValueLen;
+        const char *group = fhsm_ec_oid_to_group(oid, oid_len);
+        if (!group) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+
+        /* CKA_EC_POINT is the DER OCTET STRING of the SEC1 point. The
+         * inner bytes are 0x04 || X || Y (uncompressed) ; rejected if
+         * the caller forgot the OCTET STRING wrapper. */
+        const uint8_t *point = NULL;
+        size_t point_len = 0;
+        if (!fhsm_strip_octet_string(
+                (const uint8_t *)pTemplate[ipt].pValue,
+                pTemplate[ipt].ulValueLen,
+                &point, &point_len))
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+
+        OSSL_PARAM params[3] = {
+            OSSL_PARAM_construct_utf8_string("group", (char *)group, 0),
+            OSSL_PARAM_construct_octet_string("pub", (void *)point, point_len),
+            OSSL_PARAM_construct_end()
+        };
+        pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+        if (!pctx || EVP_PKEY_fromdata_init(pctx) != 1
+            || EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) != 1) {
+            if (pctx) EVP_PKEY_CTX_free(pctx);
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        }
+        EVP_PKEY_CTX_free(pctx);
+
+    } else if (ckk == CKK_RSA_CREATEOBJECT) {
+        long im = find_attr(pTemplate, ulCount, CKA_MODULUS);
+        long ie = find_attr(pTemplate, ulCount, CKA_PUBLIC_EXPONENT);
+        if (im < 0 || ie < 0) return CKR_TEMPLATE_INCOMPLETE;
+        BIGNUM *n = BN_bin2bn(pTemplate[im].pValue,
+                              (int)pTemplate[im].ulValueLen, NULL);
+        BIGNUM *e = BN_bin2bn(pTemplate[ie].pValue,
+                              (int)pTemplate[ie].ulValueLen, NULL);
+        if (!n || !e) { BN_free(n); BN_free(e); return FHSM_RV_HOST_MEMORY; }
+        OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+        if (!bld
+            || OSSL_PARAM_BLD_push_BN(bld, "n", n) != 1
+            || OSSL_PARAM_BLD_push_BN(bld, "e", e) != 1) {
+            OSSL_PARAM_BLD_free(bld); BN_free(n); BN_free(e);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        OSSL_PARAM *params = OSSL_PARAM_BLD_to_param(bld);
+        OSSL_PARAM_BLD_free(bld);
+        BN_free(n); BN_free(e);
+        if (!params) return FHSM_RV_FUNCTION_FAILED;
+        pctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL);
+        if (!pctx || EVP_PKEY_fromdata_init(pctx) != 1
+            || EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) != 1) {
+            if (pctx) EVP_PKEY_CTX_free(pctx);
+            OSSL_PARAM_free(params);
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        }
+        EVP_PKEY_CTX_free(pctx);
+        OSSL_PARAM_free(params);
+
+    } else {
+        return CKR_TEMPLATE_INCONSISTENT;
+    }
+
+    /* Serialize as SubjectPublicKeyInfo for the verify path. */
+    uint8_t *spki = NULL;
+    int spki_len = i2d_PUBKEY(pkey, &spki);
+    EVP_PKEY_free(pkey);
+    if (spki_len <= 0 || !spki) {
+        OPENSSL_free(spki);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+
+    uint32_t handle = 0;
+    fhsm_rv_t rv = fhsm_token_object_add(t, (uint32_t)cko, (uint32_t)ckk,
+                                          label_buf, spki, (size_t)spki_len,
+                                          id_data, id_len, 0, &handle);
+    OPENSSL_free(spki);
+    if (rv != FHSM_RV_OK) return rv;
+    *phObject = handle;
     return FHSM_RV_OK;
 }
 
