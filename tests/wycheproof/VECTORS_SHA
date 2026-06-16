@@ -1,16 +1,1 @@
-# Reference (branch, tag, or commit SHA) of github.com/C2SP/wycheproof
-# to fetch from. For maximum reproducibility put a 40-char hex commit
-# SHA here ; for bootstrapping a branch name like 'main' is acceptable.
-#
-# How to upgrade from 'main' to a pinned SHA (after first successful run) :
-#   1. Get the current HEAD SHA :
-#        git ls-remote https://github.com/C2SP/wycheproof.git HEAD
-#      Copy the 40-char hex from the FIRST COLUMN of the output.
-#   2. Replace the 'main' line below with that hex SHA (no '<' or '>',
-#      no quotes, no leading/trailing whitespace).
-#   3. ./fetch_vectors.sh   # should download the pinned tree
-#   4. ./run_wycheproof.py  # confirm no regression
-#   5. git commit -s -m "tests(wycheproof): pin VECTORS_SHA to <short>"
-#
-# Last bumped : 2026-06-13 (bootstrap with branch 'main')
-main
+6d7cccd0fcb1917368579adeeac10fe802f1b521
