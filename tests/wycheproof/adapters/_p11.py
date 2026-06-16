@@ -231,7 +231,24 @@ class P11Error(RuntimeError):
 
 
 class P11Module:
+    # Singleton-by-path : PKCS#11 mandates a single C_Initialize per
+    # process. When multiple adapters share the same .so, we hand them
+    # the existing instance instead of trying to re-initialize.
+    _instances: dict = {}
+
+    def __new__(cls, path: str):
+        inst = cls._instances.get(path)
+        if inst is not None:
+            return inst
+        inst = super().__new__(cls)
+        cls._instances[path] = inst
+        return inst
+
     def __init__(self, path: str):
+        # Skip re-init when the singleton was already constructed.
+        if getattr(self, "_init_done", False):
+            return
+        self._init_done = True
         # Allow integrity bypass for the smoke / test binary -- the
         # embedded digest is not patched at build time. The Wycheproof
         # harness is dev-only ; both env vars are forbidden in any
