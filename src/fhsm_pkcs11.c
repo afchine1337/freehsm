@@ -2791,6 +2791,11 @@ typedef struct fhsm_session_oaep_s {
 static fhsm_session_oaep_t g_oaep_enc[256];
 static fhsm_session_oaep_t g_oaep_dec[256];
 
+/* Forward decl : mech_is_pss is defined further down (sign/verify
+ * section) but op_init needs it to decide whether to parse a
+ * CK_RSA_PKCS_PSS_PARAMS from the mechanism's pParameter. */
+static int mech_is_pss(uint32_t m);
+
 static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                          CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey) {
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
@@ -3277,7 +3282,7 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
     if (mech_is_pss(op->mechanism)) {
         if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING) <= 0)
             goto cleanup;
-        long saltlen = op->pss_have ? op->pss_saltlen : -1;
+        int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
         if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen) <= 0)
             goto cleanup;
     }
@@ -3459,7 +3464,7 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
             EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING);
             /* Use the caller-supplied salt length when CK_RSA_PKCS_PSS_PARAMS
              * was provided ; otherwise fall back to digest length (-1). */
-            long saltlen = op->pss_have ? op->pss_saltlen : -1;
+            int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
             EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen);
         }
         int vrv = EVP_DigestVerify(mdctx, pSig, ulSigLen, pData, ulDataLen);
