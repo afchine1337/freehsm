@@ -5,6 +5,33 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.4] --- 2026-06-16
+
+The "EdDSA" release. Extends the Wycheproof harness with Ed25519 and Ed448 coverage and ships a quality-of-life polish on the release pipeline.
+
+### Added
+
+* **`CKM_EDDSA`** is now declared and accepted by `C_VerifyInit` / `C_SignInit`. The mechanism routes through the same `hash=NULL` `EVP_DigestVerify` path used for ML-DSA and SLH-DSA --- EdDSA's single-shot internal hashing makes this the natural match.
+* **`C_CreateObject` grows a `CKK_EC_EDWARDS` branch**. It maps the curve OID DER (`1.3.101.112` for Ed25519, `1.3.101.113` for Ed448) to the OpenSSL algorithm name and imports the raw public key via `OSSL_PARAM("pub")`.
+* **`tests/wycheproof/adapters/eddsa.py`** covers Ed25519 + Ed448 with per-curve diagnostics, schema filter (`eddsa_verify_schema_v1.json`) and the singleton `P11Module` pattern.
+
+### Changed
+
+* `scripts/gen_p11_thunks.py` now emits an SPDX-License-Identifier header in the two generated C outputs (`include/fhsm_pkcs11_mechanisms.h` and `src/gen/fhsm_dispatch.c`). The committed copies are regenerated.
+* `.github/workflows/release.yml` adds a defensive `chmod +x scripts/*.sh tests/*.sh ...` in the Build step so a runner that drops the exec bit on `actions/checkout` cannot break `make integrity` again.
+
+### Validation
+
+```
+ecdsa     match= 3098  viol= 0  skip=18794
+rsa_pss   match= 1083  viol= 0  skip= 1323
+eddsa     match=  236  viol= 0  skip=    0    (150 Ed25519 + 86 Ed448)
+```
+
+4 417 Wycheproof vectors pass with zero violations across the three asymmetric-signature families.
+
+---
+
 ## [1.1.3] --- 2026-06-16
 
 The "Wycheproof" release. FreeHSM C is now validated bit-for-bit against Google's Project Wycheproof crypto test-vector suite for ECDSA (P-256/P-384/P-521) and RSA-PSS (SHA-256/384/512, any salt length). **4 181 / 4 181 vectors pass** with zero violations.

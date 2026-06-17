@@ -68,8 +68,8 @@ extern "C" {
  * ----------------------------------------------------------------------- */
 #define FHSM_VERSION_MAJOR   1
 #define FHSM_VERSION_MINOR   1
-#define FHSM_VERSION_PATCH   3
-#define FHSM_VERSION_STRING  "1.1.3-FIPS"
+#define FHSM_VERSION_PATCH   4
+#define FHSM_VERSION_STRING  "1.1.4-FIPS"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including
