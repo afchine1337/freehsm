@@ -190,6 +190,19 @@ class AesGcmAdapter(Adapter):
             return "skip"
 
         accepted = (rv == _p11.CKR_OK) and (plaintext == msg)
+        outcome_violation = (
+            (expected == "valid" and not accepted)
+            or (expected == "invalid" and accepted)
+        )
+        if outcome_violation and self.diag.get("_logged_viols", 0) < 6:
+            self.diag["_logged_viols"] = self.diag.get("_logged_viols", 0) + 1
+            print(
+                f"[aes_gcm] viol tcId={test.get('tcId')} "
+                f"keyBits={key_bits} ivBits={iv_bits} tagBits={tag_bits} "
+                f"comment={test.get('comment', '')[:60]!r} "
+                f"expected={expected} rv=0x{rv:08x} "
+                f"pt_match={plaintext == msg}"
+            )
         if expected == "valid":
             return "match" if accepted else "violation"
         if expected == "invalid":
