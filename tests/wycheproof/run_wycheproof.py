@@ -117,7 +117,12 @@ def run_file(adapter: Adapter, path: Path, smoke: bool) -> AdapterStats:
             return stats
 
     groups = data.get("testGroups", [])
+    file_algo = data.get("algorithm")
     for group in groups:
+        # Make the file-level 'algorithm' available to the adapter via
+        # the group dict (some Wycheproof MAC files only carry the
+        # algorithm at the file level).
+        group.setdefault("_algorithm", file_algo)
         tests = group.get("tests", [])
         if smoke:
             n = max(1, min(50, len(tests) // 10))

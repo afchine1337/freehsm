@@ -116,6 +116,9 @@ CKA_PUBLIC_EXPONENT = 0x00000122
 CKM_EDDSA = 0x00001057
 CKM_AES_GCM = 0x00001087
 CKM_SHA256_HMAC = 0x00000251
+CKM_SHA384_HMAC = 0x00000261
+CKM_SHA512_HMAC = 0x00000271
+CKK_GENERIC_SECRET = 0x00000010
 
 CKF_SERIAL_SESSION = 0x00000004
 CKF_RW_SESSION = 0x00000002
@@ -170,7 +173,11 @@ class _AttrBuilder:
     CKK_RSA = CKK_RSA
     CKK_EC_EDWARDS = CKK_EC_EDWARDS
     CKK_AES = CKK_AES
+    CKK_GENERIC_SECRET = CKK_GENERIC_SECRET
     CKM_ECDSA = CKM_ECDSA
+    CKM_SHA256_HMAC = CKM_SHA256_HMAC
+    CKM_SHA384_HMAC = CKM_SHA384_HMAC
+    CKM_SHA512_HMAC = CKM_SHA512_HMAC
     CKM_ECDSA_SHA256 = CKM_ECDSA_SHA256
     CKM_ECDSA_SHA384 = CKM_ECDSA_SHA384
     CKM_ECDSA_SHA512 = CKM_ECDSA_SHA512
@@ -284,6 +291,7 @@ class P11Module:
             "C_VerifyInit", "C_Verify",
             "C_EncryptInit", "C_Encrypt",
             "C_DecryptInit", "C_Decrypt",
+            "C_SignInit", "C_Sign",
         ):
             try:
                 getattr(self.lib, name).restype = CK_ULONG
@@ -415,6 +423,25 @@ class P11Session:
             s, CK_ULONG(len(signature) if signature else 0),
         )
         return rv
+
+    def sign(self, key: int, mech: CK_MECHANISM,
+             data: bytes, out_size: int) -> tuple[int, bytes]:
+        """Returns (CKR_*, signature bytes). On failure signature is empty."""
+        rv = self.mod.lib.C_SignInit(CK_ULONG(self.h), byref(mech),
+                                      CK_ULONG(key))
+        if rv != CKR_OK:
+            return rv, b""
+        d = (c_ubyte * len(data))(*data) if data else None
+        out_buf = (c_ubyte * max(1, out_size))()
+        out_len = CK_ULONG(out_size)
+        rv = self.mod.lib.C_Sign(
+            CK_ULONG(self.h),
+            d, CK_ULONG(len(data) if data else 0),
+            out_buf, byref(out_len),
+        )
+        if rv != CKR_OK:
+            return rv, b""
+        return rv, bytes(out_buf[:out_len.value])
 
     def decrypt(self, key: int, mech: CK_MECHANISM,
                 ciphertext: bytes) -> tuple[int, bytes]:

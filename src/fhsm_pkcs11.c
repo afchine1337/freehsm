@@ -3308,6 +3308,12 @@ gcm_out:
 }
 
 #define CKM_SHA256_HMAC_INIT_VAL  0x00000251UL
+#ifndef CKM_SHA384_HMAC_INIT_VAL
+#define CKM_SHA384_HMAC_INIT_VAL  0x00000261UL
+#endif
+#ifndef CKM_SHA512_HMAC_INIT_VAL
+#define CKM_SHA512_HMAC_INIT_VAL  0x00000271UL
+#endif
 #define CKM_ECDSA                 0x00001041UL
 #define CKM_ECDSA_SHA256          0x00001044UL
 #define CKM_ECDSA_SHA384          0x00001045UL
@@ -3341,6 +3347,8 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     switch (pMechanism->mechanism) {
         case CKM_SHA256_HMAC_INIT_VAL:
+        case CKM_SHA384_HMAC_INIT_VAL:
+        case CKM_SHA512_HMAC_INIT_VAL:
         case CKM_AES_CMAC: case CKM_AES_CMAC_OPENSC_ALIAS:
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
         case CKM_EDDSA:
@@ -3486,15 +3494,25 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
 
-    if (op->mechanism == CKM_SHA256_HMAC_INIT_VAL) {
+    if (op->mechanism == CKM_SHA256_HMAC_INIT_VAL
+        || op->mechanism == CKM_SHA384_HMAC_INIT_VAL
+        || op->mechanism == CKM_SHA512_HMAC_INIT_VAL) {
         const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
         fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
+        fhsm_hash_t hash = FHSM_HASH_SHA256;
         size_t need = 32;
+        if (op->mechanism == CKM_SHA384_HMAC_INIT_VAL) {
+            hash = FHSM_HASH_SHA384;
+            need = 48;
+        } else if (op->mechanism == CKM_SHA512_HMAC_INIT_VAL) {
+            hash = FHSM_HASH_SHA512;
+            need = 64;
+        }
         if (pSignature == NULL) { *pulSignatureLen = need; return FHSM_RV_OK; }
         if (*pulSignatureLen < need) { *pulSignatureLen = need; return 0x00000150UL; }
         size_t mac_len = *pulSignatureLen;
-        rv = fhsm_hmac(FHSM_HASH_SHA256, FHSM_SLICE(kv, kvl),
+        rv = fhsm_hmac(hash, FHSM_SLICE(kv, kvl),
                         FHSM_SLICE(pData, ulDataLen), pSignature, &mac_len);
         *pulSignatureLen = mac_len;
         op->active = 0;
@@ -3553,6 +3571,8 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     switch (pMechanism->mechanism) {
         case CKM_SHA256_HMAC_INIT_VAL:
+        case CKM_SHA384_HMAC_INIT_VAL:
+        case CKM_SHA512_HMAC_INIT_VAL:
         case CKM_AES_CMAC: case CKM_AES_CMAC_OPENSC_ALIAS:
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
         case CKM_EDDSA:

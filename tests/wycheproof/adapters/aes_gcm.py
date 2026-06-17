@@ -135,9 +135,11 @@ class AesGcmAdapter(Adapter):
         # OpenSSL 3.x default provider hard-caps the AES-GCM IV at 64
         # bytes (512 bits) in GCM_IV_MAX_SIZE. Anything longer is a
         # provider limitation, not a FreeHSM module bug, so we surface
-        # it as a skip with its own diag bucket.
+        # it as a skip with its own per-size diag bucket.
         if iv_bits > 512:
             self.diag["iv_over_openssl_limit"] += 1
+            bucket = f"iv_skip_{iv_bits}_bits"
+            self.diag[bucket] = self.diag.get(bucket, 0) + 1
             return "skip"
         if tag_bits == 0 or tag_bits > 128 or tag_bits % 8 != 0:
             return "skip"
