@@ -215,6 +215,20 @@ class RsaOaepAdapter(Adapter):
             return "skip"
 
         accepted = (rv == _p11.CKR_OK) and (plaintext == msg)
+        outcome_violation = (
+            (expected == "valid" and not accepted)
+            or (expected == "invalid" and accepted)
+        )
+        if outcome_violation and self.diag.get("_logged_viols", 0) < 6:
+            self.diag["_logged_viols"] = self.diag.get("_logged_viols", 0) + 1
+            ptmatch = (plaintext == msg)
+            print(
+                f"[rsa_oaep] viol tcId={test.get('tcId')} sha={sha} "
+                f"mgfSha={mgf_sha} label_len={len(label)} ct_len={len(ct)} "
+                f"comment={test.get('comment', '')[:40]!r} "
+                f"expected={expected} rv=0x{rv:08x} "
+                f"pt_len={len(plaintext)} pt_match={ptmatch}"
+            )
         if expected == "valid":
             return "match" if accepted else "violation"
         if expected == "invalid":
