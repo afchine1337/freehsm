@@ -1473,27 +1473,16 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     CK_ULONG ckk = 0;
     memcpy(&ckk, pTemplate[i].pValue, sizeof(CK_ULONG));
 
-    /* Three supported object classes :
+    /* Three supported object classes are handled below :
      *   - CKO_PUBLIC_KEY : EC / Edwards / RSA, normalised into SPKI DER.
      *   - CKO_SECRET_KEY : AES / generic-secret, the CKA_VALUE bytes
      *     stored verbatim as the object's value (the symmetric crypto
      *     path consumes them directly via fhsm_token_object_get).
-     *   - everything else : CKR_TEMPLATE_INCONSISTENT. */
-    if (cko == CKO_SECRET_KEY) {
-        long iv = find_attr(pTemplate, ulCount, CKA_VALUE);
-        if (iv < 0) return CKR_TEMPLATE_INCOMPLETE;
-        uint32_t handle = 0;
-        fhsm_rv_t rv = fhsm_token_object_add(
-            t, (uint32_t)cko, (uint32_t)ckk,
-            label_buf,
-            (const uint8_t *)pTemplate[iv].pValue,
-            (size_t)pTemplate[iv].ulValueLen,
-            id_data, id_len, 0, &handle);
-        if (rv != FHSM_RV_OK) return rv;
-        *phObject = handle;
-        return FHSM_RV_OK;
-    }
-    if (cko != CKO_PUBLIC_KEY) return CKR_TEMPLATE_INCONSISTENT;
+     *   - everything else : CKR_TEMPLATE_INCONSISTENT.
+     * The two early-fail checks below are split because CKO_SECRET_KEY
+     * needs the optional label / ID lookup below to be in scope. */
+    if (cko != CKO_PUBLIC_KEY && cko != CKO_SECRET_KEY)
+        return CKR_TEMPLATE_INCONSISTENT;
 
     /* Optional : CKA_LABEL, CKA_ID. */
     char label_buf[64] = "";
@@ -1510,6 +1499,22 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     if (i >= 0) {
         id_data = (const uint8_t *)pTemplate[i].pValue;
         id_len  = pTemplate[i].ulValueLen;
+    }
+
+    /* CKO_SECRET_KEY : store the raw CKA_VALUE bytes directly. */
+    if (cko == CKO_SECRET_KEY) {
+        long iv = find_attr(pTemplate, ulCount, CKA_VALUE);
+        if (iv < 0) return CKR_TEMPLATE_INCOMPLETE;
+        uint32_t handle = 0;
+        fhsm_rv_t rv = fhsm_token_object_add(
+            t, (uint32_t)cko, (uint32_t)ckk,
+            label_buf,
+            (const uint8_t *)pTemplate[iv].pValue,
+            (size_t)pTemplate[iv].ulValueLen,
+            id_data, id_len, 0, &handle);
+        if (rv != FHSM_RV_OK) return rv;
+        *phObject = handle;
+        return FHSM_RV_OK;
     }
 
     /* ---- Build an EVP_PKEY then serialize as SubjectPublicKeyInfo. ---- */
