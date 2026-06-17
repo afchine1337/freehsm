@@ -5,6 +5,34 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.7] --- 2026-06-17
+
+The "ML-KEM" release. Adds post-quantum coverage (FIPS 203) to the Wycheproof harness, lifting FreeHSM C to a **seventh** cleanly-validated crypto family — the first post-quantum primitive to be bit-for-bit verified against an external corpus.
+
+### Added
+
+* **ML-KEM (FIPS 203) Wycheproof adapter** (`tests/wycheproof/adapters/mlkem.py`). Drives `CKM_ML_KEM_OP` decapsulation against the `mlkem_*_semi_expanded_decaps_test.json` corpus for ML-KEM-512 / 768 / 1024 (21 vectors total, all three parameter sets). Decision rule honours FIPS 203 §7.3 implicit rejection : `valid` requires `rv == OK` (and `ss == K` when the corpus provides it), `invalid` accepts either a structural reject (`rv != OK`) or an implicit reject (`ss != K`).
+* **Raw FIPS 203 `dk` import path in `C_DecapsulateKey`**. The Wycheproof semi-expanded corpus carries the decapsulation key as raw 1 632 / 2 400 / 3 168 bytes (FIPS 203 expanded form) rather than a PKCS#8 envelope. The module now detects the parameter set from the canonical key length and re-imports via `EVP_PKEY_fromdata(EVP_PKEY_KEYPAIR, OSSL_PKEY_PARAM_PRIV_KEY)`, falling back from `d2i_AutoPrivateKey` when the latter rejects the raw blob. Both DER and raw paths produce a structurally identical `EVP_PKEY *`, so the rest of the decapsulation flow is unchanged.
+* **PKCS#11 v3.0 plumbing in the harness `_p11.py`** : `C_DecapsulateKey` / `C_EncapsulateKey` / `C_GetAttributeValue` are now bound and exposed via `P11Session.decapsulate()` and `P11Session.get_attribute_value()`. Adds the `CKK_ML_KEM` (`0x3C`) and `CKM_ML_KEM_OP` (`0x403D`) constants plus `EXTRACTABLE` / `SENSITIVE` to the attribute-builder DSL.
+
+### Fixed
+
+* **Critical : harness DEK not loaded on token re-runs**. `fhsm_token_object_add()` requires the per-token DEK to be in memory (set on USER login). The harness `_bootstrap_token()` short-circuits when the token file already exists, so a second run with persisted state would enter `open_session()` without ever logging in — `t->dek` stayed `NULL` and every `C_CreateObject` returned `CKR_USER_NOT_LOGGED_IN` (`0x101`), wiping out every adapter that imports a key. `open_session()` now performs an idempotent `C_Login(USER)` with the bootstrap PIN ; `CKR_USER_ALREADY_LOGGED_IN` (`0x100`) is treated as success. Restores the six previously-validated families and unlocks the new ML-KEM path in one move.
+
+### Validation
+
+```
+ecdsa     match= 3098  viol= 0
+eddsa     match=  236  viol= 0
+rsa_pss   match= 1083  viol= 0
+rsa_oaep  match=  788  viol= 0
+aes_gcm   match=  310  viol= 0
+hmac      match=  522  viol= 0
+mlkem     match=   21  viol= 0
+─────────────────────────────────
+TOTAL     match= 6058  viol= 0   across 7 PKCS#11 v3.2 families
+```
+
 ## [1.1.6] --- 2026-06-17
 
 The "RSA-OAEP" release. Extends the Wycheproof harness to a sixth crypto family and brings the total cleanly-validated vector count to 6 037 with zero violations across **every** PKCS#11 v3.2 mainstream primitive.

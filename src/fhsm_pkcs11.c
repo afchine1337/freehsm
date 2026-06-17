@@ -64,6 +64,7 @@
 #include <openssl/core.h>     /* OSSL_PARAM */
 #include <openssl/core_names.h>
 #include <openssl/param_build.h> /* OSSL_PARAM_BLD */
+#include <openssl/err.h>      /* ERR_peek_last_error (ML-KEM debug only) */
 
 /* CK_RV is identical to fhsm_rv_t numerically. */
 typedef unsigned long  CK_RV;
@@ -2175,7 +2176,48 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 
     const uint8_t *p = kv;
     EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
-    if (!pkey) return FHSM_RV_FUNCTION_FAILED;
+    if (!pkey) {
+        /* Raw ML-KEM private key import fallback. The Wycheproof
+         * mlkem_{512,768,1024}_semi_expanded_decaps_test.json files
+         * provide 1632 / 2400 / 3168 raw bytes (FIPS 203 expanded
+         * decapsulation key dk) rather than a PKCS#8 envelope.
+         * OpenSSL 3.5 exposes the raw import via EVP_PKEY_fromdata
+         * with OSSL_PKEY_PARAM_PRIV_KEY. */
+        const char *alg = NULL;
+        if (kvl == 1632)      alg = "ML-KEM-512";
+        else if (kvl == 2400) alg = "ML-KEM-768";
+        else if (kvl == 3168) alg = "ML-KEM-1024";
+        if (alg) {
+            EVP_PKEY_CTX *kctx = EVP_PKEY_CTX_new_from_name(NULL, alg, NULL);
+            if (kctx) {
+                if (EVP_PKEY_fromdata_init(kctx) > 0) {
+                    OSSL_PARAM params[2] = {
+                        OSSL_PARAM_construct_octet_string(
+                            OSSL_PKEY_PARAM_PRIV_KEY,
+                            (void *)kv, (size_t)kvl),
+                        OSSL_PARAM_construct_end(),
+                    };
+                    /* For ML-KEM the expanded dk implicitly carries the
+                     * public component ; OpenSSL 3.5's keymgmt requires
+                     * EVP_PKEY_KEYPAIR (not PRIVATE_KEY-only) for the
+                     * consistency dance. */
+                    int rcfd = EVP_PKEY_fromdata(kctx, &pkey,
+                                                  EVP_PKEY_KEYPAIR, params);
+                    if (rcfd <= 0 && getenv("FHSM_DEBUG_MLKEM")) {
+                        unsigned long err = ERR_peek_last_error();
+                        char ebuf[256] = {0};
+                        ERR_error_string_n(err, ebuf, sizeof(ebuf));
+                        fprintf(stderr,
+                            "[fhsm_pkcs11] ML-KEM fromdata failed alg=%s "
+                            "kvl=%zu rc=%d err=0x%lx \"%s\"\n",
+                            alg, (size_t)kvl, rcfd, err, ebuf);
+                    }
+                }
+                EVP_PKEY_CTX_free(kctx);
+            }
+        }
+        if (!pkey) return FHSM_RV_FUNCTION_FAILED;
+    }
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
     if (!ctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
     if (EVP_PKEY_decapsulate_init(ctx, NULL) <= 0) {

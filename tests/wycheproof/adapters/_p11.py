@@ -79,6 +79,8 @@ CKK_EC = 0x00000003
 CKK_AES = 0x0000001F
 CKK_GENERIC_SECRET = 0x00000010
 CKK_EC_EDWARDS = 0x00000040
+CKK_ML_KEM = 0x0000003C
+CKM_ML_KEM_OP = 0x0000403D
 
 CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
@@ -228,6 +230,10 @@ class _AttrBuilder:
     def VALUE(cls, v: bytes): return cls._bytes(CKA_VALUE, v)
     @classmethod
     def DECRYPT(cls, v): return cls._bbool(0x00000105, v)  # CKA_DECRYPT
+    @classmethod
+    def EXTRACTABLE(cls, v): return cls._bbool(0x00000162, v)  # CKA_EXTRACTABLE
+    @classmethod
+    def SENSITIVE(cls, v): return cls._bbool(0x00000103, v)  # CKA_SENSITIVE
 
     @staticmethod
     def MECH(mech_type, param: bytes | None = None) -> CK_MECHANISM:
@@ -298,6 +304,8 @@ class P11Module:
             "C_EncryptInit", "C_Encrypt",
             "C_DecryptInit", "C_Decrypt",
             "C_SignInit", "C_Sign",
+            "C_DecapsulateKey", "C_EncapsulateKey",
+            "C_GetAttributeValue",
         ):
             try:
                 getattr(self.lib, name).restype = CK_ULONG
@@ -381,6 +389,21 @@ class P11Module:
         )
         if rv != CKR_OK:
             raise P11Error("C_OpenSession", rv)
+        # USER login : fhsm_token_object_add() requires a loaded DEK
+        # (set on USER login). On a fresh /tmp the bootstrap path
+        # implicitly loaded a DEK via SO_Login + InitPIN, but on a
+        # re-run with a persisted token the probe short-circuits and
+        # the DEK stays NULL. Logging in here is idempotent and is
+        # safe for verify-only adapters too (USER role does not
+        # restrict any operation we perform).
+        user_pin = (c_ubyte * len(BOOTSTRAP_USER_PIN))(*BOOTSTRAP_USER_PIN)
+        rv = self.lib.C_Login(h, CK_ULONG(CKU_USER),
+                              user_pin, CK_ULONG(len(BOOTSTRAP_USER_PIN)))
+        # CKR_USER_ALREADY_LOGGED_IN (0x100) is harmless ; any other
+        # non-OK indicates a token state we cannot recover from.
+        if rv != CKR_OK and rv != 0x00000100:
+            self.lib.C_CloseSession(h)
+            raise P11Error("C_Login (USER, open_session)", rv)
         return P11Session(self, h.value)
 
     def close(self) -> None:
@@ -472,6 +495,47 @@ class P11Session:
         if rv != CKR_OK:
             return rv, b""
         return rv, bytes(out_buf[:out_len.value])
+
+    def decapsulate(self, priv_key: int, mech: CK_MECHANISM,
+                    ciphertext: bytes,
+                    template: list | None = None) -> tuple[int, int]:
+        """C_DecapsulateKey(hSession, mech, hPrivKey, tmpl, ulCount,
+                            &phNewKey, pCt, ulCtLen).
+
+        Returns (CKR_*, new_key_handle). New key handle is 0 on failure.
+        The shared secret is stored as a CKO_SECRET_KEY (CKK_GENERIC_SECRET)
+        with the SS as CKA_VALUE ; read it back via get_attribute_value().
+        """
+        attrs = template or []
+        n = len(attrs)
+        tmpl = (CK_ATTRIBUTE * max(1, n))(*(a for a, _ in attrs))
+        keep = [k for _, k in attrs]  # noqa: F841
+        new_key = CK_ULONG(0)
+        ct = (c_ubyte * len(ciphertext))(*ciphertext) if ciphertext else \
+             (c_ubyte * 1)()
+        rv = self.mod.lib.C_DecapsulateKey(
+            CK_ULONG(self.h), byref(mech), CK_ULONG(priv_key),
+            tmpl, CK_ULONG(n),
+            byref(new_key),
+            ct, CK_ULONG(len(ciphertext) if ciphertext else 0),
+        )
+        return rv, new_key.value
+
+    def get_attribute_value(self, obj_handle: int,
+                            attr_type: int, buf_size: int = 4096) -> bytes:
+        """Single-attribute C_GetAttributeValue. Returns the raw bytes
+        of the requested attribute, or b"" on failure."""
+        attr = CK_ATTRIBUTE()
+        attr.type = CK_ULONG(attr_type)
+        buf = (c_ubyte * max(1, buf_size))()
+        attr.pValue = cast(buf, c_void_p)
+        attr.ulValueLen = CK_ULONG(buf_size)
+        rv = self.mod.lib.C_GetAttributeValue(
+            CK_ULONG(self.h), CK_ULONG(obj_handle), byref(attr), CK_ULONG(1),
+        )
+        if rv != CKR_OK:
+            return b""
+        return bytes(buf[:attr.ulValueLen])
 
     def close(self) -> None:
         if not self._closed:
