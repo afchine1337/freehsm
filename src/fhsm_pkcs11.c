@@ -1214,6 +1214,15 @@ typedef struct fhsm_op_s {
     int         pss_have;
     long        pss_saltlen;   /* salt length in bytes */
     uint32_t    pss_mgf;       /* CKG_MGF1_SHA* identifier */
+    /* CK_GCM_PARAMS members captured at EncryptInit / DecryptInit. The
+     * static buffers are intentionally generous to cover Wycheproof's
+     * LongIv / large-AAD cases (some test vectors use 1024-bit IVs). */
+    int         gcm_have;
+    uint8_t     gcm_iv[256];
+    size_t      gcm_iv_len;
+    uint8_t     gcm_aad[512];
+    size_t      gcm_aad_len;
+    size_t      gcm_tag_len;   /* in BYTES (ulTagBits / 8) */
 } fhsm_op_t;
 static fhsm_op_t g_op_enc[256];
 static fhsm_op_t g_op_dec[256];
@@ -1464,8 +1473,26 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     CK_ULONG ckk = 0;
     memcpy(&ckk, pTemplate[i].pValue, sizeof(CK_ULONG));
 
-    /* For now only handle public-key imports : everything else is out of
-     * scope for the Wycheproof harness that drove this implementation. */
+    /* Three supported object classes :
+     *   - CKO_PUBLIC_KEY : EC / Edwards / RSA, normalised into SPKI DER.
+     *   - CKO_SECRET_KEY : AES / generic-secret, the CKA_VALUE bytes
+     *     stored verbatim as the object's value (the symmetric crypto
+     *     path consumes them directly via fhsm_token_object_get).
+     *   - everything else : CKR_TEMPLATE_INCONSISTENT. */
+    if (cko == CKO_SECRET_KEY) {
+        long iv = find_attr(pTemplate, ulCount, CKA_VALUE);
+        if (iv < 0) return CKR_TEMPLATE_INCOMPLETE;
+        uint32_t handle = 0;
+        fhsm_rv_t rv = fhsm_token_object_add(
+            t, (uint32_t)cko, (uint32_t)ckk,
+            label_buf,
+            (const uint8_t *)pTemplate[iv].pValue,
+            (size_t)pTemplate[iv].ulValueLen,
+            id_data, id_len, 0, &handle);
+        if (rv != FHSM_RV_OK) return rv;
+        *phObject = handle;
+        return FHSM_RV_OK;
+    }
     if (cko != CKO_PUBLIC_KEY) return CKR_TEMPLATE_INCONSISTENT;
 
     /* Optional : CKA_LABEL, CKA_ID. */
@@ -2848,10 +2875,48 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     op->key_handle = (uint32_t)hKey;
     op->mechanism  = (uint32_t)pMechanism->mechanism;
     op->have_iv    = 0;
-    if (pMechanism->mechanism == CKM_AES_GCM && pMechanism->pParameter
-        && pMechanism->ulParameterLen >= 12) {
-        memcpy(op->iv, pMechanism->pParameter, 12);
-        op->have_iv = 1;
+    op->gcm_have   = 0;
+    op->gcm_iv_len = 0;
+    op->gcm_aad_len = 0;
+    op->gcm_tag_len = 16;        /* default 128-bit tag */
+    if (pMechanism->mechanism == CKM_AES_GCM && pMechanism->pParameter) {
+        /* Two calling conventions are accepted :
+         *  - CK_GCM_PARAMS struct : { pIv, ulIvLen, ulIvBits, pAAD,
+         *    ulAADLen, ulTagBits } = 6 CK_ULONG-sized words = 48 bytes
+         *    on a 64-bit ABI. This is the PKCS#11 v3.0+ canonical form
+         *    and the one Wycheproof / our harness use.
+         *  - 12 raw IV bytes : the legacy short-cut OpenSC's
+         *    pkcs11-tool sends with --iv. AAD empty, tag 16 bytes. */
+        if (pMechanism->ulParameterLen >= 6 * sizeof(CK_ULONG)) {
+            const CK_ULONG *p = (const CK_ULONG *)pMechanism->pParameter;
+            const uint8_t *iv_ptr  = (const uint8_t *)(uintptr_t)p[0];
+            size_t         iv_len  = (size_t)p[1];
+            /* p[2] = ulIvBits, derivable from iv_len for our purposes */
+            const uint8_t *aad_ptr = (const uint8_t *)(uintptr_t)p[3];
+            size_t         aad_len = (size_t)p[4];
+            size_t         tag_bits = (size_t)p[5];
+            if (iv_len > sizeof(op->gcm_iv)
+                || aad_len > sizeof(op->gcm_aad)
+                || tag_bits == 0 || tag_bits > 128 || (tag_bits & 7)) {
+                return FHSM_RV_ARGUMENTS_BAD;
+            }
+            if (iv_len && iv_ptr) memcpy(op->gcm_iv,  iv_ptr,  iv_len);
+            if (aad_len && aad_ptr) memcpy(op->gcm_aad, aad_ptr, aad_len);
+            op->gcm_iv_len  = iv_len;
+            op->gcm_aad_len = aad_len;
+            op->gcm_tag_len = tag_bits / 8;
+            op->gcm_have    = 1;
+        } else if (pMechanism->ulParameterLen >= 12) {
+            memcpy(op->iv, pMechanism->pParameter, 12);
+            op->have_iv = 1;
+            /* Also mirror into the new GCM fields so C_Decrypt can use a
+             * single code path. */
+            memcpy(op->gcm_iv, pMechanism->pParameter, 12);
+            op->gcm_iv_len  = 12;
+            op->gcm_aad_len = 0;
+            op->gcm_tag_len = 16;
+            op->gcm_have    = 1;
+        }
     }
     /* AES-CBC/CBC-PAD use a 16-byte IV passed directly as pParameter. */
     if ((pMechanism->mechanism == CKM_AES_CBC ||
@@ -3159,21 +3224,76 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         return FHSM_RV_OK;
     }
 
-    /* --- AES-256-GCM path (symmetric) --- */
+    /* --- AES-GCM path (symmetric) ---
+     * The PKCS#11 v3.x calling convention is "ciphertext || tag" : the
+     * caller appends the authentication tag to the encrypted bytes and
+     * gives us the combined buffer. The tag length is taken from the
+     * CK_GCM_PARAMS struct (default 16 bytes) and the IV/AAD come from
+     * the same struct (captured at DecryptInit). */
     if (op->mechanism != CKM_AES_GCM || kt != CKK_AES) {
         op->active = 0; return FHSM_RV_MECHANISM_INVALID;
     }
-    if (ulEncLen < 16) { op->active = 0; return FHSM_RV_ENCRYPTED_DATA_INVALID; }
-    size_t plaintext_len = ulEncLen - 16;
+    size_t tag_len = op->gcm_tag_len ? op->gcm_tag_len : 16;
+    if (ulEncLen < tag_len) {
+        op->active = 0; return FHSM_RV_ENCRYPTED_DATA_INVALID;
+    }
+    size_t plaintext_len = ulEncLen - tag_len;
     if (pData == NULL) { *pulDataLen = plaintext_len; return FHSM_RV_OK; }
-    if (*pulDataLen < plaintext_len) { *pulDataLen = plaintext_len; return 0x00000150UL; }
+    if (*pulDataLen < plaintext_len) {
+        *pulDataLen = plaintext_len; return 0x00000150UL;
+    }
     size_t out_len = *pulDataLen;
-    rv = fhsm_aes_gcm_decrypt(FHSM_SLICE(kv, kvl),
-                              FHSM_SLICE(op->iv, 12),
-                              FHSM_SLICE("", 0),
-                              FHSM_SLICE(pEnc, plaintext_len),
-                              pEnc + plaintext_len,
-                              pData, &out_len);
+    /* Inline OpenSSL call so the IV and tag lengths can be set per the
+     * caller-provided CK_GCM_PARAMS instead of the 12/16 hard-coded
+     * pair the helper accepts. This lets us exercise Wycheproof's
+     * non-default IV / tag sizes (SmallIv, LongIv, 32/64-bit tags). */
+    const uint8_t *iv_ptr = op->gcm_iv_len ? op->gcm_iv : op->iv;
+    size_t iv_len = op->gcm_iv_len ? op->gcm_iv_len : 12;
+
+    const EVP_CIPHER *cipher = NULL;
+    switch (kvl) {
+        case 16: cipher = EVP_aes_128_gcm(); break;
+        case 24: cipher = EVP_aes_192_gcm(); break;
+        case 32: cipher = EVP_aes_256_gcm(); break;
+        default: op->active = 0; return FHSM_RV_KEY_SIZE_RANGE;
+    }
+
+    EVP_CIPHER_CTX *gctx = EVP_CIPHER_CTX_new();
+    if (!gctx) { op->active = 0; return FHSM_RV_HOST_MEMORY; }
+
+    rv = FHSM_RV_FUNCTION_FAILED;
+    if (EVP_DecryptInit_ex(gctx, cipher, NULL, NULL, NULL) != 1) goto gcm_out;
+    if (iv_len != 12) {
+        if (EVP_CIPHER_CTX_ctrl(gctx, EVP_CTRL_GCM_SET_IVLEN,
+                                 (int)iv_len, NULL) != 1) goto gcm_out;
+    }
+    if (EVP_DecryptInit_ex(gctx, NULL, NULL, kv, iv_ptr) != 1) goto gcm_out;
+
+    int gxl = 0;
+    if (op->gcm_aad_len > 0) {
+        if (EVP_DecryptUpdate(gctx, NULL, &gxl,
+                              op->gcm_aad, (int)op->gcm_aad_len) != 1)
+            goto gcm_out;
+    }
+    if (EVP_DecryptUpdate(gctx, pData, &gxl,
+                          pEnc, (int)plaintext_len) != 1) goto gcm_out;
+    size_t produced = (size_t)gxl;
+
+    if (EVP_CIPHER_CTX_ctrl(gctx, EVP_CTRL_GCM_SET_TAG, (int)tag_len,
+                            (void *)(pEnc + plaintext_len)) != 1) goto gcm_out;
+    if (EVP_DecryptFinal_ex(gctx, pData + produced, &gxl) != 1) {
+        /* Tag mismatch : zeroize the partial plaintext (FIPS 140-3
+         * §7.10.4 AEAD authenticity). */
+        fhsm_zeroize(pData, *pulDataLen);
+        rv = FHSM_RV_ENCRYPTED_DATA_INVALID;
+        goto gcm_out;
+    }
+    produced += (size_t)gxl;
+    out_len = produced;
+    rv = FHSM_RV_OK;
+
+gcm_out:
+    EVP_CIPHER_CTX_free(gctx);
     *pulDataLen = out_len;
     op->active = 0;
     (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,

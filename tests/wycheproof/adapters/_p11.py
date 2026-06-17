@@ -82,6 +82,7 @@ CKK_EC_EDWARDS = 0x00000040
 
 CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
+CKA_VALUE = 0x00000011
 CKA_KEY_TYPE = 0x00000100
 CKA_SENSITIVE = 0x00000103
 CKA_VERIFY = 0x0000010A
@@ -164,14 +165,17 @@ class _AttrBuilder:
     # Re-export constants for the DSL.
     CKO_PUBLIC_KEY = CKO_PUBLIC_KEY
     CKO_PRIVATE_KEY = CKO_PRIVATE_KEY
+    CKO_SECRET_KEY = CKO_SECRET_KEY
     CKK_EC = CKK_EC
     CKK_RSA = CKK_RSA
     CKK_EC_EDWARDS = CKK_EC_EDWARDS
+    CKK_AES = CKK_AES
     CKM_ECDSA = CKM_ECDSA
     CKM_ECDSA_SHA256 = CKM_ECDSA_SHA256
     CKM_ECDSA_SHA384 = CKM_ECDSA_SHA384
     CKM_ECDSA_SHA512 = CKM_ECDSA_SHA512
     CKM_EDDSA = CKM_EDDSA
+    CKM_AES_GCM = CKM_AES_GCM
 
     @staticmethod
     def _ulong(attr_type, value):
@@ -207,6 +211,10 @@ class _AttrBuilder:
     def MODULUS(cls, v: bytes): return cls._bytes(CKA_MODULUS, v)
     @classmethod
     def PUBLIC_EXPONENT(cls, v: bytes): return cls._bytes(CKA_PUBLIC_EXPONENT, v)
+    @classmethod
+    def VALUE(cls, v: bytes): return cls._bytes(CKA_VALUE, v)
+    @classmethod
+    def DECRYPT(cls, v): return cls._bbool(0x00000105, v)  # CKA_DECRYPT
 
     @staticmethod
     def MECH(mech_type, param: bytes | None = None) -> CK_MECHANISM:
@@ -274,6 +282,8 @@ class P11Module:
             "C_InitToken", "C_InitPIN", "C_Login", "C_Logout",
             "C_CreateObject", "C_DestroyObject",
             "C_VerifyInit", "C_Verify",
+            "C_EncryptInit", "C_Encrypt",
+            "C_DecryptInit", "C_Decrypt",
         ):
             try:
                 getattr(self.lib, name).restype = CK_ULONG
@@ -405,6 +415,25 @@ class P11Session:
             s, CK_ULONG(len(signature) if signature else 0),
         )
         return rv
+
+    def decrypt(self, key: int, mech: CK_MECHANISM,
+                ciphertext: bytes) -> tuple[int, bytes]:
+        """Returns (CKR_*, plaintext bytes). On failure plaintext is empty."""
+        rv = self.mod.lib.C_DecryptInit(CK_ULONG(self.h), byref(mech),
+                                         CK_ULONG(key))
+        if rv != CKR_OK:
+            return rv, b""
+        ct = (c_ubyte * len(ciphertext))(*ciphertext) if ciphertext else None
+        out_buf = (c_ubyte * max(1, len(ciphertext)))()
+        out_len = CK_ULONG(len(ciphertext))
+        rv = self.mod.lib.C_Decrypt(
+            CK_ULONG(self.h),
+            ct, CK_ULONG(len(ciphertext) if ciphertext else 0),
+            out_buf, byref(out_len),
+        )
+        if rv != CKR_OK:
+            return rv, b""
+        return rv, bytes(out_buf[:out_len.value])
 
     def close(self) -> None:
         if not self._closed:
