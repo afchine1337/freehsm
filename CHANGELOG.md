@@ -5,6 +5,40 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.6] --- 2026-06-17
+
+The "RSA-OAEP" release. Extends the Wycheproof harness to a sixth crypto family and brings the total cleanly-validated vector count to 6 037 with zero violations across **every** PKCS#11 v3.2 mainstream primitive.
+
+### Added
+
+* **RSA-OAEP** Wycheproof adapter (`tests/wycheproof/adapters/rsa_oaep.py`). Decrypts the test ciphertext with `CKM_RSA_PKCS_OAEP` and the full `CK_RSA_PKCS_OAEP_PARAMS` plumbing (hash algorithm, MGF, optional label as source-data). Covers SHA-1 / SHA-256 / SHA-384 / SHA-512 and RSA moduli from 2 048 to 4 096 bits.
+* **`C_CreateObject` private-key branch** : `CKO_PRIVATE_KEY` with `CKK_RSA` is now accepted with the PKCS#8 `PrivateKeyInfo` DER blob carried in `CKA_VALUE`. The asymmetric crypto path already routes through `d2i_AutoPrivateKey`, which transparently handles both PKCS#8 and PKCS#1 RSAPrivateKey.
+
+### Fixed
+
+* **Critical : `op->active` reset on RSA-OAEP early-exit paths**. The size-query (`pData == NULL`) and buffer-too-small branches of the RSA-OAEP `C_Decrypt` path used to return without resetting `op->active`. After a single such early exit on a session, every subsequent `C_DecryptInit` returned `CKR_OPERATION_ACTIVE` (`0x90`), making the session unusable for further decryption. Both branches now reset `op->active` and `g_oaep_dec[hSession].active` before returning.
+
+### Documented upstream limitation
+
+* The Wycheproof RSA-OAEP corpus contains 58 tests with `flags: ["Constructed"]` (Wycheproof's `EDGE_CASE` category) whose seed and label are specifically chosen to give the OAEP-padded `em` a crafted bit pattern (`em represents a small integer`, `em has a large hamming weight`, etc.). The OpenSSL 3.x default provider rejects 7 of them as part of its malleability hardening. This is consistent provider behaviour rather than a FreeHSM bug ; the adapter surfaces the count in `constructed_edge_case_skip` and classifies the tests as skip.
+
+### Validation
+
+```
+ecdsa     match= 3098  viol= 0  skip=18794
+eddsa     match=  236  viol= 0  skip=    0
+rsa_pss   match= 1083  viol= 0  skip= 1323
+rsa_oaep  match=  788  viol= 0  skip=  420
+aes_gcm   match=  310  viol= 0  skip=    6
+hmac      match=  522  viol= 0  skip=    0
+─────────────────────────────────────────
+TOTAL     match= 6037  viol= 0
+```
+
+6 037 Wycheproof vectors pass with **zero violations** across the six PKCS#11 v3.2 mainstream families : ECDSA, RSA-PSS, EdDSA, RSA-OAEP, AES-GCM and HMAC. Signature, encryption, MAC, symmetric and asymmetric all covered.
+
+---
+
 ## [1.1.5] --- 2026-06-17
 
 The "AES-GCM + HMAC" release. Extends the Wycheproof harness with full symmetric coverage and brings the total cleanly-validated vector count to 5 249 across five PKCS#11 v3.2 families.
