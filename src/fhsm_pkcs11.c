@@ -1474,15 +1474,17 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     CK_ULONG ckk = 0;
     memcpy(&ckk, pTemplate[i].pValue, sizeof(CK_ULONG));
 
-    /* Three supported object classes are handled below :
-     *   - CKO_PUBLIC_KEY : EC / Edwards / RSA, normalised into SPKI DER.
-     *   - CKO_SECRET_KEY : AES / generic-secret, the CKA_VALUE bytes
-     *     stored verbatim as the object's value (the symmetric crypto
-     *     path consumes them directly via fhsm_token_object_get).
-     *   - everything else : CKR_TEMPLATE_INCONSISTENT.
-     * The two early-fail checks below are split because CKO_SECRET_KEY
-     * needs the optional label / ID lookup below to be in scope. */
-    if (cko != CKO_PUBLIC_KEY && cko != CKO_SECRET_KEY)
+    /* Supported object classes :
+     *   - CKO_PUBLIC_KEY  : EC / Edwards / RSA, normalised into SPKI DER.
+     *   - CKO_SECRET_KEY  : AES / generic-secret, the CKA_VALUE bytes
+     *     stored verbatim as the object's value.
+     *   - CKO_PRIVATE_KEY : RSA private key (CKK_RSA) imported as the
+     *     PKCS#8 PrivateKeyInfo DER blob passed in CKA_VALUE. The sign
+     *     / decrypt path consumes it via d2i_AutoPrivateKey so any
+     *     PKCS#8 / PKCS#1 RSAPrivateKey shape works.
+     *   - anything else   : CKR_TEMPLATE_INCONSISTENT. */
+    if (cko != CKO_PUBLIC_KEY && cko != CKO_SECRET_KEY
+        && cko != CKO_PRIVATE_KEY)
         return CKR_TEMPLATE_INCONSISTENT;
 
     /* Optional : CKA_LABEL, CKA_ID. */
@@ -1502,17 +1504,22 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         id_len  = pTemplate[i].ulValueLen;
     }
 
-    /* CKO_SECRET_KEY : store the raw CKA_VALUE bytes directly. */
-    if (cko == CKO_SECRET_KEY) {
+    /* CKO_SECRET_KEY (any key type) and CKO_PRIVATE_KEY (PKCS#8 DER
+     * in CKA_VALUE) are both stored verbatim --- the symmetric crypto
+     * path reads CKA_VALUE directly, the asymmetric one routes through
+     * d2i_AutoPrivateKey which accepts both PKCS#8 PrivateKeyInfo and
+     * PKCS#1 RSAPrivateKey. */
+    if (cko == CKO_SECRET_KEY || cko == CKO_PRIVATE_KEY) {
         long iv = find_attr(pTemplate, ulCount, CKA_VALUE);
         if (iv < 0) return CKR_TEMPLATE_INCOMPLETE;
+        uint8_t flags = (cko == CKO_PRIVATE_KEY) ? FHSM_OBJF_SENSITIVE : 0;
         uint32_t handle = 0;
         fhsm_rv_t rv = fhsm_token_object_add(
             t, (uint32_t)cko, (uint32_t)ckk,
             label_buf,
             (const uint8_t *)pTemplate[iv].pValue,
             (size_t)pTemplate[iv].ulValueLen,
-            id_data, id_len, 0, &handle);
+            id_data, id_len, flags, &handle);
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
         return FHSM_RV_OK;
