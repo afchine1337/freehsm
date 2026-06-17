@@ -22,13 +22,25 @@
 
 from __future__ import annotations
 
-# WARNING : this file is named hmac.py so `import hmac` would shadow the
-# stdlib module from within this module's namespace. Use secrets.compare_
-# digest for the constant-time comparison --- same primitive, no name
-# collision.
-import secrets
+# WARNING : this file is named hmac.py so any `import hmac` from this
+# module --- or any import that transitively pulls in stdlib hmac
+# (secrets does) --- resolves to this file and circular-imports.
+# We avoid touching stdlib hmac entirely and roll our own
+# constant-time compare. It is not a perfect timing-channel hardening
+# (CPython makes that hard) but the harness only uses it to score
+# Wycheproof verdicts, not as a production primitive.
 
 from run_wycheproof import Adapter  # type: ignore
+
+
+def _ct_eq(a: bytes, b: bytes) -> bool:
+    """Length-then-content comparison, constant-time within a length."""
+    if len(a) != len(b):
+        return False
+    diff = 0
+    for x, y in zip(a, b):
+        diff |= x ^ y
+    return diff == 0
 
 import _p11
 from _p11 import A, P11Module, P11Error  # type: ignore
@@ -173,7 +185,7 @@ class HmacAdapter(Adapter):
             return "violation" if expected == "valid" else "match"
 
         produced_prefix = sig[:tag_bytes]
-        accepted = secrets.compare_digest(produced_prefix, expected_tag)
+        accepted = _ct_eq(produced_prefix, expected_tag)
         if expected == "valid":
             return "match" if accepted else "violation"
         if expected == "invalid":
