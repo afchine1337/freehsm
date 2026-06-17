@@ -81,15 +81,16 @@ class AesGcmAdapter(Adapter):
         super().__init__(module_path)
         self._logged_symbols: set = set()
         self.diag = {
-            "key_128_seen":      0,
-            "key_192_seen":      0,
-            "key_256_seen":      0,
-            "iv_96_seen":        0,
-            "iv_other_seen":     0,
-            "tag_128_seen":      0,
-            "tag_other_seen":    0,
-            "key_import_failed": 0,
-            "unsupported_iv":    0,
+            "key_128_seen":           0,
+            "key_192_seen":           0,
+            "key_256_seen":           0,
+            "iv_96_seen":             0,
+            "iv_other_seen":          0,
+            "tag_128_seen":           0,
+            "tag_other_seen":         0,
+            "key_import_failed":      0,
+            "unsupported_iv":         0,
+            "iv_over_openssl_limit":  0,
         }
         try:
             self.module = P11Module(module_path)
@@ -130,6 +131,13 @@ class AesGcmAdapter(Adapter):
             return "skip"
         if iv_bits % 8 != 0:
             self.diag["unsupported_iv"] += 1
+            return "skip"
+        # OpenSSL 3.x default provider hard-caps the AES-GCM IV at 64
+        # bytes (512 bits) in GCM_IV_MAX_SIZE. Anything longer is a
+        # provider limitation, not a FreeHSM module bug, so we surface
+        # it as a skip with its own diag bucket.
+        if iv_bits > 512:
+            self.diag["iv_over_openssl_limit"] += 1
             return "skip"
         if tag_bits == 0 or tag_bits > 128 or tag_bits % 8 != 0:
             return "skip"
