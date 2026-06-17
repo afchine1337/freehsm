@@ -5,6 +5,30 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.8] --- 2026-06-17
+
+The "AES-CMAC" release. Adds a second MAC family (NIST SP 800-38B) to the Wycheproof harness, lifting FreeHSM C to **eight** cleanly-validated crypto families.
+
+### Added
+
+* **AES-CMAC Wycheproof adapter** (`tests/wycheproof/adapters/aes_cmac.py`). Drives `CKM_AES_CMAC` against the `aes_cmac_test.json` corpus for AES-128 / 192 / 256 (306 vectors, all sizes). Mirrors the `hmac.py` pattern : `C_Sign(msg) -> 16-byte block`, truncate to `tagSize`, constant-time compare. CMAC takes no parameters per PKCS#11 v3.2 §6.5, so the mechanism is built as `(CKM_AES_CMAC, NULL, 0)`.
+* `CKM_AES_CMAC = 0x108C` exposed in `_p11.py` and the attribute-builder DSL for downstream adapters.
+
+### Validation
+
+```
+ecdsa     match= 3098  viol= 0
+eddsa     match=  236  viol= 0
+rsa_pss   match= 1083  viol= 0
+rsa_oaep  match=  788  viol= 0
+aes_gcm   match=  310  viol= 0
+hmac      match=  522  viol= 0
+mlkem     match=   21  viol= 0
+aes_cmac  match=  306  viol= 0
+─────────────────────────────────
+TOTAL     match= 6364  viol= 0   across 8 PKCS#11 v3.2 families
+```
+
 ## [1.1.7] --- 2026-06-17
 
 The "ML-KEM" release. Adds post-quantum coverage (FIPS 203) to the Wycheproof harness, lifting FreeHSM C to a **seventh** cleanly-validated crypto family — the first post-quantum primitive to be bit-for-bit verified against an external corpus.
