@@ -457,8 +457,13 @@ class P11Session:
         if rv != CKR_OK:
             return rv, b""
         ct = (c_ubyte * len(ciphertext))(*ciphertext) if ciphertext else None
-        out_buf = (c_ubyte * max(1, len(ciphertext)))()
-        out_len = CK_ULONG(len(ciphertext))
+        # Generous buffer : Wycheproof uses moduli up to 4096 bits =
+        # 512 bytes ; pad to 8 KB so any plaintext size query reported
+        # by the underlying primitive fits without triggering
+        # CKR_BUFFER_TOO_SMALL.
+        buf_size = max(8192, len(ciphertext) or 1)
+        out_buf = (c_ubyte * buf_size)()
+        out_len = CK_ULONG(buf_size)
         rv = self.mod.lib.C_Decrypt(
             CK_ULONG(self.h),
             ct, CK_ULONG(len(ciphertext) if ciphertext else 0),

@@ -3167,11 +3167,19 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         if (pData == NULL) {
             *pulDataLen = out_len;
             EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
+            /* Per PKCS#11 v3 the operation must terminate when the
+             * caller queries the size --- otherwise we'd strand op-
+             * >active=1 and block every subsequent C_DecryptInit on
+             * this session with CKR_OPERATION_ACTIVE. */
+            op->active = 0;
+            g_oaep_dec[hSession].active = 0;
             return FHSM_RV_OK;
         }
         if (*pulDataLen < out_len) {
             *pulDataLen = out_len;
             EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
+            op->active = 0;
+            g_oaep_dec[hSession].active = 0;
             return 0x00000150UL;
         }
         size_t buf_len = *pulDataLen;
