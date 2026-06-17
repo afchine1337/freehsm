@@ -22,7 +22,11 @@
 
 from __future__ import annotations
 
-import hmac as _stdlib_hmac
+# WARNING : this file is named hmac.py so `import hmac` would shadow the
+# stdlib module from within this module's namespace. Use secrets.compare_
+# digest for the constant-time comparison --- same primitive, no name
+# collision.
+import secrets
 
 from run_wycheproof import Adapter  # type: ignore
 
@@ -169,7 +173,7 @@ class HmacAdapter(Adapter):
             return "violation" if expected == "valid" else "match"
 
         produced_prefix = sig[:tag_bytes]
-        accepted = _stdlib_hmac.compare_digest(produced_prefix, expected_tag)
+        accepted = secrets.compare_digest(produced_prefix, expected_tag)
         if expected == "valid":
             return "match" if accepted else "violation"
         if expected == "invalid":
