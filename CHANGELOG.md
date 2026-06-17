@@ -5,6 +5,43 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.5] --- 2026-06-17
+
+The "AES-GCM + HMAC" release. Extends the Wycheproof harness with full symmetric coverage and brings the total cleanly-validated vector count to 5 249 across five PKCS#11 v3.2 families.
+
+### Added
+
+* **AES-GCM (128 / 192 / 256)** Wycheproof adapter --- decrypt-and-verify path with full `CK_GCM_PARAMS` plumbing (IV, AAD, tag length per test). The module's `op_init` now parses the 6-CK_ULONG struct alongside the legacy 12-byte IV shortcut, captures `gcm_iv` (512 B), `gcm_aad` (4 KiB) and `gcm_tag_len` into `fhsm_op_t`, and `C_Decrypt` for AES-GCM inlines the OpenSSL call so non-default IV / tag lengths are honoured per call.
+* **HMAC SHA-256 / SHA-384 / SHA-512** Wycheproof adapter. The module gains `CKM_SHA384_HMAC` and `CKM_SHA512_HMAC` declarations, the `C_SignInit` switch accepts all three, and the HMAC dispatch in `C_Sign` selects `FHSM_HASH_SHA{256,384,512}` and the matching 32 / 48 / 64-byte MAC length.
+* **`C_CreateObject` symmetric branch** : `CKO_SECRET_KEY` with any key type stores the raw `CKA_VALUE` bytes directly. Unblocks both AES-GCM and HMAC key import without further plumbing in the existing crypto path (which reads keys via `fhsm_token_object_get`).
+* **`tests/wycheproof/adapters/_p11.py`** gains `C_EncryptInit` / `C_Encrypt` / `C_DecryptInit` / `C_Decrypt` / `C_SignInit` / `C_Sign` in the symbol list, exposes `P11Session.decrypt()` and `P11Session.sign()` helpers, and re-exports `CKO_SECRET_KEY` / `CKK_AES` / `CKK_GENERIC_SECRET` / `CKM_AES_GCM` / `CKM_SHA{256,384,512}_HMAC` / `A.VALUE()` / `A.DECRYPT()` through the builder DSL.
+* `tests/wycheproof/run_wycheproof.py` forwards the file-level `algorithm` field into each group dict (`group["_algorithm"]`), allowing MAC adapters to dispatch on the hash without re-opening the file.
+
+### Changed
+
+* `fhsm_op_t` grows GCM-context fields (`gcm_have` / `gcm_iv` / `gcm_aad` / `gcm_tag_len`) and a forward-declared `mech_is_pss` so `op_init` can reference it before the helper is defined.
+* `tests/wycheproof/adapters/hmac.py` rolls its own constant-time compare (3 lines) rather than `import hmac as ...` or `secrets.compare_digest`, both of which transitively pull stdlib `hmac` --- which the file name shadows from the adapter directory's `sys.path` entry.
+
+### Documented limitations
+
+* Wycheproof's `aead_test_schema_v1.json` carries three test groups whose `ivBits` exceeds the OpenSSL default-provider hard cap (`GCM_IV_MAX_SIZE = 64 bytes`, i.e. 512 bits). The adapter classifies these (3 × `ivBits=1024` + 3 × `ivBits=2056`) as skip with a dedicated diagnostic bucket --- this is an upstream OpenSSL limitation, not a FreeHSM module bug.
+
+### Validation
+
+```
+ecdsa     match= 3098  viol= 0  skip=18794
+eddsa     match=  236  viol= 0  skip=    0
+rsa_pss   match= 1083  viol= 0  skip= 1323
+aes_gcm   match=  310  viol= 0  skip=    6
+hmac      match=  522  viol= 0  skip=    0
+─────────────────────────────────────────
+TOTAL     match= 5249  viol= 0
+```
+
+5 249 Wycheproof vectors pass with **zero violations** across ECDSA, EdDSA, RSA-PSS, AES-GCM and HMAC --- the five PKCS#11 v3.2 families a typical FIPS 140-3 application exercises.
+
+---
+
 ## [1.1.4] --- 2026-06-16
 
 The "EdDSA" release. Extends the Wycheproof harness with Ed25519 and Ed448 coverage and ships a quality-of-life polish on the release pipeline.
