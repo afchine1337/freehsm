@@ -1216,11 +1216,12 @@ typedef struct fhsm_op_s {
     uint32_t    pss_mgf;       /* CKG_MGF1_SHA* identifier */
     /* CK_GCM_PARAMS members captured at EncryptInit / DecryptInit. The
      * static buffers are intentionally generous to cover Wycheproof's
-     * LongIv / large-AAD cases (some test vectors use 1024-bit IVs). */
+     * LongIv / large-AAD cases : the corpus has IVs up to 2056 bits
+     * (= 257 bytes) and AADs that can comfortably exceed 1 KiB. */
     int         gcm_have;
-    uint8_t     gcm_iv[256];
+    uint8_t     gcm_iv[512];
     size_t      gcm_iv_len;
-    uint8_t     gcm_aad[512];
+    uint8_t     gcm_aad[4096];
     size_t      gcm_aad_len;
     size_t      gcm_tag_len;   /* in BYTES (ulTagBits / 8) */
 } fhsm_op_t;
