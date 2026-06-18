@@ -41,6 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         opensc \
         gnutls-bin \
         libssl3 \
+        binutils \
         sudo \
         bash \
     && rm -rf /var/lib/apt/lists/*
