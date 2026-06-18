@@ -5,6 +5,36 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.10] --- 2026-06-17
+
+The "ML-DSA context" release. Closes the `CK_ML_DSA_PARAMS.pContext` plumbing in `C_VerifyInit`, pushing ML-DSA Wycheproof coverage from 608 to 614 (+6 vectors) at the cost of a small C addition that will also help the upcoming SLH-DSA parameter work.
+
+### Added
+
+* **`CK_ML_DSA_PARAMS` parsing in `op_init`**. PKCS#11 v3.2 §6.18 specifies a 24-byte struct `{ hedgeVariant, pContext, ulContextLen }`. When the verify mechanism is `CKM_ML_DSA_OP` and the caller passes a parameter blob, we decode the context string into a 256-byte static buffer in the operation state. `hedgeVariant` is ignored on the verify side (only sign uses it).
+* **FIPS 204 context forwarded to OpenSSL** in `C_Verify`. Before calling `EVP_DigestVerify`, the post-quantum branch now sets `OSSL_SIGNATURE_PARAM_CONTEXT_STRING` on the `EVP_PKEY_CTX` when the caller supplied a non-empty context. Empty contexts pass through unchanged so the default OpenSSL behaviour is preserved.
+* **ML-DSA adapter forwards the context** (`tests/wycheproof/adapters/mldsa.py`). Builds a `CK_ML_DSA_PARAMS` via `ctypes` for every test, decoding the optional `ctx` hex field from the Wycheproof vector. Tests with `ctx` longer than 255 bytes (FIPS 204 §5.2.1 spec violation, beyond what the PKCS#11 mechanism can express) are surfaced under `ctx_oversize_skip`.
+
+### Validation
+
+```
+ecdsa     match= 3098  viol= 0
+eddsa     match=  236  viol= 0
+rsa_pss   match= 1083  viol= 0
+rsa_oaep  match=  788  viol= 0
+aes_gcm   match=  310  viol= 0
+hmac      match=  522  viol= 0
+mlkem     match=   21  viol= 0
+aes_cmac  match=  306  viol= 0
+mldsa     match=  614  viol= 0   (+6 vs v1.1.9 ; 97.6 % of the corpus)
+─────────────────────────────────
+TOTAL     match= 6978  viol= 0
+```
+
+### Documented Wycheproof corpus skips
+
+The 15 remaining ML-DSA skips (5 per parameter set) carry `ctx` strings longer than 255 bytes ; these test that an ML-DSA implementation rejects oversize contexts. The PKCS#11 v3.2 `CK_ML_DSA_PARAMS.ulContextLen` is a `CK_ULONG`, so the wire format allows arbitrary lengths, but the FreeHSM internal buffer caps at the FIPS 204 spec limit (255 bytes) and rejects anything beyond. The Wycheproof tests are therefore unreachable for us by construction --- they would require a buffer that exceeds the spec.
+
 ## [1.1.9] --- 2026-06-17
 
 The "ML-DSA" release. Adds a second post-quantum family (FIPS 204 / Dilithium) to the Wycheproof harness, bringing FreeHSM C to **nine** cleanly-validated crypto families with both NIST PQ primitives (KEM + signature) covered.

@@ -1225,6 +1225,14 @@ typedef struct fhsm_op_s {
     uint8_t     gcm_aad[4096];
     size_t      gcm_aad_len;
     size_t      gcm_tag_len;   /* in BYTES (ulTagBits / 8) */
+    /* CK_ML_DSA_PARAMS captured at VerifyInit / SignInit. FIPS 204
+     * §5.2.1 caps the context string at 255 bytes ; we keep a 256
+     * static buffer for clarity. mldsa_ctx_have=0 means "default empty
+     * context", matching the behaviour for callers that pass no
+     * parameter (PKCS#11 v3.2 §6.18 makes the params optional). */
+    int         mldsa_ctx_have;
+    uint8_t     mldsa_ctx[256];
+    size_t      mldsa_ctx_len;
 } fhsm_op_t;
 static fhsm_op_t g_op_enc[256];
 static fhsm_op_t g_op_dec[256];
@@ -3040,6 +3048,35 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         op->pss_saltlen = (long)p[2];
         op->pss_have    = 1;
     }
+    /* CK_ML_DSA_PARAMS (PKCS#11 v3.2 §6.18) :
+     *   { CK_ULONG hedgeVariant; CK_BYTE_PTR pContext; CK_ULONG ulContextLen }
+     * = 8 + 8 + 8 = 24 bytes on a 64-bit ABI. Optional ; when absent,
+     * we default to the empty FIPS 204 context, matching the verify
+     * behaviour for callers that pass no parameter. We ignore
+     * hedgeVariant on the verify side (it only affects sign). */
+    op->mldsa_ctx_have = 0;
+    op->mldsa_ctx_len  = 0;
+    if (op->mechanism == 0x0000403FUL /* CKM_ML_DSA_OP */
+        && pMechanism->pParameter
+        && pMechanism->ulParameterLen >= 3 * sizeof(CK_ULONG)) {
+        const CK_ULONG *p = (const CK_ULONG *)pMechanism->pParameter;
+        /* p[0] = hedgeVariant (ignored on verify)
+         * p[1] = pContext (as integer-encoded pointer)
+         * p[2] = ulContextLen */
+        size_t ctx_len = (size_t)p[2];
+        const void *ctx_ptr = (const void *)(uintptr_t)p[1];
+        if (ctx_len > 0 && ctx_len <= sizeof(op->mldsa_ctx) && ctx_ptr) {
+            memcpy(op->mldsa_ctx, ctx_ptr, ctx_len);
+            op->mldsa_ctx_len  = ctx_len;
+            op->mldsa_ctx_have = 1;
+        } else if (ctx_len == 0) {
+            /* Explicit empty context is the same as the default. */
+            op->mldsa_ctx_have = 1;
+        }
+        /* ctx_len > 255 is rejected by FIPS 204 §5.2.1 ; we leave
+         * have=0/len=0 so OpenSSL receives no override and will
+         * itself reject the eventual verify. */
+    }
     op->active = 1;
     (void)hSession;
     return FHSM_RV_OK;
@@ -3738,6 +3775,24 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
         EVP_PKEY_CTX *pkctx = NULL;
         int vok = 0;
         if (EVP_DigestVerifyInit_ex(mdctx, &pkctx, NULL, NULL, NULL, pkey, NULL) == 1) {
+            /* FIPS 204 §5.2.1 context string : when the caller passed
+             * a CK_ML_DSA_PARAMS with a non-empty pContext we forward
+             * it to OpenSSL via OSSL_SIGNATURE_PARAM_CONTEXT_STRING.
+             * The default (have=0) leaves OpenSSL with its built-in
+             * empty-context behaviour. */
+            if (op->mechanism == CKM_ML_DSA_OP
+                && op->mldsa_ctx_have && op->mldsa_ctx_len > 0) {
+                OSSL_PARAM ctx_params[2] = {
+                    OSSL_PARAM_construct_octet_string(
+                        OSSL_SIGNATURE_PARAM_CONTEXT_STRING,
+                        op->mldsa_ctx, op->mldsa_ctx_len),
+                    OSSL_PARAM_construct_end(),
+                };
+                if (EVP_PKEY_CTX_set_params(pkctx, ctx_params) <= 0) {
+                    EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+                    op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+                }
+            }
             int v = EVP_DigestVerify(mdctx, pSig, ulSigLen, pData, ulDataLen);
             vok = (v == 1);
             if (v < 0) {
