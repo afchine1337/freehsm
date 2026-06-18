@@ -331,11 +331,14 @@ fhsm_rv_t fhsm_kat_run_all(fhsm_kat_result_t *out, size_t cap, size_t *count) {
     fhsm_zeroize(r2, sizeof(r2));
 
     /* ---- Extended CAVP vectors --------------------------------------
-     * Append 4 AES-GCM-256 NIST SP 800-38D vectors (TC13-16) and 4
-     * HMAC-SHA-256 RFC 4231 vectors (TC1, TC2, TC3, TC6). See
-     * kat/cavp_extended.c. Any failure latches the module error
-     * state through the standard return path. */
-    fhsm_rv_t ext_rv = FHSM_RV_OK; (void)fhsm_kat_cavp_extended;
+     * Append the published NIST/IETF/FIPS vector set from
+     * kat/cavp_extended.c : 2 AES-GCM-256 (SP 800-38D Annex B),
+     * 4 HMAC-SHA-256 (RFC 4231), 12 SHA-2/SHA-3 short-message hashes
+     * (FIPS 180-4 + FIPS 202), 1 AES-CBC-256 (SP 800-38A F.2.5),
+     * 1 AES-CTR-256 (SP 800-38A F.5.5), and 3 AES-CMAC-256
+     * (SP 800-38B D.3). Total : 23 vectors. Any single mismatch
+     * latches the module error state through FHSM_RV_KAT_FAILED. */
+    fhsm_rv_t ext_rv = fhsm_kat_cavp_extended(out, cap, count);
     if (ext_rv != FHSM_RV_OK) return ext_rv;
 
     return FHSM_RV_OK;

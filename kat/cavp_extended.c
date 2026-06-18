@@ -354,6 +354,142 @@ static int run_sha_vec(const EVP_MD *md, size_t expected_len,
 }
 
 /* =========================================================================
+ *   AES family KATs (NIST SP 800-38A for CBC/CTR, SP 800-38B for CMAC)
+ *
+ *   All vectors use the canonical NIST AES-256 test key and the
+ *   reference plaintext (4 × 16 bytes starting with 6bc1bee2...) used
+ *   throughout the SP 800-38 series. The expected ciphertexts and
+ *   CMAC tags are bit-for-bit reproductions of the values listed in
+ *   the respective appendices.
+ * ----------------------------------------------------------------------- */
+
+/* Canonical NIST AES-256 test key (SP 800-38A §F + SP 800-38B §D.3). */
+static const uint8_t aes256_key[32] = {
+    0x60,0x3d,0xeb,0x10,0x15,0xca,0x71,0xbe,0x2b,0x73,0xae,0xf0,0x85,0x7d,0x77,0x81,
+    0x1f,0x35,0x2c,0x07,0x3b,0x61,0x08,0xd7,0x2d,0x98,0x10,0xa3,0x09,0x14,0xdf,0xf4,
+};
+
+/* Canonical NIST AES test plaintext, 4 × 16-byte blocks (SP 800-38A §F). */
+static const uint8_t aes_plaintext_64[64] = {
+    0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a,
+    0xae,0x2d,0x8a,0x57,0x1e,0x03,0xac,0x9c,0x9e,0xb7,0x6f,0xac,0x45,0xaf,0x8e,0x51,
+    0x30,0xc8,0x1c,0x46,0xa3,0x5c,0xe4,0x11,0xe5,0xfb,0xc1,0x19,0x1a,0x0a,0x52,0xef,
+    0xf6,0x9f,0x24,0x45,0xdf,0x4f,0x9b,0x17,0xad,0x2b,0x41,0x7b,0xe6,0x6c,0x37,0x10,
+};
+
+/* SP 800-38A §F.2.5/F.2.6 : AES-256-CBC with IV = 0x000102...0f.
+ * Expected ciphertext for the 4-block plaintext above. */
+static const uint8_t aes256_cbc_iv[16] = {
+    0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+};
+static const uint8_t aes256_cbc_ct[64] = {
+    0xf5,0x8c,0x4c,0x04,0xd6,0xe5,0xf1,0xba,0x77,0x9e,0xab,0xfb,0x5f,0x7b,0xfb,0xd6,
+    0x9c,0xfc,0x4e,0x96,0x7e,0xdb,0x80,0x8d,0x67,0x9f,0x77,0x7b,0xc6,0x70,0x2c,0x7d,
+    0x39,0xf2,0x33,0x69,0xa9,0xd9,0xba,0xcf,0xa5,0x30,0xe2,0x63,0x04,0x23,0x14,0x61,
+    0xb2,0xeb,0x05,0xe2,0xc3,0x9b,0xe9,0xfc,0xda,0x6c,0x19,0x07,0x8c,0x6a,0x9d,0x1b,
+};
+
+/* SP 800-38A §F.5.5/F.5.6 : AES-256-CTR with initial counter
+ * f0f1f2...ff. Expected keystream-XOR ciphertext for the same 4-block
+ * plaintext. */
+static const uint8_t aes256_ctr_ic[16] = {
+    0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9,0xfa,0xfb,0xfc,0xfd,0xfe,0xff,
+};
+static const uint8_t aes256_ctr_ct[64] = {
+    0x60,0x1e,0xc3,0x13,0x77,0x57,0x89,0xa5,0xb7,0xa7,0xf5,0x04,0xbb,0xf3,0xd2,0x28,
+    0xf4,0x43,0xe3,0xca,0x4d,0x62,0xb5,0x9a,0xca,0x84,0xe9,0x90,0xca,0xca,0xf5,0xc5,
+    0x2b,0x09,0x30,0xda,0xa2,0x3d,0xe9,0x4c,0xe8,0x70,0x17,0xba,0x2d,0x84,0x98,0x8d,
+    0xdf,0xc9,0xc5,0x8d,0xb6,0x7a,0xad,0xa6,0x13,0xc2,0xdd,0x08,0x45,0x79,0x41,0xa6,
+};
+
+/* SP 800-38B §D.3 (Example 7, 8, 9) : AES-256-CMAC.
+ *
+ * D.3 Example 7 : Mlen = 0   bytes -> tag 028962f61b7bf89efc6b551f4667d983
+ * D.3 Example 8 : Mlen = 16  bytes -> tag 28a7023f452e8f82bd4bf28d8c37c35c
+ * D.3 Example 9 : Mlen = 40  bytes -> tag aaf3d8f1de5640c232f5b169b9c911e6
+ */
+static const uint8_t aes256_cmac_empty_tag[16] = {
+    0x02,0x89,0x62,0xf6,0x1b,0x7b,0xf8,0x9e,0xfc,0x6b,0x55,0x1f,0x46,0x67,0xd9,0x83,
+};
+static const uint8_t aes256_cmac_16_tag[16] = {
+    0x28,0xa7,0x02,0x3f,0x45,0x2e,0x8f,0x82,0xbd,0x4b,0xf2,0x8d,0x8c,0x37,0xc3,0x5c,
+};
+static const uint8_t aes256_cmac_40_tag[16] = {
+    0xaa,0xf3,0xd8,0xf1,0xde,0x56,0x40,0xc2,0x32,0xf5,0xb1,0x69,0xb9,0xc9,0x11,0xe6,
+};
+
+/* AES-CBC runner via EVP. Encrypts the plaintext and checks the
+ * produced ciphertext byte-for-byte against the expected value. */
+static int run_aescbc_vec(const uint8_t *key, const uint8_t *iv,
+                          const uint8_t *pt, const uint8_t *exp_ct,
+                          size_t len) {
+    int ok = 0;
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return 0;
+    uint8_t out[64];
+    int outl = 0, finall = 0;
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv) != 1) goto end;
+    EVP_CIPHER_CTX_set_padding(ctx, 0);
+    if (EVP_EncryptUpdate(ctx, out, &outl, pt, (int)len) != 1) goto end;
+    if (EVP_EncryptFinal_ex(ctx, out + outl, &finall) != 1) goto end;
+    if ((size_t)(outl + finall) != len) goto end;
+    ok = (fhsm_ct_memcmp(out, exp_ct, len) == 0);
+end:
+    EVP_CIPHER_CTX_free(ctx);
+    fhsm_zeroize(out, sizeof(out));
+    return ok;
+}
+
+/* AES-CTR runner via EVP. The "IV" for EVP_aes_256_ctr is the full
+ * 128-bit initial counter block. */
+static int run_aesctr_vec(const uint8_t *key, const uint8_t *ic,
+                          const uint8_t *pt, const uint8_t *exp_ct,
+                          size_t len) {
+    int ok = 0;
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return 0;
+    uint8_t out[64];
+    int outl = 0, finall = 0;
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_ctr(), NULL, key, ic) != 1) goto end;
+    if (EVP_EncryptUpdate(ctx, out, &outl, pt, (int)len) != 1) goto end;
+    if (EVP_EncryptFinal_ex(ctx, out + outl, &finall) != 1) goto end;
+    if ((size_t)(outl + finall) != len) goto end;
+    ok = (fhsm_ct_memcmp(out, exp_ct, len) == 0);
+end:
+    EVP_CIPHER_CTX_free(ctx);
+    fhsm_zeroize(out, sizeof(out));
+    return ok;
+}
+
+/* AES-CMAC runner via EVP_MAC. Computes the CMAC of the message and
+ * compares the 16-byte tag. */
+static int run_aescmac_vec(const uint8_t *key, size_t key_len,
+                            const uint8_t *msg, size_t msg_len,
+                            const uint8_t *exp_tag) {
+    int ok = 0;
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "CMAC", NULL);
+    if (!mac) return 0;
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    if (!ctx) { EVP_MAC_free(mac); return 0; }
+    OSSL_PARAM params[2] = {
+        OSSL_PARAM_construct_utf8_string("cipher", (char *)"AES-256-CBC", 0),
+        OSSL_PARAM_construct_end(),
+    };
+    uint8_t tag[16];
+    size_t taglen = 0;
+    if (EVP_MAC_init(ctx, key, key_len, params) != 1) goto end;
+    if (msg_len > 0 && EVP_MAC_update(ctx, msg, msg_len) != 1) goto end;
+    if (EVP_MAC_final(ctx, tag, &taglen, sizeof(tag)) != 1) goto end;
+    if (taglen != 16) goto end;
+    ok = (fhsm_ct_memcmp(tag, exp_tag, 16) == 0);
+end:
+    EVP_MAC_CTX_free(ctx);
+    EVP_MAC_free(mac);
+    fhsm_zeroize(tag, sizeof(tag));
+    return ok;
+}
+
+/* =========================================================================
  *                        Public runner
  * ----------------------------------------------------------------------- */
 fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
@@ -429,6 +565,43 @@ fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
         int pass = run_sha_vec(sha[k].md(), sha[k].dlen,
                                 sha[k].data, sha[k].data_len, sha[k].exp);
         REC(out, i, sha[k].alg, sha[k].vid, pass, local_elapsed_us(&t0));
+        i++;
+    }
+
+    /* ---- AES-256-CBC (NIST SP 800-38A §F.2.5/F.2.6) -------------- */
+    if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    {
+        int pass = run_aescbc_vec(aes256_key, aes256_cbc_iv,
+                                   aes_plaintext_64, aes256_cbc_ct, 64);
+        REC(out, i, "AES-256-CBC", "SP800-38A-F.2.5", pass, local_elapsed_us(&t0));
+        i++;
+    }
+
+    /* ---- AES-256-CTR (NIST SP 800-38A §F.5.5/F.5.6) -------------- */
+    if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    {
+        int pass = run_aesctr_vec(aes256_key, aes256_ctr_ic,
+                                   aes_plaintext_64, aes256_ctr_ct, 64);
+        REC(out, i, "AES-256-CTR", "SP800-38A-F.5.5", pass, local_elapsed_us(&t0));
+        i++;
+    }
+
+    /* ---- AES-256-CMAC (NIST SP 800-38B §D.3 examples 7/8/9) ------ */
+    struct { const char *vid; const uint8_t *msg; size_t msg_len;
+             const uint8_t *exp_tag; } cmac[] = {
+        { "SP800-38B-D.3-Ex7", NULL,            0,  aes256_cmac_empty_tag },
+        { "SP800-38B-D.3-Ex8", aes_plaintext_64, 16, aes256_cmac_16_tag    },
+        { "SP800-38B-D.3-Ex9", aes_plaintext_64, 40, aes256_cmac_40_tag    },
+    };
+    for (size_t k = 0; k < sizeof(cmac)/sizeof(cmac[0]); ++k) {
+        if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int pass = run_aescmac_vec(aes256_key, sizeof(aes256_key),
+                                    cmac[k].msg, cmac[k].msg_len,
+                                    cmac[k].exp_tag);
+        REC(out, i, "AES-256-CMAC", cmac[k].vid, pass, local_elapsed_us(&t0));
         i++;
     }
 
