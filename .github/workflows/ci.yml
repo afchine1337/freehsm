@@ -76,14 +76,10 @@ jobs:
   test-coverage-matrix:
     runs-on: ubuntu-latest
     needs: build
-    # NB: this job depends on the ghcr.io/.../freehsm-c-test:debian13-
-    # pkcs11-tools container which is not yet published. The job is
-    # gated off until the image is built and pushed (tracked as the
-    # "publish test image" follow-up). Flip the if: back to true once
-    # the manifest is available on ghcr.io. The local run via
-    # bash tests/coverage_matrix.sh still works fully on a developer
-    # workstation that has pkcs11-tool installed.
-    if: false
+    # The freehsm-c-test image is now published on ghcr.io (since
+    # commit "ci: publish freehsm-c-test Docker image for matrix jobs").
+    # If the image ever becomes unavailable, gate this job off again
+    # with `if: false` while keeping the rest of the CI green.
     container:
       image: ghcr.io/${{ github.repository_owner }}/freehsm-c-test:debian13-pkcs11-tools
       options: --user root
@@ -115,10 +111,9 @@ jobs:
   test-fips-mode:
     runs-on: ubuntu-latest
     needs: build
-    # Same caveat as test-coverage-matrix : gated off until the
-    # freehsm-c-test container image is published. Flip the if: back
-    # to true once the manifest is available.
-    if: false
+    # Image now published on ghcr.io ; symmetric with the
+    # test-coverage-matrix job. Gate off again if the image
+    # disappears or becomes unavailable.
     container:
       image: ghcr.io/${{ github.repository_owner }}/freehsm-c-test:debian13-pkcs11-tools
       options: --user root
