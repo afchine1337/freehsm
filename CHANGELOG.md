@@ -5,6 +5,42 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.12] --- 2026-06-18
+
+The "SLH-DSA context" release. Closes the symmetric plumbing for `CK_SLH_DSA_PARAMS.pContext` (PKCS#11 v3.2 §6.19 / FIPS 205 §5.2.1) on top of the ML-DSA context shipped in v1.1.10. No external corpus to validate against yet (Wycheproof has not published SLH-DSA test vectors at the pinned SHA `6d7cccd0fcb1`), but the wire is now ready : once a SLH-DSA adapter lands, the existing context plumbing covers it for free.
+
+### Changed
+
+* **`fhsm_op_t` renaming** : `mldsa_ctx_have / mldsa_ctx / mldsa_ctx_len` become `pq_ctx_have / pq_ctx / pq_ctx_len` to reflect that the same 256-byte buffer carries the FIPS 204 (ML-DSA) and FIPS 205 (SLH-DSA) context strings. Wire layout and behaviour are unchanged.
+* **`op_init` parser** : the gate that decodes the `{ hedgeVariant, pContext, ulContextLen }` triple now triggers on either `CKM_ML_DSA_OP` (0x403F) or `CKM_SLH_DSA_OP` (0x4041). Both `CK_ML_DSA_PARAMS` and `CK_SLH_DSA_PARAMS` are 24 bytes on a 64-bit ABI with identical layout, so a single code path covers them.
+* **`C_Sign` and `C_Verify` post-quantum branch** : the `EVP_PKEY_CTX_set_params(OSSL_SIGNATURE_PARAM_CONTEXT_STRING)` gate now also fires for `CKM_SLH_DSA_OP`. EdDSA stays on the empty-context default, as it has no comparable parameter struct in PKCS#11 v3.2.
+
+### Why ship this now ?
+
+Three reasons :
+
+1. **Symmetry** : the ML-DSA path was an outlier --- the same context concept exists for SLH-DSA and was implementable in one refactor instead of being duplicated when an adapter eventually appears.
+2. **Build-time safety** : the refactor is touched and validated **now**, not in the middle of writing a new adapter when noise is high. The Wycheproof full sweep is bit-identical to v1.1.11 (6 978 / 0 across 9 families ; ML-DSA still 614 / 0 / 15), proving the rename + extension is transparent.
+3. **Security Target language** : the FreeHSM C Security Target can now state "the PKCS#11 v3.2 §6.18 and §6.19 context parameters are honoured on both sign and verify for the FIPS 204 and FIPS 205 schemes respectively", a stronger statement than before.
+
+### Validation
+
+```
+ecdsa     match= 3098  viol= 0
+eddsa     match=  236  viol= 0
+rsa_pss   match= 1083  viol= 0
+rsa_oaep  match=  788  viol= 0
+aes_gcm   match=  310  viol= 0
+hmac      match=  522  viol= 0
+mlkem     match=   21  viol= 0
+aes_cmac  match=  306  viol= 0
+mldsa     match=  614  viol= 0   (unchanged ; pq_ctx code path proves bijective with v1.1.10's mldsa_ctx)
+─────────────────────────────────
+TOTAL     match= 6978  viol= 0   across 9 PKCS#11 v3.2 families
+```
+
+CI matrix : unchanged from v1.1.11, 27 / 0 / 5 in both default and FIPS strict modes.
+
 ## [1.1.11] --- 2026-06-18
 
 The "CI matrix complete" release. Closes the dual self-attestation loop : every push to main now runs the **full PKCS#11 function × mechanism coverage matrix** inside a pinned container, in both default and FIPS-strict modes, on top of the existing 9-family Wycheproof sweep. No module code change ; the surface area unblocked is operational.

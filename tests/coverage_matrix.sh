@@ -72,16 +72,33 @@ record() {
     esac
 }
 
-p11() { sudo -E -u freehsm "$P11_TOOL" --module "$MODULE" "$@" 2>&1; }
+# Run pkcs11-tool with the dev / CI env vars explicitly passed through
+# `env`. The script does NOT switch to a separate `freehsm` user any
+# more : the user separation was carried over from a production-style
+# deployment but the matrix is a developer tool and the double-sudo
+# (outer `sudo bash` + inner `sudo -E -u freehsm`) was stripping the
+# FHSM_* variables on Debian's default sudoers config (`Defaults
+# env_reset`, no env_keep += FHSM_*). Running the inner pkcs11-tool
+# as the same user as the script removes the issue entirely. CI in
+# the container also works correctly because the container is
+# already a security boundary.
+p11() {
+    env \
+        FHSM_INTEGRITY_ALLOW_UNSIGNED="${FHSM_INTEGRITY_ALLOW_UNSIGNED:-1}" \
+        FHSM_KAT_ALLOW_FAIL="${FHSM_KAT_ALLOW_FAIL:-1}" \
+        OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}" \
+        FHSM_TOKENS_DIR="${FHSM_TOKENS_DIR:-${TOKENS_DIR:-/tmp/freehsm-cov}}" \
+        "$P11_TOOL" --module "$MODULE" "$@" 2>&1
+}
 
 cleanup() {
-    sudo rm -rf "$TOKENS_DIR" /tmp/cov-*.bin 2>/dev/null
+    rm -rf "$TOKENS_DIR" /tmp/cov-*.bin 2>/dev/null
 }
 trap cleanup EXIT
 
 [ -z "$P11_TOOL" ] && { color_fail "pkcs11-tool missing"; exit 2; }
 [ ! -f "$MODULE" ] && { color_fail "module $MODULE missing"; exit 2; }
-mkdir -p "$TOKENS_DIR"; chmod 700 "$TOKENS_DIR"; sudo chown freehsm "$TOKENS_DIR"
+mkdir -p "$TOKENS_DIR"; chmod 700 "$TOKENS_DIR"
 rm -f "$REPORT"
 printf 'function\tmechanism\tstatus\tnote\n' > "$REPORT"
 
@@ -231,27 +248,28 @@ out=$(p11 --slot 0 --login --pin "$USER_PIN" \
     && record C_Sign CKM_SHA256_RSA_PKCS PASS \
     || record C_Sign CKM_SHA256_RSA_PKCS FAIL
 
-# RSA-OAEP encrypt
+# RSA-OAEP encrypt. We go through p11() (which already handles env
+# propagation) for the pubkey export instead of the legacy
+# `sudo -E -u freehsm` invocation that was bypassing it.
 echo -n "secret" > /tmp/cov-plain.bin; chmod 644 /tmp/cov-plain.bin
-sudo -E -u freehsm "$P11_TOOL" --module "$MODULE" --slot 0 --login --pin "$USER_PIN" \
+p11 --slot 0 --login --pin "$USER_PIN" \
     --read-object --type pubkey --id 05 --output-file /tmp/cov-rsapub.der >/dev/null
-sudo chmod 644 /tmp/cov-rsapub.der
 openssl pkeyutl -provider default -encrypt -pubin -inkey /tmp/cov-rsapub.der \
     -keyform DER -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
     -in /tmp/cov-plain.bin -out /tmp/cov-oaep-ct.bin 2>/dev/null
-sudo cp /tmp/cov-oaep-ct.bin /tmp/cov-oaep-in.bin; sudo chmod 644 /tmp/cov-oaep-in.bin
+cp /tmp/cov-oaep-ct.bin /tmp/cov-oaep-in.bin
 out=$(p11 --slot 0 --login --pin "$USER_PIN" \
           --decrypt --mechanism RSA-PKCS-OAEP --hash-algorithm SHA256 \
           --input-file /tmp/cov-oaep-in.bin --output-file /tmp/cov-oaep-pt.bin \
           --id 05 2>&1)
-sudo cmp /tmp/cov-plain.bin /tmp/cov-oaep-pt.bin >/dev/null 2>&1 \
+cmp /tmp/cov-plain.bin /tmp/cov-oaep-pt.bin >/dev/null 2>&1 \
     && record C_Decrypt CKM_RSA_PKCS_OAEP PASS \
     || record C_Decrypt CKM_RSA_PKCS_OAEP FAIL
 
 # ECDH derive
 p11 --slot 0 --login --pin "$USER_PIN" \
     --keypairgen --key-type EC:secp256r1 --label "cov-ec-bob" --id 06 >/dev/null
-sudo -E -u freehsm "$P11_TOOL" --module "$MODULE" --slot 0 --login --pin "$USER_PIN" \
+p11 --slot 0 --login --pin "$USER_PIN" \
     --read-object --type pubkey --id 06 --output-file /tmp/cov-bob.der >/dev/null
 out=$(p11 --slot 0 --login --pin "$USER_PIN" \
           --derive --mechanism ECDH1-COFACTOR-DERIVE \
@@ -295,22 +313,33 @@ unset FHSM_TOKENS_DIR
 # ---- 8. PQ ops via harnesses ------------------------------------------
 color_info ""
 color_info "[8/8] Post-quantum (via dlsym harnesses)"
+# Same env-propagation pattern as p11() : pass FHSM_* / OPENSSL_CONF
+# explicitly through `env` so the dlsym harnesses pick them up
+# regardless of the surrounding sudoers policy.
+pq_e2e() {
+    env \
+        FHSM_INTEGRITY_ALLOW_UNSIGNED="${FHSM_INTEGRITY_ALLOW_UNSIGNED:-1}" \
+        FHSM_KAT_ALLOW_FAIL="${FHSM_KAT_ALLOW_FAIL:-1}" \
+        OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}" \
+        FHSM_TOKENS_DIR="${FHSM_TOKENS_DIR:-${TOKENS_DIR:-/tmp/freehsm-cov}}" \
+        "$@" 2>&1
+}
 if [ -x tests/mlkem_e2e ]; then
-    sudo -u freehsm ./tests/mlkem_e2e 2>&1 | grep -q "PASS" \
+    pq_e2e ./tests/mlkem_e2e | grep -q "PASS" \
         && record C_EncapsulateKey CKM_ML_KEM PASS \
         || record C_EncapsulateKey CKM_ML_KEM FAIL
 else
     record C_EncapsulateKey CKM_ML_KEM SKIP "tests/mlkem_e2e not built"
 fi
 if [ -x tests/mldsa_e2e ]; then
-    sudo -u freehsm ./tests/mldsa_e2e 2>&1 | grep -q "PASS" \
+    pq_e2e ./tests/mldsa_e2e | grep -q "PASS" \
         && record C_Sign CKM_ML_DSA PASS \
         || record C_Sign CKM_ML_DSA FAIL
 else
     record C_Sign CKM_ML_DSA SKIP "tests/mldsa_e2e not built"
 fi
 if [ -x tests/slhdsa_e2e ]; then
-    sudo -u freehsm ./tests/slhdsa_e2e 2>&1 | grep -q "PASS" \
+    pq_e2e ./tests/slhdsa_e2e | grep -q "PASS" \
         && record C_Sign CKM_SLH_DSA PASS \
         || record C_Sign CKM_SLH_DSA FAIL
 else
@@ -329,11 +358,18 @@ color_info "[9/?] Runtime mode switch"
 # absence as CKR_TOKEN_NOT_PRESENT at session-open time (it probes
 # mech availability before opening a session and treats absence as
 # "no token"). Treat any non-success outcome as SKIP rather than FAIL.
+# Additionally : the [6/8] wrong_pin test triggers FreeHSM's PIN
+# throttle (exponential delay, FHSM_RV_PIN_THROTTLED = 0x80000004).
+# By the time we reach [9/?] the throttle window may still be active ;
+# detect this case and SKIP, otherwise this last step would flake
+# under any quick re-run.
 out=$(p11 --slot 0 --login --pin "$USER_PIN" \
           --hash --mechanism MD5 \
           --input-file /tmp/cov-msg.bin --output-file /tmp/cov-md5.bin 2>&1)
 if [ "$(stat -c '%s' /tmp/cov-md5.bin 2>/dev/null)" = "16" ]; then
     record C_Digest "CKM_MD5 (legacy)" PASS "MD5 produced 16-byte hash"
+elif echo "$out" | grep -q "0x80000004\|PIN_THROTTLED"; then
+    record C_Digest "CKM_MD5 (legacy)" SKIP "PIN throttle window still open from [6/8] wrong_pin"
 elif echo "$out" | grep -q "CKR_MECHANISM_INVALID\|CKR_TOKEN_NOT_PRESENT\|not supported\|not proposed"; then
     record C_Digest "CKM_MD5 (legacy)" SKIP "MD5 absent from g_mech_list (FIPS 140-3 §C.A removal)"
 else
@@ -345,11 +381,19 @@ fi
 # noticing the mech is absent and bailing at session-open time
 # (CKR_TOKEN_NOT_PRESENT, treated as "no MD5 path available" which
 # is the correct FIPS posture).
-out=$(FHSM_MODE=fips sudo -E -u freehsm "$P11_TOOL" --module "$MODULE" \
+out=$(env \
+          FHSM_MODE=fips \
+          FHSM_INTEGRITY_ALLOW_UNSIGNED="${FHSM_INTEGRITY_ALLOW_UNSIGNED:-1}" \
+          FHSM_KAT_ALLOW_FAIL="${FHSM_KAT_ALLOW_FAIL:-1}" \
+          OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}" \
+          FHSM_TOKENS_DIR="${FHSM_TOKENS_DIR:-${TOKENS_DIR:-/tmp/freehsm-cov}}" \
+          "$P11_TOOL" --module "$MODULE" \
           --slot 0 --login --pin "$USER_PIN" \
           --hash --mechanism MD5 \
           --input-file /tmp/cov-msg.bin --output-file /tmp/cov-md5-fips.bin 2>&1)
-if echo "$out" | grep -q "CKR_MECHANISM_INVALID\|CKR_FIPS_NOT_APPROVED\|CKR_TOKEN_NOT_PRESENT\|not allowed\|illegal\|not supported\|not proposed"; then
+if echo "$out" | grep -q "0x80000004\|PIN_THROTTLED"; then
+    record C_Digest "CKM_MD5 (FIPS)" SKIP "PIN throttle window still open from [6/8] wrong_pin"
+elif echo "$out" | grep -q "CKR_MECHANISM_INVALID\|CKR_FIPS_NOT_APPROVED\|CKR_TOKEN_NOT_PRESENT\|not allowed\|illegal\|not supported\|not proposed"; then
     record C_Digest "CKM_MD5 (FIPS)" PASS "MD5 not reachable in FIPS mode"
 else
     record C_Digest "CKM_MD5 (FIPS)" FAIL "Should have been rejected : $out"

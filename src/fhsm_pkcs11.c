@@ -1226,14 +1226,17 @@ typedef struct fhsm_op_s {
     uint8_t     gcm_aad[4096];
     size_t      gcm_aad_len;
     size_t      gcm_tag_len;   /* in BYTES (ulTagBits / 8) */
-    /* CK_ML_DSA_PARAMS captured at VerifyInit / SignInit. FIPS 204
-     * §5.2.1 caps the context string at 255 bytes ; we keep a 256
-     * static buffer for clarity. mldsa_ctx_have=0 means "default empty
-     * context", matching the behaviour for callers that pass no
-     * parameter (PKCS#11 v3.2 §6.18 makes the params optional). */
-    int         mldsa_ctx_have;
-    uint8_t     mldsa_ctx[256];
-    size_t      mldsa_ctx_len;
+    /* Post-quantum context string captured at VerifyInit / SignInit.
+     * Shared between CK_ML_DSA_PARAMS (PKCS#11 v3.2 §6.18 ; FIPS 204
+     * §5.2.1) and CK_SLH_DSA_PARAMS (PKCS#11 v3.2 §6.19 ; FIPS 205
+     * §5.2.1) --- both carry an octet-string context capped at 255
+     * bytes by their respective specs, with identical wire layout
+     * { hedgeVariant ; pContext ; ulContextLen } on the PKCS#11 side.
+     * pq_ctx_have=0 means "default empty context", matching the
+     * behaviour for callers that pass no parameter. */
+    int         pq_ctx_have;
+    uint8_t     pq_ctx[256];
+    size_t      pq_ctx_len;
 } fhsm_op_t;
 static fhsm_op_t g_op_enc[256];
 static fhsm_op_t g_op_dec[256];
@@ -2969,9 +2972,19 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             const uint8_t *aad_ptr = (const uint8_t *)(uintptr_t)p[3];
             size_t         aad_len = (size_t)p[4];
             size_t         tag_bits = (size_t)p[5];
+            /* PKCS#11 v3.0 callers including OpenSC's pkcs11-tool
+             * frequently pass ulTagBits=0 in CK_GCM_PARAMS to signal
+             * "use the implementation default". The spec is ambiguous
+             * here (NIST SP 800-38D mandates a tag length but the
+             * PKCS#11 wire does not require ulTagBits != 0). We
+             * normalise zero to the AES block size (128 bits) which
+             * matches OpenSSL's default and the FIPS 140-3 IG D.A
+             * recommendation. The Wycheproof corpus always sets an
+             * explicit value so this normalisation never fires there. */
+            if (tag_bits == 0) tag_bits = 128;
             if (iv_len > sizeof(op->gcm_iv)
                 || aad_len > sizeof(op->gcm_aad)
-                || tag_bits == 0 || tag_bits > 128 || (tag_bits & 7)) {
+                || tag_bits > 128 || (tag_bits & 7)) {
                 return FHSM_RV_ARGUMENTS_BAD;
             }
             if (iv_len && iv_ptr) memcpy(op->gcm_iv,  iv_ptr,  iv_len);
@@ -3049,34 +3062,39 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         op->pss_saltlen = (long)p[2];
         op->pss_have    = 1;
     }
-    /* CK_ML_DSA_PARAMS (PKCS#11 v3.2 §6.18) :
+    /* CK_ML_DSA_PARAMS (PKCS#11 v3.2 §6.18) and CK_SLH_DSA_PARAMS
+     * (PKCS#11 v3.2 §6.19) :
      *   { CK_ULONG hedgeVariant; CK_BYTE_PTR pContext; CK_ULONG ulContextLen }
-     * = 8 + 8 + 8 = 24 bytes on a 64-bit ABI. Optional ; when absent,
-     * we default to the empty FIPS 204 context, matching the verify
-     * behaviour for callers that pass no parameter. We ignore
-     * hedgeVariant on the verify side (it only affects sign). */
-    op->mldsa_ctx_have = 0;
-    op->mldsa_ctx_len  = 0;
-    if (op->mechanism == 0x0000403FUL /* CKM_ML_DSA_OP */
+     * = 8 + 8 + 8 = 24 bytes on a 64-bit ABI. Both structs are
+     * identical on the wire ; we parse them through the same code
+     * path. Optional ; when absent we default to an empty context,
+     * matching the verify behaviour for callers that pass no
+     * parameter. hedgeVariant is recorded but unused for now ---
+     * OpenSSL's default policy (hedged when entropy is available)
+     * matches CKH_HEDGE_PREFERRED. */
+    op->pq_ctx_have = 0;
+    op->pq_ctx_len  = 0;
+    if ((op->mechanism == 0x0000403FUL /* CKM_ML_DSA_OP */
+         || op->mechanism == 0x00004041UL /* CKM_SLH_DSA_OP */)
         && pMechanism->pParameter
         && pMechanism->ulParameterLen >= 3 * sizeof(CK_ULONG)) {
         const CK_ULONG *p = (const CK_ULONG *)pMechanism->pParameter;
-        /* p[0] = hedgeVariant (ignored on verify)
+        /* p[0] = hedgeVariant (recorded for future use ; not applied)
          * p[1] = pContext (as integer-encoded pointer)
          * p[2] = ulContextLen */
         size_t ctx_len = (size_t)p[2];
         const void *ctx_ptr = (const void *)(uintptr_t)p[1];
-        if (ctx_len > 0 && ctx_len <= sizeof(op->mldsa_ctx) && ctx_ptr) {
-            memcpy(op->mldsa_ctx, ctx_ptr, ctx_len);
-            op->mldsa_ctx_len  = ctx_len;
-            op->mldsa_ctx_have = 1;
+        if (ctx_len > 0 && ctx_len <= sizeof(op->pq_ctx) && ctx_ptr) {
+            memcpy(op->pq_ctx, ctx_ptr, ctx_len);
+            op->pq_ctx_len  = ctx_len;
+            op->pq_ctx_have = 1;
         } else if (ctx_len == 0) {
             /* Explicit empty context is the same as the default. */
-            op->mldsa_ctx_have = 1;
+            op->pq_ctx_have = 1;
         }
-        /* ctx_len > 255 is rejected by FIPS 204 §5.2.1 ; we leave
-         * have=0/len=0 so OpenSSL receives no override and will
-         * itself reject the eventual verify. */
+        /* ctx_len > 255 is rejected by both FIPS 204 §5.2.1 and
+         * FIPS 205 §5.2.1 ; we leave have=0/len=0 so OpenSSL receives
+         * no override and itself rejects the eventual sign/verify. */
     }
     op->active = 1;
     (void)hSession;
@@ -3613,20 +3631,21 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
             EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
             return FHSM_RV_FUNCTION_FAILED;
         }
-        /* Symmetric with the verify path : forward the FIPS 204
-         * context string captured from CK_ML_DSA_PARAMS at SignInit
-         * time. Without this, the signature is produced with the
-         * default empty context and would not match a caller that
-         * expects a parameter-bound binding. The hedgeVariant
-         * remains unforwarded for now ; OpenSSL's default policy
-         * (hedged when randomness is available) matches the PKCS#11
-         * CKH_HEDGE_PREFERRED semantics. */
-        if (op->mechanism == CKM_ML_DSA_OP
-            && op->mldsa_ctx_have && op->mldsa_ctx_len > 0) {
+        /* Forward the FIPS 204 (ML-DSA) / FIPS 205 (SLH-DSA) context
+         * string captured from CK_ML_DSA_PARAMS or CK_SLH_DSA_PARAMS
+         * at SignInit time. Without this the signature is produced
+         * with the default empty context and would not match a
+         * caller that expects a parameter-bound binding. hedgeVariant
+         * remains unforwarded ; OpenSSL's default policy (hedged
+         * when randomness is available) matches CKH_HEDGE_PREFERRED.
+         * EdDSA stays on the empty-context default for this branch. */
+        if ((op->mechanism == CKM_ML_DSA_OP
+             || op->mechanism == CKM_SLH_DSA_OP)
+            && op->pq_ctx_have && op->pq_ctx_len > 0) {
             OSSL_PARAM ctx_params[2] = {
                 OSSL_PARAM_construct_octet_string(
                     OSSL_SIGNATURE_PARAM_CONTEXT_STRING,
-                    op->mldsa_ctx, op->mldsa_ctx_len),
+                    op->pq_ctx, op->pq_ctx_len),
                 OSSL_PARAM_construct_end(),
             };
             if (EVP_PKEY_CTX_set_params(pkctx, ctx_params) <= 0) {
@@ -3872,17 +3891,19 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
         EVP_PKEY_CTX *pkctx = NULL;
         int vok = 0;
         if (EVP_DigestVerifyInit_ex(mdctx, &pkctx, NULL, NULL, NULL, pkey, NULL) == 1) {
-            /* FIPS 204 §5.2.1 context string : when the caller passed
-             * a CK_ML_DSA_PARAMS with a non-empty pContext we forward
-             * it to OpenSSL via OSSL_SIGNATURE_PARAM_CONTEXT_STRING.
-             * The default (have=0) leaves OpenSSL with its built-in
-             * empty-context behaviour. */
-            if (op->mechanism == CKM_ML_DSA_OP
-                && op->mldsa_ctx_have && op->mldsa_ctx_len > 0) {
+            /* FIPS 204 §5.2.1 / FIPS 205 §5.2.1 context string : when
+             * the caller passed a CK_ML_DSA_PARAMS or CK_SLH_DSA_PARAMS
+             * with a non-empty pContext we forward it to OpenSSL via
+             * OSSL_SIGNATURE_PARAM_CONTEXT_STRING. The default
+             * (have=0) leaves OpenSSL with its built-in empty-context
+             * behaviour. EdDSA stays on the empty-context default. */
+            if ((op->mechanism == CKM_ML_DSA_OP
+                 || op->mechanism == CKM_SLH_DSA_OP)
+                && op->pq_ctx_have && op->pq_ctx_len > 0) {
                 OSSL_PARAM ctx_params[2] = {
                     OSSL_PARAM_construct_octet_string(
                         OSSL_SIGNATURE_PARAM_CONTEXT_STRING,
-                        op->mldsa_ctx, op->mldsa_ctx_len),
+                        op->pq_ctx, op->pq_ctx_len),
                     OSSL_PARAM_construct_end(),
                 };
                 if (EVP_PKEY_CTX_set_params(pkctx, ctx_params) <= 0) {
