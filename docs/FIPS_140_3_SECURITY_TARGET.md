@@ -181,19 +181,40 @@ Runs once at `C_Initialize` :
 
 ### 9.3 Known Answer Tests (KAT)
 
-15 KATs run on first `C_Initialize` :
+**32 cryptographic self-tests** run on first `C_Initialize`, covering every FIPS 140-3 §C.B mandatory algorithm category. Each vector cites a public standards-track document so any independent reviewer can re-derive the expected value.
 
-| Algorithm | Vector | Source |
-|---|---|---|
-| AES-256-GCM encrypt | TC14 | SP 800-38D §B |
-| AES-256-GCM decrypt + tamper | TC14 + bit flip | Internal |
-| SHA-256 | "abc" | FIPS 180-4 §B.1 |
-| HMAC-SHA-256 | TC1 | RFC 4231 |
-| PBKDF2-HMAC-SHA-256 | smoke (200k iter, 24+20 byte PW/salt) | Internal |
-| CTR_DRBG-AES-256 | stuck-DRBG | Internal |
-| SHA-256 CAVP | 9 short-message vectors (Len 0, 8, 24, 112, 448, 8, 16, 24, 896) | NIST CAVP |
+| Family | Algorithm | Vector ID | Source |
+|---|---|---|---|
+| **Symmetric encryption** | AES-256-GCM | SP800-38D-TC14 | NIST SP 800-38D Annex B |
+|  | AES-256-GCM (AAD) | SP800-38D-TC15 | NIST SP 800-38D Annex B |
+|  | AES-256-CBC | SP800-38A-F.2.5 | NIST SP 800-38A Annex F.2.5 |
+|  | AES-256-CTR | SP800-38A-F.5.5 | NIST SP 800-38A Annex F.5.5 |
+| **MAC** | HMAC-SHA-256 | RFC 4231 TC1, TC2, TC3, TC6 | IETF RFC 4231 |
+|  | AES-256-CMAC | SP800-38B-D.3 Ex 7, 8, 9 | NIST SP 800-38B Annex D.3 |
+| **Hash (SHA-2)** | SHA-256 | "" + "abc" | FIPS 180-4 Annex B.1 |
+|  | SHA-384 | "" + "abc" | FIPS 180-4 Annex D.1 |
+|  | SHA-512 | "" + "abc" | FIPS 180-4 Annex C.1 |
+| **Hash (SHA-3)** | SHA3-256 | "" + "abc" | FIPS 202 Annex A.1 |
+|  | SHA3-384 | "" + "abc" | FIPS 202 Annex A.2 |
+|  | SHA3-512 | "" + "abc" | FIPS 202 Annex A.3 |
+| **Signature** | ECDSA-P256-SHA256 | RFC 6979 §A.2.5 | IETF RFC 6979 |
+|  | ECDSA-P384-SHA384 | RFC 6979 §A.2.6 | IETF RFC 6979 |
+|  | ECDSA-P521-SHA512 | RFC 6979 §A.2.7 | IETF RFC 6979 |
+|  | RSA-2048-PSS-SHA256 | sign-verify round-trip | NIST SP 800-89 §7 + FIPS 140-3 IG D.3 |
+| **Asym encryption** | RSA-2048-OAEP-SHA256 | encrypt-decrypt round-trip | NIST SP 800-89 §7 + FIPS 140-3 IG D.3 |
+| **KDF** | HKDF-SHA-256 | RFC 5869 §A.1, A.2 | IETF RFC 5869 |
+|  | PBKDF2-HMAC-SHA-1 | RFC 6070 §2 TC1, TC2 | IETF RFC 6070 |
+| **DRBG** | CTR_DRBG-AES-256 | stuck-DRBG | Internal continuous test (SP 800-90A) |
 
-Failure of any KAT latches the module ERROR state and returns `FHSM_RV_KAT_FAILED = 0x80000001`.
+Failure of any single KAT latches the module into the FIPS 140-3 §7.10.2 ERROR state and returns `FHSM_RV_KAT_FAILED = 0x80000001`. No cryptographic operation can complete after a latched failure ; the module must be reloaded by re-invoking `C_Initialize` on a corrected build.
+
+Boot-time KAT execution measured at **~130 ms** on the Debian 13 reference platform (Section 5.1), of which ~100 ms is the RSA-2048 ephemeral keypair generation used by the PSS and OAEP round-trip self-tests.
+
+### 9.4 Trade-offs documented
+
+* The RSA-PSS and RSA-OAEP KATs are FIPS 140-3 IG D.3 *consistency self-tests* (sign-then-verify and encrypt-then-decrypt round-trips on a fresh ephemeral keypair), not byte-deterministic vector matches. Two co-located bugs in the sign / verify or encrypt / decrypt code paths would not be surfaced by the round-trip alone ; the release-tier Wycheproof corpus (Section 13) provides the byte-deterministic safeguard against that residual risk.
+
+* The PBKDF2 KAT vectors use iteration counts (c=1, c=2) below the production minimum (200 000) required by `FHSM_MODE=fips` at runtime. The low-iteration vectors validate algorithm mechanics ; the FIPS minimum is enforced separately at API entry under `FHSM_MODE=fips`.
 
 ---
 
@@ -231,10 +252,63 @@ Documented future work :
 
 ---
 
+## 13. External Validation (Continuous, Non-FIPS Evidence)
+
+FIPS 140-3 §7.10.2 governs the boot KAT (Section 9.3). FreeHSM C additionally maintains a continuous **external validation surface** that runs on every push to `main` and on every signed release tag. This surface is not part of the validation scope per se, but provides standing evidence for the lab and end-users that the module produces bit-for-bit correct outputs against an *independent* reference implementation.
+
+### 13.1 Google Wycheproof corpus
+
+The release tier validates the module against the open Google Wycheproof crypto test corpus, pinned at the immutable commit SHA `6d7cccd0fcb1917368579adeeac10fe802f1b521` (recorded in `tests/wycheproof/VECTORS_SHA` for reproducibility). The full sweep covers **nine PKCS#11 v3.2 algorithm families** with **6 978 vectors at zero violations** as of v1.1.12 :
+
+| Family | Match | Violation | Skip | Coverage |
+|---|---|---|---|---|
+| ECDSA (P-256/384/521 verify, raw r\|\|s) | 3 098 | 0 | 18 794 | Wycheproof DER + P1363 ; P1363 deferred via `--schema` filter |
+| EdDSA (Ed25519, Ed448) | 236 | 0 | 0 | Complete |
+| RSA-PSS (SHA-256/384/512, 2 048+) | 1 083 | 0 | 1 323 | Skips = parameter combinations rejected by OpenSSL 3.5 default provider hardening |
+| RSA-OAEP (SHA-1/256/384/512) | 788 | 0 | 420 | Skips = "Constructed" EDGE_CASE rejected by OpenSSL malleability defence + unsupported MGF |
+| AES-GCM (128/192/256) | 310 | 0 | 6 | Skips = ivBits > 512 (above OpenSSL limit) |
+| AES-CMAC (128/192/256) | 306 | 0 | 5 | Skips = non-standard key lengths |
+| HMAC (SHA-256/384/512) | 522 | 0 | 0 | Complete |
+| **ML-KEM (FIPS 203, post-quantum)** | 21 | 0 | 0 | All three NIST parameter sets (512/768/1024) ; semi-expanded decaps corpus |
+| **ML-DSA (FIPS 204, post-quantum)** | 614 | 0 | 15 | All three NIST parameter sets (44/65/87) ; 15 skips = `ctx` length > 255 (FIPS 204 §5.2.1 spec violation, unreachable through `CK_ML_DSA_PARAMS`) |
+| **TOTAL** | **6 978** | **0** | **20 583** | **9 families** |
+
+The post-quantum coverage makes FreeHSM C, at the time of writing, one of very few open-source PKCS#11 v3.2 modules with both NIST PQ primitives (KEM + signature) cross-validated against an external independent corpus.
+
+### 13.2 Coverage matrix self-test
+
+A second tier runs on every push, inside a separate pinned Debian 13 container (`ghcr.io/<owner>/freehsm-c-test:debian13-pkcs11-tools`), exercising **32 PKCS#11 v3.2 function × mechanism × error path** assertions through OpenSC's `pkcs11-tool` against the freshly built `.so`. The matrix produces **24 PASS / 0 FAIL / 8 documented SKIP** in both default and FIPS-strict modes :
+
+```
+test-coverage-matrix         PASS = 24   FAIL = 0   SKIP = 8
+test-fips-mode               PASS = 24   FAIL = 0   SKIP = 8
+```
+
+The 8 skips are all due to tooling gaps in the harness layer (e.g., OpenSC's `pkcs11-tool` does not propose SHA-3 mechanisms, MD5 is intentionally absent from `g_mech_list` per FIPS 140-3 §C.A removal), not module behaviour.
+
+### 13.3 Reproducible build
+
+Every release tag triggers a deterministic build inside a pinned Docker image (`ghcr.io/<owner>/freehsm-c-build:debian13-openssl-3.5`). The resulting `libfreehsm-fips.so` is bit-identical (same SHA-256) across independent builds, verified continuously by the `reproducibility` CI job (cross-build + compare). A GPG-signed source + binary tarball is published per tag.
+
+### 13.4 Public attestation summary
+
+| Attestation | Tier | Status as of v1.1.12 |
+|---|---|---|
+| 32 boot KAT vectors (Section 9.3) | Per-invocation | Mandatory per FIPS 140-3 §7.10.2 |
+| 6 978 Wycheproof vectors, 9 families | Per push to main | 100 % match, 0 violation |
+| 32 matrix assertions, default + FIPS modes | Per push to main | 24/0/8 |
+| Reproducible build (sha256 bit-identical) | Per release tag | Verified by `dist-verify` |
+| GPG signed releases (Ed25519 fingerprint `743A6A59 04A14 61A 64640 8DE 48560 162 DBBF28 A2`) | Per release tag | 12 consecutive releases since v1.1.0 |
+
+This surface is the *operational complement* to the boot KAT : it answers the questions "does the module match a third-party reference ?" and "is the binary the one I think it is ?" that no §7.10.2 self-test can answer in isolation.
+
+---
+
 **Document Revision History**
 
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-04 | A.M. | Initial outline |
 | 0.2 | 2026-05 | A.M. | §3 algorithm table draft |
-| **0.3** | **2026-06-10** | **A.M.** | **First complete draft : §1-§12 all sections populated, ready for internal review before lab submission** |
+| 0.3 | 2026-06-10 | A.M. | First complete draft : §1-§12 all sections populated, ready for internal review before lab submission |
+| **0.4** | **2026-06-18** | **A.M.** | **§9.3 expanded from 7 to 32 KAT vectors with explicit standards-track citations (NIST SP 800-38A/B/D, FIPS 180-4, FIPS 202, RFC 4231, RFC 5869, RFC 6070, RFC 6979, NIST SP 800-89). §9.4 added documenting the FIPS 140-3 IG D.3 trade-off for RSA consistency self-tests. §13 added documenting the external Wycheproof + matrix + reproducibility evidence surface (6 978 vectors clean across 9 families, including both NIST post-quantum primitives).** |
