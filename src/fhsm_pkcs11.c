@@ -1510,7 +1510,17 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * path reads CKA_VALUE directly, the asymmetric one routes through
      * d2i_AutoPrivateKey which accepts both PKCS#8 PrivateKeyInfo and
      * PKCS#1 RSAPrivateKey. */
-    if (cko == CKO_SECRET_KEY || cko == CKO_PRIVATE_KEY) {
+    /* CKK_ML_DSA (PKCS#11 v3.2 §A.4) is properly defined further down
+     * in this translation unit alongside the post-quantum mech IDs ;
+     * spell the numeric value here so the early CKO_PUBLIC_KEY branch
+     * can use it without forward-declaring the macro. */
+    #define CKK_ML_DSA_CREATEOBJECT  0x0000003EUL
+    if (cko == CKO_SECRET_KEY || cko == CKO_PRIVATE_KEY
+        || (cko == CKO_PUBLIC_KEY && ckk == CKK_ML_DSA_CREATEOBJECT)) {
+        /* ML-DSA public keys are accepted with their SPKI DER blob
+         * (or raw FIPS 204 bytes) carried in CKA_VALUE ; the verify
+         * path decodes via d2i_PUBKEY and falls back to
+         * EVP_PKEY_fromdata for the raw form. */
         long iv = find_attr(pTemplate, ulCount, CKA_VALUE);
         if (iv < 0) return CKR_TEMPLATE_INCOMPLETE;
         uint8_t flags = (cko == CKO_PRIVATE_KEY) ? FHSM_OBJF_SENSITIVE : 0;
@@ -3685,6 +3695,36 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
     }
     const uint8_t *p = kv;
     EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
+    if (!pkey && op->mechanism == CKM_ML_DSA_OP) {
+        /* Raw ML-DSA public key import fallback. Wycheproof and most
+         * FIPS 204 test corpora carry the verification key as raw
+         * 1312 / 1952 / 2592 bytes (ML-DSA-44 / 65 / 87) rather than
+         * an SPKI envelope. OpenSSL 3.5 exposes the raw import via
+         * EVP_PKEY_fromdata with OSSL_PKEY_PARAM_PUB_KEY ; the keymgmt
+         * accepts EVP_PKEY_PUBLIC_KEY for a verify-only handle (no
+         * KEYPAIR consistency check is required since there is no
+         * private component on the public-key side). */
+        const char *alg = NULL;
+        if (kvl == 1312)      alg = "ML-DSA-44";
+        else if (kvl == 1952) alg = "ML-DSA-65";
+        else if (kvl == 2592) alg = "ML-DSA-87";
+        if (alg) {
+            EVP_PKEY_CTX *kctx = EVP_PKEY_CTX_new_from_name(NULL, alg, NULL);
+            if (kctx) {
+                if (EVP_PKEY_fromdata_init(kctx) > 0) {
+                    OSSL_PARAM params[2] = {
+                        OSSL_PARAM_construct_octet_string(
+                            OSSL_PKEY_PARAM_PUB_KEY,
+                            (void *)kv, (size_t)kvl),
+                        OSSL_PARAM_construct_end(),
+                    };
+                    (void)EVP_PKEY_fromdata(kctx, &pkey,
+                                            EVP_PKEY_PUBLIC_KEY, params);
+                }
+                EVP_PKEY_CTX_free(kctx);
+            }
+        }
+    }
     if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
 
     /* PQ schemes + EdDSA : EVP_DigestVerify with hash=NULL. EdDSA is a

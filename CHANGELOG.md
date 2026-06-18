@@ -5,6 +5,39 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.9] --- 2026-06-17
+
+The "ML-DSA" release. Adds a second post-quantum family (FIPS 204 / Dilithium) to the Wycheproof harness, bringing FreeHSM C to **nine** cleanly-validated crypto families with both NIST PQ primitives (KEM + signature) covered.
+
+### Added
+
+* **ML-DSA (FIPS 204) Wycheproof adapter** (`tests/wycheproof/adapters/mldsa.py`). Drives `CKM_ML_DSA_OP` verification against the `mldsa_{44,65,87}_verify_test.json` corpus for all three NIST parameter sets (Dilithium-2 / 3 / 5). Imports the SPKI DER `publicKeyDer` form so `d2i_PUBKEY` decodes directly ; the raw `publicKey` path remains available via the new `EVP_PKEY_fromdata` fallback.
+* **Raw FIPS 204 verification key import path in `C_VerifyInit`**. The Wycheproof corpus and most CAVP-derived suites carry the verification key as raw 1 312 / 1 952 / 2 592 bytes. When `d2i_PUBKEY` rejects the blob, the verify path now detects ML-DSA-44 / 65 / 87 by canonical length and re-imports via `EVP_PKEY_fromdata` with `OSSL_PKEY_PARAM_PUB_KEY` (selection = `EVP_PKEY_PUBLIC_KEY`). Symmetric with the ML-KEM raw decapsulation key path shipped in v1.1.7.
+* **`C_CreateObject` extended for `CKO_PUBLIC_KEY` + `CKK_ML_DSA`**. The public-key branch now stores the `CKA_VALUE` blob verbatim (matching the ML-KEM private-key path), so the verify-side fallback can re-decode whichever form the caller supplied.
+* PKCS#11 v3.2 plumbing : `CKK_ML_DSA = 0x3E`, `CKM_ML_DSA_OP = 0x403F` exposed in `_p11.py`.
+
+### Validation
+
+```
+ecdsa     match= 3098  viol= 0
+eddsa     match=  236  viol= 0
+rsa_pss   match= 1083  viol= 0
+rsa_oaep  match=  788  viol= 0
+aes_gcm   match=  310  viol= 0
+hmac      match=  522  viol= 0
+mlkem     match=   21  viol= 0
+aes_cmac  match=  306  viol= 0
+mldsa     match=  608  viol= 0
+─────────────────────────────────
+TOTAL     match= 6972  viol= 0   across 9 PKCS#11 v3.2 families
+                                  (2 post-quantum : ML-KEM + ML-DSA)
+```
+
+### Known limitations (tracked for v1.2.0)
+
+* **FIPS 204 context string** : the adapter skips 21 tests whose `ctx` field is non-empty. These exercise the `CK_ML_DSA_PARAMS.pContext` PKCS#11 v3.2 carrier that `C_VerifyInit` does not yet parse. Once the param plumbing lands, `OSSL_SIGNATURE_PARAM_CONTEXT_STRING` will forward it to OpenSSL and recover those vectors.
+* **HashML-DSA** (FIPS 204 §5.4 pre-hash variant) is not yet exposed.
+
 ## [1.1.8] --- 2026-06-17
 
 The "AES-CMAC" release. Adds a second MAC family (NIST SP 800-38B) to the Wycheproof harness, lifting FreeHSM C to **eight** cleanly-validated crypto families.
