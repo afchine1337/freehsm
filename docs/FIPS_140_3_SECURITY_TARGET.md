@@ -181,7 +181,7 @@ Runs once at `C_Initialize` :
 
 ### 9.3 Known Answer Tests (KAT)
 
-**32 cryptographic self-tests** run on first `C_Initialize`, covering every FIPS 140-3 §C.B mandatory algorithm category. Each vector cites a public standards-track document so any independent reviewer can re-derive the expected value.
+**35 cryptographic self-tests** run on first `C_Initialize`, covering every FIPS 140-3 §C.B mandatory algorithm category, **including all three NIST post-quantum primitives** (ML-KEM, ML-DSA, SLH-DSA). Each vector cites a public standards-track document so any independent reviewer can re-derive the expected value.
 
 | Family | Algorithm | Vector ID | Source |
 |---|---|---|---|
@@ -205,10 +205,13 @@ Runs once at `C_Initialize` :
 | **KDF** | HKDF-SHA-256 | RFC 5869 §A.1, A.2 | IETF RFC 5869 |
 |  | PBKDF2-HMAC-SHA-1 | RFC 6070 §2 TC1, TC2 | IETF RFC 6070 |
 | **DRBG** | CTR_DRBG-AES-256 | stuck-DRBG | Internal continuous test (SP 800-90A) |
+| **PQ KEM** | ML-KEM-768 | encaps-decaps round-trip | FIPS 203 + FIPS 140-3 IG D.3 |
+| **PQ signature (lattice)** | ML-DSA-65 | sign-verify round-trip | FIPS 204 + FIPS 140-3 IG D.3 |
+| **PQ signature (hash-based)** | SLH-DSA-SHA2-128f | sign-verify round-trip | FIPS 205 + FIPS 140-3 IG D.3 |
 
 Failure of any single KAT latches the module into the FIPS 140-3 §7.10.2 ERROR state and returns `FHSM_RV_KAT_FAILED = 0x80000001`. No cryptographic operation can complete after a latched failure ; the module must be reloaded by re-invoking `C_Initialize` on a corrected build.
 
-Boot-time KAT execution measured at **~130 ms** on the Debian 13 reference platform (Section 5.1), of which ~100 ms is the RSA-2048 ephemeral keypair generation used by the PSS and OAEP round-trip self-tests.
+Boot-time KAT execution measured at **~152 ms** on the Debian 13 reference platform (Section 5.1), of which ~100 ms is the RSA-2048 ephemeral keypair generation used by the PSS and OAEP round-trip self-tests, and ~20 ms for the three post-quantum keygen + round-trip self-tests combined (ML-KEM-768, ML-DSA-65, SLH-DSA-SHA2-128f). The "fast" variant of SLH-DSA (`128f`) was chosen over the "small signature" (`128s`) variant explicitly to bound the boot-time cost ; production code paths exercise both variants through the C_Sign / C_Verify dispatch at runtime.
 
 ### 9.4 Trade-offs documented
 

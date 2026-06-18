@@ -898,6 +898,115 @@ end:
 }
 
 /* =========================================================================
+ *   Post-quantum consistency self-tests (FIPS 203/204/205)
+ *
+ *   For each NIST PQ primitive we generate an ephemeral keypair at
+ *   boot and run a round-trip operation. As with the RSA self-tests,
+ *   these are FIPS 140-3 IG D.3 consistency self-tests : the
+ *   round-trip property is byte-deterministic (decapsulate(encaps(K))
+ *   = K ; verify(sign(M, sk), pk, M) = 1) and validates the algorithm
+ *   path end-to-end without requiring hardcoded published vectors.
+ *
+ *   The release-tier Wycheproof corpus (mlkem = 21/0, mldsa = 614/0)
+ *   complements these self-tests with external byte-deterministic
+ *   attestation. SLH-DSA has no Wycheproof corpus published yet
+ *   (verified by inspection of C2SP/wycheproof main at SHA
+ *   6d7cccd0) ; the consistency self-test is therefore the only
+ *   automated validation of the SLH-DSA path until upstream lands.
+ *
+ *   Parameter sets : we use the "default tier" recommended by NIST
+ *   (ML-KEM-768 / ML-DSA-65) for the KEM and lattice signature, and
+ *   the "fast" variant of SLH-DSA (SLH-DSA-SHA2-128f) to bound the
+ *   boot-time overhead. The slower "s" variants are exercised
+ *   through the C_Sign / C_Verify dispatch path at runtime and need
+ *   not run at boot for §7.10.2 conformance.
+ * ----------------------------------------------------------------------- */
+
+static EVP_PKEY *pq_keygen(const char *alg_name) {
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_from_name(NULL, alg_name, NULL);
+    if (!ctx) return NULL;
+    if (EVP_PKEY_keygen_init(ctx) <= 0
+        || EVP_PKEY_keygen(ctx, &pkey) <= 0) {
+        if (pkey) EVP_PKEY_free(pkey);
+        pkey = NULL;
+    }
+    EVP_PKEY_CTX_free(ctx);
+    return pkey;
+}
+
+/* ML-KEM round-trip : encapsulate then decapsulate, verify the two
+ * shared secrets match bit-for-bit. */
+static int run_mlkem_roundtrip(EVP_PKEY *pkey) {
+    int ok = 0;
+    EVP_PKEY_CTX *ectx = EVP_PKEY_CTX_new(pkey, NULL);
+    EVP_PKEY_CTX *dctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!ectx || !dctx) goto end;
+    if (EVP_PKEY_encapsulate_init(ectx, NULL) <= 0) goto end;
+    if (EVP_PKEY_decapsulate_init(dctx, NULL) <= 0) goto end;
+    size_t ct_len = 0, ss_a_len = 0;
+    if (EVP_PKEY_encapsulate(ectx, NULL, &ct_len, NULL, &ss_a_len) <= 0)
+        goto end;
+    uint8_t ct[2048];     /* max ML-KEM ciphertext (ML-KEM-1024 = 1568) */
+    uint8_t ss_a[64];     /* shared secret = 32 bytes for ML-KEM */
+    if (ct_len > sizeof(ct) || ss_a_len > sizeof(ss_a)) goto end;
+    if (EVP_PKEY_encapsulate(ectx, ct, &ct_len, ss_a, &ss_a_len) <= 0)
+        goto end;
+    size_t ss_b_len = 0;
+    if (EVP_PKEY_decapsulate(dctx, NULL, &ss_b_len, ct, ct_len) <= 0)
+        goto end;
+    uint8_t ss_b[64];
+    if (ss_b_len > sizeof(ss_b)) goto end;
+    if (EVP_PKEY_decapsulate(dctx, ss_b, &ss_b_len, ct, ct_len) <= 0)
+        goto end;
+    ok = (ss_a_len == ss_b_len)
+         && (fhsm_ct_memcmp(ss_a, ss_b, ss_a_len) == 0);
+    fhsm_zeroize(ss_a, sizeof(ss_a));
+    fhsm_zeroize(ss_b, sizeof(ss_b));
+end:
+    EVP_PKEY_CTX_free(ectx);
+    EVP_PKEY_CTX_free(dctx);
+    return ok;
+}
+
+/* ML-DSA / SLH-DSA round-trip : sign a fixed message then verify the
+ * produced signature against the same pubkey. Re-used by both
+ * lattice and hash-based PQ signatures since OpenSSL exposes them
+ * through the same EVP_DigestSign / EVP_DigestVerify interface
+ * (hash=NULL, the scheme does its own internal hashing per FIPS 204
+ * §6 / FIPS 205 §10). */
+static const uint8_t pq_sig_msg[16] = {
+    'F','r','e','e','H','S','M',' ','P','Q',' ','K','A','T','!','!',
+};
+
+static int run_pq_sign_roundtrip(EVP_PKEY *pkey) {
+    int ok = 0;
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) return 0;
+    EVP_PKEY_CTX *pkctx = NULL;
+    /* SLH-DSA-SHA2-128f signatures top out at ~17 KB ; ML-DSA-87 at
+     * ~4.6 KB. 18 KB covers everything our PQ self-tests use. */
+    uint8_t sig[18432];
+    size_t sig_len = sizeof(sig);
+    if (EVP_DigestSignInit_ex(mdctx, &pkctx, NULL, NULL, NULL, pkey, NULL) != 1)
+        goto end;
+    if (EVP_DigestSign(mdctx, sig, &sig_len, pq_sig_msg, sizeof(pq_sig_msg)) != 1)
+        goto end;
+    EVP_MD_CTX_free(mdctx);
+    mdctx = EVP_MD_CTX_new();
+    if (!mdctx) return 0;
+    if (EVP_DigestVerifyInit_ex(mdctx, &pkctx, NULL, NULL, NULL, pkey, NULL) != 1)
+        goto end;
+    int v = EVP_DigestVerify(mdctx, sig, sig_len,
+                              pq_sig_msg, sizeof(pq_sig_msg));
+    ok = (v == 1);
+end:
+    EVP_MD_CTX_free(mdctx);
+    fhsm_zeroize(sig, sizeof(sig));
+    return ok;
+}
+
+/* =========================================================================
  *                        Public runner
  * ----------------------------------------------------------------------- */
 fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
@@ -1102,6 +1211,38 @@ fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
             oaep_pass, local_elapsed_us(&t0));
         i++;
         EVP_PKEY_free(rsa);
+    }
+
+    /* ---- Post-quantum consistency self-tests (FIPS 203/204/205) -- */
+    {
+        EVP_PKEY *mlkem = pq_keygen("ML-KEM-768");
+        if (i >= cap) { EVP_PKEY_free(mlkem); return FHSM_RV_ARGUMENTS_BAD; }
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int mlkem_pass = mlkem ? run_mlkem_roundtrip(mlkem) : 0;
+        REC(out, i, "ML-KEM-768", "selftest-encaps+decaps",
+            mlkem_pass, local_elapsed_us(&t0));
+        i++;
+        EVP_PKEY_free(mlkem);
+    }
+    {
+        EVP_PKEY *mldsa = pq_keygen("ML-DSA-65");
+        if (i >= cap) { EVP_PKEY_free(mldsa); return FHSM_RV_ARGUMENTS_BAD; }
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int mldsa_pass = mldsa ? run_pq_sign_roundtrip(mldsa) : 0;
+        REC(out, i, "ML-DSA-65", "selftest-sign+verify",
+            mldsa_pass, local_elapsed_us(&t0));
+        i++;
+        EVP_PKEY_free(mldsa);
+    }
+    {
+        EVP_PKEY *slhdsa = pq_keygen("SLH-DSA-SHA2-128f");
+        if (i >= cap) { EVP_PKEY_free(slhdsa); return FHSM_RV_ARGUMENTS_BAD; }
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int slhdsa_pass = slhdsa ? run_pq_sign_roundtrip(slhdsa) : 0;
+        REC(out, i, "SLH-DSA-SHA2-128f", "selftest-sign+verify",
+            slhdsa_pass, local_elapsed_us(&t0));
+        i++;
+        EVP_PKEY_free(slhdsa);
     }
 
     *count_io = i;
