@@ -222,17 +222,16 @@ class EcdsaAdapter(Adapter):
         # let the module do the hashing inside EVP_DigestVerify, which
         # matches the signature's expectations.
         #
-        # NOTE on signature format : PKCS#11 v3.2 specifies raw r||s for
-        # CKM_ECDSA*, but the FreeHSM C implementation uses OpenSSL's
-        # EVP_DigestVerify which expects DER {SEQ r s}. We pass the DER
-        # sig directly. When the module is fixed to accept raw r||s per
-        # spec, both `mech` and `signature` change.
+        # NOTE on signature format : PKCS#11 v3.2 §6.13 mandates raw
+        # r||s for the CKM_ECDSA family. The module accepts this form
+        # since v1.1.11 (DER↔raw conversion happens in C_Sign/C_Verify
+        # via ECDSA_SIG). We pass `sig_raw` rather than `sig_der`.
         mech_id = ECDSA_HASH_MECH.get(sha_name, A.CKM_ECDSA)
         rv = None
         verify_err = None
         try:
             rv = self.session.verify(
-                pubkey, A.MECH(mech_id), msg, sig_der,
+                pubkey, A.MECH(mech_id), msg, sig_raw,
             )
         except AttributeError as exc:
             verify_err = exc

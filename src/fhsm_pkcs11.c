@@ -65,6 +65,7 @@
 #include <openssl/core_names.h>
 #include <openssl/param_build.h> /* OSSL_PARAM_BLD */
 #include <openssl/err.h>      /* ERR_peek_last_error (ML-KEM debug only) */
+#include <openssl/ecdsa.h>    /* ECDSA_SIG_new / d2i / i2d  for raw r||s conversion */
 
 /* CK_RV is identical to fhsm_rv_t numerically. */
 typedef unsigned long  CK_RV;
@@ -3517,6 +3518,68 @@ static int mech_is_pss(uint32_t m) {
         || m == CKM_SHA512_RSA_PKCS_PSS;
 }
 
+/* PKCS#11 v3.2 §6.13 specifies that the CKM_ECDSA family of
+ * mechanisms encodes the signature as raw r||s (each padded to
+ * curve_size octets, so 2 * curve_size total). OpenSSL's
+ * EVP_DigestSign / EVP_DigestVerify produce/expect a DER
+ * ECDSA-Sig-Value (SEQUENCE { r INTEGER, s INTEGER }) by default.
+ * The two helpers below bridge between the two forms. */
+
+static int mech_is_ecdsa(uint32_t m) {
+    return m == CKM_ECDSA
+        || m == CKM_ECDSA_SHA256
+        || m == CKM_ECDSA_SHA384
+        || m == CKM_ECDSA_SHA512;
+}
+
+/* Convert a DER ECDSA_SIG into raw r||s (2*nlen bytes). Returns the
+ * number of bytes written, or 0 on failure. The output buffer must
+ * have room for 2*nlen bytes. */
+static size_t ecdsa_der_to_raw(const uint8_t *der, size_t der_len,
+                                size_t nlen,
+                                uint8_t *out, size_t out_cap) {
+    if (out_cap < 2 * nlen) return 0;
+    const uint8_t *p = der;
+    ECDSA_SIG *sig = d2i_ECDSA_SIG(NULL, &p, (long)der_len);
+    if (!sig) return 0;
+    const BIGNUM *r = NULL, *s = NULL;
+    ECDSA_SIG_get0(sig, &r, &s);
+    if (!r || !s) { ECDSA_SIG_free(sig); return 0; }
+    memset(out, 0, 2 * nlen);
+    int rlen = BN_num_bytes(r);
+    int slen = BN_num_bytes(s);
+    if (rlen > (int)nlen || slen > (int)nlen) {
+        ECDSA_SIG_free(sig); return 0;
+    }
+    BN_bn2bin(r, out + (nlen - rlen));
+    BN_bn2bin(s, out + nlen + (nlen - slen));
+    ECDSA_SIG_free(sig);
+    return 2 * nlen;
+}
+
+/* Convert raw r||s (2*nlen bytes) into a DER ECDSA_SIG. Writes the
+ * DER encoding to *out_der (caller frees with OPENSSL_free). Returns
+ * the encoded length, or 0 on failure. */
+static size_t ecdsa_raw_to_der(const uint8_t *raw, size_t raw_len,
+                                size_t nlen, uint8_t **out_der) {
+    if (raw_len != 2 * nlen) return 0;
+    BIGNUM *r = BN_bin2bn(raw,         (int)nlen, NULL);
+    BIGNUM *s = BN_bin2bn(raw + nlen,  (int)nlen, NULL);
+    if (!r || !s) { BN_free(r); BN_free(s); return 0; }
+    ECDSA_SIG *sig = ECDSA_SIG_new();
+    if (!sig) { BN_free(r); BN_free(s); return 0; }
+    if (ECDSA_SIG_set0(sig, r, s) != 1) {
+        BN_free(r); BN_free(s); ECDSA_SIG_free(sig); return 0;
+    }
+    /* set0 transfers ownership ; do NOT free r/s after this point. */
+    uint8_t *buf = NULL;
+    int len = i2d_ECDSA_SIG(sig, &buf);
+    ECDSA_SIG_free(sig);
+    if (len <= 0) { OPENSSL_free(buf); return 0; }
+    *out_der = buf;
+    return (size_t)len;
+}
+
 /* Sign with an asymmetric private key. Loads the PKCS#8 DER blob from
  * the token's object store, builds an EVP_PKEY, and uses EVP_DigestSign
  * (or EVP_PKEY_sign for prehash mechanisms). */
@@ -3550,6 +3613,27 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
             EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
             return FHSM_RV_FUNCTION_FAILED;
         }
+        /* Symmetric with the verify path : forward the FIPS 204
+         * context string captured from CK_ML_DSA_PARAMS at SignInit
+         * time. Without this, the signature is produced with the
+         * default empty context and would not match a caller that
+         * expects a parameter-bound binding. The hedgeVariant
+         * remains unforwarded for now ; OpenSSL's default policy
+         * (hedged when randomness is available) matches the PKCS#11
+         * CKH_HEDGE_PREFERRED semantics. */
+        if (op->mechanism == CKM_ML_DSA_OP
+            && op->mldsa_ctx_have && op->mldsa_ctx_len > 0) {
+            OSSL_PARAM ctx_params[2] = {
+                OSSL_PARAM_construct_octet_string(
+                    OSSL_SIGNATURE_PARAM_CONTEXT_STRING,
+                    op->mldsa_ctx, op->mldsa_ctx_len),
+                OSSL_PARAM_construct_end(),
+            };
+            if (EVP_PKEY_CTX_set_params(pkctx, ctx_params) <= 0) {
+                EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+                return FHSM_RV_FUNCTION_FAILED;
+            }
+        }
         size_t out_len = *sig_len;
         if (EVP_DigestSign(mdctx, sig, &out_len, data, data_len) != 1) {
             EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
@@ -3580,6 +3664,19 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
     size_t out_len = *sig_len;
     if (EVP_DigestSign(mdctx, sig, &out_len, data, data_len) != 1)
         goto cleanup;
+    /* PKCS#11 v3.2 conformity : for the CKM_ECDSA family OpenSSL
+     * produced a DER ECDSA-Sig-Value, but the spec mandates raw
+     * r||s. Convert in place. */
+    if (mech_is_ecdsa(op->mechanism)) {
+        size_t nlen = (size_t)((EVP_PKEY_get_bits(pkey) + 7) / 8);
+        if (nlen == 0 || *sig_len < 2 * nlen) goto cleanup;
+        uint8_t raw[2 * 66];   /* enough for P-521 (66*2 = 132) */
+        size_t raw_len = ecdsa_der_to_raw(sig, out_len, nlen,
+                                          raw, sizeof(raw));
+        if (raw_len == 0) goto cleanup;
+        memcpy(sig, raw, raw_len);
+        out_len = raw_len;
+    }
     *sig_len = out_len;
     ok = 1;
 
@@ -3822,7 +3919,32 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
             int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
             EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen);
         }
-        int vrv = EVP_DigestVerify(mdctx, pSig, ulSigLen, pData, ulDataLen);
+        /* PKCS#11 v3.2 §6.13 conformity : the CKM_ECDSA family
+         * accepts raw r||s on the wire ; convert to DER for
+         * EVP_DigestVerify. A wrong sig length is a structural
+         * SIGNATURE_INVALID, not an internal error. */
+        const unsigned char *sig_to_verify = pSig;
+        CK_ULONG sig_to_verify_len = ulSigLen;
+        uint8_t *der_buf = NULL;
+        if (mech_is_ecdsa(op->mechanism)) {
+            size_t nlen = (size_t)((EVP_PKEY_get_bits(pkey) + 7) / 8);
+            if (nlen == 0 || ulSigLen != 2 * nlen) {
+                EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+                op->active = 0;
+                return FHSM_RV_SIGNATURE_INVALID;
+            }
+            size_t der_len = ecdsa_raw_to_der(pSig, ulSigLen, nlen, &der_buf);
+            if (der_len == 0 || !der_buf) {
+                EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+                op->active = 0;
+                return FHSM_RV_SIGNATURE_INVALID;
+            }
+            sig_to_verify     = der_buf;
+            sig_to_verify_len = (CK_ULONG)der_len;
+        }
+        int vrv = EVP_DigestVerify(mdctx, sig_to_verify, sig_to_verify_len,
+                                    pData, ulDataLen);
+        if (der_buf) OPENSSL_free(der_buf);
         verify_ok = (vrv == 1);
         if (vrv < 0) {
             /* genuine verification error rather than mismatch */

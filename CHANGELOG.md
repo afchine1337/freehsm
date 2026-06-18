@@ -7,13 +7,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.1.10] --- 2026-06-17
 
-The "ML-DSA context" release. Closes the `CK_ML_DSA_PARAMS.pContext` plumbing in `C_VerifyInit`, pushing ML-DSA Wycheproof coverage from 608 to 614 (+6 vectors) at the cost of a small C addition that will also help the upcoming SLH-DSA parameter work.
+The "conformity" release. Two PKCS#11 v3.2 spec gaps closed in one shot :
+the FIPS 204 ML-DSA context string (`CK_ML_DSA_PARAMS.pContext`) on both
+sign and verify, and the raw r||s signature format for the CKM_ECDSA
+family (PKCS#11 v3.2 §6.13). ML-DSA gains 6 Wycheproof vectors ; ECDSA
+keeps its 3 098 pass count while the wire format is now spec-conformant
+for any PKCS#11 v3.2 caller.
 
 ### Added
 
-* **`CK_ML_DSA_PARAMS` parsing in `op_init`**. PKCS#11 v3.2 §6.18 specifies a 24-byte struct `{ hedgeVariant, pContext, ulContextLen }`. When the verify mechanism is `CKM_ML_DSA_OP` and the caller passes a parameter blob, we decode the context string into a 256-byte static buffer in the operation state. `hedgeVariant` is ignored on the verify side (only sign uses it).
-* **FIPS 204 context forwarded to OpenSSL** in `C_Verify`. Before calling `EVP_DigestVerify`, the post-quantum branch now sets `OSSL_SIGNATURE_PARAM_CONTEXT_STRING` on the `EVP_PKEY_CTX` when the caller supplied a non-empty context. Empty contexts pass through unchanged so the default OpenSSL behaviour is preserved.
+* **`CK_ML_DSA_PARAMS` parsing in `op_init`** (shared between SignInit and VerifyInit). PKCS#11 v3.2 §6.18 specifies a 24-byte struct `{ hedgeVariant, pContext, ulContextLen }`. When the mechanism is `CKM_ML_DSA_OP` and the caller passes a parameter blob, the context string is copied into a 256-byte static buffer in the operation state. `hedgeVariant` is read but unused for now (OpenSSL's default hedged behaviour matches `CKH_HEDGE_PREFERRED`).
+* **FIPS 204 context forwarded to OpenSSL** in both `C_Sign` and `C_Verify`. Before calling `EVP_DigestSign` / `EVP_DigestVerify`, the post-quantum branch now sets `OSSL_SIGNATURE_PARAM_CONTEXT_STRING` on the `EVP_PKEY_CTX` when the caller supplied a non-empty context. The change is gated on the ML-DSA mechanism so SLH-DSA and EdDSA stay on the empty-context default.
 * **ML-DSA adapter forwards the context** (`tests/wycheproof/adapters/mldsa.py`). Builds a `CK_ML_DSA_PARAMS` via `ctypes` for every test, decoding the optional `ctx` hex field from the Wycheproof vector. Tests with `ctx` longer than 255 bytes (FIPS 204 §5.2.1 spec violation, beyond what the PKCS#11 mechanism can express) are surfaced under `ctx_oversize_skip`.
+* **Raw r||s signature format for `CKM_ECDSA*`** (PKCS#11 v3.2 §6.13). The internal OpenSSL path still uses DER ECDSA-Sig-Value (that is what `EVP_DigestSign` / `EVP_DigestVerify` consume and produce), but the public wire is now raw r||s padded to `2 * curve_size` bytes per the spec. Two helpers handle the conversion via `ECDSA_SIG_new` / `d2i_ECDSA_SIG` / `i2d_ECDSA_SIG`. The `ecdsa.py` adapter now passes its already-parsed `sig_raw` to `C_Verify` (instead of `sig_der`), proving the new wire format round-trips through the existing 3 098 Wycheproof vectors with zero regressions.
 
 ### Validation
 

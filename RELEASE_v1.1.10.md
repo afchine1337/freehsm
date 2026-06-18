@@ -1,4 +1,4 @@
-# FreeHSM C v1.1.10 --- ML-DSA context plumbing
+# FreeHSM C v1.1.10 --- PKCS#11 v3.2 conformity (ML-DSA ctx + ECDSA raw r||s)
 
 **Release date** : 2026-06-17
 **Maintainer**   : Afchine Madjlessi <afchine.mad@gmail.com>
@@ -9,7 +9,7 @@
 
 ## TL;DR
 
-> **6 978 / 6 978** Wycheproof vectors pass. Closes the FIPS 204 context string in `C_VerifyInit`, lifting ML-DSA coverage to 614 / 629 (97.6 %).
+> **6 978 / 6 978** Wycheproof vectors pass. Two PKCS#11 v3.2 spec gaps closed in one shot : `CK_ML_DSA_PARAMS.pContext` (FIPS 204 context) on both sign and verify, plus raw r||s wire format for the `CKM_ECDSA*` family (§6.13).
 
 ```
 ecdsa     match= 3098  viol= 0
@@ -25,23 +25,31 @@ mldsa     match=  614  viol= 0    <-- +6 vs v1.1.9 (FIPS 204 ctx now wired)
 TOTAL     match= 6978  viol= 0
 ```
 
-This is a focused patch release : no new family, but ML-DSA gains the `CK_ML_DSA_PARAMS.pContext` parameter --- the FIPS 204 §5.2.1 context string that PKCS#11 v3.2 §6.18 carries. The 6 Wycheproof tests with a legal non-empty context now verify cleanly.
+This is a focused conformity release. No new Wycheproof family, but two
+PKCS#11 v3.2 specification gaps are now closed.
 
 ---
 
 ## Headline changes
 
-### `CK_ML_DSA_PARAMS` parsing in `op_init`
+### 1. ML-DSA context (`CK_ML_DSA_PARAMS.pContext`) on sign and verify
 
-The 24-byte parameter struct `{ hedgeVariant, pContext, ulContextLen }` is now decoded when the caller passes it to `C_VerifyInit(CKM_ML_DSA_OP, …)`. The context is copied into a 256-byte static buffer in the operation slot ; `hedgeVariant` is read but ignored on the verify side (FIPS 204 randomization is a sign-side concern).
+The 24-byte parameter struct `{ hedgeVariant, pContext, ulContextLen }` is decoded in the shared `op_init` (so it covers `C_SignInit` and `C_VerifyInit` alike). The context is copied into a 256-byte static buffer in the operation slot. `hedgeVariant` is read but left to OpenSSL's default (hedged when randomness is available, matching `CKH_HEDGE_PREFERRED`).
 
-### `OSSL_SIGNATURE_PARAM_CONTEXT_STRING` forwarded in `C_Verify`
+Both `C_Sign` and `C_Verify` then call `EVP_PKEY_CTX_set_params(pkctx, OSSL_SIGNATURE_PARAM_CONTEXT_STRING)` before `EVP_DigestSign` / `EVP_DigestVerify`. The change is gated on the ML-DSA mechanism so SLH-DSA and EdDSA stay on the empty-context default until their own parameter plumbing lands.
 
-The post-quantum branch of `C_Verify` (ML-DSA / SLH-DSA / EdDSA shared) now calls `EVP_PKEY_CTX_set_params` with the captured context before `EVP_DigestVerify`. The change is gated on the ML-DSA mechanism so SLH-DSA and EdDSA stay on the empty-context default until their own parameter plumbing lands.
+The ML-DSA Wycheproof adapter now builds a `CK_ML_DSA_PARAMS` for every test, decoding the optional `ctx` hex field. Tests with `len(ctx) > 255` bytes (FIPS 204 §5.2.1 spec violation, beyond what the PKCS#11 mechanism can legally express) are surfaced under `ctx_oversize_skip` rather than running with a truncated context. The 6 tests with a legal non-empty context now verify cleanly, taking ML-DSA from 608 to 614 vectors (97.6 % of the corpus).
 
-### Adapter forwards the corpus `ctx` field
+### 2. ECDSA raw r||s wire format (PKCS#11 v3.2 §6.13)
 
-`tests/wycheproof/adapters/mldsa.py` now builds a `CK_ML_DSA_PARAMS` for every test, decoding the optional `ctx` hex field (defaults to empty). Tests with `len(ctx) > 255` (FIPS 204 spec violation) are surfaced under `ctx_oversize_skip` rather than running with a truncated context.
+PKCS#11 v3.2 specifies that the `CKM_ECDSA*` family transports the signature as raw r||s --- each padded to `(|q|+7)/8` octets, so 2 * curve_size bytes total. The previous code passed an OpenSSL DER ECDSA-Sig-Value `SEQUENCE { r INTEGER, s INTEGER }` straight through, which is what Wycheproof and the harness expected, but no real PKCS#11 v3.2 caller (`pkcs11-tool`, `python-pkcs11`, etc.) would.
+
+Two `static` helpers now bridge the gap inside `fhsm_pkcs11.c` :
+
+- `ecdsa_der_to_raw(der, der_len, nlen, out)` --- decode the DER produced by `EVP_DigestSign`, write r and s big-endian-padded to `nlen` bytes each. Used after `EVP_DigestSign` in `sign_asymmetric`.
+- `ecdsa_raw_to_der(raw, raw_len, nlen, &out_der)` --- inverse, used before `EVP_DigestVerify` in `C_Verify`. A wrong signature length is treated as `CKR_SIGNATURE_INVALID`, not an internal error.
+
+`mech_is_ecdsa(m)` gates both paths. The Wycheproof `ecdsa.py` adapter already parsed Wycheproof's DER into `sig_raw` (via the lenient parser shipped in v1.1.3) ; it now passes `sig_raw` to `C_Verify` instead of `sig_der`. **The full 3 098 ECDSA vector set round-trips cleanly through the new wire format, proving the conversion is bijective on the entire corpus.**
 
 ---
 
