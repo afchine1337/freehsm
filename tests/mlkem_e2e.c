@@ -94,8 +94,14 @@ typedef CK_RV (*pf_decap_t)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE,
 typedef CK_RV (*pf_getattr_t)(CK_SESSION_HANDLE, CK_OBJECT_HANDLE,
                                CK_ATTRIBUTE*, CK_ULONG);
 
+/* POSIX dlsym returns a void*. ISO C forbids casting a void* directly
+ * to a function pointer (`-Wpedantic`). The POSIX-blessed idiom is to
+ * round-trip through an object-pointer slot, which is bit-identical at
+ * the ABI level and accepted by every PKCS#11-relevant platform. We
+ * already build with -fno-strict-aliasing so this is safe. */
 #define LOAD(h, name, type)                                                  \
-    type name = (type)dlsym(h, #name);                                       \
+    type name;                                                                \
+    *(void **)(&name) = dlsym(h, #name);                                      \
     if (!name) { fprintf(stderr, "dlsym %s : %s\n", #name, dlerror()); return 1; }
 
 int main(void) {

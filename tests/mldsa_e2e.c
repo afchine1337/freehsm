@@ -93,12 +93,22 @@ typedef CK_RV (*pf_verifyinit_t)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HAN
 typedef CK_RV (*pf_verify_t)(CK_SESSION_HANDLE, unsigned char*, CK_ULONG,
                               unsigned char*, CK_ULONG);
 
+/* POSIX dlsym returns a void*. ISO C forbids casting a void* directly
+ * to a function pointer (`-Wpedantic`). The POSIX-blessed idiom is to
+ * round-trip through an object-pointer slot, which is bit-identical at
+ * the ABI level and accepted by every PKCS#11-relevant platform. We
+ * already build with -fno-strict-aliasing so this is safe. */
 #define LOAD(h, name, type)                                                  \
-    type name = (type)dlsym(h, #name);                                       \
+    type name;                                                                \
+    *(void **)(&name) = dlsym(h, #name);                                      \
     if (!name) { fprintf(stderr, "dlsym %s : %s\n", #name, dlerror()); return 1; }
 
 static double elapsed_sec(struct timespec t0, struct timespec t1) {
-    return (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+    /* Explicit casts avoid -Wconversion ; tv_sec is __time_t (long) and
+     * tv_nsec is __syscall_slong_t (long), the implicit narrowing to
+     * double would otherwise trip -Werror=conversion. */
+    return (double)(t1.tv_sec  - t0.tv_sec)
+         + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
 }
 
 int main(void) {
