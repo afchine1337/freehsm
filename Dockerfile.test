@@ -1,0 +1,62 @@
+# ===========================================================================
+# Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+# ===========================================================================
+# Dockerfile.test --- PKCS#11 test runtime for FreeHSM C CI.
+#
+# Consumed by .github/workflows/ci.yml at jobs
+#   - test-coverage-matrix : runs tests/coverage_matrix.sh against
+#                            the .so artifact produced by the `build`
+#                            job in the freehsm-c-build container.
+#   - test-fips-mode       : same script with FHSM_MODE=fips set.
+#
+# Goal : carry just enough PKCS#11 tooling for the harness scripts
+# while staying intentionally minimal. The build toolchain stays in
+# Dockerfile.build (freehsm-c-build:debian13-openssl-3.5). The test
+# image consumes a prebuilt libfreehsm-fips.so via the artifact
+# upload/download cycle.
+#
+# Published by .github/workflows/publish-test-image.yml as :
+#     ghcr.io/<owner>/freehsm-c-test:debian13-pkcs11-tools
+#
+# Versioning : the tag debian13-pkcs11-tools tracks the Debian base
+# release line. When Debian publishes a new point release we rebuild
+# the image and re-run the test matrix to catch any regression in
+# the opensc / gnutls toolchain. The tag does NOT change unless we
+# upgrade the Debian major (debian14-...).
+# ===========================================================================
+
+FROM debian:13-slim
+
+LABEL org.opencontainers.image.title="freehsm-c-test"
+LABEL org.opencontainers.image.description="PKCS#11 test runtime for FreeHSM C CI"
+LABEL org.opencontainers.image.source="https://github.com/afchine1337/freehsm-c"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        coreutils \
+        opensc \
+        gnutls-bin \
+        libssl3 \
+        sudo \
+        bash \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-privileged user expected by tests/coverage_matrix.sh : the script
+# runs pkcs11-tool as the freehsm user via `sudo -E -u freehsm`. We
+# create the user here so the CI step does not need to bootstrap it on
+# every run ; the matching `useradd ... || true` in ci.yml stays as a
+# defensive idempotent fallback.
+RUN useradd --system --create-home --home-dir /var/lib/freehsm freehsm \
+    && mkdir -p /opt/freehsm/lib \
+    && chown -R freehsm:freehsm /opt/freehsm /var/lib/freehsm
+
+# Allow non-interactive sudo to the freehsm user so coverage_matrix.sh
+# can switch identity without prompting for a password.
+RUN echo 'ALL ALL=(freehsm) NOPASSWD: ALL' > /etc/sudoers.d/90-ci-freehsm \
+    && chmod 0440 /etc/sudoers.d/90-ci-freehsm
+
+WORKDIR /workspace

@@ -1,0 +1,68 @@
+# ===========================================================================
+# .github/workflows/test-image.yml
+#
+# Build and publish the PKCS#11 test runtime image used by ci.yml's
+# `test-coverage-matrix` and `test-fips-mode` jobs.
+#
+# Output image:
+#   ghcr.io/${{ github.repository_owner }}/freehsm-c-test:debian13-pkcs11-tools
+#
+# Triggered:
+#   - On manual dispatch (Actions tab -> "Build Docker test image" -> Run)
+#   - On push to main when Dockerfile.test changes
+#
+# Once the image is published, flip the `if: false` back to `if: true`
+# on the matrix jobs in ci.yml so they run as part of the CI on every
+# push. This is tracked separately from this workflow so the two
+# changes can land in different commits.
+# ===========================================================================
+
+name: Build Docker test image
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile.test'
+      - '.github/workflows/test-image.yml'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase owner
+        id: meta
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lc=$OWNER_LC" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.test
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner_lc }}/freehsm-c-test:debian13-pkcs11-tools
+            ghcr.io/${{ steps.meta.outputs.owner_lc }}/freehsm-c-test:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
