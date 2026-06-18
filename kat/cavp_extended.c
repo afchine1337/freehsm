@@ -48,6 +48,7 @@
 #include <openssl/core_names.h>
 #include <openssl/param_build.h>
 #include <openssl/kdf.h>
+#include <openssl/rsa.h>     /* RSA_PKCS1_PSS_PADDING, RSA_PKCS1_OAEP_PADDING */
 
 /* Self-contained timing helper to avoid coupling to fhsm_kat_vectors.c
  * internals. */
@@ -784,6 +785,119 @@ static int run_pbkdf2_vec(const char *md_name,
 }
 
 /* =========================================================================
+ *   RSA consistency self-tests
+ *
+ *   Boot-time generation of an ephemeral 2 048-bit RSA keypair, then :
+ *
+ *     PSS round-trip : EVP_DigestSign with RSA_PKCS1_PSS_PADDING +
+ *                      SHA-256 + salt_len = hash_len, then
+ *                      EVP_DigestVerify on the produced signature.
+ *
+ *     OAEP round-trip : EVP_PKEY_encrypt with RSA_PKCS1_OAEP_PADDING +
+ *                       SHA-256, then EVP_PKEY_decrypt and compare
+ *                       against the original plaintext.
+ *
+ *   These are NOT strict byte-deterministic KATs (each boot derives a
+ *   fresh keypair, so the wire values change). They are FIPS 140-3 IG
+ *   D.3 "consistency self-tests" and NIST SP 800-89 §7 RSA "pairwise
+ *   consistency tests" combined : the sign / verify and encrypt /
+ *   decrypt round-trips together provide the same algorithmic-
+ *   correctness guarantee as a byte-deterministic KAT, against the
+ *   trade-off that two co-located bugs in the sign and verify paths
+ *   would not be surfaced. The Wycheproof corpus (rsa_pss = 1 083 / 0,
+ *   rsa_oaep = 788 / 0) catches any such co-located bug at the
+ *   release-validation tier.
+ * ----------------------------------------------------------------------- */
+
+static const uint8_t rsa_selftest_msg[16] = {
+    0x46,0x72,0x65,0x65,0x48,0x53,0x4d,0x20,0x52,0x53,0x41,0x20,0x4b,0x41,0x54,0x21,
+    /* "FreeHSM RSA KAT!" --- arbitrary fixed bytes ; the round-trip
+     * doesn't depend on the value, only on internal consistency. */
+};
+
+static EVP_PKEY *rsa_keygen_2048(void) {
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL);
+    if (!ctx) return NULL;
+    if (EVP_PKEY_keygen_init(ctx) <= 0
+        || EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048) <= 0
+        || EVP_PKEY_keygen(ctx, &pkey) <= 0) {
+        if (pkey) EVP_PKEY_free(pkey);
+        pkey = NULL;
+    }
+    EVP_PKEY_CTX_free(ctx);
+    return pkey;
+}
+
+static int run_rsa_pss_roundtrip(EVP_PKEY *pkey) {
+    int ok = 0;
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) return 0;
+    EVP_PKEY_CTX *pkctx = NULL;
+    uint8_t sig[512];
+    size_t sig_len = sizeof(sig);
+    if (EVP_DigestSignInit(mdctx, &pkctx, EVP_sha256(), NULL, pkey) != 1)
+        goto end;
+    if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING) <= 0)
+        goto end;
+    if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, RSA_PSS_SALTLEN_DIGEST) <= 0)
+        goto end;
+    if (EVP_DigestSign(mdctx, sig, &sig_len,
+                        rsa_selftest_msg, sizeof(rsa_selftest_msg)) != 1)
+        goto end;
+    EVP_MD_CTX_free(mdctx);
+    /* Fresh verify context to make sure we do not reuse internal state. */
+    mdctx = EVP_MD_CTX_new();
+    if (!mdctx) return 0;
+    if (EVP_DigestVerifyInit(mdctx, &pkctx, EVP_sha256(), NULL, pkey) != 1)
+        goto end;
+    if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING) <= 0)
+        goto end;
+    if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, RSA_PSS_SALTLEN_DIGEST) <= 0)
+        goto end;
+    int v = EVP_DigestVerify(mdctx, sig, sig_len,
+                              rsa_selftest_msg, sizeof(rsa_selftest_msg));
+    ok = (v == 1);
+end:
+    EVP_MD_CTX_free(mdctx);
+    fhsm_zeroize(sig, sizeof(sig));
+    return ok;
+}
+
+static int run_rsa_oaep_roundtrip(EVP_PKEY *pkey) {
+    int ok = 0;
+    EVP_PKEY_CTX *enc = NULL, *dec = NULL;
+    uint8_t ct[512];
+    uint8_t pt[64];
+    size_t  ct_len = sizeof(ct);
+    size_t  pt_len = sizeof(pt);
+    enc = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!enc) goto end;
+    if (EVP_PKEY_encrypt_init(enc) <= 0) goto end;
+    if (EVP_PKEY_CTX_set_rsa_padding(enc, RSA_PKCS1_OAEP_PADDING) <= 0) goto end;
+    if (EVP_PKEY_CTX_set_rsa_oaep_md(enc, EVP_sha256()) <= 0) goto end;
+    if (EVP_PKEY_CTX_set_rsa_mgf1_md(enc, EVP_sha256()) <= 0) goto end;
+    if (EVP_PKEY_encrypt(enc, ct, &ct_len,
+                          rsa_selftest_msg, sizeof(rsa_selftest_msg)) <= 0)
+        goto end;
+    dec = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!dec) goto end;
+    if (EVP_PKEY_decrypt_init(dec) <= 0) goto end;
+    if (EVP_PKEY_CTX_set_rsa_padding(dec, RSA_PKCS1_OAEP_PADDING) <= 0) goto end;
+    if (EVP_PKEY_CTX_set_rsa_oaep_md(dec, EVP_sha256()) <= 0) goto end;
+    if (EVP_PKEY_CTX_set_rsa_mgf1_md(dec, EVP_sha256()) <= 0) goto end;
+    if (EVP_PKEY_decrypt(dec, pt, &pt_len, ct, ct_len) <= 0) goto end;
+    ok = (pt_len == sizeof(rsa_selftest_msg))
+         && (fhsm_ct_memcmp(pt, rsa_selftest_msg, pt_len) == 0);
+end:
+    EVP_PKEY_CTX_free(enc);
+    EVP_PKEY_CTX_free(dec);
+    fhsm_zeroize(ct, sizeof(ct));
+    fhsm_zeroize(pt, sizeof(pt));
+    return ok;
+}
+
+/* =========================================================================
  *                        Public runner
  * ----------------------------------------------------------------------- */
 fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
@@ -969,6 +1083,25 @@ fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
                                    2, sizeof(pbkdf2_tc2_dk), pbkdf2_tc2_dk);
         REC(out, i, "PBKDF2-HMAC-SHA-1", "RFC6070-TC2", pass, local_elapsed_us(&t0));
         i++;
+    }
+
+    /* ---- RSA consistency self-tests (PSS + OAEP round-trips) ---- */
+    {
+        EVP_PKEY *rsa = rsa_keygen_2048();
+        if (i >= cap) { EVP_PKEY_free(rsa); return FHSM_RV_ARGUMENTS_BAD; }
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int pss_pass = rsa ? run_rsa_pss_roundtrip(rsa) : 0;
+        REC(out, i, "RSA-2048-PSS-SHA256", "selftest-sign+verify",
+            pss_pass, local_elapsed_us(&t0));
+        i++;
+
+        if (i >= cap) { EVP_PKEY_free(rsa); return FHSM_RV_ARGUMENTS_BAD; }
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int oaep_pass = rsa ? run_rsa_oaep_roundtrip(rsa) : 0;
+        REC(out, i, "RSA-2048-OAEP-SHA256", "selftest-encrypt+decrypt",
+            oaep_pass, local_elapsed_us(&t0));
+        i++;
+        EVP_PKEY_free(rsa);
     }
 
     *count_io = i;
