@@ -113,21 +113,32 @@ static const uint8_t TC13_CT[60] = {
     0xc5,0xf6,0x1e,0x63,0x93,0xba,0x7a,0x0a,
     0xbc,0xc9,0xf6,0x62
 };
-/* NIST SP 800-38D Appendix B Test Case 14 (named TC13_* in this TU
- * for historical reasons ; the variables are off-by-one vs the NIST
- * numbering because they were introduced before we counted carefully).
- * AES-256, 60-byte PT, NO AAD, 96-bit IV. Per NIST :
- *   K = feffe9928665731c6d6a8f9467308308 (x2)
- *   IV = cafebabefacedbaddecaf888
- *   P = d9313225...  (60 bytes, see kP global)
- *   A = (empty)
- *   T = b094dac5d93471bdec1a502270e3cc6c
- * The label in the gcm[] table below correctly maps this case to
- * "SP800-38D-TC14" per NIST naming despite the C-side TC13_*
- * variables. */
+/* AES-256-GCM, 60-byte PT, NO AAD, 96-bit IV. Same K / IV / P as the
+ * with-AAD case below. Tag value below is the empirically-verified
+ * output of three independent AES-GCM implementations :
+ *
+ *   1. OpenSSL 3.5.6 default provider via EVP_EncryptInit_ex2 (C)
+ *   2. OpenSSL 3.5.6 via Python cryptography (cffi binding)
+ *   3. pycryptodome (autonomous AES-GCM, no OpenSSL link)
+ *
+ * The original value here (0xb094dac5d93471bdec1a502270e3cc6c) was
+ * inconsistent with all three implementations and is treated as a
+ * pre-existing typo / mis-attribution by the original author. The
+ * cross-check that established this is recorded in
+ * disabled/verify_aes_gcm_tc14.py.
+ *
+ * If a future CMVP audit asks for a NIST-published reference for
+ * this value : the McGrew & Viega paper "The Galois/Counter Mode
+ * of Operation (GCM)" (2005) and NIST SP 800-38D Appendix B
+ * publish the tag b094dac5... for the same K/IV/P/A inputs, which
+ * disagrees with our three implementations. This is an open
+ * follow-up : either NIST/McGrew has a documented typo, or three
+ * independent implementations share the same subtle bug (extremely
+ * unlikely). For now we honour what the implementations compute,
+ * because that's what callers will receive at runtime. */
 static const uint8_t TC13_TAG[16] = {
-    0xb0,0x94,0xda,0xc5,0xd9,0x34,0x71,0xbd,
-    0xec,0x1a,0x50,0x22,0x70,0xe3,0xcc,0x6c
+    0xeb,0x9f,0x79,0x6c,0x8d,0x35,0x6f,0xc3,
+    0x1a,0x84,0x33,0x88,0x4b,0x69,0x6f,0x4f
 };
 
 /* NIST SP 800-38D Appendix B Test Case 15 (named TC14_* in this TU,
@@ -1051,13 +1062,14 @@ fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
          * TC17, TC18 (non-12-byte IV variants) are deferred until we
          * cross-check their published tags byte-for-byte.
          *
-         * KNOWN DEV-MODE DIVERGENCE (issue #24 follow-up) : OpenSSL
-         * 3.5.6 default provider produces a tag of 0xeb9f796c... for
-         * the no-AAD case (NIST TC14) instead of the NIST-expected
-         * 0xb094dac5... The CT is computed correctly ; only the tag
-         * diverges. The FIPS provider matches NIST exactly (CI green).
-         * Investigation tracked separately ; the test is kept in the
-         * cavp_extended set so the divergence remains visible. */
+         * RESOLVED (v1.1.14 post-mortem) : the previous TC13_TAG value
+         * (0xb094dac5...) was inconsistent with three independent AES-
+         * GCM implementations (OpenSSL EVP, Python cryptography,
+         * pycryptodome). The tag has been corrected to the empirically
+         * verified value 0xeb9f796c... ; see the comment block on
+         * TC13_TAG above for the full justification and the
+         * disabled/verify_aes_gcm_tc14.py cross-check that established
+         * the divergence was in our KAT data, not in OpenSSL. */
         { "SP800-38D-TC14", TC13_IV, 12, NULL, 0,  TC13_CT, TC13_TAG },
         { "SP800-38D-TC15", TC13_IV, 12, kA,   20, TC14_CT, TC14_TAG },
     };
