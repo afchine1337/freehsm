@@ -67,6 +67,11 @@
 #include <openssl/err.h>      /* ERR_peek_last_error (ML-KEM debug only) */
 #include <openssl/ecdsa.h>    /* ECDSA_SIG_new / d2i / i2d  for raw r||s conversion */
 
+/* PKCS#11 v3.2 §6.13 ECDSA r||s wire format <-> DER ECDSA_SIG. Extracted
+ * into its own translation unit in v1.1.14 as a prerequisite for the
+ * libFuzzer harness on this parser (#191). */
+#include "fhsm_ecdsa_raw.h"
+
 /* CK_RV is identical to fhsm_rv_t numerically. */
 typedef unsigned long  CK_RV;
 typedef unsigned long  CK_ULONG;
@@ -3437,10 +3442,9 @@ gcm_out:
 #ifndef CKM_SHA512_HMAC_INIT_VAL
 #define CKM_SHA512_HMAC_INIT_VAL  0x00000271UL
 #endif
-#define CKM_ECDSA                 0x00001041UL
-#define CKM_ECDSA_SHA256          0x00001044UL
-#define CKM_ECDSA_SHA384          0x00001045UL
-#define CKM_ECDSA_SHA512          0x00001046UL
+/* CKM_ECDSA* identifiers are now defined in include/fhsm_ecdsa_raw.h which
+ * is pulled in near the top of this TU. Kept here as a comment so a grep
+ * for "CKM_ECDSA" still lands somewhere readable. */
 #ifndef CKM_EDDSA
 #define CKM_EDDSA                 0x00001057UL
 #endif
@@ -3536,67 +3540,11 @@ static int mech_is_pss(uint32_t m) {
         || m == CKM_SHA512_RSA_PKCS_PSS;
 }
 
-/* PKCS#11 v3.2 §6.13 specifies that the CKM_ECDSA family of
- * mechanisms encodes the signature as raw r||s (each padded to
- * curve_size octets, so 2 * curve_size total). OpenSSL's
- * EVP_DigestSign / EVP_DigestVerify produce/expect a DER
- * ECDSA-Sig-Value (SEQUENCE { r INTEGER, s INTEGER }) by default.
- * The two helpers below bridge between the two forms. */
-
-static int mech_is_ecdsa(uint32_t m) {
-    return m == CKM_ECDSA
-        || m == CKM_ECDSA_SHA256
-        || m == CKM_ECDSA_SHA384
-        || m == CKM_ECDSA_SHA512;
-}
-
-/* Convert a DER ECDSA_SIG into raw r||s (2*nlen bytes). Returns the
- * number of bytes written, or 0 on failure. The output buffer must
- * have room for 2*nlen bytes. */
-static size_t ecdsa_der_to_raw(const uint8_t *der, size_t der_len,
-                                size_t nlen,
-                                uint8_t *out, size_t out_cap) {
-    if (out_cap < 2 * nlen) return 0;
-    const uint8_t *p = der;
-    ECDSA_SIG *sig = d2i_ECDSA_SIG(NULL, &p, (long)der_len);
-    if (!sig) return 0;
-    const BIGNUM *r = NULL, *s = NULL;
-    ECDSA_SIG_get0(sig, &r, &s);
-    if (!r || !s) { ECDSA_SIG_free(sig); return 0; }
-    memset(out, 0, 2 * nlen);
-    int rlen = BN_num_bytes(r);
-    int slen = BN_num_bytes(s);
-    if (rlen > (int)nlen || slen > (int)nlen) {
-        ECDSA_SIG_free(sig); return 0;
-    }
-    BN_bn2bin(r, out + (nlen - rlen));
-    BN_bn2bin(s, out + nlen + (nlen - slen));
-    ECDSA_SIG_free(sig);
-    return 2 * nlen;
-}
-
-/* Convert raw r||s (2*nlen bytes) into a DER ECDSA_SIG. Writes the
- * DER encoding to *out_der (caller frees with OPENSSL_free). Returns
- * the encoded length, or 0 on failure. */
-static size_t ecdsa_raw_to_der(const uint8_t *raw, size_t raw_len,
-                                size_t nlen, uint8_t **out_der) {
-    if (raw_len != 2 * nlen) return 0;
-    BIGNUM *r = BN_bin2bn(raw,         (int)nlen, NULL);
-    BIGNUM *s = BN_bin2bn(raw + nlen,  (int)nlen, NULL);
-    if (!r || !s) { BN_free(r); BN_free(s); return 0; }
-    ECDSA_SIG *sig = ECDSA_SIG_new();
-    if (!sig) { BN_free(r); BN_free(s); return 0; }
-    if (ECDSA_SIG_set0(sig, r, s) != 1) {
-        BN_free(r); BN_free(s); ECDSA_SIG_free(sig); return 0;
-    }
-    /* set0 transfers ownership ; do NOT free r/s after this point. */
-    uint8_t *buf = NULL;
-    int len = i2d_ECDSA_SIG(sig, &buf);
-    ECDSA_SIG_free(sig);
-    if (len <= 0) { OPENSSL_free(buf); return 0; }
-    *out_der = buf;
-    return (size_t)len;
-}
+/* The mech_is_ecdsa / ecdsa_der_to_raw / ecdsa_raw_to_der helpers used
+ * to live here. They were extracted to src/fhsm_ecdsa_raw.c in v1.1.14
+ * to enable a libFuzzer harness on the DER <-> raw r||s conversion path
+ * (#191). The header fhsm_ecdsa_raw.h is included near the top of this
+ * TU ; call sites use the fhsm_* prefixed names. */
 
 /* Sign with an asymmetric private key. Loads the PKCS#8 DER blob from
  * the token's object store, builds an EVP_PKEY, and uses EVP_DigestSign
@@ -3686,12 +3634,12 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
     /* PKCS#11 v3.2 conformity : for the CKM_ECDSA family OpenSSL
      * produced a DER ECDSA-Sig-Value, but the spec mandates raw
      * r||s. Convert in place. */
-    if (mech_is_ecdsa(op->mechanism)) {
+    if (fhsm_mech_is_ecdsa(op->mechanism)) {
         size_t nlen = (size_t)((EVP_PKEY_get_bits(pkey) + 7) / 8);
         if (nlen == 0 || *sig_len < 2 * nlen) goto cleanup;
         uint8_t raw[2 * 66];   /* enough for P-521 (66*2 = 132) */
-        size_t raw_len = ecdsa_der_to_raw(sig, out_len, nlen,
-                                          raw, sizeof(raw));
+        size_t raw_len = fhsm_ecdsa_der_to_raw(sig, out_len, nlen,
+                                                raw, sizeof(raw));
         if (raw_len == 0) goto cleanup;
         memcpy(sig, raw, raw_len);
         out_len = raw_len;
@@ -3947,14 +3895,14 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
         const unsigned char *sig_to_verify = pSig;
         CK_ULONG sig_to_verify_len = ulSigLen;
         uint8_t *der_buf = NULL;
-        if (mech_is_ecdsa(op->mechanism)) {
+        if (fhsm_mech_is_ecdsa(op->mechanism)) {
             size_t nlen = (size_t)((EVP_PKEY_get_bits(pkey) + 7) / 8);
             if (nlen == 0 || ulSigLen != 2 * nlen) {
                 EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
                 op->active = 0;
                 return FHSM_RV_SIGNATURE_INVALID;
             }
-            size_t der_len = ecdsa_raw_to_der(pSig, ulSigLen, nlen, &der_buf);
+            size_t der_len = fhsm_ecdsa_raw_to_der(pSig, ulSigLen, nlen, &der_buf);
             if (der_len == 0 || !der_buf) {
                 EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
                 op->active = 0;
