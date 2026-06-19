@@ -91,6 +91,7 @@ LIB_SRC = \
     src/fhsm_audit.c                  \
     src/fhsm_pkcs11.c                 \
     src/fhsm_ecdsa_raw.c              \
+    src/fhsm_pq_params.c              \
     src/fhsm_token.c                  \
     src/fhsm_session.c                \
     src/fhsm_integrity.c              \

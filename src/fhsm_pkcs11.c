@@ -72,6 +72,11 @@
  * libFuzzer harness on this parser (#191). */
 #include "fhsm_ecdsa_raw.h"
 
+/* PKCS#11 v3.2 §6.18 / §6.19 ML-DSA / SLH-DSA mechanism parameter
+ * parser. Extracted into its own TU in v1.1.14 as a prerequisite for
+ * the libFuzzer harness on this parser (#191). */
+#include "fhsm_pq_params.h"
+
 /* CK_RV is identical to fhsm_rv_t numerically. */
 typedef unsigned long  CK_RV;
 typedef unsigned long  CK_ULONG;
@@ -3068,38 +3073,23 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         op->pss_have    = 1;
     }
     /* CK_ML_DSA_PARAMS (PKCS#11 v3.2 §6.18) and CK_SLH_DSA_PARAMS
-     * (PKCS#11 v3.2 §6.19) :
-     *   { CK_ULONG hedgeVariant; CK_BYTE_PTR pContext; CK_ULONG ulContextLen }
-     * = 8 + 8 + 8 = 24 bytes on a 64-bit ABI. Both structs are
-     * identical on the wire ; we parse them through the same code
-     * path. Optional ; when absent we default to an empty context,
-     * matching the verify behaviour for callers that pass no
-     * parameter. hedgeVariant is recorded but unused for now ---
-     * OpenSSL's default policy (hedged when entropy is available)
-     * matches CKH_HEDGE_PREFERRED. */
+     * (PKCS#11 v3.2 §6.19) parser is now in src/fhsm_pq_params.c
+     * (extracted in v1.1.14 as a prerequisite for the libFuzzer harness
+     * #191). Same semantics, same wire layout, same trade-off on
+     * oversize ctx_len. The mechanism gate is kept here so the parser
+     * itself stays generic (any caller can use it for an
+     * "{ hedgeVariant ; pContext ; ulContextLen }" triple). */
     op->pq_ctx_have = 0;
     op->pq_ctx_len  = 0;
-    if ((op->mechanism == 0x0000403FUL /* CKM_ML_DSA_OP */
-         || op->mechanism == 0x00004041UL /* CKM_SLH_DSA_OP */)
-        && pMechanism->pParameter
-        && pMechanism->ulParameterLen >= 3 * sizeof(CK_ULONG)) {
-        const CK_ULONG *p = (const CK_ULONG *)pMechanism->pParameter;
-        /* p[0] = hedgeVariant (recorded for future use ; not applied)
-         * p[1] = pContext (as integer-encoded pointer)
-         * p[2] = ulContextLen */
-        size_t ctx_len = (size_t)p[2];
-        const void *ctx_ptr = (const void *)(uintptr_t)p[1];
-        if (ctx_len > 0 && ctx_len <= sizeof(op->pq_ctx) && ctx_ptr) {
-            memcpy(op->pq_ctx, ctx_ptr, ctx_len);
-            op->pq_ctx_len  = ctx_len;
-            op->pq_ctx_have = 1;
-        } else if (ctx_len == 0) {
-            /* Explicit empty context is the same as the default. */
-            op->pq_ctx_have = 1;
-        }
-        /* ctx_len > 255 is rejected by both FIPS 204 §5.2.1 and
-         * FIPS 205 §5.2.1 ; we leave have=0/len=0 so OpenSSL receives
-         * no override and itself rejects the eventual sign/verify. */
+    if (op->mechanism == 0x0000403FUL /* CKM_ML_DSA_OP */
+        || op->mechanism == 0x00004041UL /* CKM_SLH_DSA_OP */) {
+        unsigned long hedge_variant = 0;
+        fhsm_parse_pq_params(pMechanism->pParameter,
+                             (size_t)pMechanism->ulParameterLen,
+                             op->pq_ctx, sizeof(op->pq_ctx),
+                             &op->pq_ctx_len, &op->pq_ctx_have,
+                             &hedge_variant);
+        (void)hedge_variant;  /* recorded for future use ; not applied */
     }
     op->active = 1;
     (void)hSession;

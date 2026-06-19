@@ -243,6 +243,28 @@ static fhsm_rv_t do_verify(void) {
 static void verify_once(void) {
     g_result = do_verify();
     if (g_result != FHSM_RV_OK) {
+        /* FHSM_INTEGRITY_ALLOW_UNSIGNED downgrades integrity failures
+         * to a warning : we suppress both the ERROR state latch and the
+         * non-OK return so the rest of the module can continue. This
+         * matches the existing partial bypass in crypto_init_once,
+         * which only filtered the return value but missed the latch
+         * happening here. The setup-error paths in do_verify (locate_self
+         * / open / fstat / mmap / malloc) have no internal bypass, so
+         * without this consolidation the state machine ended up in
+         * ERROR before any crypto could run.
+         *
+         * The flag is REFUSED in production by AGD_PRE §7.5 ; this
+         * downgrade is purely a developer ergonomics path. */
+        if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")) {
+            fprintf(stderr,
+                "[freehsm-c] WARNING : FHSM_INTEGRITY_ALLOW_UNSIGNED "
+                "active --- integrity verify failed (rv=0x%08x) but the "
+                "ERROR latch is suppressed. This is INVALID for any "
+                "FIPS 140-3 / CC EAL4+ deployment.\n",
+                (unsigned)g_result);
+            g_result = FHSM_RV_OK;
+            return;
+        }
         fhsm_state_latch_error("integrity check failed");
     }
 }
