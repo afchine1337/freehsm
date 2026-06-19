@@ -1,0 +1,81 @@
+# ===========================================================================
+# fuzz/Makefile.fuzz
+#
+# libFuzzer + AddressSanitizer + UndefinedBehaviorSanitizer harnesses
+# for the FreeHSM C parser surfaces (#191).
+#
+# Required toolchain :
+#   clang >= 12 with libFuzzer  (Debian : clang)
+#   OpenSSL 3.x dev headers     (Debian : libssl-dev)
+#
+# Build :
+#   make -f fuzz/Makefile.fuzz                 # all three harnesses
+#   make -f fuzz/Makefile.fuzz fuzz_ecdsa_raw  # one specific
+#
+# Run :
+#   ./fuzz/fuzz_ecdsa_raw fuzz/corpus/ecdsa_raw -max_total_time=300
+#   ./fuzz/fuzz_pq_params fuzz/corpus/pq_params -max_total_time=300
+#   ./fuzz/fuzz_attr_template fuzz/corpus/attr_template -max_total_time=300
+#
+# Triage :
+#   When a crash is found, libFuzzer writes ./crash-<sha1> in the cwd.
+#   Reproduce :  ./fuzz/fuzz_<name> <crash-file>
+#   Minimize  :  ./fuzz/fuzz_<name> -minimize_crash=1 <crash-file>
+# ===========================================================================
+
+FUZZ_CC      ?= clang
+OPENSSL_PREFIX ?= /usr/local/ssl
+
+FUZZ_CFLAGS = \
+    -O1 -g \
+    -std=c11 \
+    -fsanitize=fuzzer,address,undefined \
+    -fno-omit-frame-pointer \
+    -Iinclude -I$(OPENSSL_PREFIX)/include \
+    -DFHSM_FUZZ_BUILD=1
+
+FUZZ_LDFLAGS = \
+    -fsanitize=fuzzer,address,undefined \
+    -L$(OPENSSL_PREFIX)/lib64 -L$(OPENSSL_PREFIX)/lib \
+    -lcrypto
+
+# ---------------------------------------------------------------------------
+# Default target : build all three harnesses.
+# Must come BEFORE the individual rules so `make -f fuzz/Makefile.fuzz`
+# (no target) invokes the full build.
+# ---------------------------------------------------------------------------
+all : fuzz/fuzz_ecdsa_raw fuzz/fuzz_pq_params fuzz/fuzz_attr_template
+
+# ---------------------------------------------------------------------------
+# Harness 1 : ECDSA r||s <-> DER round-trip
+# ---------------------------------------------------------------------------
+fuzz/fuzz_ecdsa_raw : fuzz/fuzz_ecdsa_raw.c src/fhsm_ecdsa_raw.c \
+                      include/fhsm_ecdsa_raw.h
+	$(FUZZ_CC) $(FUZZ_CFLAGS) \
+	    fuzz/fuzz_ecdsa_raw.c src/fhsm_ecdsa_raw.c \
+	    -o $@ $(FUZZ_LDFLAGS)
+
+# ---------------------------------------------------------------------------
+# Harness 2 : ML-DSA / SLH-DSA mech-params parser
+# ---------------------------------------------------------------------------
+fuzz/fuzz_pq_params : fuzz/fuzz_pq_params.c src/fhsm_pq_params.c \
+                      include/fhsm_pq_params.h
+	$(FUZZ_CC) $(FUZZ_CFLAGS) \
+	    fuzz/fuzz_pq_params.c src/fhsm_pq_params.c \
+	    -o $@ $(FUZZ_LDFLAGS)
+
+# ---------------------------------------------------------------------------
+# Harness 3 : attribute template + DER OCTET STRING wrapper
+# ---------------------------------------------------------------------------
+fuzz/fuzz_attr_template : fuzz/fuzz_attr_template.c \
+                          include/fhsm_attr_utils.h
+	$(FUZZ_CC) $(FUZZ_CFLAGS) \
+	    fuzz/fuzz_attr_template.c \
+	    -o $@ $(FUZZ_LDFLAGS)
+
+# ---------------------------------------------------------------------------
+clean :
+	rm -f fuzz/fuzz_ecdsa_raw fuzz/fuzz_pq_params fuzz/fuzz_attr_template \
+	      fuzz/crash-* fuzz/leak-* fuzz/oom-* fuzz/timeout-*
+
+.PHONY : all clean

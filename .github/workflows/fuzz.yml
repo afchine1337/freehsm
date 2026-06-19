@@ -1,0 +1,123 @@
+# ===========================================================================
+# .github/workflows/fuzz.yml
+#
+# Structured fuzzing on the PKCS#11 v3.2 parser surfaces (#191).
+#
+#   on push to main : 5 min per harness, fail the workflow if any crash
+#                     is reproduced.
+#   on schedule     : 1 h per harness nightly, upload corpus + crashes
+#                     as workflow artifacts even on success.
+#   on dispatch     : manual run with custom duration via input.
+# ===========================================================================
+name: fuzz
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'fuzz/**'
+      - 'src/fhsm_ecdsa_raw.c'
+      - 'src/fhsm_pq_params.c'
+      - 'include/fhsm_ecdsa_raw.h'
+      - 'include/fhsm_pq_params.h'
+      - 'include/fhsm_attr_utils.h'
+      - '.github/workflows/fuzz.yml'
+  schedule:
+    - cron: '0 2 * * *'    # nightly at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzz duration per harness, in seconds'
+        required: false
+        default: '300'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        harness:
+          - fuzz_ecdsa_raw
+          - fuzz_pq_params
+          - fuzz_attr_template
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            clang libssl-dev make ca-certificates
+          clang --version
+
+      - name: Pick fuzz duration
+        id: dur
+        run: |
+          # Push runs : 5 min per harness ; nightly : 1 h ; dispatch : input.
+          case "${{ github.event_name }}" in
+            schedule)         echo "seconds=3600" >> "$GITHUB_OUTPUT" ;;
+            workflow_dispatch) echo "seconds=${{ inputs.duration }}" >> "$GITHUB_OUTPUT" ;;
+            *)                echo "seconds=300"  >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Build ${{ matrix.harness }}
+        run: |
+          # CI uses the system OpenSSL (libssl-dev = 3.x on Ubuntu 22.04+)
+          # rather than /usr/local/ssl ; override OPENSSL_PREFIX accordingly.
+          make -f fuzz/Makefile.fuzz \
+              OPENSSL_PREFIX=/usr \
+              FUZZ_CC=clang \
+              fuzz/${{ matrix.harness }}
+          ls -la fuzz/${{ matrix.harness }}
+
+      - name: Run ${{ matrix.harness }}
+        id: run
+        env:
+          # ASAN options : symbolize stacks, allow user-controlled malloc.
+          ASAN_OPTIONS: "abort_on_error=1:detect_leaks=1:symbolize=1:print_stacktrace=1"
+          UBSAN_OPTIONS: "abort_on_error=1:print_stacktrace=1:halt_on_error=1"
+        run: |
+          set -euxo pipefail
+          # libFuzzer writes crashes in the cwd ; ensure it is dedicated.
+          mkdir -p fuzz/artifacts/${{ matrix.harness }}
+          cd fuzz/artifacts/${{ matrix.harness }}
+          ../../${{ matrix.harness }} \
+              ../../corpus/$(echo "${{ matrix.harness }}" | sed 's/^fuzz_//') \
+              -max_total_time=${{ steps.dur.outputs.seconds }} \
+              -print_final_stats=1 \
+              -rss_limit_mb=2048 \
+              -timeout=30 \
+              || (echo "Fuzz harness crashed or timed out"; ls -la; exit 1)
+
+      - name: Upload corpus + crashes (nightly)
+        if: ${{ always() && github.event_name == 'schedule' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.harness }}-corpus-${{ github.run_id }}
+          path: |
+            fuzz/corpus/${{ matrix.harness }}/
+            fuzz/artifacts/${{ matrix.harness }}/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload crashes only (push)
+        if: ${{ failure() && github.event_name == 'push' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.harness }}-crash-${{ github.run_id }}
+          path: |
+            fuzz/artifacts/${{ matrix.harness }}/crash-*
+            fuzz/artifacts/${{ matrix.harness }}/leak-*
+            fuzz/artifacts/${{ matrix.harness }}/oom-*
+            fuzz/artifacts/${{ matrix.harness }}/timeout-*
+          retention-days: 90
+          if-no-files-found: ignore
