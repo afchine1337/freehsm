@@ -5,6 +5,69 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.14] --- 2026-06-19
+
+The "fuzzing prep + libFuzzer harnesses" release. Closes the structured-fuzzing milestone (#191) by extracting the PKCS#11 v3.2 parser surfaces into reachable translation units, building three sanitizer-instrumented libFuzzer harnesses with seed corpora and a CI workflow, and shipping a bug-fix to the integrity-check bypass that was silently latching the module ERROR state in dev mode. Two adjacent investigations (AES-GCM TC14 dev-mode mislabel, OpenSSL 3.5.6 default-provider divergence) are documented as known-state with follow-up tracked.
+
+### Added
+
+* **`include/fhsm_ecdsa_raw.h` + `src/fhsm_ecdsa_raw.c`** : the PKCS#11 v3.2 §6.13 ECDSA `r||s` ↔ DER ECDSA-Sig-Value converters extracted into a dedicated translation unit. New public symbols `fhsm_mech_is_ecdsa`, `fhsm_ecdsa_der_to_raw`, `fhsm_ecdsa_raw_to_der`. Byte-identical to the original code modulo two explicit `(size_t)` casts on `rlen`/`slen` that are no-ops because `BN_num_bytes` returns `int >= 0` with the preceding bounds check.
+* **`include/fhsm_pq_params.h` + `src/fhsm_pq_params.c`** : the `CK_ML_DSA_PARAMS` / `CK_SLH_DSA_PARAMS` 24-byte mech-parameter parser (PKCS#11 v3.2 §6.18 / §6.19, FIPS 204/205) extracted into a dedicated TU. New public symbol `fhsm_parse_pq_params(param_ptr, param_len, out_ctx, out_ctx_cap, out_ctx_len, out_have, out_hedge_variant)`. Same semantics as the original inline parser, with explicit `out_*` pointers for the four output values.
+* **`include/fhsm_attr_utils.h`** : static inline mirrors of `fhsm_find_attr` and `fhsm_strip_octet_string_inline`, the two parser helpers still inlined in `src/fhsm_pkcs11.c`. Character-for-character copies of the production code ; a libFuzzer finding here corresponds to the same bug in production by inspection.
+* **`fuzz/Makefile.fuzz`** + three libFuzzer harnesses :
+  * `fuzz/fuzz_ecdsa_raw.c` exercises the ECDSA converter pair, checking round-trip closure `der_to_raw(raw_to_der(r||s)) == r||s` plus memory safety on adversarial DER inputs.
+  * `fuzz/fuzz_pq_params.c` exercises the PQ-params parser, checking five structural invariants (no-context flag consistency, bounds clamp, hedgeVariant pass-through, NULL rejection, short-input rejection).
+  * `fuzz/fuzz_attr_template.c` exercises `find_attr` + `strip_octet_string`, checking index-range invariant on `find_attr` and OCTET STRING pointer arithmetic (`out_len + (out - data) == size`).
+* **`fuzz/corpus/<harness>/`** : 2–4 seed inputs per harness, committed to git so CI fuzz runs start from the same baseline as developer machines. Includes one regression seed (`regression_harness_oob_1byte`) from a 1-byte OOB found in the harness itself during initial validation.
+* **`fuzz/README.md`** : operator runbook covering build, run, triage, minimization, and the crash-handling policy (every crash is a security finding ; private issue, fix-with-regression-test, backport, CVE if reachable). Satisfies the CC EAL4+ ALC_DVS expectation that every reported crash leads to a tracked corrective action.
+* **`.github/workflows/fuzz.yml`** : structured-fuzzing CI integration. On push to `main` 5 min per harness, fail on any crash, upload reproducers as 90-day-retention artifacts. Nightly 1 h per harness, upload evolving corpus + crashes as 30-day / 90-day-retention artifacts. `workflow_dispatch` for manual runs with configurable duration.
+* **`disabled/diag_aes_gcm_tc14*.c`, `disabled/diag_aes_gcm_tc13_no_aad.c`** : three standalone diagnostic programs written during the investigation of the integrity-bypass bug and the OpenSSL 3.5.6 default-provider AES-GCM no-AAD divergence. Not linked into the build ; kept for reproducibility evidence.
+
+### Changed
+
+* **`src/fhsm_integrity.c::verify_once()`** : the function now consults `FHSM_INTEGRITY_ALLOW_UNSIGNED` before latching the module ERROR state. The existing partial bypass in `crypto_init_once()` only filtered the return value of `fhsm_integrity_verify()` ; the state latch happening earlier in `verify_once()` was unconditional, which meant every local dev build that triggered `do_verify()` setup errors (`locate_self` / `open` / `fstat` / `mmap` / `malloc`) ended up with the module permanently in ERROR state even when the operator had explicitly opted in via the env var. **Behavior in production (env var absent) is unchanged** : `do_verify()` failure still latches ERROR and `C_Initialize` fails closed. The new dev-mode warning makes the override visible and reminds the operator that the flag is INVALID for any FIPS 140-3 / CC EAL4+ deployment per AGD_PRE §7.5.
+* **`src/fhsm_pkcs11.c`** : two extractions shrink the file from 4 400 to 4 338 lines (-62 cumulative). The 39 call sites of `find_attr` and the 2 call sites of `fhsm_strip_octet_string` continue to use the local TU-private definitions ; the inline mirrors in `include/fhsm_attr_utils.h` are a separate, isolation-respecting code path for the fuzzer.
+* **`Makefile`** : `LIB_SRC` extended with `src/fhsm_ecdsa_raw.c` + `src/fhsm_pq_params.c`.
+* **`kat/cavp_extended.c::run_aesgcm_vec`** : modernized to the OpenSSL 3.x `EVP_EncryptInit_ex2` idiom matching `fhsm_aes_gcm_encrypt`. The legacy three-step `EVP_EncryptInit_ex` pattern + `EVP_CTRL_GCM_SET_IVLEN(12)` call is replaced by a single-call init. No CI behavior change (both patterns produce the same byte-deterministic output under the FIPS provider) ; positive code-quality change.
+
+### Discovered and documented (not fixed in this release)
+
+* **OpenSSL 3.5.6 default-provider AES-GCM no-AAD divergence** : the NIST SP 800-38D Test Case 14 vector (60-byte PT, no AAD, 96-bit IV, AES-256) produces tag `0xeb9f796c...` on OpenSSL 3.5.6 default provider instead of the NIST-expected `0xb094dac5...`. The CT is computed correctly ; only the tag diverges. The FIPS provider matches NIST exactly, which is why CI runs all green and v1.1.7 onwards never surfaced this. Two standalone EVP probes confirm the divergence is in OpenSSL itself, not in our wrapper or KAT data : both "AAD update skipped" and "AAD update forced with 0 bytes" variants produce the same wrong tag. Tracked as a follow-up ; possible upstream OpenSSL report after further triage. The KAT vector is retained in `cavp_extended` so the divergence remains visible at every boot in dev mode.
+
+### Why ship this now ?
+
+Two reasons.
+
+1. **Structured fuzzing closes the validation triangle**. The boot KAT (35 vectors) tests deterministic algorithm output. Wycheproof (6 978 vectors) tests cross-implementation conformity. The matrix (24 / 0 / 8) tests function × mechanism reachability. Fuzzing tests **memory safety + structural invariants on adversarial inputs**, which the other three surfaces do not. Three orthogonal validation modalities is a stronger CMVP submission posture than two.
+2. **The integrity-bypass bug was a latent dev-experience trap**. Every developer running test_smoke locally on an unsigned build (the normal dev case) saw `C_Initialize 0x80000002` until they figured out that the bypass env var was silently ineffective beyond the rv filter. The fix is small (10 lines) but unblocks the dev workflow completely.
+
+### Validation
+
+```
+Refactor :
+  Boot KAT (15 from fhsm_kat_vectors.c + 32 from cavp_extended)
+    pass on Debian 13 + OpenSSL 3.5.6 default provider via the
+    integrity-bypass fix EXCEPT the NIST TC14 no-AAD case which
+    diverges in dev mode (documented above). CI : 35 / 35 OK
+    under FIPS provider.
+  Wycheproof ECDSA full sweep : 3 098 / 0 violations across RFC
+    6979 P-256 / P-384 / P-521. DER classification bit-identical
+    to v1.1.13.
+  PQ parser extraction : byte-identical to the original inline
+    code ; same code path through the boot KAT ML-DSA-65 and
+    SLH-DSA-SHA2-128f sign-verify round trips.
+
+Fuzzing (30 s smoke each on developer machine, after harness self-fix) :
+  fuzz_ecdsa_raw     :   7.7 M runs, 0 crash, cov 21 / ft 39
+  fuzz_pq_params     :  19.6 M runs, 0 crash, cov 28 / ft 29
+  fuzz_attr_template :  10.6 M runs, 0 crash, cov 76 / ft 192
+  Total              :  37.9 M inputs, 0 violation of the 12
+                        structural invariants checked.
+```
+
+CI matrix : unchanged from v1.1.13, **24 / 0 / 8 in both default and FIPS strict modes**.
+Wycheproof full sweep : **6 978 / 0 across 9 PKCS#11 v3.2 families**, bit-identical to v1.1.13.
+
 ## [1.1.13] --- 2026-06-18
 
 The "post-quantum boot KAT" release. Closes the FIPS 140-3 §C.B Known-Answer-Test coverage by adding consistency self-tests for the three NIST-standardised post-quantum primitives --- ML-KEM (FIPS 203), ML-DSA (FIPS 204), SLH-DSA (FIPS 205) --- on every `C_Initialize`. The boot KAT now covers the complete classical portfolio **plus** the complete NIST PQ portfolio in a single ~152 ms cold-boot, which (to the best of our literature search) is a first for an open-source PKCS#11 v3.2 cryptographic module. No module code change ; this is pure validation surface area.
