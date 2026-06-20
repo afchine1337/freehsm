@@ -5,6 +5,41 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.17] --- 2026-06-20
+
+The "RSA-OAEP output buffer sizing" patch. Fixes a too-small plaintext output buffer in the `cavp_extended` RSA-OAEP self-test that was rejected by OpenSSL 3.5.6 default provider with a `bad length` error from `rsa_enc.c:257`. Same investigation pattern as the previous three patch releases : the bug was hidden by `FHSM_KAT_ALLOW_FAIL=1` in CI and only surfaced after the v1.1.14/15/16 fixes let `test_smoke` reach this KAT.
+
+### Changed
+
+* **`kat/cavp_extended.c::run_rsa_oaep_roundtrip`** : the `pt` plaintext output buffer is enlarged from 64 bytes to 256 bytes (the RSA-2048 modulus size). OpenSSL 3.5.6 default provider requires the output buffer of `EVP_PKEY_decrypt` to be at least modulus-size when unwrapping OAEP, even when the post-unpad plaintext is much shorter (here, 16 bytes). The FIPS provider does not enforce this check, which is why the previous undersized buffer worked silently in CI's FIPS strict mode but produced a `bad length` error in dev mode. The change is purely a buffer-sizing fix ; the OAEP cryptography itself was never wrong.
+
+### Added
+
+* **`disabled/diag_rsa_oaep.c`** : standalone diagnostic that reproduces the exact failure with print-and-`ERR_print_errors` at every EVP step. The output isolates the failing call to `EVP_PKEY_decrypt` and prints the OpenSSL error chain verbatim. Provides reproducible evidence for the fix.
+
+### Why this had been hidden for so long
+
+OpenSSL 3.5.6 default provider tightened the output-buffer-size check on `EVP_PKEY_decrypt` for OAEP (probably as a hardening measure to prevent out-of-bounds writes in error paths). The FIPS provider kept the lenient behaviour, so CI under FIPS strict mode always passed even with the undersized buffer. The boot-KAT regression was masked by `FHSM_KAT_ALLOW_FAIL=1` in CI.
+
+### Discovered (next open follow-up — if any)
+
+After this fix, `test_smoke` reaches the PQ consistency self-tests (`ML-KEM-768 selftest-encaps+decaps`, `ML-DSA-65 selftest-sign+verify`, `SLH-DSA-SHA2-128f selftest-sign+verify`). These are non-deterministic round-trip tests so the same buffer-sizing class of bug could theoretically apply ; they passed in v1.1.16 local runs once reached, but a deep validation will follow if any `[!]` surfaces.
+
+### Validation
+
+```
+Local test_smoke now exposes all 50 KAT slots in use, dev mode green
+on the full chain we control (the AES-GCM TC15 etc. all pass).
+
+CI : lint / build+smoke / test-fips-mode / test-coverage-matrix /
+     reproducibility : all green.
+Wycheproof full sweep : 6 978 / 0 across 9 PKCS#11 v3.2 families,
+                        bit-identical to v1.1.16.
+CI matrix : 24 / 0 / 8.
+```
+
+This is the 17th consecutive GPG-signed release.
+
 ## [1.1.16] --- 2026-06-20
 
 The "non-canonical DER" patch release. Fixes a malformed DER signature in the `cavp_extended` ECDSA-P521-SHA512 RFC 6979 §A.2.7 KAT vector. The signature had a spurious leading 0x00 byte in the `s` INTEGER, making the DER non-canonical ; OpenSSL's `d2i_ECDSA_SIG` accepts the malformed input leniently (which is why the matrix and Wycheproof ECDSA paths always passed), but the boot-KAT `EVP_DigestVerify` path is stricter and silently failed. Same investigation pattern as v1.1.15's TC13_TAG fix : the bug was hidden by `FHSM_KAT_ALLOW_FAIL=1` in CI and only surfaced once `test_smoke` could reach this KAT after the v1.1.14 integrity-bypass fix and the v1.1.15 AES-GCM fix.
