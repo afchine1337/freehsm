@@ -927,8 +927,16 @@ end:
 static int run_rsa_oaep_roundtrip(EVP_PKEY *pkey) {
     int ok = 0;
     EVP_PKEY_CTX *enc = NULL, *dec = NULL;
+    /* RSA-2048 has a 256-byte modulus. OpenSSL 3.5.6 default provider
+     * (providers/implementations/asymciphers/rsa_enc.c:257) requires
+     * the output buffer of EVP_PKEY_decrypt to be AT LEAST modulus-
+     * size, even when the actual plaintext (after OAEP unpadding) is
+     * much shorter. The FIPS provider in CI does not enforce this
+     * check, which is why the previous pt[64] buffer worked in CI but
+     * produced 'bad length' errors in dev mode. Sized to modulus to
+     * be safe across providers. */
     uint8_t ct[512];
-    uint8_t pt[64];
+    uint8_t pt[256];
     size_t  ct_len = sizeof(ct);
     size_t  pt_len = sizeof(pt);
     enc = EVP_PKEY_CTX_new(pkey, NULL);
