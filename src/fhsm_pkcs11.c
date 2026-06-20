@@ -334,9 +334,19 @@ CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
     } *info = pInfo;
     info->cryptokiVersion[0] = 3;
     info->cryptokiVersion[1] = 2;
-    fhsm_pack_field(info->manufacturerID,    "FreeHSM C (FIPS 140-3)",            32);
+    /* PKCS#11 v3.2 §C.6.1 semantics : manufacturerID is the entity that
+     * provides the Cryptoki library (= the legal/brand identity of the
+     * vendor) ; libraryDescription is the product name. Before v1.2.0
+     * both fields were a single mixed string "FreeHSM C (FIPS 140-3)"
+     * which conflated the two roles and was non-conforming.
+     *
+     * Full legal name : "Simorgh Labs, Open Source Cryptography and
+     * Digital Trust" (53 chars). The 32-octet PKCS#11 field truncates
+     * to the brand : "Simorgh Labs". The complete name appears in the
+     * Security Target §1 and in the README. */
+    fhsm_pack_field(info->manufacturerID,    "Simorgh Labs",                      32);
     info->flags = 0;
-    fhsm_pack_field(info->libraryDescription, "libfreehsm-fips.so v" FHSM_VERSION_STRING, 32);
+    fhsm_pack_field(info->libraryDescription, "FreeHSM C (FIPS 140-3)",           32);
     info->libraryVersion[0] = FHSM_VERSION_MAJOR;
     info->libraryVersion[1] = FHSM_VERSION_MINOR;
     return FHSM_RV_OK;
@@ -535,7 +545,10 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
     snprintf(desc, sizeof(desc), "FreeHSM slot %lu (%s)", (unsigned long)slotID,
              g_slots[slotID].present ? "initialized" : "uninitialized");
     fhsm_pack_field(info->slotDescription, desc, 64);
-    fhsm_pack_field(info->manufacturerID,  "FreeHSM C (FIPS 140-3)", 32);
+    /* Slot manufacturer : the entity providing the Cryptoki library
+     * (same as CK_INFO.manufacturerID). See the rationale block in
+     * C_GetInfo above. */
+    fhsm_pack_field(info->manufacturerID,  "Simorgh Labs",          32);
     /* Per the SoftHSMv2 convention (mirroring most cloud-HSM modules),
      * every configured slot ALWAYS reports CKF_TOKEN_PRESENT. The
      * distinction between "initialized" and "blank" is exposed via
@@ -596,7 +609,11 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
     const char *label  = (t ? fhsm_token_label(t)  : "");
     const char *serial = (t ? fhsm_token_serial(t) : "");
     fhsm_pack_field(info->label,          label,                       32);
-    fhsm_pack_field(info->manufacturerID, "FreeHSM C (FIPS 140-3)",    32);
+    /* Token manufacturer : the entity providing the Cryptoki library
+     * (same as CK_INFO.manufacturerID). See the rationale block in
+     * C_GetInfo above. Model identifies the product line, stable
+     * across minor versions of the same major series. */
+    fhsm_pack_field(info->manufacturerID, "Simorgh Labs",              32);
     fhsm_pack_field(info->model,          "FreeHSM-C-v1",              16);
     fhsm_pack_field(info->serialNumber,   serial,                      16);
     /* Base flags : RNG + LOGIN_REQUIRED are inherent to the module.

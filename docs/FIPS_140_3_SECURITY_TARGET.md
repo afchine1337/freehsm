@@ -12,7 +12,11 @@
 
 | Field | Value |
 |---|---|
+| **Manufacturer (full legal name)** | Simorgh Labs, Open Source Cryptography and Digital Trust |
+| **Manufacturer (PKCS#11 32-octet field)** | `Simorgh Labs` (CK_INFO.manufacturerID, CK_SLOT_INFO.manufacturerID, CK_TOKEN_INFO.manufacturerID) |
 | **Module Name** | FreeHSM C |
+| **Library Description (PKCS#11)** | `FreeHSM C (FIPS 140-3)` (CK_INFO.libraryDescription) |
+| **Token Model (PKCS#11)** | `FreeHSM-C-v1` (CK_TOKEN_INFO.model ; stable across the v1 major series) |
 | **Version** | 1.1.18-FIPS |
 | **Module Type** | Software (`libfreehsm-fips.so`, ELF-64 shared object) |
 | **Module Embodiment** | Multi-chip standalone (GPC host) |

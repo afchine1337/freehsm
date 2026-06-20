@@ -163,3 +163,9 @@ Legend : ✅ implemented · 🟡 partial/scaffold · ⏳ to do
 - **10 evaluation documents** covering the full CC EAL4+ + FIPS 140-3 submission dossier (Security Policy, TOE, Architecture, Mechanisms, Reproducible Build, ATE_FUN, AVA_VAN, ALC_CMC, AGD_PRE, AGD_OPE).
 - **~ 8 000 lines** of C + Python + Markdown across 40+ files.
 - **Remaining roadmap** : third-party code audit (accredited lab), CMVP submission, CC EAL4+ submission (commercial 12-24 month steps).
+
+---
+
+## Maintainer
+
+**Simorgh Labs, Open Source Cryptography and Digital Trust** — sponsoring entity for the FreeHSM C project. Maintained by Afchine Madjlessi (`afchine.mad@gmail.com`). All releases are GPG-signed with key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2` (Ed25519). The PKCS#11 module reports `manufacturerID = "Simorgh Labs"` (truncated to the 32-octet field per PKCS#11 v3.2 §C.6.1).
