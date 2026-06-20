@@ -18,9 +18,11 @@ on:
       - 'fuzz/**'
       - 'src/fhsm_ecdsa_raw.c'
       - 'src/fhsm_pq_params.c'
+      - 'src/fhsm_create_attrs.c'
       - 'include/fhsm_ecdsa_raw.h'
       - 'include/fhsm_pq_params.h'
       - 'include/fhsm_attr_utils.h'
+      - 'include/fhsm_create_attrs.h'
       - '.github/workflows/fuzz.yml'
   schedule:
     - cron: '0 2 * * *'    # nightly at 02:00 UTC
@@ -45,6 +47,7 @@ jobs:
           - fuzz_ecdsa_raw
           - fuzz_pq_params
           - fuzz_attr_template
+          - fuzz_create_attrs
 
     steps:
       - name: Checkout

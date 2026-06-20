@@ -15,6 +15,20 @@ tests/mldsa_e2e
 tests/slhdsa_e2e
 tests/fuzz/
 
+# libFuzzer harness binaries (built by fuzz/Makefile.fuzz, never committed)
+fuzz/fuzz_ecdsa_raw
+fuzz/fuzz_pq_params
+fuzz/fuzz_attr_template
+fuzz/fuzz_create_attrs
+fuzz/crash-*
+fuzz/leak-*
+fuzz/oom-*
+fuzz/timeout-*
+fuzz/artifacts/
+
+# Stale backups (rename/refactor leftovers)
+*.bak
+
 # Coverage
 *.gcno
 *.gcda
