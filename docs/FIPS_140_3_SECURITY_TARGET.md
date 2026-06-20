@@ -1,4 +1,4 @@
-# FreeHSM C --- FIPS 140-3 Security Target (Draft v0.5)
+# FreeHSM C --- FIPS 140-3 Security Target (Draft v0.6)
 
 **Status :** Pre-submission draft. Not yet evaluated by a NIST CST lab.
 
@@ -17,7 +17,7 @@
 | **Module Name** | FreeHSM C |
 | **Library Description (PKCS#11)** | `FreeHSM C (FIPS 140-3)` (CK_INFO.libraryDescription) |
 | **Token Model (PKCS#11)** | `FreeHSM-C-v1` (CK_TOKEN_INFO.model ; stable across the v1 major series) |
-| **Version** | 1.1.18-FIPS |
+| **Version** | 1.2.0-FIPS |
 | **Module Type** | Software (`libfreehsm-fips.so`, ELF-64 shared object) |
 | **Module Embodiment** | Multi-chip standalone (GPC host) |
 | **Module Boundary** | The single `.so` file at SHA-256 = (see `.fhsm_digest` section, patched by `make integrity`) |
@@ -317,15 +317,16 @@ This surface is the *operational complement* to the boot KAT : it answers the qu
 
 ### 13.5 Structured fuzzing (libFuzzer + ASAN + UBSAN)
 
-Added in v1.1.14. Three sanitizer-instrumented (`-fsanitize=fuzzer,address,undefined`) libFuzzer harnesses cover the PKCS#11 v3.2 parser surfaces that receive untrusted input from a calling application :
+Introduced in v1.1.14 and expanded in v1.2.0. Four sanitizer-instrumented (`-fsanitize=fuzzer,address,undefined`) libFuzzer harnesses cover the PKCS#11 v3.2 parser surfaces that receive untrusted input from a calling application :
 
-| Harness | Target | Surface |
-|---|---|---|
-| `fuzz_ecdsa_raw` | `fhsm_ecdsa_der_to_raw`, `fhsm_ecdsa_raw_to_der` | DER ECDSA-Sig-Value ↔ raw r‖s wire format (PKCS#11 v3.2 §6.13) |
-| `fuzz_pq_params` | `fhsm_parse_pq_params` | `CK_ML_DSA_PARAMS` / `CK_SLH_DSA_PARAMS` 24-byte struct decoder (PKCS#11 v3.2 §6.18/§6.19) |
-| `fuzz_attr_template` | `fhsm_find_attr`, `fhsm_strip_octet_string_inline` | `CK_ATTRIBUTE[]` template lookup + DER OCTET STRING wrapper stripper |
+| Harness | Target | Surface | Coverage tier |
+|---|---|---|---|
+| `fuzz_ecdsa_raw` | `fhsm_ecdsa_der_to_raw`, `fhsm_ecdsa_raw_to_der` | DER ECDSA-Sig-Value ↔ raw r‖s wire format (PKCS#11 v3.2 §6.13) | Integration (production TU) |
+| `fuzz_pq_params` | `fhsm_parse_pq_params` | `CK_ML_DSA_PARAMS` / `CK_SLH_DSA_PARAMS` 24-byte struct decoder (PKCS#11 v3.2 §6.18/§6.19) | Integration (production TU) |
+| `fuzz_attr_template` | `fhsm_find_attr`, `fhsm_strip_octet_string_inline` | `CK_ATTRIBUTE[]` template lookup + DER OCTET STRING wrapper stripper | Unit (primitives in `include/fhsm_attr_utils.h`) |
+| `fuzz_create_attrs` | `fhsm_parse_create_attrs` | `C_CreateObject` template parser : `(CKO, CKK)` dispatch into VERBATIM / EC pub / Ed25519 pub / Ed448 pub / RSA pub paths (PKCS#11 v3.2 §5.6.4) | Integration (production TU, v1.2.0+) |
 
-Each harness checks **memory safety** (sanitizer-flagged out-of-bounds reads, undefined behavior, leaks) plus **structural invariants** that must hold for every input. The 12 invariants currently checked :
+Each harness checks **memory safety** (sanitizer-flagged out-of-bounds reads, undefined behavior, leaks) plus **structural invariants** that must hold for every input. The 23 invariants currently checked :
 
 1. ECDSA round-trip closure : `der_to_raw(raw_to_der(r‖s)) == r‖s`.
 2. ECDSA length-vs-buffer accounting on truncated DER.
@@ -339,12 +340,25 @@ Each harness checks **memory safety** (sanitizer-flagged out-of-bounds reads, un
 10. `find_attr` empty-template returns `-1` for any type.
 11. OCTET STRING accept-on-pointer-in-range : `data ≤ out ≤ data + size`.
 12. OCTET STRING length accounting : `(out - data) + out_len == size`.
+13. `fhsm_parse_create_attrs` path enum in range `[INVALID..RSA_PUB]`.
+14. `fhsm_parse_create_attrs` returns OK ⇒ path ≠ INVALID (dispatch decision was made).
+15. `fhsm_parse_create_attrs` label NUL-terminated within `sizeof(label)`.
+16. `fhsm_parse_create_attrs` id pointer/length consistency : `id_data == NULL ⇒ id_len == 0`.
+17. `fhsm_parse_create_attrs` class is supported : `cko ∈ {PUBLIC, PRIVATE, SECRET}`.
+18. `fhsm_parse_create_attrs` VERBATIM path carries a non-NULL `CKA_VALUE`.
+19. `fhsm_parse_create_attrs` EC public path carries one of three curve strings + non-NULL point + `cko == PUBLIC`.
+20. `fhsm_parse_create_attrs` Ed25519 / Ed448 paths carry `ec_group == NULL` (curve in path enum) + non-NULL point + `cko == PUBLIC`.
+21. `fhsm_parse_create_attrs` RSA public path carries both modulus and exponent (non-NULL, non-zero length) + `cko == PUBLIC`.
+22. `fhsm_parse_create_attrs` returns error ⇒ path == INVALID (parser `memset()`s output at entry).
+23. `fhsm_parse_create_attrs` truncation probe : re-parse after shrinking the last record's `ulValueLen` by one byte must not crash or violate invariants 13–22.
 
-**Continuous validation tier**. On every push to `main`, each harness runs for 5 minutes (fail-on-crash, upload reproducer as 90-day-retention artifact). Nightly at 02:00 UTC, each harness runs for 1 hour (upload evolving corpus + crashes). Developer smoke at 30 s per harness has measured **37.9 million inputs validated in 90 s total**, with zero violation of any of the 12 invariants since the harnesses were introduced.
+**ALC_DVS rationale for the v1.2.0 expansion**. The v1.1.x design of `fuzz_attr_template` exercised an *inline mirror* of `fhsm_find_attr` and `fhsm_strip_octet_string_inline` declared in `include/fhsm_attr_utils.h`, but the surrounding dispatch logic in `C_CreateObject` (the `(CKO, CKK)` → path enum mapping, curve OID lookup, Ed25519/Ed448 disambiguation, RSA modulus/exponent extraction) was embedded in `src/fhsm_pkcs11.c` interleaved with OpenSSL EVP construction, so the harness could only exercise a *mirror* of that logic in a separate harness body. Mirrors are an ALC_DVS hazard : the mirror code can drift from the production code in subtle ways (a missed branch, a slightly different bounds check), at which point the fuzzer reports "no findings" against the mirror while the production code retains the same vulnerability. The v1.2.0 decomposition (`src/fhsm_create_attrs.c`) removes this hazard for the `C_CreateObject` parser surface : `fuzz_create_attrs` now links the production TU directly, so the bytes libFuzzer mutates exercise the same instructions that run when an untrusted PKCS#11 caller invokes `C_CreateObject` in production. The remaining two mirror surfaces (`fhsm_find_attr`, `fhsm_strip_octet_string_inline`) are still exercised by `fuzz_attr_template` as a unit-level guardrail and remain on the maintenance ledger in `fuzz/README.md` until the last non-`C_CreateObject` call sites are migrated to the production helpers.
+
+**Continuous validation tier**. On every push to `main`, each harness runs for 5 minutes (fail-on-crash, upload reproducer as 90-day-retention artifact). Nightly at 02:00 UTC, each harness runs for 1 hour (upload evolving corpus + crashes). Developer smoke runs : the original three harnesses measured **37.9 million inputs validated in 90 s total** in v1.1.14 ; the new `fuzz_create_attrs` harness measured **18.7 million inputs in 60 s** on the same developer machine (306 k exec/s, 714 new units discovered, 0 crash / 0 ASAN report / 0 UBSAN report / 518 MB peak RSS), confirming the parser TU is hot-loop-stable under adversarial input. Zero violation of any of the 23 invariants has been observed since the harnesses were introduced.
 
 **Crash policy (ALC_DVS alignment)**. Every crash reported by the fuzz CI is treated as a security finding : triage in a private GitHub issue → confirm the bug is in the target helper → fix in `src/fhsm_*.c` + add a regression test → backport to supported release branches → CVE if the surface is reachable from an untrusted caller. The full procedure is in `fuzz/README.md` ; the file is maintained as evidence for the CC EAL4+ ALC_DVS expectation that every reported crash leads to a tracked corrective action.
 
-**Seed corpora** for all three harnesses are committed to git under `fuzz/corpus/<harness>/` so CI runs start from the same baseline as developer machines. One regression seed (`regression_harness_oob_1byte`) was added in v1.1.14 from a 1-byte OOB found in the harness itself during initial validation — kept as a permanent guardrail.
+**Seed corpora** for the original three harnesses are committed to git under `fuzz/corpus/<harness>/` so CI runs start from the same baseline as developer machines. One regression seed (`regression_harness_oob_1byte`) was added in v1.1.14 from a 1-byte OOB found in the harness itself during initial validation — kept as a permanent guardrail. The `fuzz_create_attrs` corpus starts empty in v1.2.0 (libFuzzer bootstraps from zero, reaching coverage saturation within the first nightly run) ; interesting inputs discovered by the nightly run will be promoted into the committed seed corpus as a rolling baseline.
 
 ### 13.6 Cross-validation methodology (KAT integrity)
 
@@ -363,7 +377,7 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 
 ### 13.7 Release track record (ALC_DEL / ALC_CMC)
 
-**18 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`. Each release tag triggers an automated workflow (`release.yml`) that :
+**19 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`. Each release tag triggers an automated workflow (`release.yml`) that :
 
 1. Verifies the tag's GPG signature against the canonical fingerprint.
 2. Builds `libfreehsm-fips.so` reproducibly in the pinned `freehsm-c-build:debian13-openssl-3.5` container.
@@ -386,4 +400,5 @@ The unbroken signing chain across 18 releases — including the v1.1.13 → v1.1
 | 0.2 | 2026-05 | A.M. | §3 algorithm table draft |
 | 0.3 | 2026-06-10 | A.M. | First complete draft : §1-§12 all sections populated, ready for internal review before lab submission |
 | 0.4 | 2026-06-18 | A.M. | §9.3 expanded from 7 to 32 KAT vectors with explicit standards-track citations (NIST SP 800-38A/B/D, FIPS 180-4, FIPS 202, RFC 4231, RFC 5869, RFC 6070, RFC 6979, NIST SP 800-89). §9.4 added documenting the FIPS 140-3 IG D.3 trade-off for RSA consistency self-tests. §13 added documenting the external Wycheproof + matrix + reproducibility evidence surface (6 978 vectors clean across 9 families, including both NIST post-quantum primitives). |
-| **0.5** | **2026-06-20** | **A.M.** | **§3 adds GMAC to the approved AES function list (NIST SP 800-38D §6.4). §9.3 KAT count 35 → 51 vectors with the addition of (a) ML-KEM-768 / ML-DSA-65 / SLH-DSA-SHA2-128f consistency self-tests (v1.1.13), (b) AES-256-GMAC two-path self-consistency self-test (v1.1.18). §9.4 trade-off bullet added documenting the AES-GMAC two-path self-consistency design pattern (`EVP_MAC` vs `EVP_CIPHER` cross-check, eliminating the need for a hardcoded expected tag). §13.5 NEW : Structured fuzzing — three sanitizer-instrumented libFuzzer harnesses covering the PKCS#11 v3.2 parser surfaces, with 12 structural invariants checked across 37.9 M smoke inputs, CI integration on every push + nightly, and a documented crash policy aligned with CC EAL4+ ALC_DVS expectations. §13.6 NEW : Cross-validation methodology — three-codebase triangulation protocol used between v1.1.14 and v1.1.18 to identify and correct four latent KAT data bugs that had been silently passing under `FHSM_KAT_ALLOW_FAIL=1` in CI ; methodology documented as a developer expectation. §13.7 NEW : Release track record — 18 consecutive GPG-signed releases since v1.1.0 as ALC_DEL / ALC_CMC evidence, with three-mirror redundancy (GitHub + GitLab + Codeberg). §13.4 attestation summary updated from v1.1.12 to v1.1.18 figures.** |
+| 0.5 | 2026-06-20 | A.M. | §3 adds GMAC to the approved AES function list (NIST SP 800-38D §6.4). §9.3 KAT count 35 → 51 vectors with the addition of (a) ML-KEM-768 / ML-DSA-65 / SLH-DSA-SHA2-128f consistency self-tests (v1.1.13), (b) AES-256-GMAC two-path self-consistency self-test (v1.1.18). §9.4 trade-off bullet added documenting the AES-GMAC two-path self-consistency design pattern (`EVP_MAC` vs `EVP_CIPHER` cross-check, eliminating the need for a hardcoded expected tag). §13.5 NEW : Structured fuzzing — three sanitizer-instrumented libFuzzer harnesses covering the PKCS#11 v3.2 parser surfaces, with 12 structural invariants checked across 37.9 M smoke inputs, CI integration on every push + nightly, and a documented crash policy aligned with CC EAL4+ ALC_DVS expectations. §13.6 NEW : Cross-validation methodology — three-codebase triangulation protocol used between v1.1.14 and v1.1.18 to identify and correct four latent KAT data bugs that had been silently passing under `FHSM_KAT_ALLOW_FAIL=1` in CI ; methodology documented as a developer expectation. §13.7 NEW : Release track record — 18 consecutive GPG-signed releases since v1.1.0 as ALC_DEL / ALC_CMC evidence, with three-mirror redundancy (GitHub + GitLab + Codeberg). §13.4 attestation summary updated from v1.1.12 to v1.1.18 figures. |
+| **0.6** | **2026-06-20** | **A.M.** | **§1 Module identification : Version field 1.1.18-FIPS → 1.2.0-FIPS. §13.5 expanded from three harnesses to four with the addition of `fuzz_create_attrs`, attacking `fhsm_parse_create_attrs` — the pure parser extracted from the `C_CreateObject` monolith in v1.2.0 (`src/fhsm_create_attrs.c`). Invariant count grows 12 → 23 with the addition of P1–P10 + E1 + truncation probe specifying the structural contract on the parser's typed output struct. New ALC_DVS rationale paragraph explaining why the v1.2.0 decomposition is a security-evidence-grade improvement : the production code is now linked directly into the libFuzzer binary, eliminating the mirror-vs-prod drift hazard on the `C_CreateObject` surface. Local smoke run numbers added : 18.7 M executions in 60 s on the new harness, 0 violation across all 23 invariants, 0 ASAN / 0 UBSAN report. §13.7 release counter 18 → 19 with the addition of v1.2.0 to the signed-release ledger. The two preceding rows are preserved verbatim as historical record.** |

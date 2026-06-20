@@ -7,7 +7,8 @@ that take untrusted input from a calling application :
 |---|---|---|
 | `fuzz_ecdsa_raw` | `fhsm_ecdsa_der_to_raw`, `fhsm_ecdsa_raw_to_der` | DER ECDSA-Sig-Value ↔ raw r‖s wire format conversion (PKCS#11 v3.2 §6.13) |
 | `fuzz_pq_params` | `fhsm_parse_pq_params` | `CK_ML_DSA_PARAMS` / `CK_SLH_DSA_PARAMS` 24-byte struct decoder (PKCS#11 v3.2 §6.18 / §6.19) |
-| `fuzz_attr_template` | `fhsm_find_attr`, `fhsm_strip_octet_string_inline` | `CK_ATTRIBUTE[]` template lookup + DER OCTET STRING wrapper stripper |
+| `fuzz_attr_template` | `fhsm_find_attr`, `fhsm_strip_octet_string_inline` | `CK_ATTRIBUTE[]` template lookup + DER OCTET STRING wrapper stripper (unit-level on the primitives) |
+| `fuzz_create_attrs` | `fhsm_parse_create_attrs` | `C_CreateObject` template parser — dispatch on (CKO, CKK) into VERBATIM / EC pub / Ed25519 pub / Ed448 pub / RSA pub paths (integration-level on the production parser TU, v1.2.0+) |
 
 The harnesses are sanitizer-instrumented (`-fsanitize=fuzzer,address,undefined`)
 so any out-of-bounds read, signed-integer overflow, uninitialised value, or
@@ -23,14 +24,14 @@ use-after-free is flagged as a crash with a full stack trace.
 ## Build
 
 ```bash
-# All three harnesses
+# All four harnesses
 make -f fuzz/Makefile.fuzz
 
 # Single target
 make -f fuzz/Makefile.fuzz fuzz/fuzz_ecdsa_raw
 ```
 
-Output : three sanitizer-instrumented executables in `fuzz/`.
+Output : four sanitizer-instrumented executables in `fuzz/`.
 
 ## Run
 
@@ -40,6 +41,7 @@ Short run (good for a developer machine, ~5 min) :
 ./fuzz/fuzz_ecdsa_raw     fuzz/corpus/ecdsa_raw     -max_total_time=300
 ./fuzz/fuzz_pq_params     fuzz/corpus/pq_params     -max_total_time=300
 ./fuzz/fuzz_attr_template fuzz/corpus/attr_template -max_total_time=300
+./fuzz/fuzz_create_attrs  fuzz/corpus/create_attrs  -max_total_time=300
 ```
 
 Long run (CI nightly, 1 h each) :
@@ -146,6 +148,55 @@ structural invariants that should hold for every input :
   size` (no slack). Violation = parser allows length-vs-buffer
   discrepancy that would cause OOB read downstream.
 
+**`fuzz_create_attrs`** (twelve invariants on `fhsm_parse_create_attrs` output) :
+
+On `FHSM_PARSE_OK` :
+
+- **P1 — path range** : `path ∈ [INVALID..RSA_PUB]`. Violation = enum
+  corruption.
+- **P2 — non-INVALID on OK** : `path != INVALID`. Violation =
+  the parser returned success without a dispatch decision, which
+  would cause `C_CreateObject` to fall through to no-op storage.
+- **P3 — label NUL-terminated** : `label[0..63]` contains a `\0`
+  byte. Violation = `C_CreateObject` would store an unterminated
+  label and `C_GetAttributeValue` would later overread.
+- **P4 — id pointer/length consistency** : `id_data == NULL ⟹
+  id_len == 0`. Violation = parser synthesizes a non-zero length
+  with no backing pointer.
+- **P5 — class is supported** : `cko ∈ {PUBLIC, PRIVATE, SECRET}`.
+  Violation = parser accepted an unsupported `CKO_*` value and
+  emitted OK.
+- **P6 — VERBATIM contract** : `value_data != NULL`. Violation =
+  `C_CreateObject` would write a NULL pointer to the token object
+  store.
+- **P7 — EC public contract** : `cko == PUBLIC` + `ec_group ∈
+  {"P-256","P-384","P-521"}` + `ec_point != NULL`. Violation =
+  the EVP\_PKEY builder downstream would call `OSSL_PARAM_BLD_push_*`
+  with a NULL pointer or an unknown curve string.
+- **P8 — Ed25519 contract** : `cko == PUBLIC` + `ec_group == NULL`
+  (curve carried by the path enum) + `ec_point != NULL`.
+- **P9 — Ed448 contract** : same as P8 with `path == ED448_PUB`.
+- **P10 — RSA public contract** : `cko == PUBLIC` + both
+  `rsa_modulus` and `rsa_exponent` non-NULL with non-zero
+  lengths. Violation = the EVP\_PKEY RSA builder downstream
+  would `EVP_PKEY_fromdata` with missing components and
+  later sign/verify with an undefined key.
+
+On `FHSM_PARSE_*` error :
+
+- **E1 — path stays INVALID on error** : the parser `memset()`s
+  `attrs` at entry and the `path` field is set to a non-INVALID
+  value only as the final write before an OK return. Any early
+  error path must leave `path` at 0 = `FHSM_CREATE_PATH_INVALID`.
+  Violation = the parser leaks a success-looking enum value on
+  a failed dispatch, which would cause the caller to mis-route
+  to a builder branch on garbage data.
+
+Plus a **truncation probe** that re-parses the same template after
+shrinking the last record's `ulValueLen` by one byte, to stress
+length-vs-buffer accounting in the OCTET STRING unwrapper, the OID
+matcher, and the RSA modulus/exponent extractor at the buffer tail.
+
 ## Seed corpora
 
 Each harness ships with 2–4 seed inputs in
@@ -173,18 +224,22 @@ affect a parser surface.
 
 ## Maintenance
 
-The harnesses use **layout-compatible mirrors** of the parser helpers
-defined in `src/fhsm_*.c` (see `include/fhsm_attr_utils.h` and the
-extracted TUs `src/fhsm_ecdsa_raw.c` / `src/fhsm_pq_params.c`). When
-the production code changes :
+The harnesses link the **production TUs** directly whenever possible
+so coverage maps onto the real code path. Two helpers remain as
+inline mirrors in `include/fhsm_attr_utils.h` because they are still
+called from a small handful of legacy sites inside
+`src/fhsm_pkcs11.c` (non-`C_CreateObject` paths), but the
+`C_CreateObject` parser surface itself has been fully extracted in
+v1.2.0 and is now exercised end-to-end through the production TU.
 
 | Production change | Action |
 |---|---|
 | ECDSA helpers (`fhsm_ecdsa_*`) | None : `src/fhsm_ecdsa_raw.c` is the production code linked into the harness. |
 | PQ params parser (`fhsm_parse_pq_params`) | None : same, linked into harness. |
-| `find_attr` (still inline in `src/fhsm_pkcs11.c`) | Re-sync `fhsm_find_attr` in `include/fhsm_attr_utils.h`. |
-| `fhsm_strip_octet_string` (still inline in `src/fhsm_pkcs11.c`) | Re-sync `fhsm_strip_octet_string_inline` in `include/fhsm_attr_utils.h`. |
+| `C_CreateObject` template parser (`fhsm_parse_create_attrs`) | None : `src/fhsm_create_attrs.c` is the production code linked into `fuzz_create_attrs` (v1.2.0+). |
+| `find_attr` (still inline in `src/fhsm_pkcs11.c` for legacy non-CreateObject lookups) | Re-sync `fhsm_find_attr` in `include/fhsm_attr_utils.h`. |
+| `fhsm_strip_octet_string` (still inline in `src/fhsm_pkcs11.c` for legacy non-CreateObject paths) | Re-sync `fhsm_strip_octet_string_inline` in `include/fhsm_attr_utils.h`. |
 
-Once `C_CreateObject` itself is decomposed (see roadmap), the two
-inline mirrors collapse into a single production TU and the
-maintenance row goes away.
+The last two inline mirrors collapse fully when the remaining
+`fhsm_pkcs11.c` call sites are migrated to the helpers in
+`fhsm_attr_utils.h` (planned for a future minor release).

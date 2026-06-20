@@ -9,13 +9,14 @@
 #   OpenSSL 3.x dev headers     (Debian : libssl-dev)
 #
 # Build :
-#   make -f fuzz/Makefile.fuzz                 # all three harnesses
-#   make -f fuzz/Makefile.fuzz fuzz_ecdsa_raw  # one specific
+#   make -f fuzz/Makefile.fuzz                   # all four harnesses
+#   make -f fuzz/Makefile.fuzz fuzz_ecdsa_raw    # one specific
 #
 # Run :
-#   ./fuzz/fuzz_ecdsa_raw fuzz/corpus/ecdsa_raw -max_total_time=300
-#   ./fuzz/fuzz_pq_params fuzz/corpus/pq_params -max_total_time=300
-#   ./fuzz/fuzz_attr_template fuzz/corpus/attr_template -max_total_time=300
+#   ./fuzz/fuzz_ecdsa_raw      fuzz/corpus/ecdsa_raw      -max_total_time=300
+#   ./fuzz/fuzz_pq_params      fuzz/corpus/pq_params      -max_total_time=300
+#   ./fuzz/fuzz_attr_template  fuzz/corpus/attr_template  -max_total_time=300
+#   ./fuzz/fuzz_create_attrs   fuzz/corpus/create_attrs   -max_total_time=300
 #
 # Triage :
 #   When a crash is found, libFuzzer writes ./crash-<sha1> in the cwd.
@@ -40,11 +41,12 @@ FUZZ_LDFLAGS = \
     -lcrypto
 
 # ---------------------------------------------------------------------------
-# Default target : build all three harnesses.
+# Default target : build all four harnesses.
 # Must come BEFORE the individual rules so `make -f fuzz/Makefile.fuzz`
 # (no target) invokes the full build.
 # ---------------------------------------------------------------------------
-all : fuzz/fuzz_ecdsa_raw fuzz/fuzz_pq_params fuzz/fuzz_attr_template
+all : fuzz/fuzz_ecdsa_raw fuzz/fuzz_pq_params \
+      fuzz/fuzz_attr_template fuzz/fuzz_create_attrs
 
 # ---------------------------------------------------------------------------
 # Harness 1 : ECDSA r||s <-> DER round-trip
@@ -65,7 +67,12 @@ fuzz/fuzz_pq_params : fuzz/fuzz_pq_params.c src/fhsm_pq_params.c \
 	    -o $@ $(FUZZ_LDFLAGS)
 
 # ---------------------------------------------------------------------------
-# Harness 3 : attribute template + DER OCTET STRING wrapper
+# Harness 3 : attribute template primitives (find_attr + OCTET STRING
+# wrapper). Exercises the inline mirror in include/fhsm_attr_utils.h
+# used by both src/fhsm_pkcs11.c (find_attr in untouched non-CreateObject
+# paths) and src/fhsm_create_attrs.c (strip_octet_string_inline). Kept
+# as a unit-level harness on the primitives ; the integration-level
+# harness on the C_CreateObject parser is fuzz_create_attrs below.
 # ---------------------------------------------------------------------------
 fuzz/fuzz_attr_template : fuzz/fuzz_attr_template.c \
                           include/fhsm_attr_utils.h
@@ -74,8 +81,36 @@ fuzz/fuzz_attr_template : fuzz/fuzz_attr_template.c \
 	    -o $@ $(FUZZ_LDFLAGS)
 
 # ---------------------------------------------------------------------------
+# Harness 4 : C_CreateObject template parser (v1.2.0+)
+#
+# Attacks fhsm_parse_create_attrs() — the production parser extracted
+# from C_CreateObject in v1.2.0. The harness links the actual TU
+# (src/fhsm_create_attrs.c) into the fuzz binary, so the bytes
+# libFuzzer mutates exercise the same instructions that run when an
+# untrusted PKCS#11 caller invokes C_CreateObject.
+#
+# This replaces (semantically) the inline-mirror approach previously
+# used by fuzz_attr_template for the C_CreateObject path : the v1.1.x
+# harness exercised a parallel implementation that could drift from
+# the production code, whereas this harness IS the production code.
+#
+# No OpenSSL dependency at the source level (src/fhsm_create_attrs.c
+# is OpenSSL-free) ; -lcrypto is kept in LDFLAGS purely for symmetry
+# with the other harnesses and to avoid divergence in the build
+# template.
+# ---------------------------------------------------------------------------
+fuzz/fuzz_create_attrs : fuzz/fuzz_create_attrs.c \
+                         src/fhsm_create_attrs.c \
+                         include/fhsm_create_attrs.h \
+                         include/fhsm_attr_utils.h
+	$(FUZZ_CC) $(FUZZ_CFLAGS) \
+	    fuzz/fuzz_create_attrs.c src/fhsm_create_attrs.c \
+	    -o $@ $(FUZZ_LDFLAGS)
+
+# ---------------------------------------------------------------------------
 clean :
-	rm -f fuzz/fuzz_ecdsa_raw fuzz/fuzz_pq_params fuzz/fuzz_attr_template \
+	rm -f fuzz/fuzz_ecdsa_raw fuzz/fuzz_pq_params \
+	      fuzz/fuzz_attr_template fuzz/fuzz_create_attrs \
 	      fuzz/crash-* fuzz/leak-* fuzz/oom-* fuzz/timeout-*
 
 .PHONY : all clean

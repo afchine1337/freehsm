@@ -5,6 +5,99 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] --- 2026-06-20
+
+The "Simorgh Labs" minor release. Three coordinated changes that justify the minor bump : (1) the manufacturer identifier presented through PKCS#11 `C_GetInfo` / `C_GetSlotInfo` / `C_GetTokenInfo` changes from "FreeHSM C (FIPS 140-3)" to "Simorgh Labs, Open Source Cryptography and Digital Trust", a backward-incompatible identity-string change at the PKCS#11 layer ; (2) `C_CreateObject` is decomposed into a pure-C parser (`fhsm_parse_create_attrs`, no OpenSSL dependency) plus an OpenSSL EVP builder, removing the long-standing inline-mirror divergence between the production code and the libFuzzer harness ; (3) the new `fuzz_create_attrs` harness attacks the production parser directly, replacing the unit-level mirror coverage of v1.1.x with integration-level coverage on the real C code path that runs when an untrusted PKCS#11 caller invokes `C_CreateObject`. Backward-compatible at the wire / cryptographic level : every Wycheproof corpus continues to pass bit-identically (~5 000 invocations of `C_CreateObject` across 6 paths) ; only the human-readable manufacturer string changes for end-user tools.
+
+### Added
+
+* **`include/fhsm_create_attrs.h`** (~130 lines) : public API for the new pure parser. Defines `fhsm_create_attrs_t` (typed output struct with a 5-path enum : `VERBATIM` / `EC_PUB` / `ED25519_PUB` / `ED448_PUB` / `RSA_PUB` plus path-specific resolved fields) and `fhsm_parse_rv_t` (return-code enum mapped at the call site to PKCS#11 `CKR_*`). Header has zero OpenSSL dependency.
+
+* **`src/fhsm_create_attrs.c`** (~230 lines) : the parser TU. Pure C, OpenSSL-free, no allocation, no global state. Validates `CKA_CLASS` / `CKA_KEY_TYPE` / `CKA_LABEL` / `CKA_ID`, dispatches on `(cko, ckk)` to the right sub-parser, resolves curve OIDs through a locally-duplicated 3-curve lookup table (`P-256` / `P-384` / `P-521`) plus Ed25519 / Ed448, strips DER `OCTET STRING` wrappers through `fhsm_strip_octet_string_inline` from `include/fhsm_attr_utils.h`, returns a typed `fhsm_parse_rv_t` error enum. Caller maps to `CKR_*` codes through a small `map_parse_rv()` in `fhsm_pkcs11.c`.
+
+* **`fuzz/fuzz_create_attrs.c`** (~250 lines) : new libFuzzer + ASAN + UBSAN harness that attacks `fhsm_parse_create_attrs()` directly. Decodes the fuzz input into a synthetic `CK_ATTRIBUTE[]` template (per-record `type:CK_ULONG`, `len:u8`, payload), calls the production parser, and verifies eleven structural invariants on the output via `__builtin_trap` :
+    * `P1` path enum in range, `P2` non-INVALID on OK, `P3` label NUL-terminated within bounds, `P4` id pointer/length consistency, `P5` `cko ∈ {PUBLIC, PRIVATE, SECRET}`, `P6` `VERBATIM` carries a non-NULL value, `P7` `EC_PUB` carries one of three known curve strings + non-NULL point, `P8` / `P9` Ed paths carry NULL `ec_group` (curve in path enum) + non-NULL point, `P10` `RSA_PUB` carries both modulus and exponent.
+    * `E1` on every non-OK return, `path == INVALID` (the parser `memset()`s the output at entry).
+    * Plus a truncation probe that re-parses the same template with the last record's `ulValueLen` shrunk by one byte, stressing length-vs-buffer accounting in the `OCTET STRING` unwrapper, the OID matcher, and the RSA modulus/exponent extractor at the buffer tail.
+    * Local 60-second smoke run on the developer machine : 18 678 924 executions, 306 211 exec/s, 714 new units, 0 crash / 0 ASAN / 0 UBSAN / 518 MB peak RSS.
+
+### Changed
+
+* **`src/fhsm_pkcs11.c::C_CreateObject`** : the body shrinks from ~215 lines (v1.1.18 monolith) to ~110 lines. The new structure is :
+    1. Session / state / argument validation (unchanged).
+    2. Call to `fhsm_parse_create_attrs()`.
+    3. `map_parse_rv()` to translate the parse return code to `CKR_*`.
+    4. Switch on `attrs.path` :  `VERBATIM` stores `CKA_VALUE` directly, the three EVP_PKEY paths (`EC_PUB`, `ED25519_PUB`/`ED448_PUB`, `RSA_PUB`) build the corresponding key with OpenSSL's `EVP_PKEY_fromdata` API, and the common epilogue serializes as SPKI DER through `i2d_PUBKEY` and registers the token object via `fhsm_token_object_add`.
+
+* **`src/fhsm_pkcs11.c`** : two now-orphan local helpers (`fhsm_ec_oid_to_group` and `fhsm_strip_octet_string`) are removed. Their only call sites were inside `C_CreateObject` and have moved to the new parser TU (the latter via its `_inline` counterpart in `include/fhsm_attr_utils.h`, the former duplicated locally in `src/fhsm_create_attrs.c` to keep the parser self-contained).
+
+* **`src/fhsm_pkcs11.c`** : the manufacturer identifier presented through three `C_Get*Info` calls changes from "FreeHSM C (FIPS 140-3)" to "Simorgh Labs, Open Source Cryptography and Digital Trust". The PKCS#11 string fields are space-padded fixed-width buffers (`CK_INFO::manufacturerID` is 32 chars, `CK_SLOT_INFO::manufacturerID` is 32 chars, `CK_TOKEN_INFO::manufacturerID` is 32 chars) so the new string is truncated as required by §5.5 of the PKCS#11 v3.2 base spec : `"Simorgh Labs, Open Source Crypt"` (31 chars + 1 trailing space). `CK_INFO::libraryDescription` (32 chars) takes the previous module label "FreeHSM C (FIPS 140-3)" so the library identity remains discoverable. `CK_TOKEN_INFO::model` is unchanged (`"FreeHSM-C-v1"`).
+
+* **`Makefile`** : `LIB_SRC` adds `src/fhsm_create_attrs.c` next to the existing extracted TUs `src/fhsm_ecdsa_raw.c` and `src/fhsm_pq_params.c`.
+
+* **`fuzz/Makefile.fuzz`** : adds a fourth build target `fuzz/fuzz_create_attrs` next to the existing three. The new rule links the production TU `src/fhsm_create_attrs.c` into the harness binary (the same object file as the production module library).
+
+* **`fuzz/README.md`** : harness table gains a fourth row ; new section under "Property invariants checked" enumerates P1–P10 + E1 + the truncation probe with the rationale for each invariant ; the Maintenance table now lists `fhsm_parse_create_attrs` as the third production helper linked into a harness, leaving only two legacy `fhsm_pkcs11.c` call sites still using inline mirrors.
+
+* **`README.md`** : the "Maintainer" section continues to show the Simorgh Labs identity and the GPG key fingerprint added in v1.1.18.
+
+* **`include/fhsm_common.h`** : `FHSM_VERSION_MAJOR` / `MINOR` / `PATCH` / `STRING` bumped to `1` / `2` / `0` / `"1.2.0-FIPS"`.
+
+### Removed
+
+* **`src/fhsm_pkcs11.c::fhsm_ec_oid_to_group`** (static helper, ~25 lines) : the only call site was inside the previous `C_CreateObject` monolith ; the lookup table is now duplicated locally in `src/fhsm_create_attrs.c` to preserve the OpenSSL-free property of the parser TU.
+
+* **`src/fhsm_pkcs11.c::fhsm_strip_octet_string`** (static helper, ~30 lines) : same migration. The remaining `fhsm_pkcs11.c` callers were already using the `_inline` counterpart in `include/fhsm_attr_utils.h` (added in v1.1.14 for the original fuzz harness), so the local copy is now redundant.
+
+### Security & Validation
+
+```
+Boot KAT 51 / 51 vectors unchanged in dev mode (C_CreateObject is
+   not exercised in the boot KAT path).
+
+The C_CreateObject decomposition was validated by CI against the
+full Wycheproof corpus and the matrix step :
+
+   * Wycheproof RSA-PSS verify   : 1 083 / 0   (CKK_RSA path)
+   * Wycheproof RSA-OAEP         :   788 / 0   (CKK_RSA path)
+   * Wycheproof ECDSA verify     : 3 098 / 0   (CKK_EC path)
+   * Wycheproof EdDSA            :   236 / 0   (CKK_EC_EDWARDS path)
+   * Wycheproof ML-DSA verify    :   614 / 0   (CKK_ML_DSA verbatim)
+   * CI matrix CKK_AES verbatim  :    24 / 0 / 8
+
+Total : ~5 000 C_CreateObject invocations across 6 paths, 0
+regression vs the v1.1.18 monolith. The new parser is
+semantically-identical to the v1.1.18 inline implementation.
+
+fuzz_create_attrs smoke run (60s on dev machine, libFuzzer +
+ASAN + UBSAN) :
+   * 18 678 924 executions
+   * 306 211 exec/s
+   * 714 new units discovered
+   * 0 crash / 0 ASAN report / 0 UBSAN report
+   * peak RSS 518 MB
+The nightly CI fuzz run will exercise the harness for 1 h on the
+same conditions ; any future crash will be tracked per fuzz/README.md
+§"Crash policy".
+
+CI all 5 jobs green : lint / build+smoke / test-fips-mode /
+test-coverage-matrix / reproducibility.
+```
+
+This is the 19th consecutive GPG-signed release.
+
+### ALC_DVS rationale for the minor bump
+
+Two of the three changes (manufacturer rename + new fuzz harness) are
+ALC_DVS-grade improvements rather than purely cryptographic ones, which
+is the reason this release ships as a minor bump instead of a patch
+release. The manufacturer rename is a forward-looking identity change ;
+the C_CreateObject decomposition is a structural refactor that pays off
+on the security-evidence side by collapsing the previous "production
+code vs fuzz mirror" divergence into a single attack surface that the
+nightly fuzz run exercises with real bytes. See Security Target v0.6
+§13.5 for the corresponding ALC_DVS write-up.
+
 ## [1.1.18] --- 2026-06-20
 
 The "real AES-GMAC" release. Replaces a long-standing OpenSC pkcs11-tool interop alias (CKM_AES_GMAC at 0x108A silently aliased to CKM_AES_CMAC) with a spec-compliant AES-GMAC implementation per PKCS#11 v3.2 §6.10.6 and NIST SP 800-38D §6.4. Backward-compatible by construction : callers that send 0x108A with no IV (the OpenSC code path) continue to receive CMAC behaviour ; callers that send 0x108A with an IV receive real GMAC. Coincides with the first session where `test_smoke` runs end-to-end on a developer machine in dev mode without any `[!]` (50 / 50 KAT vectors).

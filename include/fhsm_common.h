@@ -67,9 +67,9 @@ extern "C" {
  * invalidates the current FIPS 140-3 / CC certificate.
  * ----------------------------------------------------------------------- */
 #define FHSM_VERSION_MAJOR   1
-#define FHSM_VERSION_MINOR   1
-#define FHSM_VERSION_PATCH   18
-#define FHSM_VERSION_STRING  "1.1.18-FIPS"
+#define FHSM_VERSION_MINOR   2
+#define FHSM_VERSION_PATCH   0
+#define FHSM_VERSION_STRING  "1.2.0-FIPS"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including
