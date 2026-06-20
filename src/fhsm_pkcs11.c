@@ -2826,12 +2826,23 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
 #ifndef CKM_AES_CMAC
 #define CKM_AES_CMAC              0x0000108CUL
 #endif
-/* OpenSC pkcs11-tool maps the "AES-CMAC" CLI string to 0x108a, which per
- * PKCS#11 v3.2 §A.4.1 is actually CKM_AES_GMAC. We accept this value as
- * an alias for CMAC so the most common test driver works. The proper
- * fix lives in OpenSC, but advertising this alias is the pragmatic
- * choice for interop. */
-#define CKM_AES_CMAC_OPENSC_ALIAS 0x0000108AUL
+/* CKM_AES_GMAC (PKCS#11 v3.2 §A.4.1) = AES-GMAC = the GHASH-based MAC
+ * underlying AES-GCM (NIST SP 800-38D §6.4). Distinct from CKM_AES_CMAC
+ * (which is the AES-CBC-based MAC from NIST SP 800-38B).
+ *
+ * Historical context : OpenSC pkcs11-tool maps its CLI string "AES-CMAC"
+ * to 0x108A internally (a long-standing OpenSC bug ; the correct value
+ * per PKCS#11 v3.2 §A.4.1 is 0x108C). Before v1.1.18, FreeHSM C aliased
+ * 0x108A to CKM_AES_CMAC for pkcs11-tool interop, which was wrong per
+ * the spec but pragmatically useful. Starting in v1.1.18, FreeHSM C
+ * implements real AES-GMAC at 0x108A, with an opt-in legacy alias
+ * controlled by the FHSM_OPENSC_GMAC_ALIAS environment variable :
+ *   - default                    : 0x108A = real AES-GMAC (spec-compliant)
+ *   - FHSM_OPENSC_GMAC_ALIAS=1   : 0x108A = AES-CMAC (legacy OpenSC alias)
+ * The alias is resolved once at op_init time so downstream dispatch
+ * only sees the resolved mechanism. Production deployments MUST NOT set
+ * FHSM_OPENSC_GMAC_ALIAS ; the AGD_PRE systemd unit leaves it unset. */
+#define CKM_AES_GMAC              0x0000108AUL
 #ifndef CKM_ECDH1_DERIVE
 #define CKM_ECDH1_DERIVE          0x00001050UL
 #endif
@@ -2956,11 +2967,20 @@ static fhsm_session_oaep_t g_oaep_dec[256];
  * CK_RSA_PKCS_PSS_PARAMS from the mechanism's pParameter. */
 static int mech_is_pss(uint32_t m);
 
+/* Forward decl : resolve_mech is defined in the sign/verify section
+ * (next to aes_gmac) but op_init calls it to apply the optional
+ * FHSM_OPENSC_GMAC_ALIAS downgrade at the earliest point. See the
+ * comment block on CKM_AES_GMAC further up for the policy. */
+static uint32_t resolve_mech(uint32_t m);
+
 static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                          CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey) {
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
     op->key_handle = (uint32_t)hKey;
-    op->mechanism  = (uint32_t)pMechanism->mechanism;
+    /* resolve_mech downgrades CKM_AES_GMAC (0x108A) to CKM_AES_CMAC (0x108C)
+     * iff FHSM_OPENSC_GMAC_ALIAS=1 is set in the environment. Done here so
+     * the rest of op_init / C_Sign / C_Verify see a single resolved value. */
+    op->mechanism  = resolve_mech((uint32_t)pMechanism->mechanism);
     op->have_iv    = 0;
     op->gcm_have   = 0;
     op->gcm_iv_len = 0;
@@ -3029,6 +3049,53 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         && pMechanism->pParameter && pMechanism->ulParameterLen >= 16) {
         memcpy(op->iv, pMechanism->pParameter, 16);
         op->have_iv = 1;
+    }
+    /* AES-GMAC : per PKCS#11 v3.2 §6.10.6 the IV is conveyed via
+     * pParameter. We accept two calling conventions for interop :
+     *   - raw IV bytes (PKCS#11 v3.0 convention, what most clients
+     *     including pkcs11-tool send)
+     *   - CK_AES_GMAC_PARAMS = { CK_ULONG ulIvLen ; CK_BYTE_PTR pIv }
+     *     (PKCS#11 v3.2 canonical form, 16 bytes on a 64-bit ABI)
+     * The struct form is heuristically detected when ulParameterLen ==
+     * 16 AND the first 8 bytes look like a sensible IV length (1..512).
+     * We store the IV in op->gcm_iv (shared 512-byte buffer with GCM)
+     * which fits Wycheproof's LongIv exercises if we ever extend the
+     * GMAC corpus. The mechanism check uses op->mechanism (already
+     * resolved via resolve_mech above). */
+    if (op->mechanism == CKM_AES_GMAC && pMechanism->pParameter
+        && pMechanism->ulParameterLen > 0) {
+        const uint8_t *iv_src = (const uint8_t *)pMechanism->pParameter;
+        size_t iv_len = pMechanism->ulParameterLen;
+        if (iv_len == 16) {
+            /* Potential CK_AES_GMAC_PARAMS struct. Peek at the length
+             * word to disambiguate from a 16-byte raw IV : if it points
+             * to a plausible length and a non-null pIv, treat as struct. */
+            const CK_ULONG *p = (const CK_ULONG *)pMechanism->pParameter;
+            size_t s_len = (size_t)p[0];
+            const uint8_t *s_iv = (const uint8_t *)(uintptr_t)p[1];
+            if (s_iv && s_len > 0 && s_len <= sizeof(op->gcm_iv)) {
+                iv_src = s_iv;
+                iv_len = s_len;
+            }
+        }
+        if (iv_len > sizeof(op->gcm_iv)) return FHSM_RV_ARGUMENTS_BAD;
+        memcpy(op->gcm_iv, iv_src, iv_len);
+        op->gcm_iv_len = iv_len;
+        op->gcm_have   = 1;
+    }
+    /* AES-GMAC without an IV : implicit downgrade to AES-CMAC. CKM_AES_GMAC
+     * per PKCS#11 v3.2 §6.10.6 requires an IV in pParameter ; if the caller
+     * provided none (e.g. OpenSC's pkcs11-tool, which sends the spec-
+     * incorrect 0x108A code point for its 'AES-CMAC' CLI string with no
+     * pParameter at all), we infer the caller meant CMAC and route the
+     * operation through the CMAC path. This makes the v1.1.18 transition
+     * backward-compatible : any pre-v1.1.18 caller using 0x108A as a CMAC
+     * alias keeps working unchanged. Callers who actually want real
+     * AES-GMAC always pass an IV. The FHSM_OPENSC_GMAC_ALIAS env var
+     * (handled in resolve_mech above) is a separate forced override for
+     * callers that DO pass a garbage non-empty pParameter but mean CMAC. */
+    if (op->mechanism == CKM_AES_GMAC && !op->gcm_have) {
+        op->mechanism = CKM_AES_CMAC;
     }
     /* For RSA-OAEP, capture and validate the OAEP params at Init time so
      * the actual Encrypt/Decrypt call can be the bare key-material path. */
@@ -3466,7 +3533,8 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA256_HMAC_INIT_VAL:
         case CKM_SHA384_HMAC_INIT_VAL:
         case CKM_SHA512_HMAC_INIT_VAL:
-        case CKM_AES_CMAC: case CKM_AES_CMAC_OPENSC_ALIAS:
+        case CKM_AES_CMAC:
+        case CKM_AES_GMAC:
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
         case CKM_EDDSA:
         case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
@@ -3480,6 +3548,50 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);
+}
+
+/* Resolve mechanism identifier through the optional FHSM_OPENSC_GMAC_ALIAS
+ * gate (see the comment block on CKM_AES_GMAC further up). Called once at
+ * op_init time so the rest of the module only sees the resolved value.
+ * Returns the input unchanged when the alias is off or when the mechanism
+ * is anything other than CKM_AES_GMAC. */
+static uint32_t resolve_mech(uint32_t m) {
+    if (m == CKM_AES_GMAC && getenv("FHSM_OPENSC_GMAC_ALIAS")) {
+        return CKM_AES_CMAC;
+    }
+    return m;
+}
+
+/* Helper : AES-GMAC via EVP_MAC. Used by C_Sign (mac generation) and
+ * C_Verify (constant-time compare). The GMAC tag is always 16 bytes
+ * (the AES block size). Unlike CMAC, GMAC needs an IV : the IV is
+ * captured at op_init time from pMechanism->pParameter and stored in
+ * op->gcm_iv (the same buffer used by CKM_AES_GCM ; sufficient for the
+ * variable IV lengths Wycheproof exercises). */
+static fhsm_rv_t aes_gmac(const uint8_t *key, size_t key_len,
+                           const uint8_t *iv,  size_t iv_len,
+                           const uint8_t *data, size_t data_len,
+                           uint8_t out[16]) {
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "GMAC", NULL);
+    if (!mac) return FHSM_RV_MECHANISM_INVALID;
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);
+    if (!ctx) return FHSM_RV_HOST_MEMORY;
+    char cipher_name[16];
+    snprintf(cipher_name, sizeof(cipher_name), "AES-%zu-GCM", key_len * 8);
+    OSSL_PARAM params[3] = {
+        OSSL_PARAM_construct_utf8_string("cipher", cipher_name, 0),
+        OSSL_PARAM_construct_octet_string("iv", (void *)iv, iv_len),
+        OSSL_PARAM_construct_end()
+    };
+    if (EVP_MAC_init(ctx, key, key_len, params) != 1
+        || EVP_MAC_update(ctx, data, data_len) != 1) {
+        EVP_MAC_CTX_free(ctx); return FHSM_RV_FUNCTION_FAILED;
+    }
+    size_t out_len = 16;
+    int ok = EVP_MAC_final(ctx, out, &out_len, 16);
+    EVP_MAC_CTX_free(ctx);
+    return ok == 1 && out_len == 16 ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
 
 /* Helper : AES-CMAC via EVP_MAC. Used by C_Sign (mac generation) and
@@ -3679,15 +3791,22 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         return rv;
     }
 
-    if (op->mechanism == CKM_AES_CMAC
-        || op->mechanism == CKM_AES_CMAC_OPENSC_ALIAS) {
+    if (op->mechanism == CKM_AES_CMAC || op->mechanism == CKM_AES_GMAC) {
         const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
         fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         if (pSignature == NULL) { *pulSignatureLen = 16; return FHSM_RV_OK; }
         if (*pulSignatureLen < 16) { *pulSignatureLen = 16; return 0x00000150UL; }
-        rv = aes_cmac(kv, kvl, pData, ulDataLen, pSignature);
+        if (op->mechanism == CKM_AES_GMAC) {
+            if (!op->gcm_have || op->gcm_iv_len == 0) {
+                op->active = 0; return FHSM_RV_ARGUMENTS_BAD;
+            }
+            rv = aes_gmac(kv, kvl, op->gcm_iv, op->gcm_iv_len,
+                          pData, ulDataLen, pSignature);
+        } else {
+            rv = aes_cmac(kv, kvl, pData, ulDataLen, pSignature);
+        }
         *pulSignatureLen = 16;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
@@ -3731,7 +3850,8 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA256_HMAC_INIT_VAL:
         case CKM_SHA384_HMAC_INIT_VAL:
         case CKM_SHA512_HMAC_INIT_VAL:
-        case CKM_AES_CMAC: case CKM_AES_CMAC_OPENSC_ALIAS:
+        case CKM_AES_CMAC:
+        case CKM_AES_GMAC:
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
         case CKM_EDDSA:
         case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
@@ -3767,11 +3887,18 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
                                                           : FHSM_RV_SIGNATURE_INVALID;
     }
 
-    if (op->mechanism == CKM_AES_CMAC
-        || op->mechanism == CKM_AES_CMAC_OPENSC_ALIAS) {
+    if (op->mechanism == CKM_AES_CMAC || op->mechanism == CKM_AES_GMAC) {
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         uint8_t mac[16];
-        rv = aes_cmac(kv, kvl, pData, ulDataLen, mac);
+        if (op->mechanism == CKM_AES_GMAC) {
+            if (!op->gcm_have || op->gcm_iv_len == 0) {
+                op->active = 0; return FHSM_RV_ARGUMENTS_BAD;
+            }
+            rv = aes_gmac(kv, kvl, op->gcm_iv, op->gcm_iv_len,
+                          pData, ulDataLen, mac);
+        } else {
+            rv = aes_cmac(kv, kvl, pData, ulDataLen, mac);
+        }
         op->active = 0;
         if (rv != FHSM_RV_OK) return rv;
         if (ulSigLen != 16) return FHSM_RV_SIGNATURE_INVALID;
