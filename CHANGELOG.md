@@ -5,6 +5,50 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.16] --- 2026-06-20
+
+The "non-canonical DER" patch release. Fixes a malformed DER signature in the `cavp_extended` ECDSA-P521-SHA512 RFC 6979 §A.2.7 KAT vector. The signature had a spurious leading 0x00 byte in the `s` INTEGER, making the DER non-canonical ; OpenSSL's `d2i_ECDSA_SIG` accepts the malformed input leniently (which is why the matrix and Wycheproof ECDSA paths always passed), but the boot-KAT `EVP_DigestVerify` path is stricter and silently failed. Same investigation pattern as v1.1.15's TC13_TAG fix : the bug was hidden by `FHSM_KAT_ALLOW_FAIL=1` in CI and only surfaced once `test_smoke` could reach this KAT after the v1.1.14 integrity-bypass fix and the v1.1.15 AES-GCM fix.
+
+### Changed
+
+* **`kat/cavp_extended.c::ecdsa_p521_sig`** : the DER signature for the ECDSA-P521-SHA512 RFC 6979 §A.2.7 KAT is corrected. The `s` INTEGER had `0x02 0x43 0x00 0x61 0x7c ...` (length 0x43=67 bytes including the illegal leading 0x00) ; the canonical encoding is `0x02 0x41 0x61 0x7c ...` (length 0x41=65 bytes, no leading 0x00). DER positive INTEGERs MUST omit a leading 0x00 byte when the next byte's MSB is < 0x80 (here `0x61` < `0x80`). The outer SEQUENCE length is updated `0x8b → 0x87` accordingly ; the C array shrinks from 143 to 138 bytes. The underlying r and s values are unchanged ; only the DER framing was malformed.
+
+### Added
+
+* **`disabled/verify_ecdsa_p521_rfc6979.py`** : standalone cross-validation script that confirms (a) the corrected DER bytes are produced by `python-ecdsa` with RFC 6979 deterministic signing using the published private key from §A.2.7, (b) the corrected signature verifies under Python `cryptography` and pycryptodome (DER mode), and (c) the underlying r||s values verify under pycryptodome (raw mode) for both the corrected and the previous malformed encoding (confirming the underlying maths was always right ; only the framing was wrong).
+
+### Why this had been hidden for so long
+
+OpenSSL's `d2i_ECDSA_SIG` is lenient with non-canonical DER : it parses the malformed input, extracts the right r and s values, and the resulting ECDSA verify succeeds. That's why the **CI matrix** (which exercises ECDSA via PKCS#11 → OpenSSL EVP) and the **Wycheproof ECDSA full sweep** (3 098 / 0 across P-256 / P-384 / P-521) have always passed. But the **boot-KAT EVP_DigestVerify path** goes through `OSSL_PARAM` machinery that is stricter about input encoding, and silently returned 0 for this one vector. Combined with `FHSM_KAT_ALLOW_FAIL=1` in CI, the failure was invisible until v1.1.14's integrity-bypass fix let `test_smoke` see the boot KAT report on a developer machine.
+
+### Discovered (next open follow-up)
+
+* **RSA-2048-OAEP-SHA256 self-test failure** : after the ECDSA-P521 fix, `test_smoke` reaches `RSA-2048-OAEP-SHA256 selftest-encrypt+decrypt` and reports `[!]` after 61 µs (suspiciously fast for a real OAEP round-trip on 2 048-bit). The matrix and runtime RSA-OAEP paths continue to work, so this is almost certainly another KAT data or setup issue, not a real RSA-OAEP regression. Tracked as a separate investigation following the now-rodé pattern.
+
+### Validation
+
+```
+Local test_smoke now exposes 44 KATs visible (was 40+ in v1.1.15) :
+  All previous KATs : green
+  AES-GCM-256 / AES-GCM-decrypt
+  SHA-256/384/512/SHA3 × 6
+  HMAC-SHA-256 × 4
+  AES-CBC / AES-CTR / AES-CMAC × 3
+  ECDSA-P256/P384/P521 (P-521 now passing thanks to this fix)
+  HKDF × 2
+  PBKDF2 × 2
+  RSA-2048-PSS-SHA256 (sign+verify)
+  RSA-2048-OAEP-SHA256 [!] (next follow-up)
+
+CI : lint / build+smoke / test-fips-mode / test-coverage-matrix /
+     reproducibility : all green.
+Wycheproof full sweep : 6 978 / 0 across 9 PKCS#11 v3.2 families,
+                        bit-identical to v1.1.15.
+CI matrix : 24 / 0 / 8 (with the known ECDH flaky behaviour).
+```
+
+This is the 16th consecutive GPG-signed release.
+
 ## [1.1.15] --- 2026-06-19
 
 The "KAT data integrity" patch release. Fixes a pre-existing wrong expected value in the `cavp_extended` AES-GCM-256 no-AAD KAT (`TC13_TAG`) that had been silently bypassed in CI via `FHSM_KAT_ALLOW_FAIL=1` and only surfaced after the v1.1.14 integrity-bypass fix let `test_smoke` reach this KAT on a developer machine. Resolution is grounded in a cross-validation across three independent AES-GCM implementations.
