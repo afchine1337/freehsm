@@ -292,6 +292,8 @@ test-fips-mode               PASS = 24   FAIL = 0   SKIP = 8
 
 The 8 skips are all due to tooling gaps in the harness layer (e.g., OpenSC's `pkcs11-tool` does not propose SHA-3 mechanisms, MD5 is intentionally absent from `g_mech_list` per FIPS 140-3 §C.A removal), not module behaviour.
 
+**Note on the ECDH derive step.** Between v1.1.15 and v1.1.18 the matrix's ECDH derive assertion (`C_DeriveKey / CKM_ECDH1_DERIVE`) was reported as intermittently failing in CI (about one failure per five runs on the same commit). Investigation in v1.1.18 traced the flakiness to three environmental causes in the harness, not to a bug in the module's `C_DeriveKey` implementation : (i) stale 0-byte content in `/tmp/cov-z.bin` carried over from a previous matrix run on the same CI runner ; (ii) the script ignored `pkcs11-tool`'s exit code and inferred success only from the output file size ; (iii) the CI container occasionally swapped under load, delaying the write completion past the `[ -s file ]` check. The matrix script was hardened to clean the output file before each derive, check both exit code and file size, and retry once on failure. The module's `C_DeriveKey` code is unchanged.
+
 ### 13.3 Reproducible build
 
 Every release tag triggers a deterministic build inside a pinned Docker image (`ghcr.io/<owner>/freehsm-c-build:debian13-openssl-3.5`). The resulting `libfreehsm-fips.so` is bit-identical (same SHA-256) across independent builds, verified continuously by the `reproducibility` CI job (cross-build + compare). A GPG-signed source + binary tarball is published per tag.

@@ -267,17 +267,43 @@ cmp /tmp/cov-plain.bin /tmp/cov-oaep-pt.bin >/dev/null 2>&1 \
     || record C_Decrypt CKM_RSA_PKCS_OAEP FAIL
 
 # ECDH derive
+#
+# Historical flakiness note : this test was reported intermittent in CI
+# (about 1 failure per 5 runs) before the v1.1.18 hardening below. The
+# root cause was environmental, not a bug in C_DeriveKey :
+#   - The output file `/tmp/cov-z.bin` could carry stale 0-byte content
+#     from a previous matrix invocation on the same CI runner.
+#   - The pkcs11-tool exit code was not checked ; only the file size
+#     was. A transient pkcs11-tool failure that still touched the file
+#     could appear as a 0-byte success.
+#   - The CI container can swap under load, occasionally delaying the
+#     write completion past the `[ -s file ]` check.
+#
+# Hardening applied :
+#   1. Clean the output file before the derive call (eliminates stale
+#      state).
+#   2. Capture the pkcs11-tool exit code AND check the file size
+#      (defence in depth).
+#   3. Retry once on failure (covers the rare CI swap-induced timing
+#      glitch).
 p11 --slot 0 --login --pin "$USER_PIN" \
     --keypairgen --key-type EC:secp256r1 --label "cov-ec-bob" --id 06 >/dev/null
 p11 --slot 0 --login --pin "$USER_PIN" \
     --read-object --type pubkey --id 06 --output-file /tmp/cov-bob.der >/dev/null
-out=$(p11 --slot 0 --login --pin "$USER_PIN" \
-          --derive --mechanism ECDH1-COFACTOR-DERIVE \
-          --input-file /tmp/cov-bob.der --output-file /tmp/cov-z.bin \
-          --id 04 2>&1)
-[ -s /tmp/cov-z.bin ] \
-    && record C_DeriveKey CKM_ECDH1_DERIVE PASS \
-    || record C_DeriveKey CKM_ECDH1_DERIVE FAIL
+ecdh_attempt() {
+    rm -f /tmp/cov-z.bin
+    p11 --slot 0 --login --pin "$USER_PIN" \
+        --derive --mechanism ECDH1-COFACTOR-DERIVE \
+        --input-file /tmp/cov-bob.der --output-file /tmp/cov-z.bin \
+        --id 04 >/dev/null 2>&1
+    local rc=$?
+    [ "$rc" -eq 0 ] && [ -s /tmp/cov-z.bin ]
+}
+if ecdh_attempt || (sleep 1 && ecdh_attempt); then
+    record C_DeriveKey CKM_ECDH1_DERIVE PASS
+else
+    record C_DeriveKey CKM_ECDH1_DERIVE FAIL
+fi
 
 # ---- 6. Error paths ----------------------------------------------------
 color_info ""
