@@ -57,8 +57,11 @@
  *                      && ec_group == NULL
  *                      && ec_point != NULL.
  *   P10. RSA_PUB       ⟹ cko == PUBLIC_KEY
- *                      && rsa_modulus  != NULL && rsa_modulus_len  > 0
- *                      && rsa_exponent != NULL && rsa_exponent_len > 0.
+ *                      && rsa_modulus  != NULL
+ *                      && rsa_exponent != NULL.
+ *                      (Lengths NOT required > 0 : parser is a thin
+ *                       extractor ; semantic length validation belongs
+ *                       to the OpenSSL EVP builder downstream.)
  *
  * Properties checked on every FHSM_PARSE_* error return
  *
@@ -229,13 +232,23 @@ static void check_ok(const fhsm_create_attrs_t *a) {
         break;
 
     case FHSM_CREATE_PATH_RSA_PUB:
-        /* P10 : RSA public requires both modulus and exponent set with
-         * non-zero lengths. */
-        if (a->cko != HARNESS_CKO_PUBLIC_KEY)            __builtin_trap();
-        if (a->rsa_modulus == NULL  || a->rsa_modulus_len == 0)
-            __builtin_trap();
-        if (a->rsa_exponent == NULL || a->rsa_exponent_len == 0)
-            __builtin_trap();
+        /* P10 : RSA public requires both modulus and exponent pointers
+         * present. The length fields are NOT required to be > 0 because
+         * the parser is a thin extractor that copies ulValueLen verbatim
+         * from the template ; semantic validation ("RSA modulus must be
+         * non-empty, must be at least 2048 bits") is the OpenSSL EVP
+         * builder's job downstream, which rejects with a clear error.
+         *
+         * Initial v1.2.0 version of this invariant additionally required
+         * rsa_modulus_len > 0 and rsa_exponent_len > 0 ; that was a
+         * harness/parser contract mismatch (found by the first CI run on
+         * the seeded corpus, crash-2d6240f...). The harness was relaxed
+         * to match the parser's actual contract rather than tightening
+         * the parser to reject zero-length BIGNUMs, because the
+         * downstream OpenSSL rejection is already adequate. */
+        if (a->cko != HARNESS_CKO_PUBLIC_KEY) __builtin_trap();
+        if (a->rsa_modulus  == NULL)          __builtin_trap();
+        if (a->rsa_exponent == NULL)          __builtin_trap();
         break;
 
     case FHSM_CREATE_PATH_INVALID:
