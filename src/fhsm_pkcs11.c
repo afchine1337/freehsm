@@ -77,6 +77,13 @@
  * the libFuzzer harness on this parser (#191). */
 #include "fhsm_pq_params.h"
 
+/* C_CreateObject attribute parser (PKCS#11 v3.2 §6.7.1). Extracted in
+ * v1.2.0 as part of the C_CreateObject decomposition : the pure parser
+ * lives in src/fhsm_create_attrs.c (reachable from the fuzz harness)
+ * while the OpenSSL EVP builder stays inline below. */
+#include "fhsm_create_attrs.h"
+#include "fhsm_attr_utils.h"
+
 /* CK_RV is identical to fhsm_rv_t numerically. */
 typedef unsigned long  CK_RV;
 typedef unsigned long  CK_ULONG;
@@ -1437,59 +1444,28 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 #define CKR_TEMPLATE_INCONSISTENT 0x000000D1UL
 #endif
 
-/* Map a DER-encoded curve OID (CKA_EC_PARAMS) to the OpenSSL group name
- * accepted by EVP_PKEY_CTX_new_from_name("EC")+OSSL_PARAM("group", ...).
- * Returns NULL if the OID is unknown to us. Adding curves here is a
- * one-line change once the corresponding OID DER is known. */
-static const char *fhsm_ec_oid_to_group(const uint8_t *oid, size_t oid_len) {
-    /* secp256r1 / P-256 :  1.2.840.10045.3.1.7  */
-    static const uint8_t k_p256[] = {
-        0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07
-    };
-    /* secp384r1 / P-384 :  1.3.132.0.34         */
-    static const uint8_t k_p384[] = {
-        0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22
-    };
-    /* secp521r1 / P-521 :  1.3.132.0.35         */
-    static const uint8_t k_p521[] = {
-        0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23
-    };
-    if (oid_len == sizeof(k_p256) && memcmp(oid, k_p256, oid_len) == 0)
-        return "P-256";
-    if (oid_len == sizeof(k_p384) && memcmp(oid, k_p384, oid_len) == 0)
-        return "P-384";
-    if (oid_len == sizeof(k_p521) && memcmp(oid, k_p521, oid_len) == 0)
-        return "P-521";
-    return NULL;
-}
+/* Curve-OID-to-group-name lookup and DER OCTET STRING wrapper stripper
+ * used to live here. As part of the v1.2.0 C_CreateObject decomposition,
+ * both functions were extracted to src/fhsm_create_attrs.c (parser TU)
+ * and removed from here. The C_CreateObject builder paths use the
+ * already-resolved values from the parser's fhsm_create_attrs_t struct.
+ *
+ * If a future code path inside fhsm_pkcs11.c needs an OID-to-group
+ * lookup again, prefer adding it to the parser TU and exposing it
+ * through include/fhsm_create_attrs.h rather than re-introducing a
+ * duplicate definition here. */
 
-/* Strip a DER OCTET STRING wrapper. CKA_EC_POINT is the OCTET STRING
- * encoding of the SEC1 uncompressed point. Same logic as the ECDH peer
- * key reconstruction above. Sets *out / *out_len on success. Returns 0
- * if the OCTET STRING shape is wrong (e.g. caller passed the raw point). */
-static int fhsm_strip_octet_string(const uint8_t *in, size_t in_len,
-                                    const uint8_t **out, size_t *out_len) {
-    if (in_len > 2 && in[0] == 0x04 && in[1] != 0x04
-        && (size_t)in[1] + 2 == in_len) {
-        *out = in + 2;
-        *out_len = in_len - 2;
-        return 1;
+/* Map the pure-parser return codes into the PKCS#11 / FHSM codes that
+ * C_CreateObject is expected to surface. Centralised here so the parser
+ * itself stays decoupled from the FHSM_RV / CKR enum layouts. */
+static CK_RV map_parse_rv(fhsm_parse_rv_t rv) {
+    switch (rv) {
+        case FHSM_PARSE_OK:                          return FHSM_RV_OK;
+        case FHSM_PARSE_TEMPLATE_INCOMPLETE:         return CKR_TEMPLATE_INCOMPLETE;
+        case FHSM_PARSE_TEMPLATE_INCONSISTENT:       return CKR_TEMPLATE_INCONSISTENT;
+        case FHSM_PARSE_ATTRIBUTE_VALUE_INVALID:     return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     }
-    if (in_len > 3 && in[0] == 0x04 && in[1] == 0x81
-        && (size_t)in[2] + 3 == in_len) {
-        *out = in + 3;
-        *out_len = in_len - 3;
-        return 1;
-    }
-    if (in_len > 4 && in[0] == 0x04 && in[1] == 0x82) {
-        size_t l = ((size_t)in[2] << 8) | in[3];
-        if (l + 4 == in_len) {
-            *out = in + 4;
-            *out_len = l;
-            return 1;
-        }
-    }
-    return 0;
+    return FHSM_RV_FUNCTION_FAILED;
 }
 
 CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
@@ -1500,108 +1476,41 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
 
-    long i;
-    /* Required : CKA_CLASS, CKA_KEY_TYPE. */
-    i = find_attr(pTemplate, ulCount, CKA_CLASS);
-    if (i < 0 || pTemplate[i].ulValueLen < sizeof(CK_ULONG))
-        return CKR_TEMPLATE_INCOMPLETE;
-    CK_ULONG cko = 0;
-    memcpy(&cko, pTemplate[i].pValue, sizeof(CK_ULONG));
+    /* === Parser stage : pure C, no OpenSSL. ============================
+     * The CK_ATTRIBUTE layout is bit-identical to fhsm_attr_t (see
+     * include/fhsm_attr_utils.h) ; the cast below is therefore safe. */
+    fhsm_create_attrs_t a;
+    CK_RV rv_parse = map_parse_rv(fhsm_parse_create_attrs(
+        (const fhsm_attr_t *)pTemplate, ulCount, &a));
+    if (rv_parse != FHSM_RV_OK) return rv_parse;
 
-    i = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
-    if (i < 0 || pTemplate[i].ulValueLen < sizeof(CK_ULONG))
-        return CKR_TEMPLATE_INCOMPLETE;
-    CK_ULONG ckk = 0;
-    memcpy(&ckk, pTemplate[i].pValue, sizeof(CK_ULONG));
+    /* === Builder stage : path-specific construction of either a raw blob
+     * (verbatim path) or an EVP_PKEY that is then i2d_PUBKEY-serialised
+     * into a SubjectPublicKeyInfo. The builder remains inline because
+     * it is intrinsically tied to the OpenSSL EVP API. =================== */
 
-    /* Supported object classes :
-     *   - CKO_PUBLIC_KEY  : EC / Edwards / RSA, normalised into SPKI DER.
-     *   - CKO_SECRET_KEY  : AES / generic-secret, the CKA_VALUE bytes
-     *     stored verbatim as the object's value.
-     *   - CKO_PRIVATE_KEY : RSA private key (CKK_RSA) imported as the
-     *     PKCS#8 PrivateKeyInfo DER blob passed in CKA_VALUE. The sign
-     *     / decrypt path consumes it via d2i_AutoPrivateKey so any
-     *     PKCS#8 / PKCS#1 RSAPrivateKey shape works.
-     *   - anything else   : CKR_TEMPLATE_INCONSISTENT. */
-    if (cko != CKO_PUBLIC_KEY && cko != CKO_SECRET_KEY
-        && cko != CKO_PRIVATE_KEY)
-        return CKR_TEMPLATE_INCONSISTENT;
-
-    /* Optional : CKA_LABEL, CKA_ID. */
-    char label_buf[64] = "";
-    i = find_attr(pTemplate, ulCount, CKA_LABEL);
-    if (i >= 0) {
-        size_t n = pTemplate[i].ulValueLen;
-        if (n >= sizeof(label_buf)) n = sizeof(label_buf) - 1;
-        memcpy(label_buf, pTemplate[i].pValue, n);
-        label_buf[n] = '\0';
-    }
-    const uint8_t *id_data = NULL;
-    size_t         id_len  = 0;
-    i = find_attr(pTemplate, ulCount, CKA_ID);
-    if (i >= 0) {
-        id_data = (const uint8_t *)pTemplate[i].pValue;
-        id_len  = pTemplate[i].ulValueLen;
-    }
-
-    /* CKO_SECRET_KEY (any key type) and CKO_PRIVATE_KEY (PKCS#8 DER
-     * in CKA_VALUE) are both stored verbatim --- the symmetric crypto
-     * path reads CKA_VALUE directly, the asymmetric one routes through
-     * d2i_AutoPrivateKey which accepts both PKCS#8 PrivateKeyInfo and
-     * PKCS#1 RSAPrivateKey. */
-    /* CKK_ML_DSA (PKCS#11 v3.2 §A.4) is properly defined further down
-     * in this translation unit alongside the post-quantum mech IDs ;
-     * spell the numeric value here so the early CKO_PUBLIC_KEY branch
-     * can use it without forward-declaring the macro. */
-    #define CKK_ML_DSA_CREATEOBJECT  0x0000003EUL
-    if (cko == CKO_SECRET_KEY || cko == CKO_PRIVATE_KEY
-        || (cko == CKO_PUBLIC_KEY && ckk == CKK_ML_DSA_CREATEOBJECT)) {
-        /* ML-DSA public keys are accepted with their SPKI DER blob
-         * (or raw FIPS 204 bytes) carried in CKA_VALUE ; the verify
-         * path decodes via d2i_PUBKEY and falls back to
-         * EVP_PKEY_fromdata for the raw form. */
-        long iv = find_attr(pTemplate, ulCount, CKA_VALUE);
-        if (iv < 0) return CKR_TEMPLATE_INCOMPLETE;
-        uint8_t flags = (cko == CKO_PRIVATE_KEY) ? FHSM_OBJF_SENSITIVE : 0;
+    /* --- Verbatim path (CKO_SECRET_KEY / CKO_PRIVATE_KEY / ML-DSA pub). */
+    if (a.path == FHSM_CREATE_PATH_VERBATIM) {
+        uint8_t flags = (a.cko == CKO_PRIVATE_KEY) ? FHSM_OBJF_SENSITIVE : 0;
         uint32_t handle = 0;
         fhsm_rv_t rv = fhsm_token_object_add(
-            t, (uint32_t)cko, (uint32_t)ckk,
-            label_buf,
-            (const uint8_t *)pTemplate[iv].pValue,
-            (size_t)pTemplate[iv].ulValueLen,
-            id_data, id_len, flags, &handle);
+            t, (uint32_t)a.cko, (uint32_t)a.ckk,
+            a.label, a.value_data, a.value_len,
+            a.id_data, a.id_len, flags, &handle);
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
         return FHSM_RV_OK;
     }
 
-    /* ---- Build an EVP_PKEY then serialize as SubjectPublicKeyInfo. ---- */
+    /* --- EVP_PKEY paths : EC / Ed25519 / Ed448 / RSA public key. */
     EVP_PKEY *pkey = NULL;
     EVP_PKEY_CTX *pctx = NULL;
 
-    if (ckk == CKK_EC_CREATEOBJECT) {
-        long ip = find_attr(pTemplate, ulCount, CKA_EC_PARAMS);
-        long ipt = find_attr(pTemplate, ulCount, CKA_EC_POINT);
-        if (ip < 0 || ipt < 0) return CKR_TEMPLATE_INCOMPLETE;
-        const uint8_t *oid = (const uint8_t *)pTemplate[ip].pValue;
-        size_t oid_len = pTemplate[ip].ulValueLen;
-        const char *group = fhsm_ec_oid_to_group(oid, oid_len);
-        if (!group) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-
-        /* CKA_EC_POINT is the DER OCTET STRING of the SEC1 point. The
-         * inner bytes are 0x04 || X || Y (uncompressed) ; rejected if
-         * the caller forgot the OCTET STRING wrapper. */
-        const uint8_t *point = NULL;
-        size_t point_len = 0;
-        if (!fhsm_strip_octet_string(
-                (const uint8_t *)pTemplate[ipt].pValue,
-                pTemplate[ipt].ulValueLen,
-                &point, &point_len))
-            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-
+    if (a.path == FHSM_CREATE_PATH_EC_PUB) {
         OSSL_PARAM params[3] = {
-            OSSL_PARAM_construct_utf8_string("group", (char *)group, 0),
-            OSSL_PARAM_construct_octet_string("pub", (void *)point, point_len),
+            OSSL_PARAM_construct_utf8_string("group", (char *)a.ec_group, 0),
+            OSSL_PARAM_construct_octet_string("pub",
+                (void *)a.ec_point, a.ec_point_len),
             OSSL_PARAM_construct_end()
         };
         pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
@@ -1612,39 +1521,13 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         }
         EVP_PKEY_CTX_free(pctx);
 
-    } else if (ckk == CKK_EC_EDWARDS_CREATEOBJECT) {
-        /* Ed25519 / Ed448 : CKA_EC_PARAMS carries the curve OID DER and
-         * CKA_EC_POINT carries the raw public key wrapped in an OCTET
-         * STRING. OpenSSL's "ED25519" / "ED448" providers accept the
-         * raw key directly via OSSL_PARAM "pub", same shape as the
-         * Edwards-EC path in EC. */
-        long ip = find_attr(pTemplate, ulCount, CKA_EC_PARAMS);
-        long ipt = find_attr(pTemplate, ulCount, CKA_EC_POINT);
-        if (ip < 0 || ipt < 0) return CKR_TEMPLATE_INCOMPLETE;
-        const uint8_t *oid = (const uint8_t *)pTemplate[ip].pValue;
-        size_t oid_len = pTemplate[ip].ulValueLen;
-        /* Ed25519 : 1.3.101.112  -> DER 06 03 2B 65 70
-         * Ed448   : 1.3.101.113  -> DER 06 03 2B 65 71 */
-        static const uint8_t k_ed25519[] = { 0x06, 0x03, 0x2b, 0x65, 0x70 };
-        static const uint8_t k_ed448[]   = { 0x06, 0x03, 0x2b, 0x65, 0x71 };
-        const char *algo = NULL;
-        if (oid_len == sizeof(k_ed25519) && memcmp(oid, k_ed25519, oid_len) == 0)
-            algo = "ED25519";
-        else if (oid_len == sizeof(k_ed448) && memcmp(oid, k_ed448, oid_len) == 0)
-            algo = "ED448";
-        else
-            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-
-        const uint8_t *point = NULL;
-        size_t point_len = 0;
-        if (!fhsm_strip_octet_string(
-                (const uint8_t *)pTemplate[ipt].pValue,
-                pTemplate[ipt].ulValueLen,
-                &point, &point_len))
-            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-
+    } else if (a.path == FHSM_CREATE_PATH_ED25519_PUB
+               || a.path == FHSM_CREATE_PATH_ED448_PUB) {
+        const char *algo = (a.path == FHSM_CREATE_PATH_ED25519_PUB)
+                           ? "ED25519" : "ED448";
         OSSL_PARAM params[2] = {
-            OSSL_PARAM_construct_octet_string("pub", (void *)point, point_len),
+            OSSL_PARAM_construct_octet_string("pub",
+                (void *)a.ec_point, a.ec_point_len),
             OSSL_PARAM_construct_end()
         };
         pctx = EVP_PKEY_CTX_new_from_name(NULL, algo, NULL);
@@ -1655,14 +1538,9 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         }
         EVP_PKEY_CTX_free(pctx);
 
-    } else if (ckk == CKK_RSA_CREATEOBJECT) {
-        long im = find_attr(pTemplate, ulCount, CKA_MODULUS);
-        long ie = find_attr(pTemplate, ulCount, CKA_PUBLIC_EXPONENT);
-        if (im < 0 || ie < 0) return CKR_TEMPLATE_INCOMPLETE;
-        BIGNUM *n = BN_bin2bn(pTemplate[im].pValue,
-                              (int)pTemplate[im].ulValueLen, NULL);
-        BIGNUM *e = BN_bin2bn(pTemplate[ie].pValue,
-                              (int)pTemplate[ie].ulValueLen, NULL);
+    } else if (a.path == FHSM_CREATE_PATH_RSA_PUB) {
+        BIGNUM *n = BN_bin2bn(a.rsa_modulus,  (int)a.rsa_modulus_len,  NULL);
+        BIGNUM *e = BN_bin2bn(a.rsa_exponent, (int)a.rsa_exponent_len, NULL);
         if (!n || !e) { BN_free(n); BN_free(e); return FHSM_RV_HOST_MEMORY; }
         OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
         if (!bld
@@ -1686,6 +1564,9 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         OSSL_PARAM_free(params);
 
     } else {
+        /* Should not happen : the parser only emits the paths listed
+         * above when it returns OK. Defensive return to satisfy the
+         * exhaustive-switch policy. */
         return CKR_TEMPLATE_INCONSISTENT;
     }
 
@@ -1699,9 +1580,9 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     }
 
     uint32_t handle = 0;
-    fhsm_rv_t rv = fhsm_token_object_add(t, (uint32_t)cko, (uint32_t)ckk,
-                                          label_buf, spki, (size_t)spki_len,
-                                          id_data, id_len, 0, &handle);
+    fhsm_rv_t rv = fhsm_token_object_add(t, (uint32_t)a.cko, (uint32_t)a.ckk,
+                                          a.label, spki, (size_t)spki_len,
+                                          a.id_data, a.id_len, 0, &handle);
     OPENSSL_free(spki);
     if (rv != FHSM_RV_OK) return rv;
     *phObject = handle;
