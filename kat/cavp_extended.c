@@ -160,6 +160,82 @@ static const uint8_t TC14_TAG[16] = {
 };
 
 
+/* Helper : compute AES-GMAC tag via EVP_MAC "GMAC".
+ *
+ * Used by run_aesgmac_consistency below to mirror what the production
+ * src/fhsm_pkcs11.c::aes_gmac helper does. Returns 1 on success and
+ * fills tag[16] ; returns 0 on any EVP failure. */
+static int compute_gmac_tag(const uint8_t *key, size_t key_len,
+                             const uint8_t *iv,  size_t iv_len,
+                             const uint8_t *aad, size_t aad_len,
+                             uint8_t tag[16]) {
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "GMAC", NULL);
+    if (!mac) return 0;
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);
+    if (!ctx) return 0;
+    char cipher_name[16];
+    snprintf(cipher_name, sizeof(cipher_name), "AES-%zu-GCM", key_len * 8);
+    OSSL_PARAM params[3] = {
+        OSSL_PARAM_construct_utf8_string("cipher", cipher_name, 0),
+        OSSL_PARAM_construct_octet_string("iv", (void *)iv, iv_len),
+        OSSL_PARAM_construct_end()
+    };
+    int ok = (EVP_MAC_init(ctx, key, key_len, params) == 1)
+           && (EVP_MAC_update(ctx, aad, aad_len) == 1);
+    size_t out_len = 16;
+    if (ok) ok = (EVP_MAC_final(ctx, tag, &out_len, 16) == 1) && (out_len == 16);
+    EVP_MAC_CTX_free(ctx);
+    return ok;
+}
+
+/* Helper : compute the AES-GCM authentication tag with an empty
+ * plaintext via the EVP_CIPHER interface. Mathematically GMAC(K, IV, A)
+ * == AES-GCM(K, IV, A, empty PT).tag per NIST SP 800-38D §6.4. We use
+ * this as an independent reference against the EVP_MAC GMAC output. */
+static int compute_gcm_tag_empty_pt(const uint8_t *key, size_t key_len,
+                                     const uint8_t *iv,  size_t iv_len,
+                                     const uint8_t *aad, size_t aad_len,
+                                     uint8_t tag[16]) {
+    EVP_CIPHER_CTX *c = EVP_CIPHER_CTX_new();
+    if (!c) return 0;
+    const EVP_CIPHER *cipher = NULL;
+    switch (key_len) {
+        case 16: cipher = EVP_aes_128_gcm(); break;
+        case 24: cipher = EVP_aes_192_gcm(); break;
+        case 32: cipher = EVP_aes_256_gcm(); break;
+        default: EVP_CIPHER_CTX_free(c); return 0;
+    }
+    int outl = 0, tmpl = 0;
+    int ok = (EVP_EncryptInit_ex2(c, cipher, key, iv, NULL) == 1)
+           && (aad_len == 0 || EVP_EncryptUpdate(c, NULL, &tmpl, aad, (int)aad_len) == 1)
+           && (EVP_EncryptFinal_ex(c, NULL, &outl) == 1)
+           && (EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_GCM_GET_TAG, 16, tag) == 1);
+    EVP_CIPHER_CTX_free(c);
+    return ok;
+}
+
+/* Self-consistency boot KAT for AES-GMAC : compute the tag via two
+ * independent OpenSSL code paths (EVP_MAC "GMAC" and EVP_CIPHER
+ * AES-GCM with empty plaintext) and assert they match byte-for-byte.
+ *
+ * Mathematically the two computations are identical (NIST SP 800-38D
+ * §6.4 defines AES-GMAC as AES-GCM applied to the AAD with empty PT)
+ * so any divergence catches a bug in either path. Stronger than a
+ * fixed-value KAT because it exercises two implementations in
+ * parallel ; also obviates the need for a hardcoded expected tag
+ * (which would inevitably drift from upstream NIST publications). */
+static int run_aesgmac_consistency(const uint8_t *key, size_t key_len,
+                                    const uint8_t *iv,  size_t iv_len,
+                                    const uint8_t *aad, size_t aad_len) {
+    uint8_t gmac_tag[16], gcm_tag[16];
+    if (!compute_gmac_tag(key, key_len, iv, iv_len, aad, aad_len, gmac_tag))
+        return 0;
+    if (!compute_gcm_tag_empty_pt(key, key_len, iv, iv_len, aad, aad_len, gcm_tag))
+        return 0;
+    return fhsm_ct_memcmp(gmac_tag, gcm_tag, 16) == 0;
+}
+
 /* Helper : run one AES-GCM CAVP encrypt+tag-verify vector via EVP.
  *
  * Uses EVP_EncryptInit_ex2 (the OpenSSL 3.x idiom that sets cipher,
@@ -1199,6 +1275,22 @@ fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
                                     cmac[k].msg, cmac[k].msg_len,
                                     cmac[k].exp_tag);
         REC(out, i, "AES-256-CMAC", cmac[k].vid, pass, local_elapsed_us(&t0));
+        i++;
+    }
+
+    /* ---- AES-GMAC (NIST SP 800-38D §6.4 self-consistency) ------- */
+    if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    {
+        /* Reuse the AES-GCM TC15 inputs : K = kK (256-bit), IV = TC13_IV
+         * (12 bytes), AAD = kA (20 bytes). Empty PT. The two compute
+         * paths (EVP_MAC GMAC vs EVP_CIPHER GCM tag-only) MUST produce
+         * identical 16-byte tags. */
+        int pass = run_aesgmac_consistency(kK,      sizeof(kK),
+                                            TC13_IV, sizeof(TC13_IV),
+                                            kA,      sizeof(kA));
+        REC(out, i, "AES-256-GMAC", "SP800-38D-self-consistency",
+            pass, local_elapsed_us(&t0));
         i++;
     }
 

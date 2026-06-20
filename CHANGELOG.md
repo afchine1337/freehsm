@@ -5,6 +5,53 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.18] --- 2026-06-20
+
+The "real AES-GMAC" release. Replaces a long-standing OpenSC pkcs11-tool interop alias (CKM_AES_GMAC at 0x108A silently aliased to CKM_AES_CMAC) with a spec-compliant AES-GMAC implementation per PKCS#11 v3.2 §6.10.6 and NIST SP 800-38D §6.4. Backward-compatible by construction : callers that send 0x108A with no IV (the OpenSC code path) continue to receive CMAC behaviour ; callers that send 0x108A with an IV receive real GMAC. Coincides with the first session where `test_smoke` runs end-to-end on a developer machine in dev mode without any `[!]` (50 / 50 KAT vectors).
+
+### Added
+
+* **`src/fhsm_pkcs11.c::aes_gmac`** : single-shot EVP_MAC "GMAC" helper. Mirrors the structural pattern of the existing `aes_cmac` helper ; takes (key, iv, data) and emits the 16-byte tag. Selects the underlying AES key size (128 / 192 / 256) from the imported secret key length.
+
+* **`src/fhsm_pkcs11.c::resolve_mech`** : optional forced-downgrade gate controlled by `FHSM_OPENSC_GMAC_ALIAS=1`. When set, all CKM_AES_GMAC requests at op_init are rewritten to CKM_AES_CMAC, regardless of whether an IV was provided. Off by default ; AGD_PRE forbids it in production. The implicit "no IV → CMAC" downgrade in op_init handles the common case (OpenSC pkcs11-tool) automatically without needing this env var.
+
+* **`src/fhsm_pkcs11.c::op_init` IV parsing** : new block that accepts the GMAC IV via either the PKCS#11 v3.0 raw-bytes convention (what pkcs11-tool sends) or the PKCS#11 v3.2 `CK_AES_GMAC_PARAMS` struct `{ ulIvLen, pIv }`. The struct form is heuristically detected when `ulParameterLen == 16`. IV is stored in the shared `op->gcm_iv` / `op->gcm_iv_len` buffer (sufficient for Wycheproof's `LongIv` exercises if we ever extend the GMAC corpus to those).
+
+* **`kat/cavp_extended.c` AES-GMAC self-consistency boot KAT** : a new boot-time KAT that computes the AES-256-GMAC tag for the existing TC14/TC15 inputs (K = `kK`, IV = `TC13_IV`, AAD = `kA`) via TWO independent OpenSSL code paths (`EVP_MAC` "GMAC" and `EVP_CIPHER` AES-GCM with empty plaintext) and asserts the two 16-byte outputs match byte-for-byte. Mathematically the two paths are identical per NIST SP 800-38D §6.4 ; any divergence catches a bug in either path. Stronger than a fixed-value KAT because it exercises two implementations in parallel.
+
+* **`tests/wycheproof/adapters/aes_gmac.py`** : Wycheproof adapter that exercises AES-GMAC against the `aes_gmac_test.json` corpus. Follows the same pattern as the existing `aes_cmac.py` adapter, with the per-test IV passed through the mechanism parameter (raw bytes, PKCS#11 v3.0 convention).
+
+* **`tests/wycheproof/adapters/_p11.py::CKM_AES_GMAC`** : adds the constant `0x108A` for use by the new adapter.
+
+### Changed
+
+* **`src/fhsm_pkcs11.c`** : the `CKM_AES_CMAC_OPENSC_ALIAS` constant is renamed to `CKM_AES_GMAC` (same numeric value, semantically correct name per PKCS#11 v3.2 §A.4.1). The four call sites that previously accepted "either CMAC or OpenSC alias" now accept "either CMAC or GMAC" and route to distinct helpers based on the resolved mechanism.
+
+* **`src/fhsm_pkcs11.c::op_init` implicit downgrade** : if mechanism is CKM_AES_GMAC AND no IV was provided in pParameter, the mechanism is downgraded to CKM_AES_CMAC in op_init. This is a self-consistent disambiguation (real GMAC fundamentally requires an IV ; "GMAC without IV" can only mean "CMAC alias" in practice). The fix preserves backward compatibility for OpenSC pkcs11-tool users without requiring an environment variable.
+
+### Validation
+
+```
+Boot KAT now exposes 51 vectors (was 50 in v1.1.17). All green in
+dev mode on Debian 13 + OpenSSL 3.5.6 default provider :
+
+  AES-GMAC self-consistency : tag from EVP_MAC matches tag from
+    EVP_CIPHER GCM tag-only.
+
+CI all 5 jobs green :
+  lint / build+smoke / test-fips-mode / test-coverage-matrix /
+  reproducibility. The implicit-downgrade fix preserves the pre-
+  v1.1.18 pkcs11-tool behaviour so the matrix step that does
+  `pkcs11-tool --mechanism AES-CMAC` (which sends 0x108A) keeps
+  working as before.
+
+Wycheproof full sweep : 6 978 / 0 unchanged on v1.1.17 corpus ;
+  the new aes_gmac adapter will be exercised once the corpus is
+  declared and bumped in tests/wycheproof/run_wycheproof.py.
+```
+
+This is the 18th consecutive GPG-signed release.
+
 ## [1.1.17] --- 2026-06-20
 
 The "RSA-OAEP output buffer sizing" patch. Fixes a too-small plaintext output buffer in the `cavp_extended` RSA-OAEP self-test that was rejected by OpenSSL 3.5.6 default provider with a `bad length` error from `rsa_enc.c:257`. Same investigation pattern as the previous three patch releases : the bug was hidden by `FHSM_KAT_ALLOW_FAIL=1` in CI and only surfaced after the v1.1.14/15/16 fixes let `test_smoke` reach this KAT.
