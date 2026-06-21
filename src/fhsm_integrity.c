@@ -92,6 +92,27 @@ static int find_self_cb(struct dl_phdr_info *info, size_t sz, void *vdata) {
                 /* snprintf for gcc 14 -Wstringop-truncation compliance. */
                 (void)snprintf(c->out, sizeof(c->out), "%s", info->dlpi_name);
                 c->found = 1;
+            } else {
+                /* Main executable case : per Linux convention, dlpi_name
+                 * is the empty string for the program's own image (rather
+                 * than a path). This happens for any binary that
+                 * statically links fhsm_integrity.o instead of
+                 * dynamically loading libfreehsm-fips.so : the test
+                 * harness `tests/test_smoke`, the CAVS harness, etc.
+                 *
+                 * Recover the binary's path via /proc/self/exe so the
+                 * integrity self-test can read its own image and
+                 * compare against the embedded digest. On systems
+                 * without /proc (some chroot/jail environments), the
+                 * readlink fails and ctx.found stays 0 ; the caller
+                 * then returns the usual setup error and the rest of
+                 * the bypass logic applies. */
+                ssize_t n = readlink("/proc/self/exe", c->out,
+                                     sizeof(c->out) - 1);
+                if (n > 0) {
+                    c->out[n] = '\0';
+                    c->found = 1;
+                }
             }
             return 1;   /* stop iteration */
         }
@@ -184,17 +205,23 @@ static fhsm_rv_t do_verify(void) {
     size_t off = 0, len = 0;
     if (find_section_offset(buf, flen, FHSM_INTEGRITY_SECTION, &off, &len) != 0
         || len < FHSM_INTEGRITY_DIGEST_LEN) {
-        /* The .fhsm_digest section is only present in the production
-         * shared object built with the integrity-aware linker script.
-         * Executables that statically link the .o files (e.g. the
-         * tests/test_smoke harness) do not have it. In dev mode allow
-         * the bypass ; in production this path means the operator is
-         * running the wrong artifact and we fail closed. */
+        /* The .fhsm_digest section is only present in binaries built
+         * with the integrity-aware build (libfreehsm-fips.so plus any
+         * statically-linked test harness that includes
+         * fhsm_integrity.o). If we cannot locate it, the operator is
+         * running the wrong artifact. In dev mode (env var set) we
+         * downgrade to a permissive return ; in production we MUST
+         * return FHSM_RV_INTEGRITY_FAILED so the caller's state
+         * machine latches ERROR. The previous version fell through
+         * to `memset(buf + off, 0, len)` after free(buf), an
+         * exploitable use-after-free that could be triggered by any
+         * binary lacking the .fhsm_digest section. */
         fhsm_zeroize(buf, flen);
         free(buf);
         if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")) {
             return FHSM_RV_OK;
         }
+        return FHSM_RV_INTEGRITY_FAILED;
     }
     memset(buf + off, 0, len);
 
@@ -218,16 +245,33 @@ static fhsm_rv_t do_verify(void) {
 
     if (rv != FHSM_RV_OK) return rv;
 
-    /* Compare. Unsigned (all-zero) builds get a separate downgrade path.
-     * In a development build, FHSM_INTEGRITY_ALLOW_UNSIGNED also bypasses
-     * a digest MISMATCH (e.g. test_smoke which statically links the .o
-     * files and never gets its embedded digest patched). The flag is
-     * REFUSED in production by the AGD_PRE guidance ; the check here is
-     * purely permissive for developer ergonomics. */
+    /* Compare. Two failure modes converge here :
+     *   (a) Unsigned build : the .fhsm_digest section is the all-zero
+     *       placeholder placed by the compiler. In production this is
+     *       INTEGRITY_FAILED (the operator must run a signed binary).
+     *       In dev mode (FHSM_INTEGRITY_ALLOW_UNSIGNED set) the build
+     *       is allowed to run unsigned.
+     *   (b) Signed build with mismatched digest : the embedded digest
+     *       is non-zero but does not match g_last_digest (computed
+     *       above). In production this is INTEGRITY_FAILED (the
+     *       binary has been tampered with after signing). In dev mode
+     *       the mismatch is tolerated for ergonomics (e.g. an
+     *       unsigned test harness reusing a stale .fhsm_digest from
+     *       a previous build).
+     *
+     * The env var is REFUSED in production per AGD_PRE §7.5 ; the
+     * permissive paths here exist purely for developer ergonomics.
+     *
+     * Prior to v1.2.1 this function fell through to a final
+     * `return FHSM_RV_OK` in both failure modes, silently bypassing
+     * the integrity check whenever the env var was unset. That
+     * effectively disabled FIPS 140-3 §7.10.2 in all signed
+     * production builds. Fixed in v1.2.1 (CVE candidate). */
     if (is_all_zero(fhsm_module_integrity_digest, FHSM_INTEGRITY_DIGEST_LEN)) {
         if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")) {
             return FHSM_RV_OK;   /* unsigned build, allowed by explicit opt-in */
         }
+        return FHSM_RV_INTEGRITY_FAILED;
     }
 
     if (fhsm_ct_memcmp(g_last_digest,
@@ -236,6 +280,7 @@ static fhsm_rv_t do_verify(void) {
         if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")) {
             return FHSM_RV_OK;   /* dev override, mismatch tolerated */
         }
+        return FHSM_RV_INTEGRITY_FAILED;
     }
     return FHSM_RV_OK;
 }
