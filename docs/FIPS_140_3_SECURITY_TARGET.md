@@ -1,4 +1,4 @@
-# FreeHSM C --- FIPS 140-3 Security Target (Draft v0.6)
+# FreeHSM C --- FIPS 140-3 Security Target (Draft v0.7)
 
 **Status :** Pre-submission draft. Not yet evaluated by a NIST CST lab.
 
@@ -17,7 +17,7 @@
 | **Module Name** | FreeHSM C |
 | **Library Description (PKCS#11)** | `FreeHSM C (FIPS 140-3)` (CK_INFO.libraryDescription) |
 | **Token Model (PKCS#11)** | `FreeHSM-C-v1` (CK_TOKEN_INFO.model ; stable across the v1 major series) |
-| **Version** | 1.2.0-FIPS |
+| **Version** | 1.2.1-FIPS |
 | **Module Type** | Software (`libfreehsm-fips.so`, ELF-64 shared object) |
 | **Module Embodiment** | Multi-chip standalone (GPC host) |
 | **Module Boundary** | The single `.so` file at SHA-256 = (see `.fhsm_digest` section, patched by `make integrity`) |
@@ -177,6 +177,18 @@ Runs once at `C_Initialize` :
 1. **Software integrity check** : SHA-256 of `.text` vs `.fhsm_digest`.
 2. **FIPS provider load** : `OSSL_PROVIDER_load("fips")` non-NULL.
 3. **CSP zeroization** : `fhsm_secure_heap_init` allocates the secure arena and locks pages with `mlock`.
+
+#### 9.1.1 v1.2.1 fix : enforcement of the software integrity check
+
+A defect introduced in commit `0c0f5df` (the initial open-source release v1.1.0, 2026-06-12) caused `src/fhsm_integrity.c::do_verify` to return `FHSM_RV_OK` on every reachable path of the comparison block, including when the embedded digest mismatched the computed digest and the development bypass env var `FHSM_INTEGRITY_ALLOW_UNSIGNED` was not set. The intent (per the surrounding comment and per the operator documentation) was to return `FHSM_RV_INTEGRITY_FAILED` in that case ; the implementation fell through to a final `return FHSM_RV_OK` regardless.
+
+The net effect was that the software integrity self-test described above was **not actually enforced** in any signed production build between v1.1.0 and v1.2.0 inclusive (19 GPG-signed releases over a 9-day window). A tampered `libfreehsm-fips.so` would have passed the check silently. The defect did not affect the boot KAT (which has its own enforcement path) nor any cryptographic primitive ; it affected only the §7.10.2 software / firmware integrity self-test itself.
+
+Fixed in v1.2.1 (commit `63e1b35`, 2026-06-21). The comparison block now returns `FHSM_RV_INTEGRITY_FAILED` in both the all-zero (unsigned) and the mismatched-digest paths when the bypass env var is unset. Two adjacent defects in the same translation unit (a use-after-free on the `find_section_offset` failure path, and a `locate_self` regression for binaries that statically link `fhsm_integrity.o`) were fixed in the same commit ; see CHANGELOG entry for v1.2.1 for the full breakdown.
+
+A `killer test` validates the fix : after re-signing the binary with the v1.2.1 build, the `tests/test_smoke` harness loads the signed binary correctly and the `tests/test_smoke.tampered` variant (1 byte flipped in `.text`) is rejected with `C_Initialize` returning `0x80000002 = FHSM_RV_INTEGRITY_FAILED`. The same procedure on a v1.2.0 binary returns OK silently, confirming the defect's behaviour on the affected window.
+
+Discovery was triggered by an investigation of a dev-environment integrity quirk on the maintainer's VM ; the visibility of the underlying defect was enabled by the v1.2.0 ALC_DVS-grade decomposition of `C_CreateObject` (see §13.5 and §13.8), which sharpened the focus on the integrity surface and made the dev-env quirk worth chasing. Pre-certification status of the project means no CVE is requested ; full disclosure is in CHANGELOG, this Security Target, and the GitHub Security Advisory in informational mode.
 
 ### 9.2 Conditional Self-Tests (§7.10.3)
 
@@ -377,7 +389,7 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 
 ### 13.7 Release track record (ALC_DEL / ALC_CMC)
 
-**19 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`. Each release tag triggers an automated workflow (`release.yml`) that :
+**20 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`. Each release tag triggers an automated workflow (`release.yml`) that :
 
 1. Verifies the tag's GPG signature against the canonical fingerprint.
 2. Builds `libfreehsm-fips.so` reproducibly in the pinned `freehsm-c-build:debian13-openssl-3.5` container.
@@ -388,7 +400,25 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 
 The mirror workflow (`mirror.yml`) cross-publishes the same tag and assets to GitLab (`gitlab.com/afchine.mad/freehsm-c`) and Codeberg (`codeberg.org/afchine1337/freehsm-c`) within seconds. This provides three independent hosts of every signed artifact, mitigating single-point-of-failure risk on the supply chain (ALC_DEL coverage).
 
-The unbroken signing chain across 18 releases — including the v1.1.13 → v1.1.18 patch cascade that fixed four latent KAT data bugs and added real AES-GMAC — is itself ALC_CMC evidence : every change that reached a shipping release passed through the signed-release pipeline, and the inventory of changes is verifiable in the `CHANGELOG.md` ledger plus the git commit history (each tagged commit is itself GPG-signed by the same fingerprint).
+The unbroken signing chain across 20 releases — including the v1.1.13 → v1.1.18 patch cascade that fixed four latent KAT data bugs, the v1.2.0 structural decomposition of `C_CreateObject`, and the v1.2.1 security patch on the integrity self-test — is itself ALC_CMC evidence : every change that reached a shipping release passed through the signed-release pipeline, and the inventory of changes is verifiable in the `CHANGELOG.md` ledger plus the git commit history (each tagged commit is itself GPG-signed by the same fingerprint).
+
+### 13.8 Discovery + correction protocol (ALC_DVS / ALC_FLR)
+
+The v1.2.1 release codifies a working protocol for the discovery and correction of latent defects in the cryptographic module's own evidence-bearing surface. The protocol generalises the practice established between v1.1.13 and v1.1.18 for KAT data and extends it to the §7.10.2 self-test path.
+
+The five-step protocol :
+
+1. **Symptom triage in dev** : An apparent dev-environment quirk is investigated as a potential surface symptom of a latent defect, not dismissed as ergonomic friction. The maintainer's standing rule is that any boot-time failure that disappears under `FHSM_INTEGRITY_ALLOW_UNSIGNED` deserves a one-hour minimum investigation before being filed as a side issue.
+
+2. **Read both sides** : For any disagreement between two pieces of code that should agree (sign/verify, mirror/prod, compute/compare), both sides are read in full before any patch is written. The reading explicitly looks for : the source-of-truth definition, return-code paths, fall-through cases, and silently-bypassed branches.
+
+3. **Cross-check the contract** : The expected contract is reconstructed independently of the existing implementation (from the standards documents, the operator-facing comments, the audit log). The reconstructed contract is compared against what the implementation actually does. Drift is identified as either harness-too-strict or production-too-permissive ; both cases are corrected at the boundary that owns the contract.
+
+4. **Killer-test artifact** : For every defect that has the structure "a malicious input would have been accepted", a reproducible artifact is produced that demonstrates the difference between the buggy and the fixed behaviour. For v1.2.1, the artifact is `tests/test_smoke.tampered` (1 byte flipped in `.text`, runs OK against pre-v1.2.1, returns `0x80000002` against v1.2.1).
+
+5. **Scope the temporal impact via git blame** : The commit that introduced the defect is identified. The set of affected releases is enumerated. The disclosure decision (CVE vs informational advisory) is made based on the pre-certification status, the deployment landscape (none known), and the project's transparency-first hygiene.
+
+This protocol applies to any future evidence-bearing surface defect : the KAT runner (covered by the v1.1.13 → v1.1.18 cross-validation methodology, §13.6), the integrity self-test (covered by the v1.2.1 fix), the structured fuzzing harnesses (covered by the v1.2.0 ALC_DVS-grade decomposition, §13.5), the audit log (not yet a surface that has produced a defect, but eligible). The protocol is documented as a developer expectation in `SECURITY.md` and `CONTRIBUTING.md`.
 
 ---
 
@@ -401,4 +431,5 @@ The unbroken signing chain across 18 releases — including the v1.1.13 → v1.1
 | 0.3 | 2026-06-10 | A.M. | First complete draft : §1-§12 all sections populated, ready for internal review before lab submission |
 | 0.4 | 2026-06-18 | A.M. | §9.3 expanded from 7 to 32 KAT vectors with explicit standards-track citations (NIST SP 800-38A/B/D, FIPS 180-4, FIPS 202, RFC 4231, RFC 5869, RFC 6070, RFC 6979, NIST SP 800-89). §9.4 added documenting the FIPS 140-3 IG D.3 trade-off for RSA consistency self-tests. §13 added documenting the external Wycheproof + matrix + reproducibility evidence surface (6 978 vectors clean across 9 families, including both NIST post-quantum primitives). |
 | 0.5 | 2026-06-20 | A.M. | §3 adds GMAC to the approved AES function list (NIST SP 800-38D §6.4). §9.3 KAT count 35 → 51 vectors with the addition of (a) ML-KEM-768 / ML-DSA-65 / SLH-DSA-SHA2-128f consistency self-tests (v1.1.13), (b) AES-256-GMAC two-path self-consistency self-test (v1.1.18). §9.4 trade-off bullet added documenting the AES-GMAC two-path self-consistency design pattern (`EVP_MAC` vs `EVP_CIPHER` cross-check, eliminating the need for a hardcoded expected tag). §13.5 NEW : Structured fuzzing — three sanitizer-instrumented libFuzzer harnesses covering the PKCS#11 v3.2 parser surfaces, with 12 structural invariants checked across 37.9 M smoke inputs, CI integration on every push + nightly, and a documented crash policy aligned with CC EAL4+ ALC_DVS expectations. §13.6 NEW : Cross-validation methodology — three-codebase triangulation protocol used between v1.1.14 and v1.1.18 to identify and correct four latent KAT data bugs that had been silently passing under `FHSM_KAT_ALLOW_FAIL=1` in CI ; methodology documented as a developer expectation. §13.7 NEW : Release track record — 18 consecutive GPG-signed releases since v1.1.0 as ALC_DEL / ALC_CMC evidence, with three-mirror redundancy (GitHub + GitLab + Codeberg). §13.4 attestation summary updated from v1.1.12 to v1.1.18 figures. |
-| **0.6** | **2026-06-20** | **A.M.** | **§1 Module identification : Version field 1.1.18-FIPS → 1.2.0-FIPS. §13.5 expanded from three harnesses to four with the addition of `fuzz_create_attrs`, attacking `fhsm_parse_create_attrs` — the pure parser extracted from the `C_CreateObject` monolith in v1.2.0 (`src/fhsm_create_attrs.c`). Invariant count grows 12 → 23 with the addition of P1–P10 + E1 + truncation probe specifying the structural contract on the parser's typed output struct. New ALC_DVS rationale paragraph explaining why the v1.2.0 decomposition is a security-evidence-grade improvement : the production code is now linked directly into the libFuzzer binary, eliminating the mirror-vs-prod drift hazard on the `C_CreateObject` surface. Local smoke run numbers added : 18.7 M executions in 60 s on the new harness, 0 violation across all 23 invariants, 0 ASAN / 0 UBSAN report. §13.7 release counter 18 → 19 with the addition of v1.2.0 to the signed-release ledger. The two preceding rows are preserved verbatim as historical record.** |
+| 0.6 | 2026-06-20 | A.M. | §1 Module identification : Version field 1.1.18-FIPS → 1.2.0-FIPS. §13.5 expanded from three harnesses to four with the addition of `fuzz_create_attrs`, attacking `fhsm_parse_create_attrs` — the pure parser extracted from the `C_CreateObject` monolith in v1.2.0 (`src/fhsm_create_attrs.c`). Invariant count grows 12 → 23 with the addition of P1–P10 + E1 + truncation probe specifying the structural contract on the parser's typed output struct. New ALC_DVS rationale paragraph explaining why the v1.2.0 decomposition is a security-evidence-grade improvement : the production code is now linked directly into the libFuzzer binary, eliminating the mirror-vs-prod drift hazard on the `C_CreateObject` surface. Local smoke run numbers added : 18.7 M executions in 60 s on the new harness, 0 violation across all 23 invariants, 0 ASAN / 0 UBSAN report. §13.7 release counter 18 → 19 with the addition of v1.2.0 to the signed-release ledger. The two preceding rows are preserved verbatim as historical record. |
+| **0.7** | **2026-06-21** | **A.M.** | **§1 Module identification : Version field 1.2.0-FIPS → 1.2.1-FIPS. §9.1.1 NEW : v1.2.1 security fix on the §7.10.2 software / firmware integrity self-test, documenting the defect that caused `do_verify` to silently return OK on every reachable comparison path in v1.1.0 through v1.2.0, and the v1.2.1 fix (commit 63e1b35) that returns FHSM_RV_INTEGRITY_FAILED on unsigned + no-env and on mismatch + no-env. Includes the killer-test artifact (`tests/test_smoke.tampered`, 1 byte flipped, rejected with 0x80000002 in v1.2.1, accepted silently in v1.2.0). §13.7 release counter 19 → 20 with the addition of v1.2.1 to the signed-release ledger and explicit mention of the integrity-fix patch cascade. §13.8 NEW : Discovery + correction protocol (ALC_DVS / ALC_FLR), codifying the five-step practice used to find and fix the v1.2.1 defect — symptom triage in dev, read both sides, cross-check the contract, killer-test artifact, scope the temporal impact. The protocol generalises the cross-validation methodology of §13.6 from KAT data to evidence-bearing surfaces in general. Disclosure decision documented : no CVE requested (pre-certification status, no known production deployments), informational GitHub Security Advisory published.** |

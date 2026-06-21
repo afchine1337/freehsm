@@ -47,11 +47,86 @@ re-verify with the new key — the signature has changed.
 
 ---
 
+## Self-disclosed integrity self-test defect — v1.2.1 (2026-06-21)
+
+A critical defect in the module's `§7.10.2` software / firmware integrity
+self-test (`src/fhsm_integrity.c::do_verify`) was self-discovered and
+self-corrected in v1.2.1.
+
+**What was wrong.** The comparison block in `do_verify` was supposed to
+return `FHSM_RV_INTEGRITY_FAILED` when the embedded SHA-256 (in
+`.fhsm_digest`) did not match the runtime-computed SHA-256, and the
+development bypass env var `FHSM_INTEGRITY_ALLOW_UNSIGNED` was not set.
+The implementation fell through to a final `return FHSM_RV_OK` regardless
+of the comparison outcome. As a result, a tampered `libfreehsm-fips.so`
+would have passed the integrity self-test silently and the module would
+have exposed cryptographic services on a binary that did not match the
+signed digest.
+
+**Affected releases.** Every signed release from v1.1.0 (origin :
+commit `0c0f5df`, 2026-06-12) through v1.2.0 inclusive — that is, 19
+GPG-signed releases over a 9-day window.
+
+**Fixed in.** v1.2.1 (commit `63e1b35`, 2026-06-21). The fix returns
+`FHSM_RV_INTEGRITY_FAILED` in both the all-zero (unsigned build) and the
+mismatched-digest paths when the bypass env var is not set. Two adjacent
+defects in the same translation unit (a use-after-free on the
+`find_section_offset` failure path, and a `locate_self` regression for
+binaries that statically link `fhsm_integrity.o`) were fixed in the same
+commit ; see CHANGELOG entry for v1.2.1 and Security Target v0.7 §9.1.1
+for the full breakdown.
+
+**Validation.** A reproducible artifact (`tests/test_smoke.tampered`,
+1 byte flipped in `.text` outside `.fhsm_digest`) is rejected with
+`C_Initialize` returning `0x80000002 = FHSM_RV_INTEGRITY_FAILED` on
+v1.2.1. The same artifact is accepted silently by v1.2.0, confirming
+the defect's behaviour on the affected window.
+
+**Disclosure decision : no CVE.** The project is in pre-certification
+status (FIPS 140-3 Level 1 / CC EAL4+ candidate) with no known production
+deployments. The defect is disclosed transparently via :
+
+- the CHANGELOG entry for v1.2.1 ;
+- this SECURITY.md section ;
+- the updated Security Target v0.7 (§9.1.1 and §13.8) ;
+- a GitHub Security Advisory published in **informational mode** (no CVE
+  identifier) on the project's repository.
+
+A CVE will be requested for any equivalent defect found post-certification
+or post-first-deployment, following the standard MITRE coordination
+described in [§Patch process](#patch-process) below.
+
+**Recommended action for anyone running v1.1.0 through v1.2.0.** Upgrade
+to v1.2.1 when it ships (within 48 hours of this writing). The upgrade is
+a drop-in `.so` replacement ; PKCS#11 wire compatibility is unchanged.
+Either re-sign the embedded digest via `make integrity` from the v1.2.1
+source, or take the pre-signed binary tarball directly from the v1.2.1
+GitHub Release.
+
+For installations where an immediate upgrade is not possible, the interim
+mitigation is to verify the SHA-256 of the deployed `.so` against the
+value published in the corresponding release notes by an out-of-band
+channel (e.g. download `sha256sum` from the GitHub Release page over
+HTTPS, compare with `sha256sum` on the running binary). This restores
+the integrity guarantee externally to the module's own self-test.
+
+**Discovery + correction protocol.** This defect was found by following
+the five-step protocol described in Security Target v0.7 §13.8 :
+symptom triage in dev → read both sides of the disagreement → cross-check
+the contract → produce a killer-test artifact → scope the temporal impact
+via `git blame`. The protocol generalises the cross-validation
+triangulation methodology established for KAT data between v1.1.13 and
+v1.1.18 (§13.6 of the same Security Target) and is now documented as the
+standing practice for any future evidence-bearing surface defect.
+
+---
+
 ## Supported versions
 
 | Version | Supported |
 |---|---|
-| `1.1.x-FIPS` | ✅ — active development + security backports |
+| `1.2.x-FIPS` | ✅ — active development + security backports (v1.2.1 is the first version not affected by the integrity self-test defect described above) |
+| `1.1.x-FIPS` | ⚠️ — security backports only ; **all v1.1.x versions are affected by the integrity self-test defect ; upgrade to v1.2.1 is strongly recommended** |
 | `1.0.x-FIPS` | ⚠️ — security fixes only until 2027-06 |
 | `< 1.0` | ❌ — end of life (Python POC, not certified) |
 

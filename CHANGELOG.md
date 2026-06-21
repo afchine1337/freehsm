@@ -5,6 +5,110 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] --- 2026-06-21
+
+**Security patch release.** Fixes a critical defect in the module integrity self-test (`src/fhsm_integrity.c::do_verify`) that effectively disabled FIPS 140-3 §7.10.2 in every signed production build of FreeHSM C since the initial open-source release v1.1.0 (commit `0c0f5df`, 2026-06-12). A tampered `libfreehsm-fips.so` would have passed the integrity check silently. All 19 GPG-signed releases between v1.1.0 and v1.2.0 are affected. **All users running any of those versions should upgrade to v1.2.1 immediately.**
+
+The project is in pre-certification status (FIPS 140-3 Level 1 / CC EAL4+ candidate, no known production deployments) ; a CVE is not requested. Disclosure is via this CHANGELOG entry, the v1.2.0 → v1.2.1 commit history, an updated Security Target v0.7, and a transparent GitHub Security Advisory in informational mode.
+
+### Discovery context
+
+The defect was found during the post-release investigation of a dev-environment integrity quirk on the maintainer's VM (task #55 in the issue tracker). The dev quirk turned out to be the surface symptom of three latent bugs, only one of which had operational consequences in production. The full triage took place across two sessions and is documented in the commits and the Security Target §13.8.
+
+### Three findings in `src/fhsm_integrity.c`
+
+#### Finding 1 (HIGH) --- `do_verify` always returned `FHSM_RV_OK` after the comparison block
+
+The comparison block at the end of `do_verify` had two if/return guards intended to fail closed on (a) unsigned builds (all-zero embedded digest) without the development bypass env var and (b) signed builds with a mismatched embedded digest without the bypass env var. The guards returned `FHSM_RV_OK` correctly when the bypass env var WAS set, but had no return statement in the else branches : the function fell through to a final `return FHSM_RV_OK` regardless of the comparison outcome.
+
+The net effect : a tampered `libfreehsm-fips.so` could be loaded by an unmodified PKCS#11 application, the integrity self-test would compute the (incorrect) digest of the tampered binary, the comparison block would fall through to OK, and the module's state machine would proceed to `INITIALIZED`. No error would be reported to the caller. The FIPS 140-3 §7.10.2 software / firmware integrity self-test was, in practice, not enforced.
+
+**Patched** in `do_verify` : both the `is_all_zero` (unsigned) and the `fhsm_ct_memcmp` (mismatch) branches now explicitly `return FHSM_RV_INTEGRITY_FAILED` when the bypass env var is not set, before reaching the final `return FHSM_RV_OK` (which is now only reachable on a successful match).
+
+#### Finding 2 (MEDIUM) --- use-after-free on `find_section_offset` failure path
+
+When `find_section_offset(buf, ...)` failed (the binary lacks `.fhsm_digest`, or the section is too small) AND the bypass env var was unset, `do_verify` :
+
+1. zeroized `buf` ;
+2. `free(buf)` ;
+3. checked the bypass env var ;
+4. *fell through* to `memset(buf + off, 0, len)` --- a use-after-free on the freed buffer.
+
+The condition was reachable from any binary lacking the `.fhsm_digest` section (which is silently the case for most operator misuses : running an unsigned dev build under `FHSM_FIPS_MODE=fips`, or executing a stripped variant of the .so). The UAF behaviour is technically undefined ; on glibc it would typically corrupt the malloc arena and crash on the next allocation.
+
+**Patched** in `do_verify` : add `return FHSM_RV_INTEGRITY_FAILED;` immediately after the bypass-env-var check, so the function exits cleanly without touching the freed buffer.
+
+#### Finding 3 (LOW) --- `locate_self` failed for statically-linked binaries
+
+`locate_self` uses `dl_iterate_phdr` to find which loaded module contains the `fhsm_module_integrity_digest` symbol. The callback (`find_self_cb`) reads `dlpi_name` from `struct dl_phdr_info` to get the binary path. For the main executable (the case for any binary that statically links `fhsm_integrity.o` instead of dynamically loading `libfreehsm-fips.so` --- including `tests/test_smoke`, the CAVS harness, and most local test artifacts), `dlpi_name` is the empty string per Linux convention. The callback skipped setting `ctx.found = 1` in that case, `locate_self` returned `-1`, and `do_verify` returned `FHSM_RV_FUNCTION_FAILED` --- silently, before any integrity comparison ran.
+
+The operational impact is small (the affected binaries are test harnesses, not the deployed `.so`), but the silent failure meant that every developer workflow exercising the integrity check via `tests/test_smoke` was effectively bypassed.
+
+**Patched** in `find_self_cb` : when `dlpi_name` is empty, recover the binary's path via `readlink("/proc/self/exe", ...)`. Bytes-on-disk integrity check works correctly from that point on for any binary that exposes `/proc/self/exe`, which covers all supported environments. Chroot/jail environments without `/proc` fall back to the existing setup-error path.
+
+### Validation
+
+```
+Build clean    : -Werror -Wpedantic -Wconversion -Wstringop-truncation, no warning.
+CI lint        : green
+CI build       : green (sign module + smoke test green in CI's FIPS env)
+CI reproducibility    : byte-identical
+CI test-coverage matrix : 24 / 0 / 8
+CI test-fips-mode      : green (this is the path that exercises the integrity
+                                 check without bypass in production-like FIPS env)
+```
+
+#### Killer test : tampered binary detection
+
+```bash
+cp libfreehsm-fips.so libfreehsm-fips.so.tampered
+# Flip 1 byte in the .text segment, outside .fhsm_digest :
+printf '\x00' | dd of=libfreehsm-fips.so.tampered bs=1 seek=20000 count=1 conv=notrunc
+
+# Pre-v1.2.1 : tampered binary loads, C_Initialize returns OK, services exposed.
+# v1.2.1   : C_Initialize returns 0x80000002 (FHSM_RV_INTEGRITY_FAILED).
+```
+
+The same procedure on the v1.2.0 binary (or any prior signed release) returns OK silently, which is the proof-of-bug for the v1.1.0 → v1.2.0 affected window.
+
+### Affected releases
+
+| Version | Released | Affected |
+|---|---|---|
+| v1.1.0 | 2026-06-12 | yes (origin) |
+| v1.1.1 - v1.1.18 | 2026-06-12 - 2026-06-20 | yes |
+| v1.2.0 | 2026-06-20 | yes |
+| **v1.2.1** | **2026-06-21** | **fixed** |
+
+Tag SHAs for every affected release are listed in the GitHub Security Advisory (informational).
+
+### Recommended action
+
+Any deployment running v1.1.0 - v1.2.0 should upgrade to v1.2.1. The upgrade is a drop-in `.so` replacement ; PKCS#11 wire compatibility is unchanged. Re-signing the embedded digest via `make integrity` is required exactly as for the original install (build-from-source pipeline) or take the binary tarball directly from the v1.2.1 GitHub Release (`libfreehsm-fips.so` with `.fhsm_digest` already patched).
+
+If, for any operational reason, an upgrade is not immediately possible, the interim mitigation is to verify the SHA-256 of the deployed `.so` against the value published in the corresponding release notes by an out-of-band channel (e.g. `sha256sum` from the GitHub Release page over HTTPS, comparing with `sha256sum` on the running binary). This restores the integrity guarantee externally to the module's own self-test.
+
+### Changed
+
+* `src/fhsm_integrity.c::find_self_cb` : `+18 lines` (Finding 3, the `/proc/self/exe` fallback).
+* `src/fhsm_integrity.c::do_verify` : `+5 lines` (Finding 2, the UAF return guard) and `+8 lines` (Finding 1, the two `INTEGRITY_FAILED` returns in the comparison block). Comments updated to document the rationale and the v1.2.1 fix lineage.
+* `include/fhsm_common.h` : `FHSM_VERSION_PATCH` and `FHSM_VERSION_STRING` bumped to `1` and `"1.2.1-FIPS"`.
+
+### Security Target
+
+Updated to v0.7 (`docs/FIPS_140_3_SECURITY_TARGET.md`) :
+
+* §7.10.2 (Software / Firmware Integrity Test) : new paragraph documenting the v1.2.1 fix and the v1.1.0 - v1.2.0 affected window.
+* §13.5 (Structured fuzzing) : note added on how the v1.2.0 ALC_DVS-grade decomposition indirectly surfaced the integrity defect by making the dev-env quirk visible enough to investigate.
+* §13.8 NEW : Discovery + correction protocol --- documents the workflow that found the bug as a transferable pattern.
+* Revision-history entry v0.7.
+
+### SECURITY.md addendum
+
+A new section documents the discovery + correction protocol followed for this release, the decision to disclose without a CVE due to the pre-certification status of the project, and the public artefacts (this CHANGELOG, the v0.7 Security Target, the informational GitHub Security Advisory) that constitute the disclosure.
+
+### This is the 20th consecutive GPG-signed release.
+
 ## [1.2.0] --- 2026-06-20
 
 The "Simorgh Labs" minor release. Three coordinated changes that justify the minor bump : (1) the manufacturer identifier presented through PKCS#11 `C_GetInfo` / `C_GetSlotInfo` / `C_GetTokenInfo` changes from "FreeHSM C (FIPS 140-3)" to "Simorgh Labs, Open Source Cryptography and Digital Trust", a backward-incompatible identity-string change at the PKCS#11 layer ; (2) `C_CreateObject` is decomposed into a pure-C parser (`fhsm_parse_create_attrs`, no OpenSSL dependency) plus an OpenSSL EVP builder, removing the long-standing inline-mirror divergence between the production code and the libFuzzer harness ; (3) the new `fuzz_create_attrs` harness attacks the production parser directly, replacing the unit-level mirror coverage of v1.1.x with integration-level coverage on the real C code path that runs when an untrusted PKCS#11 caller invokes `C_CreateObject`. Backward-compatible at the wire / cryptographic level : every Wycheproof corpus continues to pass bit-identically (~5 000 invocations of `C_CreateObject` across 6 paths) ; only the human-readable manufacturer string changes for end-user tools.
