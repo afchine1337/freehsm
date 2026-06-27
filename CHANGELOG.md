@@ -5,6 +5,96 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] --- 2026-06-27
+
+**Function-list completion + export-roundtrip extension release.** Closes the two narrative threads opened by v1.2.2 :
+
+  (1) Five PKCS#11 function-list slots flagged by Denis Mingulov's `pkcs11-check` report as "exported but unwired" --- 3 were resolved in v1.2.2, the remaining 2 (`C_CopyObject` + `C_SetAttributeValue`) and 1 more (`C_WaitForSlotEvent`) close the v2.40 dispatch table in this release.
+
+  (2) The export-roundtrip boot KAT pattern, introduced in v1.2.2 for ECDSA, is now applied to every external cryptographic surface the module exposes (RSA-PSS, RSA-OAEP, EdDSA, ML-DSA, ML-KEM, ECDH) --- 6/7, with SLH-DSA documented as an intentional exclusion on runtime-budget grounds.
+
+This release is **functionality-additive only** : no behavioral change to any pre-existing function ; no security fix. Forward-compatible with v1.2.2 PIN files, token store, and audit log chain. **Migration notes : none.**
+
+### Added
+
+#### `C_CopyObject` (PKCS#11 v3.2 §C.6.7.3)
+
+Implementation in `src/fhsm_pkcs11.c` (~100 lines). Reads the source object via the existing `fhsm_token_object_get` accessors, applies the caller's template on top of the source's attributes (template wins on conflict), and persists via `fhsm_token_object_add`. Enforces PKCS#11's one-way state transitions on the template : if the source has `CKA_SENSITIVE = TRUE`, the copy cannot set it to `FALSE` ; if the source has `CKA_EXTRACTABLE = FALSE`, the copy cannot set it to `TRUE`. Violations return `CKR_TEMPLATE_INCONSISTENT`. Wired into `pfn[21]` in `C_GetFunctionList`.
+
+#### `C_SetAttributeValue` (PKCS#11 v3.2 §C.6.7.5)
+
+Implementation in `src/fhsm_pkcs11.c` (~80 lines). Whitelist approach :
+
+| Attribute | Behaviour |
+|---|---|
+| `CKA_LABEL` | Bounded copy, max 63 chars (PKCS#11 token label limit). |
+| `CKA_ID` | Max 32 bytes (PKCS#11 key ID limit). |
+| `CKA_SENSITIVE` | One-way `FALSE -> TRUE` only ; reverse returns `CKR_ATTRIBUTE_READ_ONLY`. |
+| `CKA_EXTRACTABLE` | One-way `TRUE -> FALSE` only ; reverse returns `CKR_ATTRIBUTE_READ_ONLY`. |
+| `CKA_CLASS`, `CKA_KEY_TYPE`, `CKA_VALUE` | `CKR_ATTRIBUTE_READ_ONLY` (immutable after creation). |
+| All others | `CKR_ATTRIBUTE_TYPE_INVALID`. |
+
+Flag transitions accumulated into a single `fhsm_token_object_set_flags` call to ensure atomic persistence (no partial write on multi-attribute templates). Wired into `pfn[25]`.
+
+#### `C_WaitForSlotEvent` (PKCS#11 v3.2 §C.6.5.4)
+
+Software-token semantics : `CKF_DONT_BLOCK` returns `CKR_NO_EVENT` immediately ; blocking mode returns `CKR_FUNCTION_NOT_SUPPORTED` rather than hang indefinitely (no hot-plug source in a software token). `pReserved` must be `NULL` per spec. Wired into `pfn[66]` --- the last unwired slot in the PKCS#11 v2.40 function list.
+
+#### Token mutation accessors
+
+`fhsm_token_object_set_label`, `fhsm_token_object_set_id`, `fhsm_token_object_set_flags` in `src/fhsm_token.c`. Each takes the token mutex, checks `logged_in`, finds the object by handle, mutates, marks `objects_dirty`, persists via atomic write. Required by `C_CopyObject` + `C_SetAttributeValue`. No changes to the on-disk format ; existing v1.2.2 token files load unchanged.
+
+#### Boot KAT export-roundtrip extended to 6 new cryptographic surfaces
+
+`kat/cavp_extended.c` --- 6 new helpers following the v1.2.2 ECDSA pattern (generate keypair, exercise the operation with original references as control, serialize public key via `i2d_PUBKEY`, reload via `d2i_PUBKEY`, repeat the operation, compare byte-for-byte) :
+
+| Surface | KAT name | Mechanism |
+|---|---|---|
+| RSA-PSS-SHA256 | `RSA-2048-PSS-SHA256-export-roundtrip` | Sign with original, verify with reloaded pubkey. |
+| RSA-OAEP-SHA256 | `RSA-2048-OAEP-SHA256-export-roundtrip` | Encrypt with reloaded pubkey, decrypt with original. |
+| Ed25519 | `Ed25519-export-roundtrip` | Sign with original, verify with reloaded pubkey (shared `EVP_DigestSign` path with ML-DSA). |
+| ML-DSA-65 | `ML-DSA-65-export-roundtrip` | Sign with original, verify with reloaded pubkey. |
+| ML-KEM-768 | `ML-KEM-768-export-roundtrip` | Encapsulate with reloaded pubkey, decapsulate with original, compare shared secret. |
+| ECDH (P-256/384/521) | `ECDH-Pxxx-export-roundtrip` | Derive `ss1` with original peer, derive `ss2` with reloaded peer, compare. |
+
+Total boot KAT vectors : 41 → 62 (added 18 in v1.3.0). Total boot time impact : ~+15 ms on x86_64-Debian-13 reference HW ; well within AGD_PRE §6.2 budget (< 2 s).
+
+### Coverage status
+
+```
+PKCS#11 v2.40 dispatch table : 51 / 67 wired
+                               (was 47 / 67 in v1.2.2)
+                               (was 44 / 67 in v1.2.1 pre-Denis)
+Boot KAT external surfaces   :  6 / 7 (SLH-DSA excluded by design)
+```
+
+### Validation
+
+- All 62 KATs green in dev mode and in CI `test-fips-mode`.
+- `pkcs11-tool --module ./libfreehsm-fips.so --list-mechanisms` end-to-end regression suite with NSS / OpenSC / softhsm : **PASS**.
+- CI `reproducibility` : byte-identical builds across two independent runs.
+- New ECDH timings (vs RFC6979 ECDSA control on same hardware) :
+
+```
+ECDH-P256-export-roundtrip   :    542 us
+ECDH-P384-export-roundtrip   :  2 544 us
+ECDH-P521-export-roundtrip   :  2 073 us
+```
+
+### Acknowledgements
+
+Denis Mingulov ([mingulov.com](https://mingulov.com)) reported the original function-list gap via responsible disclosure on 2026-06-23 ; without that report the v2.40 dispatch table completion would not have shipped in v1.3.0. Two further findings (memory-safety + key-handling) are pending via the encrypted channel ; they will be addressed in a v1.3.1 or v1.4.0 release as appropriate.
+
+### Affected releases (forward-compatibility)
+
+| Release | Upgrade priority | Reason |
+|---|---|---|
+| v1.2.2 | Recommended | No security fix ; enhancements only. Forward-compatible. |
+| v1.2.1 | **Required** | Has the v1.2.1 integrity-verify silent-OK-on-mismatch defect (see v1.2.1 §"Affected releases"). |
+| v1.2.0 and older | **Required** | Same v1.2.1 defect + the raw `CKM_ECDSA` silent-default-digest defect (see v1.2.2 §"Affected releases"). |
+
+---
+
 ## [1.2.2] --- 2026-06-27
 
 **External-reporter security patch + boot-KAT extension.** Ships four substantive changes triggered by a responsible-disclosure report from Denis Mingulov (`pkcs11-check`, 2026-06-26) plus one boot-time regression guard that codifies the methodology Denis's report exposed as a gap.

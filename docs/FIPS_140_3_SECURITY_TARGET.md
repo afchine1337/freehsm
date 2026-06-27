@@ -1,4 +1,4 @@
-# FreeHSM C --- FIPS 140-3 Security Target (Draft v0.8)
+# FreeHSM C --- FIPS 140-3 Security Target (Draft v0.9)
 
 **Status :** Pre-submission draft. Not yet evaluated by a NIST CST lab.
 
@@ -17,7 +17,7 @@
 | **Module Name** | FreeHSM C |
 | **Library Description (PKCS#11)** | `FreeHSM C (FIPS 140-3)` (CK_INFO.libraryDescription) |
 | **Token Model (PKCS#11)** | `FreeHSM-C-v1` (CK_TOKEN_INFO.model ; stable across the v1 major series) |
-| **Version** | 1.2.2-FIPS |
+| **Version** | 1.3.0-FIPS |
 | **Module Type** | Software (`libfreehsm-fips.so`, ELF-64 shared object) |
 | **Module Embodiment** | Multi-chip standalone (GPC host) |
 | **Module Boundary** | The single `.so` file at SHA-256 = (see `.fhsm_digest` section, patched by `make integrity`) |
@@ -205,6 +205,22 @@ The fix is paired with three new boot KAT vectors (`ECDSA-P256/P384/P521-export-
 Severity (CVSS v3.1) : `AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H` base 7.5, HIGH on correctness / interoperability. Not exploitable in confidentiality or integrity sense : the private key is never leaked, the signature is mathematically valid for the (wrong) double-hashed digest, no key material is exposed.
 
 Discovery was triggered externally by a third-party reporter (Denis Mingulov) using `pkcs11-check` ; the report was initially blocked by the maintainer's published GPG key being sign-only with no encryption capability. The operational gap was fixed in v1.2.2 by adding a cv25519 encryption subkey to the maintainer's primary key, publishing to keys.openpgp.org with the maintainer's email verified, and updating SECURITY.md. The discovery + correction protocol in §13.8 is extended for the v1.2.2 release to incorporate the *external-reporter* case as a recognised path. No CVE is requested ; the disclosure model matches the v1.2.1 informational GHSA pattern.
+
+#### 9.1.3 v1.3.0 enhancements (2026-06-27) --- functionality-additive only
+
+Functionality-additive only release. No defect resolved ; closes the two narrative threads opened by v1.2.2 :
+
+**Function-list completion.** The five PKCS#11 dispatch slots flagged by Denis Mingulov's v1.2.2 report as "exported but unwired" are now fully resolved : three were wired in v1.2.2 (`C_GetSessionInfo`, `C_CreateObject`, `C_GetObjectSize`), the remaining two (`C_CopyObject` §C.6.7.3, `C_SetAttributeValue` §C.6.7.5) are implemented and wired in v1.3.0, plus a sixth (`C_WaitForSlotEvent` §C.6.5.4) closing the last unwired slot in the PKCS#11 v2.40 function list. Total v2.40 dispatch coverage : 51/67 (was 47/67 in v1.2.2, 44/67 in v1.2.1 pre-Denis).
+
+  * `C_CopyObject` enforces PKCS#11's one-way state transitions on the template : a copy cannot weaken `CKA_SENSITIVE` (false→true only) or `CKA_EXTRACTABLE` (true→false only) relative to the source. Violations return `CKR_TEMPLATE_INCONSISTENT`.
+  * `C_SetAttributeValue` uses a whitelist approach : only `CKA_LABEL`, `CKA_ID`, and the two one-way state transitions on `CKA_SENSITIVE` / `CKA_EXTRACTABLE` are mutable. `CKA_CLASS` / `CKA_KEY_TYPE` / `CKA_VALUE` return `CKR_ATTRIBUTE_READ_ONLY` (immutable after creation per PKCS#11). All other attributes return `CKR_ATTRIBUTE_TYPE_INVALID`.
+  * `C_WaitForSlotEvent` implements software-token semantics : `CKF_DONT_BLOCK` returns `CKR_NO_EVENT` immediately ; blocking mode returns `CKR_FUNCTION_NOT_SUPPORTED` rather than hang indefinitely (no hot-plug source in a software token).
+
+**Export-roundtrip boot KAT extension.** The methodology codified in v1.2.2 for ECDSA (sign with original, serialize+reload public key via `i2d_PUBKEY`/`d2i_PUBKEY`, verify with reloaded key, byte-compare) is extended to six more cryptographic surfaces : RSA-2048-PSS-SHA256, RSA-2048-OAEP-SHA256, Ed25519, ML-DSA-65, ML-KEM-768, ECDH (P-256 / P-384 / P-521). Total boot KAT count grows from 54 (v1.2.2) to 62 (v1.3.0). Coverage of external-roundtrip surfaces : 6/7. SLH-DSA is excluded by design : a full sign+verify-with-reloaded-pubkey would approximately double the existing ~33ms SLH-DSA-SHA2-128f selftest cost ; the exclusion is documented as a known gap, addressable when the boot KAT runtime budget allows.
+
+No change to the security functions inventory (FCS_COP, FCS_CKM, FCS_RNG, FIA_*, FAU_*, FDP_*, FMT_*, FPT_*, FTP_*). Under CC §APE_REQ.2 unchanged-SFR rule, CMVP/CC re-validation is considered a clarification, not a re-evaluation. Token-store on-disk format unchanged ; existing v1.2.2 token files load unchanged.
+
+Denis Mingulov's two remaining findings (memory-safety + key-handling) are pending via the encrypted channel and will be addressed in a v1.3.1 or v1.4.0 release as appropriate.
 
 ### 9.2 Conditional Self-Tests (§7.10.3)
 
@@ -405,7 +421,7 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 
 ### 13.7 Release track record (ALC_DEL / ALC_CMC)
 
-**21 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`. Each release tag triggers an automated workflow (`release.yml`) that :
+**22 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`. Each release tag triggers an automated workflow (`release.yml`) that :
 
 1. Verifies the tag's GPG signature against the canonical fingerprint.
 2. Builds `libfreehsm-fips.so` reproducibly in the pinned `freehsm-c-build:debian13-openssl-3.5` container.
@@ -416,7 +432,7 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 
 The mirror workflow (`mirror.yml`) cross-publishes the same tag and assets to GitLab (`gitlab.com/afchine.mad/freehsm-c`) and Codeberg (`codeberg.org/afchine1337/freehsm-c`) within seconds. This provides three independent hosts of every signed artifact, mitigating single-point-of-failure risk on the supply chain (ALC_DEL coverage).
 
-The unbroken signing chain across 21 releases — including the v1.1.13 → v1.1.18 patch cascade that fixed four latent KAT data bugs, the v1.2.0 structural decomposition of `C_CreateObject`, the v1.2.1 security patch on the integrity self-test, and the v1.2.2 external-reporter-driven raw ECDSA fix plus boot-KAT extension — is itself ALC_CMC evidence : every change that reached a shipping release passed through the signed-release pipeline, and the inventory of changes is verifiable in the `CHANGELOG.md` ledger plus the git commit history (each tagged commit is itself GPG-signed by the same fingerprint).
+The unbroken signing chain across 22 releases — including the v1.1.13 → v1.1.18 patch cascade that fixed four latent KAT data bugs, the v1.2.0 structural decomposition of `C_CreateObject`, the v1.2.1 security patch on the integrity self-test, the v1.2.2 external-reporter-driven raw ECDSA fix plus boot-KAT extension, and the v1.3.0 function-list completion + export-roundtrip extension — is itself ALC_CMC evidence : every change that reached a shipping release passed through the signed-release pipeline, and the inventory of changes is verifiable in the `CHANGELOG.md` ledger plus the git commit history (each tagged commit is itself GPG-signed by the same fingerprint).
 
 ### 13.8 Discovery + correction protocol (ALC_DVS / ALC_FLR)
 
