@@ -214,10 +214,30 @@ The following are NOT considered vulnerabilities :
 ## GPG public key
 
 ```
-pub   ed25519 2026-06-11 [SC]
-      <fingerprint to be filled at first signed release>
-uid           Afchine Madjlessi <afchine.mad@gmail.com>
-sub   cv25519 2026-06-11 [E]
+pub   ed25519 2026-06-12 [SCA] [expires: 2028-06-11]
+      743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2
+uid           [ultimate] Afchine Madjlessi <afchine.mad@gmail.com>
+sub   cv25519 2026-06-26 [E] [expires: 2028-06-11]
+      9813 876A 34BA DD4A 0A50 915E 7EAC 4BA5 5574 DBE8
 ```
 
-The full public key is available at [`https://keys.openpgp.org`](https://keys.openpgp.org) once the maintainer has published it. Until then, request the key via email.
+The key is published and verified on [`keys.openpgp.org`](https://keys.openpgp.org/search?q=afchine.mad%40gmail.com) (search by `afchine.mad@gmail.com`) and on `keyserver.ubuntu.com`.
+
+To encrypt a vulnerability report :
+
+```bash
+# By email (the published verification on keys.openpgp.org makes this
+# work via --auto-key-locate keyserver)
+gpg --auto-key-locate keyserver --locate-key afchine.mad@gmail.com
+gpg --encrypt --armor --recipient afchine.mad@gmail.com report.txt
+
+# Or by primary-key fingerprint (no email lookup needed)
+gpg --encrypt --armor \
+    --recipient 743A6A5904A1461A646408DE48560162DBBF28A2 report.txt
+```
+
+GnuPG automatically selects the encryption subkey `9813876A34BADD4A0A50915E7EAC4BA55574DBE8` for the encryption operation ; the primary key `743A6A5904A1461A646408DE48560162DBBF28A2` remains sign / certify / authenticate only.
+
+### Encryption subkey added in response to an external report
+
+The encryption subkey was added on 2026-06-26 following a vulnerability report from a third party who could not encrypt their report to the maintainer because the published primary key was sign-only. The gap is fixed in this revision ; the change is logged here so any future reporter can verify the encryption capability has been continuously available from this date onward.
