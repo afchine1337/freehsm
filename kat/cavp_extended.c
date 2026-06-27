@@ -858,6 +858,273 @@ end:
     return ok;
 }
 
+/* RSA-PSS export-roundtrip self-consistency KAT (v1.3.0+).
+ *
+ * Same shape as run_ecdsa_export_roundtrip but for RSA-PSS : generate a
+ * fresh RSA keypair, sign the digest via EVP_PKEY_sign with PSS padding
+ * (salt length = digest length, MGF1 hash = signature hash), serialize
+ * the public key via i2d_PUBKEY, reload via d2i_PUBKEY, verify via
+ * EVP_PKEY_verify on the reloaded public key.
+ *
+ * RSA-2048 keygen typically costs 50-200 ms ; combined with PSS sign +
+ * verify on a 256-byte modulus, the KAT runs in ~150 ms in the dev
+ * provider and slightly faster under the FIPS provider. */
+static int run_rsa_pss_export_roundtrip(unsigned int bits,
+                                          const EVP_MD *md) {
+    int ok = 0;
+    EVP_PKEY     *pkey = NULL;
+    EVP_PKEY     *reloaded = NULL;
+    EVP_PKEY_CTX *sctx = NULL;
+    EVP_PKEY_CTX *vctx = NULL;
+    EVP_MD_CTX   *mdctx = NULL;
+    uint8_t      *pub_der = NULL;
+    uint8_t       digest[64];
+    uint8_t       sig[1024];      /* RSA-4096 sig = 512 bytes ; margin */
+    size_t        sig_len = sizeof(sig);
+    unsigned int  digest_len = 0;
+
+    static const uint8_t msg[] =
+        "FreeHSM C v1.3.0+ RSA-PSS export-roundtrip KAT";
+
+    pkey = EVP_PKEY_Q_keygen(NULL, NULL, "RSA", (size_t)bits);
+    if (!pkey) goto end;
+
+    mdctx = EVP_MD_CTX_new();
+    if (!mdctx) goto end;
+    if (EVP_DigestInit_ex(mdctx, md, NULL) != 1)            goto end;
+    if (EVP_DigestUpdate(mdctx, msg, sizeof(msg) - 1) != 1) goto end;
+    if (EVP_DigestFinal_ex(mdctx, digest, &digest_len) != 1) goto end;
+
+    sctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!sctx) goto end;
+    if (EVP_PKEY_sign_init(sctx) <= 0)                          goto end;
+    if (EVP_PKEY_CTX_set_rsa_padding(sctx,
+                                      RSA_PKCS1_PSS_PADDING) <= 0) goto end;
+    if (EVP_PKEY_CTX_set_signature_md(sctx, md) <= 0)            goto end;
+    if (EVP_PKEY_CTX_set_rsa_mgf1_md(sctx, md) <= 0)             goto end;
+    if (EVP_PKEY_CTX_set_rsa_pss_saltlen(sctx, -1) <= 0)         goto end;
+    if (EVP_PKEY_sign(sctx, sig, &sig_len, digest, digest_len) <= 0)
+        goto end;
+
+    int pub_len = i2d_PUBKEY(pkey, &pub_der);
+    if (pub_len <= 0) goto end;
+    {
+        const uint8_t *p = pub_der;
+        reloaded = d2i_PUBKEY(NULL, &p, (long)pub_len);
+        if (!reloaded) goto end;
+    }
+
+    vctx = EVP_PKEY_CTX_new(reloaded, NULL);
+    if (!vctx) goto end;
+    if (EVP_PKEY_verify_init(vctx) <= 0)                          goto end;
+    if (EVP_PKEY_CTX_set_rsa_padding(vctx,
+                                      RSA_PKCS1_PSS_PADDING) <= 0) goto end;
+    if (EVP_PKEY_CTX_set_signature_md(vctx, md) <= 0)              goto end;
+    if (EVP_PKEY_CTX_set_rsa_mgf1_md(vctx, md) <= 0)               goto end;
+    if (EVP_PKEY_CTX_set_rsa_pss_saltlen(vctx, -1) <= 0)           goto end;
+    {
+        int v = EVP_PKEY_verify(vctx, sig, sig_len, digest, digest_len);
+        ok = (v == 1);
+    }
+
+end:
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_free(reloaded);
+    EVP_PKEY_CTX_free(sctx);
+    EVP_PKEY_CTX_free(vctx);
+    if (mdctx) EVP_MD_CTX_free(mdctx);
+    OPENSSL_free(pub_der);
+    fhsm_zeroize(digest, sizeof(digest));
+    fhsm_zeroize(sig,    sizeof(sig));
+    return ok;
+}
+
+/* RSA-OAEP encrypt+decrypt export-roundtrip self-consistency KAT
+ * (v1.3.0+). Generates a fresh RSA keypair, serializes the public key
+ * via i2d_PUBKEY, reloads via d2i_PUBKEY (pubkey-only), encrypts a
+ * fixed-message plaintext with the reloaded public key using OAEP
+ * padding, decrypts with the original (full) private key, and compares
+ * the recovered plaintext against the original. */
+static int run_rsa_oaep_export_roundtrip(unsigned int bits,
+                                          const EVP_MD *md) {
+    int ok = 0;
+    EVP_PKEY     *pkey = NULL;
+    EVP_PKEY     *reloaded_pub = NULL;
+    EVP_PKEY_CTX *ectx = NULL;
+    EVP_PKEY_CTX *dctx = NULL;
+    uint8_t      *pub_der = NULL;
+    uint8_t       ct[1024];        /* RSA-4096 ct = 512 bytes ; margin */
+    uint8_t       pt_out[512];
+    size_t        ct_len = sizeof(ct);
+    size_t        pt_out_len = sizeof(pt_out);
+
+    static const uint8_t pt[] =
+        "FreeHSM C v1.3.0+ RSA-OAEP export-roundtrip KAT";
+    const size_t pt_len = sizeof(pt) - 1;
+
+    pkey = EVP_PKEY_Q_keygen(NULL, NULL, "RSA", (size_t)bits);
+    if (!pkey) goto end;
+
+    int pub_len = i2d_PUBKEY(pkey, &pub_der);
+    if (pub_len <= 0) goto end;
+    {
+        const uint8_t *p = pub_der;
+        reloaded_pub = d2i_PUBKEY(NULL, &p, (long)pub_len);
+        if (!reloaded_pub) goto end;
+    }
+
+    /* Encrypt with reloaded pubkey. */
+    ectx = EVP_PKEY_CTX_new(reloaded_pub, NULL);
+    if (!ectx) goto end;
+    if (EVP_PKEY_encrypt_init(ectx) <= 0)                          goto end;
+    if (EVP_PKEY_CTX_set_rsa_padding(ectx,
+                                      RSA_PKCS1_OAEP_PADDING) <= 0) goto end;
+    if (EVP_PKEY_CTX_set_rsa_oaep_md(ectx, md) <= 0)               goto end;
+    if (EVP_PKEY_CTX_set_rsa_mgf1_md(ectx, md) <= 0)               goto end;
+    if (EVP_PKEY_encrypt(ectx, ct, &ct_len, pt, pt_len) <= 0)       goto end;
+
+    /* Decrypt with original (full) pkey. */
+    dctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!dctx) goto end;
+    if (EVP_PKEY_decrypt_init(dctx) <= 0)                          goto end;
+    if (EVP_PKEY_CTX_set_rsa_padding(dctx,
+                                      RSA_PKCS1_OAEP_PADDING) <= 0) goto end;
+    if (EVP_PKEY_CTX_set_rsa_oaep_md(dctx, md) <= 0)               goto end;
+    if (EVP_PKEY_CTX_set_rsa_mgf1_md(dctx, md) <= 0)               goto end;
+    if (EVP_PKEY_decrypt(dctx, pt_out, &pt_out_len, ct, ct_len) <= 0)
+        goto end;
+
+    if (pt_out_len != pt_len) goto end;
+    ok = (fhsm_ct_memcmp(pt_out, pt, pt_len) == 0);
+
+end:
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_free(reloaded_pub);
+    EVP_PKEY_CTX_free(ectx);
+    EVP_PKEY_CTX_free(dctx);
+    OPENSSL_free(pub_der);
+    fhsm_zeroize(ct,     sizeof(ct));
+    fhsm_zeroize(pt_out, sizeof(pt_out));
+    return ok;
+}
+
+/* EdDSA / ML-DSA export-roundtrip helper (v1.3.0+). Both schemes use
+ * EVP_DigestSign with hash=NULL (the scheme does its own internal
+ * hashing per FIPS 204 / RFC 8032). Same serialize + reload + verify
+ * pattern as run_ecdsa_export_roundtrip. */
+static int run_evp_digestsign_export_roundtrip(const char *alg,
+                                                 const uint8_t *msg,
+                                                 size_t msg_len,
+                                                 size_t sig_buf_size) {
+    int ok = 0;
+    EVP_PKEY    *pkey = NULL;
+    EVP_PKEY    *reloaded = NULL;
+    EVP_MD_CTX  *sctx = NULL;
+    EVP_MD_CTX  *vctx = NULL;
+    uint8_t     *pub_der = NULL;
+    uint8_t     *sig = NULL;
+    size_t       sig_len = sig_buf_size;
+
+    sig = (uint8_t *)OPENSSL_malloc(sig_buf_size);
+    if (!sig) goto end;
+    memset(sig, 0, sig_buf_size);
+
+    pkey = EVP_PKEY_Q_keygen(NULL, NULL, alg);
+    if (!pkey) goto end;
+
+    sctx = EVP_MD_CTX_new();
+    if (!sctx) goto end;
+    if (EVP_DigestSignInit(sctx, NULL, NULL, NULL, pkey) != 1)  goto end;
+    if (EVP_DigestSign(sctx, sig, &sig_len, msg, msg_len) != 1) goto end;
+
+    int pub_len = i2d_PUBKEY(pkey, &pub_der);
+    if (pub_len <= 0) goto end;
+    {
+        const uint8_t *p = pub_der;
+        reloaded = d2i_PUBKEY(NULL, &p, (long)pub_len);
+        if (!reloaded) goto end;
+    }
+
+    vctx = EVP_MD_CTX_new();
+    if (!vctx) goto end;
+    if (EVP_DigestVerifyInit(vctx, NULL, NULL, NULL, reloaded) != 1)
+        goto end;
+    {
+        int v = EVP_DigestVerify(vctx, sig, sig_len, msg, msg_len);
+        ok = (v == 1);
+    }
+
+end:
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_free(reloaded);
+    if (sctx) EVP_MD_CTX_free(sctx);
+    if (vctx) EVP_MD_CTX_free(vctx);
+    OPENSSL_free(pub_der);
+    if (sig) {
+        fhsm_zeroize(sig, sig_buf_size);
+        OPENSSL_free(sig);
+    }
+    return ok;
+}
+
+/* ML-KEM export + encap-decap self-consistency KAT (v1.3.0+).
+ *
+ * Generate a fresh ML-KEM keypair, serialize the public key via
+ * i2d_PUBKEY, reload via d2i_PUBKEY (pubkey-only), encapsulate against
+ * the reloaded pubkey to produce (ciphertext, shared_secret_1),
+ * decapsulate the ciphertext with the original (full) pkey to recover
+ * shared_secret_2, compare byte-for-byte. */
+static int run_mlkem_export_roundtrip(const char *alg) {
+    int ok = 0;
+    EVP_PKEY     *pkey = NULL;
+    EVP_PKEY     *reloaded_pub = NULL;
+    EVP_PKEY_CTX *ectx = NULL;
+    EVP_PKEY_CTX *dctx = NULL;
+    uint8_t      *pub_der = NULL;
+    uint8_t       ct[2048];          /* ML-KEM-1024 ct = 1568 ; margin */
+    uint8_t       ss1[64];
+    uint8_t       ss2[64];
+    size_t        ct_len  = sizeof(ct);
+    size_t        ss1_len = sizeof(ss1);
+    size_t        ss2_len = sizeof(ss2);
+
+    pkey = EVP_PKEY_Q_keygen(NULL, NULL, (char *)alg);
+    if (!pkey) goto end;
+
+    int pub_len = i2d_PUBKEY(pkey, &pub_der);
+    if (pub_len <= 0) goto end;
+    {
+        const uint8_t *p = pub_der;
+        reloaded_pub = d2i_PUBKEY(NULL, &p, (long)pub_len);
+        if (!reloaded_pub) goto end;
+    }
+
+    ectx = EVP_PKEY_CTX_new(reloaded_pub, NULL);
+    if (!ectx) goto end;
+    if (EVP_PKEY_encapsulate_init(ectx, NULL) <= 0)             goto end;
+    if (EVP_PKEY_encapsulate(ectx, ct, &ct_len, ss1, &ss1_len) <= 0)
+        goto end;
+
+    dctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!dctx) goto end;
+    if (EVP_PKEY_decapsulate_init(dctx, NULL) <= 0)             goto end;
+    if (EVP_PKEY_decapsulate(dctx, ss2, &ss2_len, ct, ct_len) <= 0)
+        goto end;
+
+    if (ss1_len == 0 || ss1_len != ss2_len) goto end;
+    ok = (fhsm_ct_memcmp(ss1, ss2, ss1_len) == 0);
+
+end:
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_free(reloaded_pub);
+    EVP_PKEY_CTX_free(ectx);
+    EVP_PKEY_CTX_free(dctx);
+    OPENSSL_free(pub_der);
+    fhsm_zeroize(ss1, sizeof(ss1));
+    fhsm_zeroize(ss2, sizeof(ss2));
+    return ok;
+}
+
 /* AES-CMAC runner via EVP_MAC. Computes the CMAC of the message and
  * compares the 16-byte tag. */
 static int run_aescmac_vec(const uint8_t *key, size_t key_len,
@@ -1452,6 +1719,74 @@ fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
                                                 ecdsa_rt[k].md());
         REC(out, i, ecdsa_rt[k].alg, ecdsa_rt[k].vid,
             pass, local_elapsed_us(&t0));
+        i++;
+    }
+
+    /* ---- RSA-PSS / RSA-OAEP / EdDSA / ML-DSA / ML-KEM export-roundtrip
+     *      (v1.3.0+)
+     *
+     * Extends the v1.2.2 ECDSA export-roundtrip methodology to the
+     * remaining cryptographic surfaces the module exposes externally.
+     * Each vector generates a fresh keypair via EVP_PKEY_Q_keygen,
+     * exercises the production-grade EVP API (sign / verify for
+     * signatures ; encrypt / decrypt for OAEP ; encapsulate /
+     * decapsulate for KEM), serializes the public key via i2d_PUBKEY,
+     * reloads via d2i_PUBKEY, and verifies the round-trip on the
+     * reloaded public key.
+     *
+     * SLH-DSA is intentionally excluded : the keygen + sign + verify
+     * cycle on SLH-DSA-SHA2-128f would add ~25 ms to the boot KAT
+     * runtime, and the existing SLH-DSA-SHA2-128f selftest already
+     * provides sign+verify regression coverage on the production key
+     * lifecycle. The export-roundtrip pattern can be added in a
+     * future release if a third-party SLH-DSA interop concern
+     * surfaces. */
+    if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    {
+        int pass = run_rsa_pss_export_roundtrip(2048, EVP_sha256());
+        REC(out, i, "RSA-2048-PSS-SHA256-export-roundtrip",
+            "v1.3.0-self-consistency", pass, local_elapsed_us(&t0));
+        i++;
+    }
+    if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    {
+        int pass = run_rsa_oaep_export_roundtrip(2048, EVP_sha256());
+        REC(out, i, "RSA-2048-OAEP-SHA256-export-roundtrip",
+            "v1.3.0-self-consistency", pass, local_elapsed_us(&t0));
+        i++;
+    }
+    if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    {
+        static const uint8_t edmsg[] =
+            "FreeHSM C v1.3.0+ Ed25519 export-roundtrip KAT";
+        /* Ed25519 sig is 64 bytes ; 128 is comfortable. */
+        int pass = run_evp_digestsign_export_roundtrip(
+                        "ED25519", edmsg, sizeof(edmsg) - 1, 128);
+        REC(out, i, "Ed25519-export-roundtrip",
+            "v1.3.0-self-consistency", pass, local_elapsed_us(&t0));
+        i++;
+    }
+    if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    {
+        static const uint8_t mldsamsg[] =
+            "FreeHSM C v1.3.0+ ML-DSA-65 export-roundtrip KAT";
+        /* ML-DSA-65 sig is ~3309 bytes ; 5000 is comfortable. */
+        int pass = run_evp_digestsign_export_roundtrip(
+                        "ML-DSA-65", mldsamsg, sizeof(mldsamsg) - 1, 5000);
+        REC(out, i, "ML-DSA-65-export-roundtrip",
+            "v1.3.0-self-consistency", pass, local_elapsed_us(&t0));
+        i++;
+    }
+    if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    {
+        int pass = run_mlkem_export_roundtrip("ML-KEM-768");
+        REC(out, i, "ML-KEM-768-export-roundtrip",
+            "v1.3.0-self-consistency", pass, local_elapsed_us(&t0));
         i++;
     }
 
