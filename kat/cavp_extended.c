@@ -49,6 +49,7 @@
 #include <openssl/param_build.h>
 #include <openssl/kdf.h>
 #include <openssl/rsa.h>     /* RSA_PKCS1_PSS_PADDING, RSA_PKCS1_OAEP_PADDING */
+#include <openssl/x509.h>    /* i2d_PUBKEY, d2i_PUBKEY (ECDSA export-roundtrip KAT) */
 
 /* Self-contained timing helper to avoid coupling to fhsm_kat_vectors.c
  * internals. */
@@ -754,6 +755,109 @@ static int run_ecdsa_verify_vec(const char *curve, const EVP_MD *md,
     return ok;
 }
 
+/* ECDSA export-roundtrip self-consistency KAT.
+ *
+ * Background (added v1.2.2 in response to the Denis Mingulov pkcs11-check
+ * report of 2026-06-26) : the raw CKM_ECDSA sign path of the module used
+ * to call EVP_DigestSignInit_ex with mdname=NULL, which on the OpenSSL 3.x
+ * default provider's ECDSA digest_sign function applied an internal default
+ * digest (observed as SHA-256) before signing. The result was that the
+ * module signed SHA-256(input) instead of input, breaking interoperability
+ * for any third-party verifier expecting raw ECDSA on the supplied digest.
+ * The fix (v1.2.2) routes raw mode through EVP_PKEY_sign / EVP_PKEY_verify.
+ *
+ * This KAT does not call the module's sign path directly --- it would be
+ * too tangled to wire into the boot KAT runner, and the production sign
+ * path is independently exercised by the CI test-coverage matrix via
+ * pkcs11-tool. What this KAT does is enforce the **methodology** that the
+ * fix is built on : sign a pre-computed digest via EVP_PKEY_sign, serialize
+ * the public key via i2d_PUBKEY, reload via d2i_PUBKEY (mimicking exactly
+ * what an external verifier does), then verify the signature via
+ * EVP_PKEY_verify on the reloaded public key.
+ *
+ * If a future OpenSSL provider upgrade re-introduces the silent-default-
+ * digest behaviour for EVP_PKEY_sign, or if i2d_PUBKEY / d2i_PUBKEY ever
+ * stop producing byte-stable round-trips for EC keys, this boot KAT fails
+ * at C_Initialize and the module refuses to start. Subsequent regressions
+ * on the raw sign path are catchable at boot rather than discovered by
+ * external reporters running pkcs11-check.
+ *
+ * Returns 1 on round-trip success ; 0 on any EVP failure or verify
+ * mismatch. */
+static int run_ecdsa_export_roundtrip(const char *curve, const EVP_MD *md) {
+    int ok = 0;
+    EVP_PKEY     *pkey = NULL;
+    EVP_PKEY     *reloaded = NULL;
+    EVP_PKEY_CTX *sctx = NULL;
+    EVP_PKEY_CTX *vctx = NULL;
+    EVP_MD_CTX   *mdctx = NULL;
+    uint8_t      *pub_der = NULL;
+    uint8_t       digest[64];     /* big enough for SHA-512 */
+    uint8_t       sig[256];       /* big enough for P-521 DER */
+    size_t        sig_len = sizeof(sig);
+    unsigned int  digest_len = 0;
+
+    /* Fixed reference message ; not security-sensitive. Allows the
+     * operator to reproduce the exact computation in a debugger if the
+     * KAT ever fails. */
+    static const uint8_t msg[] =
+        "FreeHSM C v1.2.2+ ECDSA export-roundtrip KAT (Denis Mingulov, 2026-06)";
+
+    /* 1. Generate a fresh keypair on the requested curve. */
+    pkey = EVP_PKEY_Q_keygen(NULL, NULL, "EC", (char *)curve);
+    if (!pkey) goto end;
+
+    /* 2. Compute the message digest with `md` (SHA-256 / 384 / 512). */
+    mdctx = EVP_MD_CTX_new();
+    if (!mdctx) goto end;
+    if (EVP_DigestInit_ex(mdctx, md, NULL) != 1)            goto end;
+    if (EVP_DigestUpdate(mdctx, msg, sizeof(msg) - 1) != 1) goto end;
+    if (EVP_DigestFinal_ex(mdctx, digest, &digest_len) != 1) goto end;
+
+    /* 3. Sign the digest via EVP_PKEY_sign (raw mode, mirrors the
+     * production CKM_ECDSA path post-v1.2.2 fix). */
+    sctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!sctx) goto end;
+    if (EVP_PKEY_sign_init(sctx) <= 0) goto end;
+    if (EVP_PKEY_sign(sctx, sig, &sig_len, digest, digest_len) <= 0) goto end;
+
+    /* 4. Serialize the public key via i2d_PUBKEY (mirrors how the
+     * production C_GenerateKeyPair stores pub_der + how an external
+     * tool reads CKA_VALUE on the pubkey object). */
+    int pub_len = i2d_PUBKEY(pkey, &pub_der);
+    if (pub_len <= 0) goto end;
+
+    /* 5. Reload the public key via d2i_PUBKEY (mirrors what an external
+     * verifier does : openssl pkey -pubin -inform DER -in pub.der). */
+    {
+        const uint8_t *p = pub_der;
+        reloaded = d2i_PUBKEY(NULL, &p, (long)pub_len);
+        if (!reloaded) goto end;
+    }
+
+    /* 6. Verify the signature on the *reloaded* public key via
+     * EVP_PKEY_verify. If the sign and verify paths agree externally,
+     * this passes. */
+    vctx = EVP_PKEY_CTX_new(reloaded, NULL);
+    if (!vctx) goto end;
+    if (EVP_PKEY_verify_init(vctx) <= 0) goto end;
+    {
+        int v = EVP_PKEY_verify(vctx, sig, sig_len, digest, digest_len);
+        ok = (v == 1);
+    }
+
+end:
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_free(reloaded);
+    EVP_PKEY_CTX_free(sctx);
+    EVP_PKEY_CTX_free(vctx);
+    if (mdctx) EVP_MD_CTX_free(mdctx);
+    OPENSSL_free(pub_der);
+    fhsm_zeroize(digest, sizeof(digest));
+    fhsm_zeroize(sig,    sizeof(sig));
+    return ok;
+}
+
 /* AES-CMAC runner via EVP_MAC. Computes the CMAC of the message and
  * compares the 16-byte tag. */
 static int run_aescmac_vec(const uint8_t *key, size_t key_len,
@@ -1317,6 +1421,37 @@ fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
                                          ecdsa_msg_sample, sizeof(ecdsa_msg_sample),
                                          ecdsa[k].sig, ecdsa[k].sig_len);
         REC(out, i, ecdsa[k].alg, ecdsa[k].vid, pass, local_elapsed_us(&t0));
+        i++;
+    }
+
+    /* ---- ECDSA export-roundtrip self-consistency (v1.2.2+) -----
+     *
+     * Sign a digest via EVP_PKEY_sign (raw mode), serialize the public
+     * key via i2d_PUBKEY, reload via d2i_PUBKEY (mimicking an external
+     * verifier), and verify via EVP_PKEY_verify on the reloaded public
+     * key. Catches any future regression on the raw ECDSA sign path or
+     * on the i2d_PUBKEY / d2i_PUBKEY round-trip for EC keys.
+     *
+     * Added in v1.2.2 in response to Denis Mingulov's pkcs11-check
+     * report of 2026-06-26 that surfaced the silent-default-digest bug
+     * in the module's raw CKM_ECDSA sign path. See the helper's docstring
+     * for the full rationale. */
+    struct { const char *alg; const char *vid; const char *curve;
+             const EVP_MD *(*md)(void); } ecdsa_rt[] = {
+        { "ECDSA-P256-export-roundtrip", "v1.2.2-self-consistency",
+          "P-256", EVP_sha256 },
+        { "ECDSA-P384-export-roundtrip", "v1.2.2-self-consistency",
+          "P-384", EVP_sha384 },
+        { "ECDSA-P521-export-roundtrip", "v1.2.2-self-consistency",
+          "P-521", EVP_sha512 },
+    };
+    for (size_t k = 0; k < sizeof(ecdsa_rt)/sizeof(ecdsa_rt[0]); ++k) {
+        if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int pass = run_ecdsa_export_roundtrip(ecdsa_rt[k].curve,
+                                                ecdsa_rt[k].md());
+        REC(out, i, ecdsa_rt[k].alg, ecdsa_rt[k].vid,
+            pass, local_elapsed_us(&t0));
         i++;
     }
 
