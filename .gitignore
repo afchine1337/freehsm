@@ -86,3 +86,7 @@ deploy-key*
 build.log
 tests/test_smoke.sha256
 tests/test_smoke.tampered
+
+# sign_module.sh test artifacts
+tests/test_smoke.sha256
+tests/test_smoke.tampered
