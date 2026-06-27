@@ -5,6 +5,122 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] --- 2026-06-27
+
+**External-reporter security patch + boot-KAT extension.** Ships four substantive changes triggered by a responsible-disclosure report from Denis Mingulov (`pkcs11-check`, 2026-06-26) plus one boot-time regression guard that codifies the methodology Denis's report exposed as a gap.
+
+**Headline finding (Denis Finding 1)** : every signed release of FreeHSM C since v1.1.0 has produced ECDSA signatures via the `CKM_ECDSA` mechanism that no third-party verifier could check. The root cause is `EVP_DigestSignInit_ex(..., mdname = NULL, ...)` on the OpenSSL 3.x default provider's ECDSA digest-sign function applying an internal default digest (SHA-256) before signing, so the module signed `SHA-256(input)` instead of `input`. The bug had been invisible internally because `C_Verify` applied the same default symmetrically ; Wycheproof's verify-only corpus did not exercise the sign path externally. Severity HIGH on correctness / interoperability (CVSS 7.5, `AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H`) ; not exploitable in confidentiality or integrity sense (private key never leaked). **All deployments running v1.1.0 - v1.2.1 should upgrade to v1.2.2 immediately.**
+
+Disclosure follows the same transparency-first model as v1.2.1 : informational GitHub Security Advisory (no CVE while the project is in pre-certification), CHANGELOG entry, Security Target update, SECURITY.md credit. Reporter credited as Denis Mingulov via `pkcs11-check`.
+
+### Fixes
+
+#### Finding 1 (HIGH) --- raw CKM_ECDSA / CKM_RSA_PKCS sign+verify silently applied a default digest
+
+`src/fhsm_pkcs11.c::sign_asymmetric` and `verify_asymmetric` previously routed raw mechanisms (`CKM_ECDSA` bare, `CKM_RSA_PKCS` bare) through `EVP_DigestSignInit_ex(ctx, &pctx, mdname = NULL, ...)`, expecting OpenSSL to treat the input as a pre-computed digest. On the OpenSSL 3.x default provider, the ECDSA digest-sign function applies an internal default digest (observed as SHA-256 on 3.5.x) when `mdname` is NULL, so the module signed `SHA-256(input)` instead of `input`. The module's own verify path applied the same default symmetrically, masking the bug to internal sign+verify cycles. External verifiers ( `openssl dgst -sha256 -verify` , `openssl pkeyutl -verify` ) rejected every signature.
+
+Fixed by branching on `hash == NULL` in both functions : raw mode now uses `EVP_PKEY_sign` / `EVP_PKEY_verify` on a freshly-allocated `EVP_PKEY_CTX`, which is the canonical OpenSSL 3.x API for signing a pre-computed digest. Hashed mechanisms ( `CKM_ECDSA_SHAxxx`, `CKM_SHAxxx_RSA_PKCS` ) continue through the existing `EVP_DigestSign` / `EVP_DigestVerify` path unchanged.
+
+Validated locally and in CI on P-256, P-384, P-521 via Denis's exact reproduction script. Module self-verify and external `openssl dgst` verify both pass post-fix.
+
+#### Finding 2 (HIGH compliance) --- `C_CreateObject` and four siblings were unreachable through `C_GetFunctionList`
+
+Five functions implemented in `src/fhsm_pkcs11.c` were exported as ELF symbols but their slots in `CK_FUNCTION_LIST` were not assigned :
+
+| Slot | Function | v1.2.2 status |
+|---|---|---|
+| 15 | `C_GetSessionInfo` | implemented + wired |
+| 20 | `C_CreateObject`   | wired (implementation existed since v1.0) |
+| 23 | `C_GetObjectSize`  | implemented + wired |
+| 21 | `C_CopyObject`     | deferred to v1.3.0 (not yet implemented) |
+| 25 | `C_SetAttributeValue` | deferred to v1.3.0 (not yet implemented) |
+
+Normal PKCS#11 consumers (`pkcs11-tool` + every standard library) reach these functions through `C_GetFunctionList -> fl->C_*` ; the module's internal test harnesses and the Wycheproof Python adapters bypass the function-list dispatch and call the symbols via `dlsym`, so the gap was invisible to CI. Particularly ironic : v1.2.0 (released 5 days before this report) celebrated a structural decomposition of `C_CreateObject` that was, all along, unreachable through any standard caller.
+
+Fixed by adding the three wired-and-implemented slots to `fhsm_function_list` in v2.40 mode ( mirrored into the v3.0 table by the existing `fhsm_init_v3_0_table`). A new accessor `fhsm_session_info(h, *slot, *flags, *role)` was added to `src/fhsm_session.c` for `C_GetSessionInfo` ; `C_GetObjectSize` reuses the existing `fhsm_token_object_get` path. `C_CopyObject` and `C_SetAttributeValue` are documented as known limitations for v1.2.2 and roadmapped for v1.3.0.
+
+#### Operational gap : sign-only GPG key
+
+The published GPG key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2` was sign + certify + authenticate only, with no encryption capability. Denis could not send the rest of his report (memory-safety + key-handling findings) over an encrypted channel. A cv25519 encryption subkey (fingerprint `9813 876A 34BA DD4A 0A50 915E 7EAC 4BA5 5574 DBE8`) was generated on 2026-06-26 and published to `keys.openpgp.org` (with the `afchine.mad@gmail.com` address verified) and `keyserver.ubuntu.com`. SECURITY.md is updated to reflect the new key material and documents the gap honestly. The primary key remains sign / certify / authenticate only ; only the encryption operation has a target now.
+
+### Added
+
+#### Boot KAT : ECDSA export-roundtrip self-consistency (P-256 / P-384 / P-521)
+
+`kat/cavp_extended.c::run_ecdsa_export_roundtrip()`. Three new boot-time KAT vectors that enforce the methodology the v1.2.2 fix is built on. For each curve : generate a fresh keypair via `EVP_PKEY_Q_keygen`, compute the digest of a fixed reference message with the matching SHA, sign the digest via `EVP_PKEY_sign` (raw mode), serialize the public key via `i2d_PUBKEY`, reload via `d2i_PUBKEY` (mimicking exactly what an external verifier does), and verify via `EVP_PKEY_verify` on the reloaded public key. Returns 1 on success and 0 on any EVP failure or verify mismatch.
+
+If a future OpenSSL provider upgrade re-introduces the silent-default-digest behaviour for `EVP_PKEY_sign`, or if `i2d_PUBKEY` / `d2i_PUBKEY` ever stop producing byte-stable round-trips for EC keys, this boot KAT fails at `C_Initialize` and the module refuses to start. Subsequent regressions on the raw sign path are catchable at boot rather than discovered by external reporters running `pkcs11-check`.
+
+KAT count : 51 -> 54. `FHSM_KAT_MAX` (64) unchanged.
+
+The pattern generalises and will be extended in future releases : every cryptographic surface that the module exposes externally ( sign / verify / wrap / unwrap / derive ) should have an analogous boot KAT that exercises the external-roundtrip property, not just the internal `EVP_PKEY -> EVP_PKEY` round trip.
+
+### Affected releases
+
+| Version | Released | Finding 1 (raw ECDSA) | Finding 2 (function list) |
+|---|---|---|---|
+| v1.1.0 | 2026-06-12 | yes (origin) | yes (origin) |
+| v1.1.1 - v1.1.18 | 2026-06-12 - 2026-06-20 | yes | yes |
+| v1.2.0 - v1.2.1 | 2026-06-20 - 2026-06-21 | yes | yes |
+| **v1.2.2** | **2026-06-27** | **fixed** | **3 of 5 fixed, 2 deferred** |
+
+### Validation
+
+```
+Boot KAT                              54 / 54 vectors green (was 51 / 51)
+   --- of which the 3 new export-roundtrip vectors :
+   ECDSA-P256-export-roundtrip / SHA-256  PASS (~1200 us)
+   ECDSA-P384-export-roundtrip / SHA-384  PASS (~1000 us)
+   ECDSA-P521-export-roundtrip / SHA-512  PASS (~1150 us)
+
+Denis's killer test (external verify after raw CKM_ECDSA sign) :
+   P-256 : OK   P-384 : OK   P-521 : OK
+
+CI lint / build / sign / smoke    : green
+CI reproducibility                : byte-identical
+CI test-coverage matrix           : 24 / 0 / 8 (exercises sign + verify
+                                    via pkcs11-tool, which routes through
+                                    the production sign_asymmetric path)
+CI test-fips-mode                 : green (FIPS strict env exercises
+                                    the raw ECDSA fix end-to-end)
+Wycheproof full sweep             : 6 978 / 0 unchanged from v1.2.1
+```
+
+### Recommended action
+
+Any deployment running v1.1.0 - v1.2.1 should upgrade to v1.2.2. The upgrade is a drop-in `.so` replacement ; PKCS#11 wire compatibility is unchanged. Re-sign the embedded digest via `make integrity` from the v1.2.2 source, or take the pre-signed binary tarball directly from the v1.2.2 GitHub Release.
+
+Specifically affected workflows :
+
+* **Any consumer that verifies the module's ECDSA signatures externally** (CA / RA issuing certificates, signature-archive verifiers, peer-to-peer protocols using ECDSA, etc.) is non-interoperable in v1.1.0 - v1.2.1 and is restored to spec-compliant ECDSA in v1.2.2. The module's pre-v1.2.2 signatures cannot be retroactively repaired ; only signatures produced by v1.2.2+ are interoperable.
+
+* **Any consumer that calls `C_CreateObject` / `C_GetSessionInfo` / `C_GetObjectSize` through the standard `C_GetFunctionList` dispatch** received `CKR_FUNCTION_NOT_SUPPORTED` in v1.1.0 - v1.2.1 and gets a valid dispatch in v1.2.2.
+
+### Discovery + correction context
+
+The defects were reported by **Denis Mingulov** via the `pkcs11-check` testing harness on 2026-06-26, with reproducible PoC on P-256 / P-384 / P-521 (every run) for Finding 1 and a sharp diagnostic for Finding 2. The discovery + correction protocol established in v1.2.1 Security Target §13.8 was extended to incorporate the *external-reporter* case :
+
+1. **Symptom triage** : take any external reporter's evidence seriously, even if reported in clear (when the canonical encrypted channel is unavailable). Acknowledge the operational gap (sign-only GPG key) that forced clear-text disclosure ; restore the encrypted channel before continuing the technical triage.
+2. **Read both sides** : the reporter's evidence + the module's source. Verify the reproduction locally before challenging the report.
+3. **Cross-check the contract** : compare the module's behaviour with the OpenSSL canonical APIs (in this case, `EVP_PKEY_sign` is documented as the API for signing a pre-computed digest ; `EVP_DigestSign` with `mdname=NULL` was the wrong choice).
+4. **Killer-test artifact** : Denis already provided one (his pkcs11-check repro) ; we add the boot-KAT regression guard so the methodology is institutionalised in the module itself.
+5. **Scope the temporal impact** : `git blame` on the affected lines ; document the affected window ; decide on disclosure model.
+
+The Security Target v0.8 §13.8 codifies this extension as a sub-section "External reporters".
+
+### Acknowledgements
+
+* **Denis Mingulov** for the careful report, the responsible-disclosure framing (despite the encrypted-channel friction), the clean reproduction script, and the noise-aware framing on `pkcs11-check` raw output.
+* The OpenSSL project for the canonical `EVP_PKEY_sign` API and the standard `i2d_PUBKEY` / `d2i_PUBKEY` round-trip primitives.
+
+### Deferred to v1.3.0
+
+* `C_CopyObject` and `C_SetAttributeValue` : not currently implemented in the module ; documented as known limitations of the v2.40 function list. Denis's initial report claimed they were "implemented but not wired" ; on re-reading the source they turned out not to be implemented at all. v1.3.0 will either implement them or formally retire the slots.
+
+* External-roundtrip boot KATs for RSA-PSS / RSA-OAEP / ML-DSA / SLH-DSA / Ed25519. Pattern documented in this CHANGELOG and Security Target §13.8 ; instances to be added per release.
+
+### This is the 21st consecutive GPG-signed release.
+
 ## [1.2.1] --- 2026-06-21
 
 **Security patch release.** Fixes a critical defect in the module integrity self-test (`src/fhsm_integrity.c::do_verify`) that effectively disabled FIPS 140-3 §7.10.2 in every signed production build of FreeHSM C since the initial open-source release v1.1.0 (commit `0c0f5df`, 2026-06-12). A tampered `libfreehsm-fips.so` would have passed the integrity check silently. All 19 GPG-signed releases between v1.1.0 and v1.2.0 are affected. **All users running any of those versions should upgrade to v1.2.1 immediately.**
