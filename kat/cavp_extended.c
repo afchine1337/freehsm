@@ -1125,6 +1125,89 @@ end:
     return ok;
 }
 
+/* ECDH derive + export-roundtrip self-consistency KAT (v1.3.0+).
+ *
+ * Closes the last cryptographic surface the module exposes externally
+ * that did not have an external-roundtrip boot KAT. The pattern :
+ *
+ *   1. Generate two independent EC keypairs (Alice, Bob) on the same
+ *      curve.
+ *   2. Derive shared_secret_1 = ECDH(Alice.priv, Bob.pub) using the
+ *      original Bob pkey reference (control path).
+ *   3. Serialize Bob's public key via i2d_PUBKEY (extracts the pubkey
+ *      half from the full pair).
+ *   4. Reload via d2i_PUBKEY into a pubkey-only EVP_PKEY (mimicking
+ *      exactly what an external ECDH peer does after receiving a
+ *      SubjectPublicKeyInfo over the wire).
+ *   5. Derive shared_secret_2 = ECDH(Alice.priv, Bob.pub_reloaded).
+ *   6. Compare shared_secret_1 == shared_secret_2 byte-for-byte.
+ *
+ * If i2d_PUBKEY / d2i_PUBKEY ever stops being byte-stable for EC
+ * keys *specifically along the ECDH peer-key code path* (a different
+ * provider entry point than the signature path covered by ECDSA's
+ * export-roundtrip KAT), this boot KAT fails closed at
+ * C_Initialize. */
+static int run_ecdh_export_roundtrip(const char *curve) {
+    int ok = 0;
+    EVP_PKEY     *alice = NULL;
+    EVP_PKEY     *bob = NULL;
+    EVP_PKEY     *bob_pub_reloaded = NULL;
+    EVP_PKEY_CTX *d1 = NULL;
+    EVP_PKEY_CTX *d2 = NULL;
+    uint8_t      *bob_pub_der = NULL;
+    uint8_t       ss1[256], ss2[256];
+    size_t        ss1_len = sizeof(ss1);
+    size_t        ss2_len = sizeof(ss2);
+
+    alice = EVP_PKEY_Q_keygen(NULL, NULL, "EC", (char *)curve);
+    if (!alice) goto end;
+    bob = EVP_PKEY_Q_keygen(NULL, NULL, "EC", (char *)curve);
+    if (!bob) goto end;
+
+    /* Derive 1 : Alice + Bob (original) --- control. */
+    d1 = EVP_PKEY_CTX_new(alice, NULL);
+    if (!d1) goto end;
+    if (EVP_PKEY_derive_init(d1) <= 0)         goto end;
+    if (EVP_PKEY_derive_set_peer(d1, bob) <= 0) goto end;
+    if (EVP_PKEY_derive(d1, NULL, &ss1_len) <= 0) goto end;
+    if (ss1_len == 0 || ss1_len > sizeof(ss1))   goto end;
+    if (EVP_PKEY_derive(d1, ss1, &ss1_len) <= 0)  goto end;
+
+    /* Serialize Bob's public key (i2d_PUBKEY extracts the pubkey
+     * half from the full keypair). */
+    int pub_len = i2d_PUBKEY(bob, &bob_pub_der);
+    if (pub_len <= 0) goto end;
+    {
+        const uint8_t *p = bob_pub_der;
+        bob_pub_reloaded = d2i_PUBKEY(NULL, &p, (long)pub_len);
+        if (!bob_pub_reloaded) goto end;
+    }
+
+    /* Derive 2 : Alice + Bob_reloaded --- exercises d2i_PUBKEY's
+     * output as a peer key on the ECDH derive path. */
+    d2 = EVP_PKEY_CTX_new(alice, NULL);
+    if (!d2) goto end;
+    if (EVP_PKEY_derive_init(d2) <= 0)                     goto end;
+    if (EVP_PKEY_derive_set_peer(d2, bob_pub_reloaded) <= 0) goto end;
+    if (EVP_PKEY_derive(d2, NULL, &ss2_len) <= 0)           goto end;
+    if (ss2_len == 0 || ss2_len > sizeof(ss2))              goto end;
+    if (EVP_PKEY_derive(d2, ss2, &ss2_len) <= 0)            goto end;
+
+    if (ss1_len != ss2_len) goto end;
+    ok = (fhsm_ct_memcmp(ss1, ss2, ss1_len) == 0);
+
+end:
+    EVP_PKEY_free(alice);
+    EVP_PKEY_free(bob);
+    EVP_PKEY_free(bob_pub_reloaded);
+    EVP_PKEY_CTX_free(d1);
+    EVP_PKEY_CTX_free(d2);
+    OPENSSL_free(bob_pub_der);
+    fhsm_zeroize(ss1, sizeof(ss1));
+    fhsm_zeroize(ss2, sizeof(ss2));
+    return ok;
+}
+
 /* AES-CMAC runner via EVP_MAC. Computes the CMAC of the message and
  * compares the 16-byte tag. */
 static int run_aescmac_vec(const uint8_t *key, size_t key_len,
@@ -1787,6 +1870,28 @@ fhsm_rv_t fhsm_kat_cavp_extended(fhsm_kat_result_t *out, size_t cap,
         int pass = run_mlkem_export_roundtrip("ML-KEM-768");
         REC(out, i, "ML-KEM-768-export-roundtrip",
             "v1.3.0-self-consistency", pass, local_elapsed_us(&t0));
+        i++;
+    }
+
+    /* ---- ECDH derive + export-roundtrip (v1.3.0+) --------------
+     *
+     * Closes the last cryptographic surface exposed externally that
+     * did not previously have an external-roundtrip boot KAT. The
+     * pattern is described in the helper's docstring above. */
+    struct { const char *alg; const char *vid; const char *curve; } ecdh_rt[] = {
+        { "ECDH-P256-export-roundtrip", "v1.3.0-self-consistency",
+          "P-256" },
+        { "ECDH-P384-export-roundtrip", "v1.3.0-self-consistency",
+          "P-384" },
+        { "ECDH-P521-export-roundtrip", "v1.3.0-self-consistency",
+          "P-521" },
+    };
+    for (size_t k = 0; k < sizeof(ecdh_rt)/sizeof(ecdh_rt[0]); ++k) {
+        if (i >= cap) return FHSM_RV_ARGUMENTS_BAD;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int pass = run_ecdh_export_roundtrip(ecdh_rt[k].curve);
+        REC(out, i, ecdh_rt[k].alg, ecdh_rt[k].vid,
+            pass, local_elapsed_us(&t0));
         i++;
     }
 

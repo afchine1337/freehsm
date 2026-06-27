@@ -160,6 +160,8 @@ typedef struct CK_MECHANISM {
 
 FHSM_EXPORT CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession,
                                     unsigned char *pSeed, CK_ULONG ulLen);
+FHSM_EXPORT CK_RV C_WaitForSlotEvent(CK_FLAGS flags, CK_SLOT_ID *pSlot,
+                                      CK_VOID_PTR pReserved);
 FHSM_EXPORT CK_RV C_DigestInit(CK_SESSION_HANDLE hSession,
                                 CK_MECHANISM *pMechanism);
 FHSM_EXPORT CK_RV C_Digest(CK_SESSION_HANDLE hSession,
@@ -331,6 +333,44 @@ CK_RV C_Finalize(CK_VOID_PTR pReserved) {
     fhsm_audit_close();
     fhsm_state_set(FHSM_STATE_POWER_OFF);
     return FHSM_RV_OK;
+}
+
+/* PKCS#11 v3.2 §C.6.5.4 --- C_WaitForSlotEvent
+ *
+ * Watch for slot insertion / removal events. A software token has no
+ * hot-plug : slots are static, configured at C_Initialize time, and
+ * never produce events during the module's lifetime.
+ *
+ * Two return modes per the spec :
+ *
+ *     CKF_DONT_BLOCK set     : return CKR_NO_EVENT immediately if no
+ *                              event is pending. For this module, no
+ *                              event ever pends, so always CKR_NO_EVENT.
+ *     CKF_DONT_BLOCK unset   : block until an event is available. For
+ *                              this module no event will EVER be
+ *                              available, so blocking indefinitely
+ *                              would hang the caller. Returning
+ *                              CKR_FUNCTION_NOT_SUPPORTED is the
+ *                              documented behaviour for software tokens
+ *                              without a hot-plug source.
+ *
+ * pReserved must be NULL per the spec.
+ *
+ * Added in v1.3.0 in response to Denis Mingulov's pkcs11-check report :
+ * slot 66 was the last unwired slot in the v2.40 function list ; this
+ * commit completes the v2.40 dispatch table. */
+CK_RV C_WaitForSlotEvent(CK_FLAGS flags, CK_SLOT_ID *pSlot,
+                         CK_VOID_PTR pReserved) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (pReserved != NULL) return FHSM_RV_ARGUMENTS_BAD;
+    (void)pSlot;
+    /* CKF_DONT_BLOCK == 0x00000001 per PKCS#11 v3.2. */
+    if (flags & 0x00000001UL) {
+        return 0x00000008UL;        /* CKR_NO_EVENT */
+    }
+    /* Software token : no hot-plug ; refuse blocking calls explicitly
+     * rather than hang the caller. */
+    return 0x00000054UL;            /* CKR_FUNCTION_NOT_SUPPORTED */
 }
 
 CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
@@ -4722,6 +4762,9 @@ CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
         fhsm_function_list.pfn[62] = (void*)(uintptr_t)C_DeriveKey;        /* slot 62 */
         /* RNG */
         fhsm_function_list.pfn[64] = (void*)(uintptr_t)C_GenerateRandom;   /* slot 64 */
+        /* Slot event (software token : no hot-plug ; non-blocking returns
+         * CKR_NO_EVENT, blocking returns CKR_FUNCTION_NOT_SUPPORTED). */
+        fhsm_function_list.pfn[66] = (void*)(uintptr_t)C_WaitForSlotEvent; /* slot 66 (v1.3.0) */
     }
     *ppFnList = &fhsm_function_list;
     return FHSM_RV_OK;
