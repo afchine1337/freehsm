@@ -112,6 +112,8 @@ FHSM_EXPORT CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
                                  CK_VOID_PTR pApp, CK_VOID_PTR Notify,
                                  CK_SESSION_HANDLE *phSession);
 FHSM_EXPORT CK_RV C_CloseSession(CK_SESSION_HANDLE hSession);
+FHSM_EXPORT CK_RV C_GetSessionInfo(CK_SESSION_HANDLE hSession,
+                                    CK_VOID_PTR pInfo);
 FHSM_EXPORT CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
                            CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen);
 FHSM_EXPORT CK_RV C_Logout(CK_SESSION_HANDLE hSession);
@@ -214,6 +216,9 @@ FHSM_EXPORT CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                                   CK_OBJECT_HANDLE *phObject);
 FHSM_EXPORT CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession,
                                    CK_OBJECT_HANDLE hObject);
+FHSM_EXPORT CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession,
+                                   CK_OBJECT_HANDLE hObject,
+                                   CK_ULONG *pulSize);
 FHSM_EXPORT CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession,
                                        CK_OBJECT_HANDLE hObject,
                                        CK_ATTRIBUTE *pTemplate,
@@ -386,6 +391,71 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
 CK_RV C_CloseSession(CK_SESSION_HANDLE hSession) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     return fhsm_session_close(hSession);
+}
+
+/* PKCS#11 v3.2 §C.6.6.5 --- C_GetSessionInfo
+ *
+ * Populates a CK_SESSION_INFO struct for the given session :
+ *
+ *     typedef struct CK_SESSION_INFO {
+ *         CK_SLOT_ID    slotID;        // 8 bytes on LP64
+ *         CK_STATE      state;         // 8 bytes
+ *         CK_FLAGS      flags;         // 8 bytes (CKF_RW_SESSION etc.)
+ *         CK_ULONG      ulDeviceError; // 8 bytes
+ *     } CK_SESSION_INFO;
+ *
+ * The state is derived from (CKF_RW_SESSION flag, authenticated role)
+ * per PKCS#11 v3.2 §6.6.2 :
+ *
+ *     CKS_RO_PUBLIC_SESSION = 0 : RO + no user logged in
+ *     CKS_RO_USER_FUNCTIONS = 1 : RO + user logged in
+ *     CKS_RW_PUBLIC_SESSION = 2 : RW + no user logged in
+ *     CKS_RW_USER_FUNCTIONS = 3 : RW + user logged in
+ *     CKS_RW_SO_FUNCTIONS   = 4 : RW + SO logged in
+ *
+ * Wired into the v2.40 function list at slot 15 ; mirrored into the
+ * v3.0 table by fhsm_init_v3_0_table().
+ *
+ * Added in v1.2.2 in response to Denis Mingulov's pkcs11-check report
+ * that flagged this function as missing from the exported list. */
+#define FHSM_CKF_RW_SESSION 0x00000002UL
+
+CK_RV C_GetSessionInfo(CK_SESSION_HANDLE hSession, CK_VOID_PTR pInfo) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
+
+    unsigned long slot = 0, flags = 0;
+    fhsm_role_t   role = FHSM_ROLE_NONE;
+    fhsm_rv_t rv = fhsm_session_info(hSession, &slot, &flags, &role);
+    if (rv != FHSM_RV_OK) return rv;
+
+    int rw = (flags & FHSM_CKF_RW_SESSION) != 0;
+    CK_ULONG state;
+    switch (role) {
+        case FHSM_ROLE_SO:
+            /* SO is always RW per PKCS#11 v3.2 §C.6.6.6 ; if a session
+             * was opened RO and then SO-login attempted, fhsm_session_login
+             * already rejected with CKR_SESSION_READ_ONLY_EXISTS, so we
+             * can assume RW here. */
+            state = 4;  /* CKS_RW_SO_FUNCTIONS */
+            break;
+        case FHSM_ROLE_USER:
+            state = rw ? 3 : 1;  /* CKS_RW_USER_FUNCTIONS / CKS_RO_USER_FUNCTIONS */
+            break;
+        case FHSM_ROLE_NONE:
+        default:
+            state = rw ? 2 : 0;  /* CKS_RW_PUBLIC_SESSION / CKS_RO_PUBLIC_SESSION */
+            break;
+    }
+
+    /* Populate CK_SESSION_INFO at the raw memory layout. */
+    CK_ULONG *out = (CK_ULONG *)pInfo;
+    out[0] = (CK_ULONG)slot;
+    out[1] = state;
+    out[2] = (CK_ULONG)flags;
+    out[3] = 0;   /* ulDeviceError, always 0 for a software token */
+
+    return FHSM_RV_OK;
 }
 
 CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
@@ -2601,6 +2671,39 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     return FHSM_RV_OK;
 }
 
+/* PKCS#11 v3.2 §C.6.7.4 --- C_GetObjectSize
+ *
+ * Obtains the size of an object in bytes. The spec is explicit that
+ * the returned value "does not necessarily reflect actual storage used
+ * by the object" ; we interpret it as the byte length of the object's
+ * primary value blob (CKA_VALUE for secret/private keys ; the DER SPKI
+ * for public keys ; the verbatim ML-DSA / SLH-DSA blob for PQ keys).
+ *
+ * Wired into the v2.40 function list at slot 23 ; mirrored into the
+ * v3.0 table by fhsm_init_v3_0_table().
+ *
+ * Added in v1.2.2 in response to Denis Mingulov's pkcs11-check report
+ * that flagged this function as missing from the exported list. */
+CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
+                      CK_ULONG *pulSize) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pulSize) return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+
+    const uint8_t *value = NULL;
+    size_t value_len = 0;
+    uint32_t cko_class = 0, ckk_type = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hObject,
+                                          &value, &value_len,
+                                          &cko_class, &ckk_type);
+    if (rv != FHSM_RV_OK) return rv;
+
+    *pulSize = (CK_ULONG)value_len;
+    return FHSM_RV_OK;
+}
+
 CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
                         CK_ULONG ulCount) {
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -4231,10 +4334,13 @@ CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
         fhsm_function_list.pfn[11] = (void*)(uintptr_t)C_SetPIN;           /* slot 11 */
         fhsm_function_list.pfn[12] = (void*)(uintptr_t)C_OpenSession;      /* slot 12 */
         fhsm_function_list.pfn[13] = (void*)(uintptr_t)C_CloseSession;     /* slot 13 */
+        fhsm_function_list.pfn[15] = (void*)(uintptr_t)C_GetSessionInfo;   /* slot 15 (v1.2.2) */
         fhsm_function_list.pfn[18] = (void*)(uintptr_t)C_Login;            /* slot 18 */
         fhsm_function_list.pfn[19] = (void*)(uintptr_t)C_Logout;           /* slot 19 */
         /* Object lifecycle */
+        fhsm_function_list.pfn[20] = (void*)(uintptr_t)C_CreateObject;     /* slot 20 (v1.2.2) */
         fhsm_function_list.pfn[22] = (void*)(uintptr_t)C_DestroyObject;    /* slot 22 */
+        fhsm_function_list.pfn[23] = (void*)(uintptr_t)C_GetObjectSize;    /* slot 23 (v1.2.2) */
         fhsm_function_list.pfn[24] = (void*)(uintptr_t)C_GetAttributeValue;/* slot 24 */
         fhsm_function_list.pfn[26] = (void*)(uintptr_t)C_FindObjectsInit;  /* slot 26 */
         fhsm_function_list.pfn[27] = (void*)(uintptr_t)C_FindObjects;      /* slot 27 */

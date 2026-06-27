@@ -149,3 +149,22 @@ fhsm_role_t fhsm_session_role(unsigned long h) {
     pthread_mutex_unlock(&g_sess_mu);
     return r;
 }
+
+fhsm_rv_t fhsm_session_info(unsigned long h,
+                              unsigned long *out_slot,
+                              unsigned long *out_flags,
+                              fhsm_role_t   *out_role) {
+    if (h == 0 || h >= FHSM_MAX_SESSIONS) {
+        return FHSM_RV_SESSION_HANDLE_INVALID;
+    }
+    pthread_mutex_lock(&g_sess_mu);
+    if (!g_sessions[h].in_use) {
+        pthread_mutex_unlock(&g_sess_mu);
+        return FHSM_RV_SESSION_HANDLE_INVALID;
+    }
+    if (out_slot)  *out_slot  = g_sessions[h].slot;
+    if (out_flags) *out_flags = g_sessions[h].flags;
+    if (out_role)  *out_role  = g_sessions[h].role;
+    pthread_mutex_unlock(&g_sess_mu);
+    return FHSM_RV_OK;
+}

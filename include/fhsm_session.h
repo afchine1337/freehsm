@@ -41,4 +41,14 @@ fhsm_rv_t fhsm_session_attach_token(unsigned long h, fhsm_token_t *t);
 fhsm_token_t *fhsm_session_token(unsigned long h);
 fhsm_role_t   fhsm_session_role(unsigned long h);
 
+/* Aggregate accessor for C_GetSessionInfo : populates slot ID, open
+ * flags, and authenticated role for the given session handle in one
+ * mutex-protected lookup. Returns FHSM_RV_OK on success, or
+ * FHSM_RV_SESSION_HANDLE_INVALID if the handle is unknown. Any out
+ * pointer may be NULL if the caller does not need that field. */
+fhsm_rv_t fhsm_session_info(unsigned long h,
+                              unsigned long *out_slot,
+                              unsigned long *out_flags,
+                              fhsm_role_t   *out_role);
+
 #endif
