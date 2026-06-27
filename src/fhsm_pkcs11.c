@@ -216,9 +216,17 @@ FHSM_EXPORT CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                                   CK_OBJECT_HANDLE *phObject);
 FHSM_EXPORT CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession,
                                    CK_OBJECT_HANDLE hObject);
+FHSM_EXPORT CK_RV C_CopyObject(CK_SESSION_HANDLE hSession,
+                                CK_OBJECT_HANDLE hObject,
+                                CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                                CK_OBJECT_HANDLE *phNewObject);
 FHSM_EXPORT CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession,
                                    CK_OBJECT_HANDLE hObject,
                                    CK_ULONG *pulSize);
+FHSM_EXPORT CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
+                                       CK_OBJECT_HANDLE hObject,
+                                       CK_ATTRIBUTE *pTemplate,
+                                       CK_ULONG ulCount);
 FHSM_EXPORT CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession,
                                        CK_OBJECT_HANDLE hObject,
                                        CK_ATTRIBUTE *pTemplate,
@@ -2704,6 +2712,261 @@ CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     return FHSM_RV_OK;
 }
 
+/* PKCS#11 v3.2 §C.6.7.5 --- C_SetAttributeValue
+ *
+ * Modifies the attributes of an existing object. The PKCS#11 spec
+ * enumerates which attributes are settable per object class ; the
+ * v1.3.0 implementation supports the four most commonly mutated :
+ *
+ *     CKA_LABEL          : NUL-terminated UTF-8, max 63 chars after
+ *                          truncation. Always settable.
+ *     CKA_ID             : opaque byte string, max 32 bytes. Always
+ *                          settable.
+ *     CKA_SENSITIVE      : one-way FALSE -> TRUE (per §C.6.7.5
+ *                          informative table). TRUE -> FALSE is
+ *                          rejected with CKR_ATTRIBUTE_READ_ONLY.
+ *     CKA_EXTRACTABLE    : one-way TRUE -> FALSE. FALSE -> TRUE is
+ *                          rejected with CKR_ATTRIBUTE_READ_ONLY.
+ *
+ * Any other attribute in the template is rejected with
+ * CKR_ATTRIBUTE_READ_ONLY (for immutable attributes such as
+ * CKA_CLASS / CKA_KEY_TYPE / CKA_VALUE) or
+ * CKR_ATTRIBUTE_TYPE_INVALID (for attributes the module does not
+ * support setting). The first error halts processing ; remaining
+ * template entries are not applied. This matches the spec's
+ * "shall fail" wording for the first invalid attribute.
+ *
+ * Added in v1.3.0 in response to Denis Mingulov's pkcs11-check
+ * report (slot 25 was unimplemented in v1.2.2). Wired into the v2.40
+ * function list at slot 25 ; mirrored into the v3.0 table by
+ * fhsm_init_v3_0_table(). */
+CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
+                          CK_OBJECT_HANDLE hObject,
+                          CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!pTemplate || ulCount == 0) return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    /* Snapshot current flags once : we will apply the SENSITIVE /
+     * EXTRACTABLE transitions as a single set_flags call after all
+     * template entries pass validation. This keeps the on-disk write
+     * count at one per call rather than per-attribute. */
+    uint8_t flags_now = 0;
+    fhsm_rv_t rv_get = fhsm_token_object_get_flags(t, (uint32_t)hObject,
+                                                    &flags_now);
+    if (rv_get != FHSM_RV_OK) return rv_get;
+    uint8_t flags_new = flags_now;
+    int flags_touched = 0;
+
+    for (CK_ULONG i = 0; i < ulCount; ++i) {
+        CK_ATTRIBUTE *a = &pTemplate[i];
+        switch (a->type) {
+            case CKA_LABEL: {
+                /* Use the template buffer directly ; the setter does a
+                 * bounded copy. ulValueLen of 0 is allowed and yields
+                 * an empty label. */
+                char buf[64];
+                size_t n = a->ulValueLen;
+                if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+                memcpy(buf, a->pValue, n);
+                buf[n] = '\0';
+                fhsm_rv_t r = fhsm_token_object_set_label(
+                                t, (uint32_t)hObject, buf);
+                if (r != FHSM_RV_OK) return r;
+                break;
+            }
+            case CKA_ID: {
+                fhsm_rv_t r = fhsm_token_object_set_id(
+                                t, (uint32_t)hObject,
+                                (const uint8_t *)a->pValue,
+                                (size_t)a->ulValueLen);
+                if (r != FHSM_RV_OK) return r;
+                break;
+            }
+            case CKA_SENSITIVE: {
+                if (a->ulValueLen != 1) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                uint8_t want = *(const uint8_t *)a->pValue ? 1 : 0;
+                uint8_t is_now = (flags_new & FHSM_OBJF_SENSITIVE) ? 1 : 0;
+                if (want == is_now) break;          /* no-op */
+                if (want == 0)
+                    return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
+                flags_new |= FHSM_OBJF_SENSITIVE;
+                flags_touched = 1;
+                break;
+            }
+            case CKA_EXTRACTABLE: {
+                if (a->ulValueLen != 1) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                uint8_t want = *(const uint8_t *)a->pValue ? 1 : 0;
+                uint8_t is_now = (flags_new & FHSM_OBJF_EXTRACTABLE) ? 1 : 0;
+                if (want == is_now) break;          /* no-op */
+                if (want == 1)
+                    return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
+                flags_new &= (uint8_t)~FHSM_OBJF_EXTRACTABLE;
+                flags_touched = 1;
+                break;
+            }
+            case CKA_CLASS:
+            case CKA_KEY_TYPE:
+            case CKA_VALUE:
+                /* Immutable after object creation. */
+                return 0x00000010UL;                 /* CKR_ATTRIBUTE_READ_ONLY */
+            default:
+                return 0x00000012UL;                 /* CKR_ATTRIBUTE_TYPE_INVALID */
+        }
+    }
+
+    if (flags_touched) {
+        fhsm_rv_t r = fhsm_token_object_set_flags(t, (uint32_t)hObject,
+                                                   flags_new);
+        if (r != FHSM_RV_OK) return r;
+    }
+
+    return FHSM_RV_OK;
+}
+
+/* PKCS#11 v3.2 §C.6.7.3 --- C_CopyObject
+ *
+ * Creates a copy of an existing object and applies an override
+ * template. The new object inherits all attributes of the original ;
+ * template entries override individual attributes per the same rules
+ * as C_SetAttributeValue. The override template may NOT change
+ * CKA_CLASS, CKA_KEY_TYPE, or CKA_VALUE (CKR_TEMPLATE_INCONSISTENT
+ * if attempted) and must respect the one-way SENSITIVE / EXTRACTABLE
+ * transitions.
+ *
+ * Implementation strategy : read the original via
+ * fhsm_token_object_get + the small auxiliary accessors, apply the
+ * template overrides to a local working copy of the (label, id,
+ * flags) triple, then call fhsm_token_object_add to create a fresh
+ * persistent object with the overridden attributes plus the
+ * original value blob.
+ *
+ * Added in v1.3.0 in response to Denis Mingulov's pkcs11-check
+ * report (slot 21 was unimplemented in v1.2.2). Wired into the v2.40
+ * function list at slot 21 ; mirrored into the v3.0 table by
+ * fhsm_init_v3_0_table(). */
+CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
+                   CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                   CK_OBJECT_HANDLE *phNewObject) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (!phNewObject) return FHSM_RV_ARGUMENTS_BAD;
+    /* Empty template is legal : it means "a verbatim copy". */
+    if (ulCount > 0 && !pTemplate) return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    /* Read original object's value + scalar fields. */
+    const uint8_t *src_value = NULL;
+    size_t src_value_len = 0;
+    uint32_t src_class = 0, src_key_type = 0;
+    fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hObject,
+                                         &src_value, &src_value_len,
+                                         &src_class, &src_key_type);
+    if (r != FHSM_RV_OK) return r;
+
+    /* Read original label / id / flags via the auxiliary accessors. */
+    char     copy_label[64] = "";
+    uint8_t  copy_id[32] = {0};
+    size_t   copy_id_len = 0;
+    uint8_t  copy_flags = 0;
+    {
+        const char *lp = NULL; size_t llen = 0;
+        if (fhsm_token_object_get_label(t, (uint32_t)hObject, &lp, &llen)
+            == FHSM_RV_OK && lp && llen > 0) {
+            size_t n = llen < sizeof(copy_label) - 1
+                            ? llen : sizeof(copy_label) - 1;
+            memcpy(copy_label, lp, n);
+            copy_label[n] = '\0';
+        }
+    }
+    {
+        const uint8_t *ip = NULL; size_t ilen = 0;
+        if (fhsm_token_object_get_id(t, (uint32_t)hObject, &ip, &ilen)
+            == FHSM_RV_OK && ip && ilen > 0 && ilen <= sizeof(copy_id)) {
+            memcpy(copy_id, ip, ilen);
+            copy_id_len = ilen;
+        }
+    }
+    (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &copy_flags);
+
+    /* Apply override template. Same rules as C_SetAttributeValue but
+     * with CKA_CLASS / CKA_KEY_TYPE / CKA_VALUE producing
+     * CKR_TEMPLATE_INCONSISTENT rather than CKR_ATTRIBUTE_READ_ONLY
+     * (PKCS#11 v3.2 §C.6.7.3 specifies the former for class-changing
+     * attempts during copy). */
+    for (CK_ULONG i = 0; i < ulCount; ++i) {
+        CK_ATTRIBUTE *a = &pTemplate[i];
+        switch (a->type) {
+            case CKA_LABEL: {
+                fhsm_zeroize(copy_label, sizeof(copy_label));
+                size_t n = a->ulValueLen < sizeof(copy_label) - 1
+                                ? a->ulValueLen : sizeof(copy_label) - 1;
+                memcpy(copy_label, a->pValue, n);
+                copy_label[n] = '\0';
+                break;
+            }
+            case CKA_ID: {
+                if (a->ulValueLen > sizeof(copy_id))
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                fhsm_zeroize(copy_id, sizeof(copy_id));
+                if (a->ulValueLen > 0)
+                    memcpy(copy_id, a->pValue, a->ulValueLen);
+                copy_id_len = (size_t)a->ulValueLen;
+                break;
+            }
+            case CKA_SENSITIVE: {
+                if (a->ulValueLen != 1)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                uint8_t want = *(const uint8_t *)a->pValue ? 1 : 0;
+                uint8_t is_now = (copy_flags & FHSM_OBJF_SENSITIVE) ? 1 : 0;
+                if (want == is_now) break;
+                if (want == 0)
+                    return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
+                copy_flags |= FHSM_OBJF_SENSITIVE;
+                break;
+            }
+            case CKA_EXTRACTABLE: {
+                if (a->ulValueLen != 1)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                uint8_t want = *(const uint8_t *)a->pValue ? 1 : 0;
+                uint8_t is_now = (copy_flags & FHSM_OBJF_EXTRACTABLE) ? 1 : 0;
+                if (want == is_now) break;
+                if (want == 1)
+                    return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
+                copy_flags &= (uint8_t)~FHSM_OBJF_EXTRACTABLE;
+                break;
+            }
+            case CKA_CLASS:
+            case CKA_KEY_TYPE:
+            case CKA_VALUE:
+                return 0x000000D1UL;                 /* CKR_TEMPLATE_INCONSISTENT */
+            default:
+                return 0x00000012UL;                 /* CKR_ATTRIBUTE_TYPE_INVALID */
+        }
+    }
+
+    /* Persist the new object. fhsm_token_object_add returns the new
+     * handle in *out_handle. The source value blob is referenced
+     * read-only ; the token store performs its own copy. */
+    uint32_t new_handle = 0;
+    fhsm_rv_t r2 = fhsm_token_object_add(t, src_class, src_key_type,
+                                          copy_label,
+                                          src_value, src_value_len,
+                                          copy_id, copy_id_len,
+                                          copy_flags, &new_handle);
+    if (r2 != FHSM_RV_OK) return r2;
+
+    *phNewObject = (CK_OBJECT_HANDLE)new_handle;
+    return FHSM_RV_OK;
+}
+
 CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
                         CK_ULONG ulCount) {
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -4420,9 +4683,11 @@ CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
         fhsm_function_list.pfn[19] = (void*)(uintptr_t)C_Logout;           /* slot 19 */
         /* Object lifecycle */
         fhsm_function_list.pfn[20] = (void*)(uintptr_t)C_CreateObject;     /* slot 20 (v1.2.2) */
+        fhsm_function_list.pfn[21] = (void*)(uintptr_t)C_CopyObject;       /* slot 21 (v1.3.0) */
         fhsm_function_list.pfn[22] = (void*)(uintptr_t)C_DestroyObject;    /* slot 22 */
         fhsm_function_list.pfn[23] = (void*)(uintptr_t)C_GetObjectSize;    /* slot 23 (v1.2.2) */
         fhsm_function_list.pfn[24] = (void*)(uintptr_t)C_GetAttributeValue;/* slot 24 */
+        fhsm_function_list.pfn[25] = (void*)(uintptr_t)C_SetAttributeValue;/* slot 25 (v1.3.0) */
         fhsm_function_list.pfn[26] = (void*)(uintptr_t)C_FindObjectsInit;  /* slot 26 */
         fhsm_function_list.pfn[27] = (void*)(uintptr_t)C_FindObjects;      /* slot 27 */
         fhsm_function_list.pfn[28] = (void*)(uintptr_t)C_FindObjectsFinal; /* slot 28 */

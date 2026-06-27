@@ -196,6 +196,25 @@ fhsm_rv_t fhsm_token_object_get_id(fhsm_token_t *t, uint32_t handle,
 fhsm_rv_t fhsm_token_object_get_flags(fhsm_token_t *t, uint32_t handle,
                                        uint8_t *out_flags);
 
+/* Mutation accessors used by C_SetAttributeValue and C_CopyObject
+ * (added in v1.3.0 in response to Denis Mingulov's pkcs11-check
+ * Finding 2 ; the v1.2.2 release wired three of the five missing
+ * function-list slots and deferred C_CopyObject + C_SetAttributeValue
+ * to v1.3.0 pending the underlying token-level mutation primitives).
+ *
+ * Each setter requires the token to be in the logged-in state and
+ * persists the change atomically to disk before returning (same model
+ * as fhsm_token_object_destroy). The caller is responsible for
+ * enforcing PKCS#11's one-way state transitions on CKA_SENSITIVE and
+ * CKA_EXTRACTABLE before calling set_flags ; this layer accepts the
+ * new flags byte unconditionally. */
+fhsm_rv_t fhsm_token_object_set_label(fhsm_token_t *t, uint32_t handle,
+                                       const char *label);
+fhsm_rv_t fhsm_token_object_set_id(fhsm_token_t *t, uint32_t handle,
+                                    const uint8_t *id, size_t id_len);
+fhsm_rv_t fhsm_token_object_set_flags(fhsm_token_t *t, uint32_t handle,
+                                       uint8_t flags);
+
 /* Destroy an object by handle. The slot is marked free and the on-disk
  * blob is rewritten. Returns FHSM_RV_KEY_HANDLE_INVALID if not found. */
 fhsm_rv_t fhsm_token_object_destroy(fhsm_token_t *t, uint32_t handle);

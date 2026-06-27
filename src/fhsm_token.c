@@ -1020,6 +1020,94 @@ fhsm_rv_t fhsm_token_object_get_flags(fhsm_token_t *t, uint32_t handle,
     return FHSM_RV_KEY_HANDLE_INVALID;
 }
 
+/* ---------------------------------------------------------------------------
+ * Mutation accessors (v1.3.0+) --- shared helper finds the object and
+ * applies a small mutation, then atomically persists. The token must be
+ * logged in (DEK present + objects_loaded) ; otherwise the function
+ * returns FHSM_RV_USER_NOT_LOGGED_IN to mirror fhsm_token_object_destroy.
+ *
+ * Pattern duplicated three times rather than refactored behind a
+ * function-pointer indirection : the bodies are tiny, each one has a
+ * different argument shape, and the duplication is auditable at a
+ * glance. ALC_DVS prefers small repetitive code over abstraction that
+ * obscures the per-attribute write boundary.
+ * ----------------------------------------------------------------------- */
+fhsm_rv_t fhsm_token_object_set_label(fhsm_token_t *t, uint32_t handle,
+                                       const char *label) {
+    if (!t || !label) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            /* Bounded copy : at most FHSM_OBJ_LABEL_LEN - 1 chars +
+             * NUL terminator. Pre-zero the buffer so the unused tail
+             * does not leak whatever was there before. */
+            fhsm_zeroize(t->objects[i].label, sizeof(t->objects[i].label));
+            size_t n = strnlen(label, FHSM_OBJ_LABEL_LEN - 1);
+            memcpy(t->objects[i].label, label, n);
+            /* label is uint8_t[64] ; NUL terminator already present
+             * thanks to the zeroize above. */
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+fhsm_rv_t fhsm_token_object_set_id(fhsm_token_t *t, uint32_t handle,
+                                    const uint8_t *id, size_t id_len) {
+    if (!t) return FHSM_RV_ARGUMENTS_BAD;
+    if (id_len > sizeof(((fhsm_object_t *)0)->id)) {
+        return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    }
+    if (id_len > 0 && !id) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            fhsm_zeroize(t->objects[i].id, sizeof(t->objects[i].id));
+            if (id_len > 0) memcpy(t->objects[i].id, id, id_len);
+            t->objects[i].id_len = (uint32_t)id_len;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+fhsm_rv_t fhsm_token_object_set_flags(fhsm_token_t *t, uint32_t handle,
+                                       uint8_t flags) {
+    if (!t) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            t->objects[i].flags = flags;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
 fhsm_rv_t fhsm_token_object_destroy(fhsm_token_t *t, uint32_t handle) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
