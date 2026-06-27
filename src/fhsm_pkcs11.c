@@ -3715,25 +3715,68 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
     }
 
     int ok = 0;
-    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
-    if (!mdctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
+    EVP_MD_CTX *mdctx = NULL;
+    EVP_PKEY_CTX *pkctx_raw = NULL;
 
     const char *hash = mech_hash_name(op->mechanism);
     const EVP_MD *md = hash ? EVP_MD_fetch(NULL, hash, NULL) : NULL;
+    size_t out_len = *sig_len;
 
-    EVP_PKEY_CTX *pkctx = NULL;
-    if (EVP_DigestSignInit_ex(mdctx, &pkctx, hash, NULL, NULL, pkey, NULL) != 1)
-        goto cleanup;
-    if (mech_is_pss(op->mechanism)) {
-        if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING) <= 0)
+    /* === RAW signing path (hash == NULL) ====================================
+     *
+     * The mechanisms CKM_ECDSA (bare) and CKM_RSA_PKCS (bare) expect the
+     * input to be a pre-computed digest. The canonical OpenSSL 3.x API to
+     * sign a pre-computed digest is EVP_PKEY_sign --- NOT EVP_DigestSign
+     * with mdname = NULL.
+     *
+     * Calling EVP_DigestSignInit_ex(..., mdname = NULL, ...) on the default
+     * OpenSSL 3.x provider's ECDSA signature operation does not produce a
+     * "raw" signature : the provider applies an internal default digest
+     * (observed as SHA-256 on the 3.5.x default provider) before signing.
+     * The result is that the module signs SHA-256(input) instead of input,
+     * which the symmetric C_Verify path also accepts (because it applies
+     * the same default digest), but any third-party verifier expecting
+     * raw ECDSA on the digest rejects.
+     *
+     * Fix (v1.2.2) : route the raw case through EVP_PKEY_sign directly.
+     * The bug was reported by Denis Mingulov via pkcs11-check on
+     * 2026-06-26 ; affects every signed release of FreeHSM C that has
+     * shipped this path. See CHANGELOG entry for v1.2.2. */
+    if (hash == NULL) {
+        pkctx_raw = EVP_PKEY_CTX_new(pkey, NULL);
+        if (!pkctx_raw) goto cleanup;
+        if (EVP_PKEY_sign_init(pkctx_raw) <= 0) goto cleanup;
+        if (mech_is_pss(op->mechanism)) {
+            if (EVP_PKEY_CTX_set_rsa_padding(pkctx_raw,
+                                              RSA_PKCS1_PSS_PADDING) <= 0)
+                goto cleanup;
+            int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
+            if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx_raw, saltlen) <= 0)
+                goto cleanup;
+        }
+        if (EVP_PKEY_sign(pkctx_raw, sig, &out_len, data, data_len) <= 0)
             goto cleanup;
-        int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
-        if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen) <= 0)
+    } else {
+        /* === Hashed signing path (hash != NULL) ============================
+         * Mechanisms CKM_ECDSA_SHAxxx, CKM_SHAxxx_RSA_PKCS, etc. : OpenSSL
+         * hashes the input with `hash` before signing. This path was always
+         * correct. */
+        mdctx = EVP_MD_CTX_new();
+        if (!mdctx) goto cleanup;
+        EVP_PKEY_CTX *pkctx = NULL;
+        if (EVP_DigestSignInit_ex(mdctx, &pkctx, hash, NULL, NULL, pkey, NULL) != 1)
+            goto cleanup;
+        if (mech_is_pss(op->mechanism)) {
+            if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING) <= 0)
+                goto cleanup;
+            int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
+            if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen) <= 0)
+                goto cleanup;
+        }
+        if (EVP_DigestSign(mdctx, sig, &out_len, data, data_len) != 1)
             goto cleanup;
     }
-    size_t out_len = *sig_len;
-    if (EVP_DigestSign(mdctx, sig, &out_len, data, data_len) != 1)
-        goto cleanup;
+
     /* PKCS#11 v3.2 conformity : for the CKM_ECDSA family OpenSSL
      * produced a DER ECDSA-Sig-Value, but the spec mandates raw
      * r||s. Convert in place. */
@@ -3752,7 +3795,8 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
 
 cleanup:
     if (md) EVP_MD_free((EVP_MD*)md);
-    EVP_MD_CTX_free(mdctx);
+    if (mdctx) EVP_MD_CTX_free(mdctx);
+    if (pkctx_raw) EVP_PKEY_CTX_free(pkctx_raw);
     EVP_PKEY_free(pkey);
     return ok ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
@@ -3992,55 +4036,92 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
         return rv;
     }
 
-    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
-    if (!mdctx) { EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_HOST_MEMORY; }
-
-    EVP_PKEY_CTX *pkctx = NULL;
     const char *hash = mech_hash_name(op->mechanism);
     int verify_ok = 0;
-    if (EVP_DigestVerifyInit_ex(mdctx, &pkctx, hash, NULL, NULL, pkey, NULL) == 1) {
+    EVP_MD_CTX *mdctx = NULL;
+    EVP_PKEY_CTX *pkctx_raw = NULL;
+
+    /* Convert raw r||s ECDSA signature to DER (single conversion used for
+     * both raw and hashed paths). nlen check rejects malformed wire sig. */
+    const unsigned char *sig_to_verify = pSig;
+    CK_ULONG sig_to_verify_len = ulSigLen;
+    uint8_t *der_buf = NULL;
+    if (fhsm_mech_is_ecdsa(op->mechanism)) {
+        size_t nlen = (size_t)((EVP_PKEY_get_bits(pkey) + 7) / 8);
+        if (nlen == 0 || ulSigLen != 2 * nlen) {
+            EVP_PKEY_free(pkey);
+            op->active = 0;
+            return FHSM_RV_SIGNATURE_INVALID;
+        }
+        size_t der_len = fhsm_ecdsa_raw_to_der(pSig, ulSigLen, nlen, &der_buf);
+        if (der_len == 0 || !der_buf) {
+            EVP_PKEY_free(pkey);
+            op->active = 0;
+            return FHSM_RV_SIGNATURE_INVALID;
+        }
+        sig_to_verify     = der_buf;
+        sig_to_verify_len = (CK_ULONG)der_len;
+    }
+
+    /* === RAW verify path (hash == NULL) =====================================
+     *
+     * Symmetric to the sign path : raw CKM_ECDSA / CKM_RSA_PKCS expect the
+     * input to be a pre-computed digest. Use EVP_PKEY_verify directly. See
+     * sign_asymmetric for the full rationale on why EVP_DigestVerify with
+     * mdname = NULL silently applies a default digest in OpenSSL 3.x.
+     *
+     * Fix (v1.2.2). Bug reported by Denis Mingulov via pkcs11-check
+     * on 2026-06-26. */
+    if (hash == NULL) {
+        pkctx_raw = EVP_PKEY_CTX_new(pkey, NULL);
+        if (!pkctx_raw) goto vcleanup;
+        if (EVP_PKEY_verify_init(pkctx_raw) <= 0) goto vcleanup;
         if (mech_is_pss(op->mechanism)) {
-            EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING);
-            /* Use the caller-supplied salt length when CK_RSA_PKCS_PSS_PARAMS
-             * was provided ; otherwise fall back to digest length (-1). */
+            if (EVP_PKEY_CTX_set_rsa_padding(pkctx_raw,
+                                              RSA_PKCS1_PSS_PADDING) <= 0)
+                goto vcleanup;
             int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
-            EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen);
+            if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx_raw, saltlen) <= 0)
+                goto vcleanup;
         }
-        /* PKCS#11 v3.2 §6.13 conformity : the CKM_ECDSA family
-         * accepts raw r||s on the wire ; convert to DER for
-         * EVP_DigestVerify. A wrong sig length is a structural
-         * SIGNATURE_INVALID, not an internal error. */
-        const unsigned char *sig_to_verify = pSig;
-        CK_ULONG sig_to_verify_len = ulSigLen;
-        uint8_t *der_buf = NULL;
-        if (fhsm_mech_is_ecdsa(op->mechanism)) {
-            size_t nlen = (size_t)((EVP_PKEY_get_bits(pkey) + 7) / 8);
-            if (nlen == 0 || ulSigLen != 2 * nlen) {
-                EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
-                op->active = 0;
-                return FHSM_RV_SIGNATURE_INVALID;
-            }
-            size_t der_len = fhsm_ecdsa_raw_to_der(pSig, ulSigLen, nlen, &der_buf);
-            if (der_len == 0 || !der_buf) {
-                EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
-                op->active = 0;
-                return FHSM_RV_SIGNATURE_INVALID;
-            }
-            sig_to_verify     = der_buf;
-            sig_to_verify_len = (CK_ULONG)der_len;
-        }
-        int vrv = EVP_DigestVerify(mdctx, sig_to_verify, sig_to_verify_len,
+        int vrv = EVP_PKEY_verify(pkctx_raw, sig_to_verify, sig_to_verify_len,
                                     pData, ulDataLen);
-        if (der_buf) OPENSSL_free(der_buf);
         verify_ok = (vrv == 1);
         if (vrv < 0) {
-            /* genuine verification error rather than mismatch */
-            EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+            if (der_buf) OPENSSL_free(der_buf);
+            EVP_PKEY_CTX_free(pkctx_raw);
+            EVP_PKEY_free(pkey);
             op->active = 0;
             return FHSM_RV_FUNCTION_FAILED;
         }
+    } else {
+        /* === Hashed verify path (hash != NULL) ============================ */
+        mdctx = EVP_MD_CTX_new();
+        if (!mdctx) goto vcleanup;
+        EVP_PKEY_CTX *pkctx = NULL;
+        if (EVP_DigestVerifyInit_ex(mdctx, &pkctx, hash, NULL, NULL, pkey, NULL) == 1) {
+            if (mech_is_pss(op->mechanism)) {
+                EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING);
+                int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
+                EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen);
+            }
+            int vrv = EVP_DigestVerify(mdctx, sig_to_verify, sig_to_verify_len,
+                                        pData, ulDataLen);
+            verify_ok = (vrv == 1);
+            if (vrv < 0) {
+                if (der_buf) OPENSSL_free(der_buf);
+                EVP_MD_CTX_free(mdctx);
+                EVP_PKEY_free(pkey);
+                op->active = 0;
+                return FHSM_RV_FUNCTION_FAILED;
+            }
+        }
     }
-    EVP_MD_CTX_free(mdctx);
+
+vcleanup:
+    if (der_buf) OPENSSL_free(der_buf);
+    if (mdctx) EVP_MD_CTX_free(mdctx);
+    if (pkctx_raw) EVP_PKEY_CTX_free(pkctx_raw);
     EVP_PKEY_free(pkey);
     op->active = 0;
     rv = verify_ok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
