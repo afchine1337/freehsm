@@ -84,3 +84,5 @@ RELEASE_GPG_KEY
 *.gpg.key
 deploy-key*
 build.log
+tests/test_smoke.sha256
+tests/test_smoke.tampered
