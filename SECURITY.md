@@ -11,20 +11,38 @@ Project lead : **Afchine Madjlessi** ([`afchine.mad@gmail.com`](mailto:afchine.m
 ## Maintainer GPG key rotation — 2026-06-12
 
 The maintainer GPG signing key has been rotated. The previous key
-`743A6A5904A1461A646408DE48560162DBBF28A2` (Ed25519, generated 2026-06-12)
-was **compromised** : an ASCII-armored export of the private key was
-accidentally committed to the public repository in commit `922c6f7`
-during the initial open-source release.
+`B79726CB087375CF990E00E4A0BC5BB2FB1EE342` (Ed25519, generated
+2026-06-12 06:42 UTC) was **compromised** : an ASCII-armored export
+of the private key was accidentally committed to the public
+repository in commit `922c6f7` during the initial open-source
+release.
+
+> **Correction note (2026-06-27).** Earlier versions of this section
+> (between the 2026-06-13 rotation commit `2e6a413` and the
+> 2026-06-27 correction in commit listed below) listed the previous
+> key fingerprint incorrectly --- the *new* key fingerprint
+> `743A6A59…DBBF28A2` was shown in both the "previous" and the
+> "new" position due to a copy-paste typo when this section was
+> first drafted. The fingerprints below are now consistent with
+> the canonical record in the rotation commit message
+> `2e6a413` (`git show 2e6a413`) and with the keyring state of the
+> maintainer.
 
 Mitigations completed on 2026-06-12 :
 
-- A revocation certificate was generated with reason **"Key has been
-  compromised"** and pushed to `keys.openpgp.org` and
+- A revocation certificate was generated for
+  `B79726CB087375CF990E00E4A0BC5BB2FB1EE342` with reason **"Key has
+  been compromised"** and pushed to `keys.openpgp.org` and
   `keyserver.ubuntu.com`. The old key now appears as `[revoked]` on
-  any synchronized client.
+  any synchronized client (verify locally :
+  `gpg --keyserver hkps://keys.openpgp.org --recv-keys
+  B79726CB087375CF990E00E4A0BC5BB2FB1EE342`).
 - A new release signing key was generated :
-  `743A6A5904A1461A646408DE48560162DBBF28A2` (Ed25519, valid until
-  2028-06-11), published on the same keyservers.
+  `743A6A5904A1461A646408DE48560162DBBF28A2` (Ed25519, generated
+  2026-06-12 20:51 UTC, valid until 2028-06-11), published on the
+  same keyservers. The new key carries a cv25519 encryption subkey
+  `9813876A34BADD4A0A50915E7EAC4BA55574DBE8` added on 2026-06-26 in
+  response to the Denis Mingulov v1.2.2 disclosure (see below).
 - The git history on GitHub, GitLab and Codeberg was rewritten with
   `git-filter-repo --invert-paths --path afchine-secret-BACKUP.asc`
   to remove every blob reference to the leaked file. The current
@@ -33,9 +51,10 @@ Mitigations completed on 2026-06-12 :
 - The release tag `v1.1.0` was re-signed with the new key and
   force-pushed.
 
-If you cloned `freehsm-c` between 2026-06-12 morning and 2026-06-12
-evening, your local clone may still contain the leaked file in
-`.git/objects/`. You should re-clone from scratch:
+If you cloned `freehsm-c` between 2026-06-12 morning (~07:00 UTC)
+and 2026-06-12 evening (~21:00 UTC), your local clone may still
+contain the leaked file in `.git/objects/`. You should re-clone
+from scratch:
 
 ```bash
 rm -rf freehsm-c
