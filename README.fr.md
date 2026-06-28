@@ -7,8 +7,8 @@
 [![Mirror](https://github.com/afchine1337/freehsm-c/actions/workflows/mirror.yml/badge.svg)](https://github.com/afchine1337/freehsm-c/actions/workflows/mirror.yml)
 
 
-> Version anglaise : voir [`README.md`](README.md). Index documentation : [`docs/INDEX.md`](docs/INDEX.md).
-> English version: see [`README.md`](README.md). Documentation index: [`docs/INDEX.md`](docs/INDEX.md).
+> Version anglaise : voir [`README.md`](README.md). Index documentation : [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
+> English version: see [`README.md`](README.md). Documentation index: [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
 
 > **Note sur le badge OpenSSF/CII** : le projet est enregistré sur `bestpractices.dev` (ID 13190). `bestpractices.dev` (OpenSSF Best Practices) est le successeur officiel du programme CII Best Practices : un seul badge couvre les deux.
 

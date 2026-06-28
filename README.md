@@ -6,7 +6,7 @@
 [![CI](https://github.com/afchine1337/freehsm-c/actions/workflows/ci.yml/badge.svg)](https://github.com/afchine1337/freehsm-c/actions/workflows/ci.yml)
 [![Mirror](https://github.com/afchine1337/freehsm-c/actions/workflows/mirror.yml/badge.svg)](https://github.com/afchine1337/freehsm-c/actions/workflows/mirror.yml)
 
-> French version: see [`README.fr.md`](README.fr.md). Documentation index: [`docs/INDEX.md`](docs/INDEX.md).
+> French version: see [`README.fr.md`](README.fr.md). Documentation index: [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
 
 Native **C11** re-implementation of the FreeHSM PKCS#11 v3.2 Soft HSM, designed to pass a FIPS 140-3 Level 1 evaluation and an augmented Common Criteria EAL4+ certification (ALC_FLR.2 + AVA_VAN.5).
 
@@ -67,7 +67,7 @@ freehsm_c/
 │   ├── test_smoke.c               # E2E smoke (init + KAT + encrypt/decrypt + tamper)
 │   └── test_dispatch.c            # Checks weak/strong override, table sort, counts
 └── docs/
-    ├── INDEX.md                   # Bilingual doc index
+    ├── DOC_INDEX.md               # Bilingual doc index
     ├── ARCHITECTURE.md            # Modular decomposition + data flow
     ├── FIPS_140_3.md              # Non-proprietary Security Policy (FIPS 140-3)
     ├── EAL4_PLUS.md               # Target of Evaluation (CC EAL4+)
