@@ -1,0 +1,9 @@
+title: FreeHSM C
+description: An open-source PKCS#11 v3.2 cryptographic module under Simorgh Labs
+theme: jekyll-theme-minimal
+markdown: kramdown
+plugins:
+  - jekyll-feed
+
+show_downloads: false
+google_analytics:
