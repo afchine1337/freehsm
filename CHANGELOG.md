@@ -13,6 +13,69 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.0] --- 2026-06-28
+
+**v2.40 dispatch-table near-completion release.** Wires 6 additional v2.40 function-list slots that close most of the remaining gap between FreeHSM C and a strict OASIS PKCS#11 v2.40 implementation, bringing dispatch coverage from **51 / 67 to 57 / 67 (85 %)**.
+
+This is **functionality-additive only** : no behavioral change to any pre-existing function ; no security fix. Forward-compatible with v1.3.0 PIN files, token store, and audit log chain. Migration notes: none.
+
+### Added
+
+#### Tier 1 --- session management + legacy parallel + DRBG seed
+
+* **`C_CloseAllSessions`** (PKCS#11 v3.2 §C.6.6.2) wired into slot 14. Iterates session-handle range (1..256), closes each open session for the given slot. The module is a single-slot software token ; `slotID != 0` returns `CKR_SLOT_ID_INVALID`.
+
+* **`C_SeedRandom`** (§C.6.6.5) wired into slot 63. Returns `CKR_RANDOM_SEED_NOT_SUPPORTED` unconditionally per NIST SP 800-90A §9.2 : a SP 800-90A DRBG must be seeded only from approved entropy sources ; caller-supplied seed material is rejected in FIPS mode and rejected for security in legacy mode (attacker-controlled seed could narrow the entropy distribution downstream).
+
+* **`C_GetFunctionStatus`** (§C.6.5.6) wired into slot 65. Returns `CKR_FUNCTION_NOT_PARALLEL` per spec. The PKCS#11 parallel-function model was abandoned in v2.10 ; this function is a legacy stub on every modern non-parallel implementation. `C_CancelFunction` is also implemented and exported as an ELF symbol but cannot be wired in the current v2.40 dispatch due to the 67-slot table collision with slot 66 (`C_WaitForSlotEvent`, wired in v1.3.0). Documented as a roadmap item for v1.5.x : resize `pfn[]` to 68 slots to fit both per strict spec ordering.
+
+#### Tier 2 --- digest extension + verify multipart
+
+* **`C_DigestKey`** (§C.6.10.5) wired into slot 40. Feeds a key value into the ongoing digest context (equivalent to calling `C_DigestUpdate` on the key bytes). Refuses sensitive (`CKA_SENSITIVE=TRUE`) and non-`CKO_SECRET_KEY` objects with `CKR_KEY_INDIGESTIBLE` so that the digest output cannot be used as a side channel to recover key material from asymmetric private keys. Lazy-init the `EVP_MD_CTX` so a digest-of-key-alone via `C_DigestInit → C_DigestKey → C_DigestFinal` is supported without intervening data.
+
+* **`C_VerifyUpdate`** (§C.6.13.6) wired into slot 50. Multipart HMAC verification, symmetric to `C_SignUpdate` from earlier releases. Currently scoped to `CKM_SHA256_HMAC` ; asymmetric multipart verify (which would defer `EVP_DigestVerifyFinal` until `C_VerifyFinal`) is not yet implemented and falls through to `CKR_MECHANISM_INVALID`.
+
+* **`C_VerifyFinal`** (§C.6.13.7) wired into slot 51. HMAC MAC accumulation final with **constant-time compare via `fhsm_ct_memcmp`** to avoid timing side channels on signature validation. Mirrors the existing `C_SignFinal` pattern.
+
+### Coverage status
+
+```
+PKCS#11 v2.40 dispatch table : 57 / 67 wired (85 %)
+                               (was 51 / 67 in v1.3.0)
+                               (was 47 / 67 in v1.2.2)
+                               (was 44 / 67 in v1.2.1 pre-Denis)
+Unwired (10 slots, all by design) :
+    16, 17  C_GetOperationState / C_SetOperationState
+            (HSM-internal context switching, not applicable to
+             a software token)
+    46, 47  C_SignRecoverInit / C_SignRecover
+    52, 53  C_VerifyRecoverInit / C_VerifyRecover
+            (RSA recovery, ISO/IEC 9796-2, rarely used in practice)
+    54-57   C_DigestEncryptUpdate / C_DecryptDigestUpdate
+            / C_SignEncryptUpdate / C_DecryptVerifyUpdate
+            (dual-operation streaming, niche)
+
+Plus C_CancelFunction symbol exported but not in v2.40 dispatch
+(67-slot table collision ; tracked for v1.5.x).
+```
+
+### Validation
+
+* Build clean : `-Werror -Wpedantic -Wconversion -Wstringop-truncation -Wmissing-prototypes`, zero warning.
+* All 62 KAT vectors green in dev mode and CI `test-fips-mode`.
+* Python ctypes verification confirms all 6 new slots (`pfn[14, 40, 50, 51, 63, 65]`) are distinct from the `fhsm_not_supported` sentinel at `pfn[16]`.
+* The v3.0 dispatch table (`fhsm_function_list_3_0`) automatically mirrors slots 0..66 from v2.40 via the existing loop in `fhsm_init_v3_0_table()` ; no separate v3.0 wiring needed.
+* CI `reproducibility` : byte-identical builds across two independent runs.
+
+### Affected releases (forward-compatibility)
+
+| Release | Upgrade priority | Reason |
+|---|---|---|
+| v1.3.0 | Recommended | No security fix ; enhancements only. Forward-compatible. |
+| v1.2.2 and older | **Required** | See v1.3.0 and v1.2.2 advisories (`GHSA-xpxx-66pp-pf99`, `GHSA-6jx9-gh48-5qf6`, `GHSA-wgv9-m9cv-4647`). |
+
+---
+
 ## [1.3.0] --- 2026-06-27
 
 **Function-list completion + export-roundtrip extension release.** Closes the two narrative threads opened by v1.2.2 :

@@ -1,4 +1,4 @@
-# FreeHSM C --- FIPS 140-3 Security Target (Draft v0.9)
+# FreeHSM C --- FIPS 140-3 Security Target (Draft v0.10)
 
 **Status :** Pre-submission draft. Not yet evaluated by a NIST CST lab.
 
@@ -17,7 +17,7 @@
 | **Module Name** | FreeHSM C |
 | **Library Description (PKCS#11)** | `FreeHSM C (FIPS 140-3)` (CK_INFO.libraryDescription) |
 | **Token Model (PKCS#11)** | `FreeHSM-C-v1` (CK_TOKEN_INFO.model ; stable across the v1 major series) |
-| **Version** | 1.3.0-FIPS |
+| **Version** | 1.4.0-FIPS |
 | **Module Type** | Software (`libfreehsm-fips.so`, ELF-64 shared object) |
 | **Module Embodiment** | Multi-chip standalone (GPC host) |
 | **Module Boundary** | The single `.so` file at SHA-256 = (see `.fhsm_digest` section, patched by `make integrity`) |
@@ -222,6 +222,29 @@ No change to the security functions inventory (FCS_COP, FCS_CKM, FCS_RNG, FIA_*,
 
 Denis Mingulov's two remaining findings (memory-safety + key-handling) are pending via the encrypted channel and will be addressed in a v1.3.1 or v1.4.0 release as appropriate.
 
+#### 9.1.4 v1.4.0 enhancements (2026-06-28) --- v2.40 dispatch near-completion
+
+Functionality-additive only release. No defect resolved ; closes most of the remaining gap between FreeHSM C and a strict OASIS PKCS#11 v2.40 implementation. Six additional dispatch slots wired :
+
+  * `C_CloseAllSessions` (§C.6.6.2) into slot 14 ;
+  * `C_SeedRandom` (§C.6.6.5) into slot 63, returning `CKR_RANDOM_SEED_NOT_SUPPORTED` unconditionally per NIST SP 800-90A §9.2 (DRBG seed input from caller is not approved) ;
+  * `C_GetFunctionStatus` (§C.6.5.6) into slot 65, returning `CKR_FUNCTION_NOT_PARALLEL` per spec for non-parallel modules ;
+  * `C_DigestKey` (§C.6.10.5) into slot 40, with `CKR_KEY_INDIGESTIBLE` gate on sensitive keys and asymmetric private keys to prevent key-material exfiltration via the digest output ;
+  * `C_VerifyUpdate` (§C.6.13.6) into slot 50, multipart HMAC verify (mirrors `C_SignUpdate`) ;
+  * `C_VerifyFinal` (§C.6.13.7) into slot 51, with constant-time MAC compare via `fhsm_ct_memcmp` to avoid timing side channels on signature validation.
+
+`C_CancelFunction` is implemented + exported as an ELF symbol but cannot be wired in the v2.40 dispatch due to the 67-slot table collision with slot 66 (`C_WaitForSlotEvent`, wired in v1.3.0). Documented as a roadmap item for v1.5.x.
+
+Total v2.40 dispatch coverage : **57 / 67 (85 %)**. The 10 remaining unwired slots are intentional design decisions :
+
+  * `C_GetOperationState` / `C_SetOperationState` (slots 16, 17) --- HSM-internal context switching, not applicable to a software token whose operation state is process-local.
+  * `C_SignRecoverInit` / `C_SignRecover` (slots 46, 47), `C_VerifyRecoverInit` / `C_VerifyRecover` (slots 52, 53) --- RSA sign-with-message-recovery per ISO/IEC 9796-2, rarely used in modern applications.
+  * `C_DigestEncryptUpdate` / `C_DecryptDigestUpdate` / `C_SignEncryptUpdate` / `C_DecryptVerifyUpdate` (slots 54-57) --- dual-operation streaming, niche use case.
+
+No change to the security functions inventory (FCS_COP, FCS_CKM, FCS_RNG, FIA_*, FAU_*, FDP_*, FMT_*, FPT_*, FTP_*). Under CC §APE_REQ.2 unchanged-SFR rule, CMVP/CC re-validation is considered a clarification, not a re-evaluation. Token-store on-disk format unchanged ; existing v1.3.0 token files load unchanged.
+
+Denis Mingulov's two remaining findings (memory-safety + key-handling) are still pending via the encrypted channel and will be addressed in a future v1.4.x or v1.5.0 release as appropriate.
+
 ### 9.2 Conditional Self-Tests (§7.10.3)
 
 * **Pair-wise consistency** : after each `C_GenerateKeyPair`, sign+verify a known plaintext to confirm the new private key matches the public key (TODO — not yet wired).
@@ -421,7 +444,7 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 
 ### 13.7 Release track record (ALC_DEL / ALC_CMC)
 
-**22 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`. Each release tag triggers an automated workflow (`release.yml`) that :
+**23 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`. Each release tag triggers an automated workflow (`release.yml`) that :
 
 1. Verifies the tag's GPG signature against the canonical fingerprint.
 2. Builds `libfreehsm-fips.so` reproducibly in the pinned `freehsm-c-build:debian13-openssl-3.5` container.
@@ -432,7 +455,7 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 
 The mirror workflow (`mirror.yml`) cross-publishes the same tag and assets to GitLab (`gitlab.com/afchine.mad/freehsm-c`) and Codeberg (`codeberg.org/afchine1337/freehsm-c`) within seconds. This provides three independent hosts of every signed artifact, mitigating single-point-of-failure risk on the supply chain (ALC_DEL coverage).
 
-The unbroken signing chain across 22 releases — including the v1.1.13 → v1.1.18 patch cascade that fixed four latent KAT data bugs, the v1.2.0 structural decomposition of `C_CreateObject`, the v1.2.1 security patch on the integrity self-test, the v1.2.2 external-reporter-driven raw ECDSA fix plus boot-KAT extension, and the v1.3.0 function-list completion + export-roundtrip extension — is itself ALC_CMC evidence : every change that reached a shipping release passed through the signed-release pipeline, and the inventory of changes is verifiable in the `CHANGELOG.md` ledger plus the git commit history (each tagged commit is itself GPG-signed by the same fingerprint).
+The unbroken signing chain across 23 releases — including the v1.1.13 → v1.1.18 patch cascade that fixed four latent KAT data bugs, the v1.2.0 structural decomposition of `C_CreateObject`, the v1.2.1 security patch on the integrity self-test, the v1.2.2 external-reporter-driven raw ECDSA fix plus boot-KAT extension, the v1.3.0 function-list completion + export-roundtrip extension, and the v1.4.0 v2.40 dispatch near-completion (85 % coverage) — is itself ALC_CMC evidence : every change that reached a shipping release passed through the signed-release pipeline, and the inventory of changes is verifiable in the `CHANGELOG.md` ledger plus the git commit history (each tagged commit is itself GPG-signed by the same fingerprint).
 
 ### 13.8 Discovery + correction protocol (ALC_DVS / ALC_FLR)
 
