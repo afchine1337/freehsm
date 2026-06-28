@@ -160,13 +160,24 @@ typedef struct CK_MECHANISM {
 
 FHSM_EXPORT CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession,
                                     unsigned char *pSeed, CK_ULONG ulLen);
+FHSM_EXPORT CK_RV C_SeedRandom(CK_SESSION_HANDLE hSession,
+                                unsigned char *pSeed, CK_ULONG ulSeedLen);
 FHSM_EXPORT CK_RV C_WaitForSlotEvent(CK_FLAGS flags, CK_SLOT_ID *pSlot,
                                       CK_VOID_PTR pReserved);
+FHSM_EXPORT CK_RV C_CloseAllSessions(CK_SLOT_ID slotID);
+FHSM_EXPORT CK_RV C_GetFunctionStatus(CK_SESSION_HANDLE hSession);
+FHSM_EXPORT CK_RV C_CancelFunction(CK_SESSION_HANDLE hSession);
 FHSM_EXPORT CK_RV C_DigestInit(CK_SESSION_HANDLE hSession,
                                 CK_MECHANISM *pMechanism);
 FHSM_EXPORT CK_RV C_Digest(CK_SESSION_HANDLE hSession,
                             unsigned char *pData, CK_ULONG ulDataLen,
                             unsigned char *pDigest, CK_ULONG *pulDigestLen);
+FHSM_EXPORT CK_RV C_DigestKey(CK_SESSION_HANDLE hSession,
+                               CK_OBJECT_HANDLE hKey);
+FHSM_EXPORT CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession,
+                                  unsigned char *pPart, CK_ULONG ulPartLen);
+FHSM_EXPORT CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession,
+                                 unsigned char *pSig, CK_ULONG ulSigLen);
 FHSM_EXPORT CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession,
                                  CK_MECHANISM *pMechanism,
                                  CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
@@ -371,6 +382,74 @@ CK_RV C_WaitForSlotEvent(CK_FLAGS flags, CK_SLOT_ID *pSlot,
     /* Software token : no hot-plug ; refuse blocking calls explicitly
      * rather than hang the caller. */
     return 0x00000054UL;            /* CKR_FUNCTION_NOT_SUPPORTED */
+}
+
+/* ===========================================================================
+ * v1.4.0 Tier 1 --- session management + legacy parallel + DRBG seed.
+ *
+ * These four functions close the v2.40 dispatch-table gaps that don't
+ * require new cryptographic primitives.
+ * ========================================================================= */
+
+/* PKCS#11 v3.2 §C.6.6.2 : C_CloseAllSessions
+ *
+ * Closes every open session that belongs to the given slot. The module
+ * is a single-slot software token (slotID must be 0) ; we iterate the
+ * session-handle range (1 .. FHSM_MAX_SESSIONS = 256) and close each
+ * handle that resolves to a non-NULL token via fhsm_session_token.
+ * C_CloseSession is idempotent on stale handles and returns
+ * CKR_SESSION_HANDLE_INVALID which we silently consume here. */
+CK_RV C_CloseAllSessions(CK_SLOT_ID slotID) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (slotID != 0) return 0x00000003UL;   /* CKR_SLOT_ID_INVALID */
+    for (CK_SESSION_HANDLE h = 1; h <= 256; h++) {
+        if (fhsm_session_token(h) != NULL) {
+            (void)C_CloseSession(h);
+        }
+    }
+    return FHSM_RV_OK;
+}
+
+/* PKCS#11 v3.2 §C.6.6.5 : C_SeedRandom
+ *
+ * The DRBG used by C_GenerateRandom is a CTR_DRBG-AES-256 (FIPS provider)
+ * or the OpenSSL default provider's RAND when the FIPS provider is not
+ * available. Per NIST SP 800-90A §9.2, a SP 800-90A DRBG must be seeded
+ * only from approved entropy sources (a hardware RNG or a SP 800-90B
+ * entropy source) ; mixing arbitrary caller-supplied bytes into the
+ * DRBG state is not approved.
+ *
+ * The conformant answer is CKR_RANDOM_SEED_NOT_SUPPORTED ; we return it
+ * unconditionally rather than branching on FIPS / legacy because :
+ *   - in FIPS mode the answer is required by spec ;
+ *   - in legacy mode mixing arbitrary input would still weaken the
+ *     overall RNG posture (an attacker-controlled seed could narrow
+ *     the entropy distribution downstream) ;
+ *   - returning the same answer in both modes simplifies the security
+ *     story (no mode-dependent RNG behaviour to document or test). */
+CK_RV C_SeedRandom(CK_SESSION_HANDLE hSession,
+                    unsigned char *pSeed,
+                    CK_ULONG ulSeedLen) {
+    if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (!pSeed || ulSeedLen == 0) return FHSM_RV_ARGUMENTS_BAD;
+    return 0x00000034UL;   /* CKR_RANDOM_SEED_NOT_SUPPORTED */
+}
+
+/* PKCS#11 v3.2 §C.6.5.6 : C_GetFunctionStatus and C_CancelFunction are
+ * legacy parallel-function-management functions. The v2.0 parallel
+ * model was abandoned starting from v2.10 ; both functions MUST return
+ * CKR_FUNCTION_NOT_PARALLEL on any non-parallel implementation, which
+ * is every modern PKCS#11 module since v2.10. We follow the spec
+ * literally for both. */
+CK_RV C_GetFunctionStatus(CK_SESSION_HANDLE hSession) {
+    if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
+    return 0x00000051UL;   /* CKR_FUNCTION_NOT_PARALLEL */
+}
+
+CK_RV C_CancelFunction(CK_SESSION_HANDLE hSession) {
+    if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
+    return 0x00000051UL;   /* CKR_FUNCTION_NOT_PARALLEL */
 }
 
 CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
@@ -4474,6 +4553,71 @@ CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     return FHSM_RV_OK;
 }
 
+/* PKCS#11 v3.2 §C.6.10.5 : C_DigestKey
+ *
+ * Process the value of a key object as if it had been passed to
+ * C_DigestUpdate. Only meaningful for non-sensitive secret keys ;
+ * sensitive (CKA_SENSITIVE=TRUE) and asymmetric private keys MUST
+ * return CKR_KEY_INDIGESTIBLE so that the digest output cannot be
+ * used as a side channel to recover the key material.
+ *
+ * The actual feeding is equivalent to calling C_DigestUpdate on the
+ * key value bytes ; we reuse the same EVP_MD_CTX so a mixed-mode
+ * stream (data + key + data) produces the correct concatenated digest. */
+CK_RV C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey) {
+    fhsm_op_t *op = op_slot(g_op_dig, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+
+    /* Sensitive-key gate : refuse before fetching the key value, so the
+     * value never enters the digest pipeline for a sensitive object.
+     * CK_OBJECT_HANDLE is CK_ULONG (long unsigned) ; the token-internal
+     * handle space is uint32_t. Explicit narrowing cast since the upper
+     * bits cannot be in use (the token allocates handles from a 32-bit
+     * counter). */
+    uint32_t obj_handle = (uint32_t)hKey;
+    uint8_t obj_flags = 0;
+    if (fhsm_token_object_get_flags(t, obj_handle, &obj_flags) == FHSM_RV_OK) {
+        if (obj_flags & FHSM_OBJF_SENSITIVE) {
+            return 0x00000067UL;   /* CKR_KEY_INDIGESTIBLE */
+        }
+    }
+
+    const uint8_t *kv = NULL; size_t kvl = 0;
+    uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, obj_handle, &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) return rv;
+
+    /* Only secret keys can be digested ; asymmetric private keys would
+     * leak the key material through the digest output. Public keys
+     * are accessible via C_GetAttributeValue(CKA_VALUE) directly --- no
+     * need for C_DigestKey path. */
+    if (cl != CKO_SECRET_KEY) {
+        return 0x00000067UL;       /* CKR_KEY_INDIGESTIBLE */
+    }
+
+    /* Lazy-init the EVP_MD_CTX if no C_DigestUpdate was called first
+     * (allows digest-of-key-alone via C_DigestInit → C_DigestKey →
+     * C_DigestFinal). */
+    if (!op->md_ctx) {
+        EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+        if (!ctx) return FHSM_RV_HOST_MEMORY;
+        const EVP_MD *md = EVP_MD_fetch(NULL, hash_evp_name(op->hash), NULL);
+        if (!md) { EVP_MD_CTX_free(ctx); return FHSM_RV_MECHANISM_INVALID; }
+        if (EVP_DigestInit_ex(ctx, md, NULL) != 1) {
+            EVP_MD_free((EVP_MD*)md); EVP_MD_CTX_free(ctx);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        EVP_MD_free((EVP_MD*)md);
+        op->md_ctx = ctx;
+    }
+    if (EVP_DigestUpdate(op->md_ctx, kv, kvl) != 1) {
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    return FHSM_RV_OK;
+}
+
 CK_RV C_DigestFinal(CK_SESSION_HANDLE hSession, unsigned char *pDigest,
                     CK_ULONG *pulDigestLen) {
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
@@ -4559,6 +4703,87 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
     *pulSigLen = out_len;
     op->active = 0;
     return rv;
+}
+
+/* PKCS#11 v3.2 §C.6.13.6 / §C.6.13.7 : C_VerifyUpdate and C_VerifyFinal.
+ *
+ * Symmetric to C_SignUpdate / C_SignFinal which currently only supports
+ * the HMAC mechanism CKM_SHA256_HMAC. We mirror that coverage on the
+ * verify path : multipart HMAC verification is supported ; asymmetric
+ * multipart verify (which would require deferring the actual
+ * EVP_DigestVerifyFinal call until C_VerifyFinal) is not currently
+ * implemented and falls through to CKR_MECHANISM_INVALID.
+ *
+ * The HMAC compare uses fhsm_ct_memcmp for constant-time equality
+ * to avoid timing side channels on signature validation. */
+CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
+                     CK_ULONG ulPartLen) {
+    fhsm_op_t *op = op_slot(g_op_ver, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (op->mechanism != CKM_SHA256_HMAC_INIT_VAL) {
+        /* Asymmetric multipart not implemented in this scaffold. */
+        return FHSM_RV_MECHANISM_INVALID;
+    }
+    if (!op->mac_ctx) {
+        const uint8_t *kv = NULL; size_t kvl = 0;
+        uint32_t cl = 0, kt = 0;
+        fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (rv != FHSM_RV_OK) return rv;
+        EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+        if (!mac) return FHSM_RV_MECHANISM_INVALID;
+        EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+        EVP_MAC_free(mac);
+        if (!ctx) return FHSM_RV_HOST_MEMORY;
+        OSSL_PARAM params[2];
+        char digest_name[] = "SHA256";
+        params[0] = OSSL_PARAM_construct_utf8_string("digest", digest_name, 0);
+        params[1] = OSSL_PARAM_construct_end();
+        if (EVP_MAC_init(ctx, kv, kvl, params) != 1) {
+            EVP_MAC_CTX_free(ctx);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        op->mac_ctx = ctx;
+    }
+    if (EVP_MAC_update(op->mac_ctx, pPart, ulPartLen) != 1)
+        return FHSM_RV_FUNCTION_FAILED;
+    return FHSM_RV_OK;
+}
+
+CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
+                    CK_ULONG ulSigLen) {
+    fhsm_op_t *op = op_slot(g_op_ver, hSession);
+    if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (!pSig) return FHSM_RV_ARGUMENTS_BAD;
+    if (op->mechanism != CKM_SHA256_HMAC_INIT_VAL) {
+        if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
+        op->active = 0;
+        return FHSM_RV_MECHANISM_INVALID;
+    }
+    uint8_t mac[32];
+    size_t mac_len = 0;
+    fhsm_rv_t rv = FHSM_RV_OK;
+    if (!op->mac_ctx) {
+        /* No Update issued ; HMAC of empty input. */
+        fhsm_token_t *t = fhsm_session_token(hSession);
+        const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl=0, kt=0;
+        rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (rv == FHSM_RV_OK) {
+            mac_len = sizeof(mac);
+            rv = fhsm_hmac(FHSM_HASH_SHA256, FHSM_SLICE(kv, kvl),
+                            FHSM_SLICE("", 0), mac, &mac_len);
+        }
+    } else {
+        if (EVP_MAC_final(op->mac_ctx, mac, &mac_len, sizeof(mac)) != 1)
+            rv = FHSM_RV_FUNCTION_FAILED;
+        EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL;
+    }
+    op->active = 0;
+    if (rv != FHSM_RV_OK) return rv;
+    if (ulSigLen != mac_len) return FHSM_RV_SIGNATURE_INVALID;
+    return (fhsm_ct_memcmp(mac, pSig, mac_len) == 0) ? FHSM_RV_OK
+                                                       : FHSM_RV_SIGNATURE_INVALID;
 }
 
 /* AES-GCM Update/Final via EVP_CIPHER_CTX. */
@@ -4718,6 +4943,7 @@ CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
         fhsm_function_list.pfn[11] = (void*)(uintptr_t)C_SetPIN;           /* slot 11 */
         fhsm_function_list.pfn[12] = (void*)(uintptr_t)C_OpenSession;      /* slot 12 */
         fhsm_function_list.pfn[13] = (void*)(uintptr_t)C_CloseSession;     /* slot 13 */
+        fhsm_function_list.pfn[14] = (void*)(uintptr_t)C_CloseAllSessions; /* slot 14 (v1.4.0) */
         fhsm_function_list.pfn[15] = (void*)(uintptr_t)C_GetSessionInfo;   /* slot 15 (v1.2.2) */
         fhsm_function_list.pfn[18] = (void*)(uintptr_t)C_Login;            /* slot 18 */
         fhsm_function_list.pfn[19] = (void*)(uintptr_t)C_Logout;           /* slot 19 */
@@ -4744,6 +4970,7 @@ CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
         fhsm_function_list.pfn[37] = (void*)(uintptr_t)C_DigestInit;       /* slot 37 */
         fhsm_function_list.pfn[38] = (void*)(uintptr_t)C_Digest;           /* slot 38 */
         fhsm_function_list.pfn[39] = (void*)(uintptr_t)C_DigestUpdate;     /* slot 39 */
+        fhsm_function_list.pfn[40] = (void*)(uintptr_t)C_DigestKey;        /* slot 40 (v1.4.0) */
         fhsm_function_list.pfn[41] = (void*)(uintptr_t)C_DigestFinal;      /* slot 41 */
         /* Sign */
         fhsm_function_list.pfn[42] = (void*)(uintptr_t)C_SignInit;         /* slot 42 */
@@ -4753,6 +4980,8 @@ CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
         /* Verify */
         fhsm_function_list.pfn[48] = (void*)(uintptr_t)C_VerifyInit;       /* slot 48 */
         fhsm_function_list.pfn[49] = (void*)(uintptr_t)C_Verify;           /* slot 49 */
+        fhsm_function_list.pfn[50] = (void*)(uintptr_t)C_VerifyUpdate;     /* slot 50 (v1.4.0) */
+        fhsm_function_list.pfn[51] = (void*)(uintptr_t)C_VerifyFinal;      /* slot 51 (v1.4.0) */
         /* Key generation */
         fhsm_function_list.pfn[58] = (void*)(uintptr_t)C_GenerateKey;      /* slot 58 */
         fhsm_function_list.pfn[59] = (void*)(uintptr_t)C_GenerateKeyPair;  /* slot 59 */
@@ -4761,7 +4990,12 @@ CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
         /* Key derivation */
         fhsm_function_list.pfn[62] = (void*)(uintptr_t)C_DeriveKey;        /* slot 62 */
         /* RNG */
+        fhsm_function_list.pfn[63] = (void*)(uintptr_t)C_SeedRandom;       /* slot 63 (v1.4.0) */
         fhsm_function_list.pfn[64] = (void*)(uintptr_t)C_GenerateRandom;   /* slot 64 */
+        /* Legacy parallel-function management (v2.40 §C.6.5.6).
+         * Both return CKR_FUNCTION_NOT_PARALLEL per spec on every
+         * modern non-parallel implementation. */
+        fhsm_function_list.pfn[65] = (void*)(uintptr_t)C_GetFunctionStatus;/* slot 65 (v1.4.0) */
         /* Slot event (software token : no hot-plug ; non-blocking returns
          * CKR_NO_EVENT, blocking returns CKR_FUNCTION_NOT_SUPPORTED). */
         fhsm_function_list.pfn[66] = (void*)(uintptr_t)C_WaitForSlotEvent; /* slot 66 (v1.3.0) */
