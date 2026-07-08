@@ -5,9 +5,19 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased (post-v1.3.0 documentation correction)
+## Unreleased
 
-### Documentation
+### Branding / repository
+
+* **Rebrand (July 2026)** : repository renamed `freehsm-c` → `freehsm` ; dual
+  branding formalized (FreeHSM = library, Simorgh PKI = product, Simorgh Labs
+  = org). Positioning updated per primacy audit #118
+  (`docs/PRIMACY_AUDIT_PQC_COMPOSITE.md`). Added `TRADEMARK.md`. **No
+  consumer-facing change** : binary name `libfreehsm-fips.so`, PKCS#11
+  identifiers, and the GPG release key are all unchanged. Old repository
+  URLs redirect.
+
+### Documentation (post-v1.3.0 correction)
 
 * `SECURITY.md` --- corrected a typo in the "Maintainer GPG key rotation 2026-06-12" section that has been present since the original 2026-06-13 commit `2e6a413`. The previous key fingerprint was incorrectly listed as `743A6A59…DBBF28A2` (which is the *new* key) in both the "previous" and "new" position ; it is now correctly listed as `B79726CB087375CF990E00E4A0BC5BB2FB1EE342`, matching the canonical record in the rotation commit message. A 14-day correction note is added inline. No code change ; no behavior change. Filed concurrently as informational GitHub Security Advisory `GHSA-wgv9-m9cv-4647` (published 2026-06-27, drafted 2026-06-13).
 
@@ -1367,18 +1377,4 @@ independent PKCS#11 clients, full asymmetric / symmetric / PQ surface wired.
 * `ML-DSA` / `SLH-DSA` sign+verify wire is in place but `pkcs11-tool` of
   Debian 13 doesn't recognize these mechanism names. Tested via
   `tests/mlkem_e2e.c` for ML-KEM ; ML-DSA can be exercised similarly
-  through a custom harness.
-
-
-## [1.0.0-FIPS] --- 2025-12
-
-Initial C reimplementation of the original Python proof-of-concept.
-Scope : minimal PKCS#11 v3.0 with AES-GCM and SHA-2, FIPS 140-3 §7.10
-self-tests, integrity boot check, token store scaffold.
-
-* 6 smoke KATs
-* Slot 0 hard-coded
-* `C_Initialize` / `C_Finalize` / `C_GetInfo`
-* Audit chain HMAC
-* Reproducible build infrastructure (Dockerfile.build)
-* Documentation : `AGD_PRE` and `AGD_OPE` skeletons in EN+FR
+  through a cus

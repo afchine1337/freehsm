@@ -1,12 +1,14 @@
-# FreeHSM C --- FIPS 140-3 / CC EAL4+ candidate
+# FreeHSM --- FIPS 140-3 / CC EAL4+ candidate
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![REUSE status](https://api.reuse.software/badge/github.com/afchine1337/freehsm-c)](https://api.reuse.software/info/github.com/afchine1337/freehsm-c)
+[![REUSE status](https://api.reuse.software/badge/github.com/afchine1337/freehsm)](https://api.reuse.software/info/github.com/afchine1337/freehsm)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13190/badge)](https://www.bestpractices.dev/projects/13190)
-[![CI](https://github.com/afchine1337/freehsm-c/actions/workflows/ci.yml/badge.svg)](https://github.com/afchine1337/freehsm-c/actions/workflows/ci.yml)
-[![Mirror](https://github.com/afchine1337/freehsm-c/actions/workflows/mirror.yml/badge.svg)](https://github.com/afchine1337/freehsm-c/actions/workflows/mirror.yml)
+[![CI](https://github.com/afchine1337/freehsm/actions/workflows/ci.yml/badge.svg)](https://github.com/afchine1337/freehsm/actions/workflows/ci.yml)
+[![Mirror](https://github.com/afchine1337/freehsm/actions/workflows/mirror.yml/badge.svg)](https://github.com/afchine1337/freehsm/actions/workflows/mirror.yml)
 
 > French version: see [`README.fr.md`](README.fr.md). Documentation index: [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
+>
+> **FreeHSM** is the open-source PKCS#11 library. **[Simorgh PKI](https://simorgh.io)** is the product built on it — *the first open-source software HSM with built-in PKI and signing toolkit, PQC composite signatures out-of-the-box*. Both are stewarded by **Simorgh Labs**. *(Repository renamed from `freehsm-c` to `freehsm` in July 2026; old URLs redirect.)*
 
 Native **C11** re-implementation of the FreeHSM PKCS#11 v3.2 Soft HSM, designed to pass a FIPS 140-3 Level 1 evaluation and an augmented Common Criteria EAL4+ certification (ALC_FLR.2 + AVA_VAN.5).
 
@@ -23,7 +25,7 @@ The C port removes these obstacles : a single `.so` (`libfreehsm-fips.so`) direc
 ## Structure
 
 ```
-freehsm_c/
+freehsm/
 ├── Makefile                       # Hardened build + reproducibility + lint + generate
 ├── Dockerfile.build               # Pinned image for reproducible builds (Debian 12 + OpenSSL FIPS)
 ├── include/
@@ -166,6 +168,6 @@ Legend : ✅ implemented · 🟡 partial/scaffold · ⏳ to do
 
 ---
 
-## Maintainer
+## Maintainer & brand
 
-**Simorgh Labs, Open Source Cryptography and Digital Trust** — sponsoring entity for the FreeHSM C project. Maintained by Afchine Madjlessi (`afchine.mad@gmail.com`). All releases are GPG-signed with key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2` (Ed25519). The PKCS#11 module reports `manufacturerID = "Simorgh Labs"` (truncated to the 32-octet field per PKCS#11 v3.2 §C.6.1).
+**Simorgh Labs — Open Source Crypt

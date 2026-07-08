@@ -1,14 +1,16 @@
-# FreeHSM C --- FIPS 140-3 / CC EAL4+ candidate
+# FreeHSM --- FIPS 140-3 / CC EAL4+ candidate
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![REUSE status](https://api.reuse.software/badge/github.com/afchine1337/freehsm-c)](https://api.reuse.software/info/github.com/afchine1337/freehsm-c)
+[![REUSE status](https://api.reuse.software/badge/github.com/afchine1337/freehsm)](https://api.reuse.software/info/github.com/afchine1337/freehsm)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13190/badge)](https://www.bestpractices.dev/projects/13190)
-[![CI](https://github.com/afchine1337/freehsm-c/actions/workflows/ci.yml/badge.svg)](https://github.com/afchine1337/freehsm-c/actions/workflows/ci.yml)
-[![Mirror](https://github.com/afchine1337/freehsm-c/actions/workflows/mirror.yml/badge.svg)](https://github.com/afchine1337/freehsm-c/actions/workflows/mirror.yml)
+[![CI](https://github.com/afchine1337/freehsm/actions/workflows/ci.yml/badge.svg)](https://github.com/afchine1337/freehsm/actions/workflows/ci.yml)
+[![Mirror](https://github.com/afchine1337/freehsm/actions/workflows/mirror.yml/badge.svg)](https://github.com/afchine1337/freehsm/actions/workflows/mirror.yml)
 
 
 > Version anglaise : voir [`README.md`](README.md). Index documentation : [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
 > English version: see [`README.md`](README.md). Documentation index: [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
+>
+> **FreeHSM** est la bibliothèque PKCS#11 open source. **[Simorgh PKI](https://simorgh.io)** est le produit construit dessus — *le premier HSM logiciel open source avec PKI et outil de signature intégrés, signatures composites PQC prêtes à l'emploi*. Les deux sont portés par **Simorgh Labs**. *(Dépôt renommé de `freehsm-c` en `freehsm` en juillet 2026 ; les anciennes URLs redirigent.)*
 
 > **Note sur le badge OpenSSF/CII** : le projet est enregistré sur `bestpractices.dev` (ID 13190). `bestpractices.dev` (OpenSSF Best Practices) est le successeur officiel du programme CII Best Practices : un seul badge couvre les deux.
 
@@ -27,7 +29,7 @@ Le portage en C élimine ces obstacles : un seul `.so` (`libfreehsm-fips.so`) qu
 ## Structure
 
 ```
-freehsm_c/
+freehsm/
 ├── Makefile                       # Build hardening + reproducibilité + lint + generate
 ├── Dockerfile.build               # Image pinnée pour build reproductible (Debian 12 + OpenSSL FIPS)
 ├── include/
@@ -250,8 +252,4 @@ Cela permet une **migration sans interruption de service** : on substitue `libfr
   - `REPRODUCIBLE_BUILD.md` procédure de build bit-identical
   - `ATE_FUN.md` test plan + coverage SFR→TSFI→test (ATE_FUN.1)
   - `AVA_VAN.md` vulnerability analysis 9 vulnérabilités notées CEM (AVA_VAN.5)
-  - `ALC_CMC.md` configuration management + life-cycle (ALC_CMC.4)
-  - `AGD_PRE.md` guide d'installation administrateur (AGD_PRE.1)
-  - `AGD_OPE.md` manuel opérationnel + service reference (AGD_OPE.1)
-- **~ 8 000 lignes** de code C + Python + Markdown réparties sur 40+ fichiers.
-- **Roadmap restante** : audit code par tiers (cabinet accrédité), soumission CMVP, soumission CC EAL4+ (étapes commerciales 12-24 mois).
+  - `ALC_CMC.md` configuration manage
