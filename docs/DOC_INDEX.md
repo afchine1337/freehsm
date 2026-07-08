@@ -18,6 +18,7 @@
 | Hardened DRBG pipeline + SP 800-90B health tests | [`RNG.md`](RNG.md) | --- | ADV_TDS.3 + FIPS §7.10.3 |
 | Side-channel posture audit (Level 1 + Level 2 gaps) | [`SIDE_CHANNEL.md`](SIDE_CHANNEL.md) | --- | AVA_VAN.5 |
 | Post-quantum support matrix (Kyber alias, Falcon, LMS, XMSS, HQC) | [`POST_QUANTUM.md`](POST_QUANTUM.md) | --- | ADV_FSP.4 |
+| Primacy audit — PQC composite claim (#118, verdict + competitor matrix) | [`PRIMACY_AUDIT_PQC_COMPOSITE.md`](PRIMACY_AUDIT_PQC_COMPOSITE.md) | --- | (marketing / positioning) |
 
 ## Conventions
 
@@ -32,6 +33,4 @@
 The following technical artefacts remain English-only :
 - All inline comments in `src/`, `include/`, `scripts/`
 - The generated `MECHANISMS.md` body (auto-gen output)
-- The `kat/cavp/*.rsp` files (NIST CAVP format, by definition English)
-
-These technical artefacts use precise vocabulary inherited from the standards (FIPS, NIST SP, RFC, PKCS#11 OASIS) and are commonly read in English by francophone evaluators.
+- The `kat/cavp/*.rsp` files (NIST CAVP format, by definition Eng
