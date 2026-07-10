@@ -9,6 +9,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Token store-full returns CKR_DEVICE_MEMORY, not CKR_HOST_MEMORY
+  (#125 finding I1).** When a token reached `FHSM_MAX_OBJECTS`,
+  `C_CreateObject` returned `CKR_HOST_MEMORY` (host RAM exhausted) where
+  the correct code is `CKR_DEVICE_MEMORY` (token storage full), which is
+  what pkcs11-check flagged on certificate import under load.
+  `FHSM_MAX_OBJECTS` is now overridable at build time
+  (`-DFHSM_MAX_OBJECTS=N`, default 64) for general-purpose deployments
+  needing a larger store. Regression covered in
+  `tests/test_token_capacity.c` (65th object rejected with
+  `CKR_DEVICE_MEMORY`).
+
 * **Mechanism advertisement rebuilt from the dispatch table (#125,
   found by pkcs11-check).** `C_GetMechanismList` / `C_GetMechanismInfo`
   used a hand-maintained list + capability switch that had drifted

@@ -198,3 +198,12 @@ the objects blob is self-versioned by its leading magic. Loaders must
 reject unknown versions/magics rather than guess. Future extensions
 (variable `extras` CBOR attribute blob) will be additive and documented
 here.
+
+## Build-time configuration
+
+`FHSM_MAX_OBJECTS` (default 64) is overridable via `-DFHSM_MAX_OBJECTS=N`
+for general-purpose deployments needing a larger per-token store. It
+bounds both the in-memory object array and the on-disk blob
+(`FHSM_OBJ_BLOB_MAX` scales with it). A token that reaches the limit
+returns `CKR_DEVICE_MEMORY` on the next `C_CreateObject` (#125 I1).
+

@@ -69,16 +69,20 @@ in the harness. This document records the triage.
 
 ## To investigate (follow-up items)
 
-### I1 — Certificate import reports CKR_HOST_MEMORY under load
+### I1 — Certificate import reports CKR_HOST_MEMORY under load — RESOLVED
 * `x509::test_core_ops::TestCertificateImport::test_import_der_certificate`
-  returned `CKR_HOST_MEMORY`. `fhsm_token_object_add` returns this when
-  the store is full (`FHSM_MAX_OBJECTS = 64`). Most likely the harness
-  had already filled the token with prior objects rather than a leak,
-  but worth confirming the harness runs against a fresh token per
-  file, and considering whether `FHSM_MAX_OBJECTS` should be
-  configurable. **Action**: reproduce in isolation; if store-full is
-  the cause, return is arguably correct but the harness ordering makes
-  it noisy — consider per-test token reset in `run_pkcs11_check.sh`.
+  returned `CKR_HOST_MEMORY`. `fhsm_token_object_add` returned this when
+  the store is full (`FHSM_MAX_OBJECTS = 64`), because the harness had
+  already filled the token with prior objects.
+* **Resolution (2026-07-10)**: the return code was wrong — a full token
+  is `CKR_DEVICE_MEMORY` (token storage exhausted), not `CKR_HOST_MEMORY`
+  (host RAM). Fixed in `fhsm_token_object_add`. `FHSM_MAX_OBJECTS` is now
+  overridable at build time (`-DFHSM_MAX_OBJECTS=N`, default 64) for
+  general-purpose deployments that need a larger store. Regression:
+  `tests/test_token_capacity.c` asserts the 65th object is rejected with
+  `CKR_DEVICE_MEMORY`. The residual harness-ordering noise (filling the
+  token before the cert-import case) is a run-script concern, tracked
+  with I2.
 
 ### I2 — Login throttle bleeds across harness tests
 * `test_ckr_session::TestLoginErrors::test_already_logged_in` and
@@ -94,7 +98,4 @@ in the harness. This document records the triage.
 
 ## Method
 
-Run: `make pkcs11-check` (local) or the `pkcs11-check` CI workflow.
-Baseline regression gating (`pkcs11-check compare-results` against a
-stored baseline) is tracked as follow-up so that *new* crashed/error
-findings fail CI while the known xfail/fail population does not.
+Run: `make pkcs11-check` (local) 

@@ -61,7 +61,13 @@
  * in production) ; the integration test exercises only the scalar
  * fields below.
  * ----------------------------------------------------------------------- */
+/* Per-token object capacity. Overridable at build time
+ * (-DFHSM_MAX_OBJECTS=N) for general-purpose deployments that need a
+ * larger store ; the fixed in-memory array trades RAM for simplicity
+ * (constant-time, no allocator on the object hot path). */
+#ifndef FHSM_MAX_OBJECTS
 #define FHSM_MAX_OBJECTS    64
+#endif
 #define FHSM_OBJ_LABEL_LEN  64
 /* Value buffer sized to hold the largest supported key type :
  *   RSA-4096 PKCS#8 priv     ≈ 2400 bytes
@@ -969,8 +975,11 @@ fhsm_rv_t fhsm_token_object_add(fhsm_token_t *t, uint32_t cko_class,
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
     if (t->object_count >= FHSM_MAX_OBJECTS) {
+        /* Token storage is full --- this is CKR_DEVICE_MEMORY (token
+         * out of room), not CKR_HOST_MEMORY (host RAM). #125 finding
+         * I1. Raise FHSM_MAX_OBJECTS at build time if needed. */
         pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_HOST_MEMORY;
+        return FHSM_RV_DEVICE_MEMORY;
     }
     fhsm_object_t *o = &t->objects[t->object_count];
     memset(o, 0, sizeof(*o));

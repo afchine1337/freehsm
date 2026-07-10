@@ -202,6 +202,34 @@ static int run_cert_roundtrip(const char *path) {
     return 0;
 }
 
+/* --- #125 I1 : store-full must return CKR_DEVICE_MEMORY, not
+ * CKR_HOST_MEMORY. Fill to FHSM_MAX_OBJECTS then assert the next add is
+ * rejected with the token-storage code. */
+#define FHSM_RV_DEVICE_MEMORY_ 0x00000131u
+static int run_store_full(const char *path) {
+    fhsm_token_t *t = NULL; fhsm_rv_t rv; unlink(path);
+    rv = fhsm_token_init(path, SO_PIN, "full-test", &t);
+    if (rv != FHSM_RV_OK) return fail("token_init (full)", rv);
+    if ((rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN))) return fail("SO login (full)", rv);
+    if ((rv = fhsm_token_init_user_pin(t, USER_PIN)))     return fail("init_user_pin (full)", rv);
+    fhsm_token_logout(t);
+    if ((rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN))) return fail("USER login (full)", rv);
+    uint8_t key[32] = {0}; char label[32]; uint32_t h;
+    for (uint32_t i = 0; i < N_MAX; ++i) {
+        snprintf(label, sizeof(label), "full-%03u", i);
+        rv = fhsm_token_object_add(t, 0x4u, 0x1Fu, label, key, sizeof key, NULL, 0, 0x1, &h);
+        if (rv != FHSM_RV_OK) return fail("fill add", rv);
+    }
+    rv = fhsm_token_object_add(t, 0x4u, 0x1Fu, "overflow", key, sizeof key, NULL, 0, 0x1, &h);
+    if (rv != FHSM_RV_DEVICE_MEMORY_) {
+        fprintf(stderr, "FAIL: store-full add -> 0x%08x (want CKR_DEVICE_MEMORY 0x131)\n", (unsigned)rv);
+        return 1;
+    }
+    fhsm_token_logout(t); fhsm_token_close(t); unlink(path);
+    printf("  store-full -> CKR_DEVICE_MEMORY : OK\n");
+    return 0;
+}
+
 int main(void) {
     char path[256];
     snprintf(path, sizeof(path), "/tmp/fhsm-capacity-%d.tok", (int)getpid());
@@ -210,6 +238,7 @@ int main(void) {
     if (run_roundtrip(path, N_OBJECTS)) return 1;  /* > 11 : the regression */
     if (run_roundtrip(path, N_MAX))     return 1;  /* upper bound (64)      */
     if (run_cert_roundtrip(path))       return 1;  /* v2 variable records   */
+    if (run_store_full(path))           return 1;  /* #125 I1 : DEVICE_MEMORY */
     printf("test_token_capacity : PASS\n");
     return 0;
 }

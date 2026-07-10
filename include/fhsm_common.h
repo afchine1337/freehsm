@@ -89,6 +89,7 @@ typedef uint32_t fhsm_rv_t;
 #define FHSM_RV_OK                          0x00000000u
 #define FHSM_RV_CANCEL                      0x00000001u
 #define FHSM_RV_HOST_MEMORY                 0x00000002u
+#define FHSM_RV_DEVICE_MEMORY               0x00000131u  /* CKR_DEVICE_MEMORY : token storage full */
 #define FHSM_RV_SLOT_ID_INVALID             0x00000003u
 #define FHSM_RV_GENERAL_ERROR               0x00000005u
 #define FHSM_RV_FUNCTION_FAILED             0x00000006u
