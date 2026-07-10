@@ -1,0 +1,82 @@
+# ===========================================================================
+# pkcs11-check.yml --- External behavioral harness run (#125).
+#
+# Runs Denis Mingulov's pkcs11-check (>100k vendor-neutral behavioral
+# checks) against the digest-signed libfreehsm-fips.so and uploads the
+# JSON report + log as artifacts.
+#
+# NON-GATING by design : per pkcs11-check's own guidance, large
+# xfail/fail counts are normal findings (PKCS#11 cannot express many
+# capability constraints), so the job fails only if the harness itself
+# fails to run or produce a report. Baseline regression comparison
+# (pkcs11-check compare-results) is tracked as follow-up work.
+# ===========================================================================
+name: pkcs11-check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'kat/**'
+      - 'Makefile'
+      - 'scripts/run_pkcs11_check.sh'
+      - '.github/workflows/pkcs11-check.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'   # weekly, Monday 04:17 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  pkcs11-check:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build + sign module
+        run: |
+          make clean
+          make
+          make integrity
+          test -f libfreehsm-fips.so
+
+      - name: Install harness (opensc + pkcs11-check)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq opensc python3-pip python3-venv
+          python3 -m venv /opt/p11check
+          /opt/p11check/bin/pip install --quiet pkcs11-check
+          ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
+          pkcs11-check --help >/dev/null
+
+      - name: Run pkcs11-check against signed module
+        run: |
+          bash scripts/run_pkcs11_check.sh ./libfreehsm-fips.so ./reports/pkcs11-check \
+            2>&1 | tee harness.log
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## pkcs11-check run"
+            echo '```'
+            grep -A 20 "== Summary ==" harness.log | head -25 || true
+            echo '```'
+            echo "_Findings are evidence to investigate, not a verdict (see pkcs11-check docs/interpreting-results.md)._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkcs11-check-report
+          path: |
+            reports/pkcs11-check/
+            harness.log
+          retention-days: 30

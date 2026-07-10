@@ -9,6 +9,22 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+* **CI : pkcs11-check external harness (#125).** New workflow
+  `.github/workflows/pkcs11-check.yml` runs Denis Mingulov's
+  `pkcs11-check` (>100k vendor-neutral behavioral checks : spec
+  conformance, CKR negatives, security, fuzz, Wycheproof / ACVP
+  corpora) against the **digest-signed** module on every push to main
+  + weekly, uploading the JSON report and log as artifacts.
+  Non-gating by design per the harness's own guidance (findings are
+  evidence, not a verdict) ; the job fails only if the harness cannot
+  run or produce a report. Local mirror : `make pkcs11-check`
+  (shared logic in `scripts/run_pkcs11_check.sh` ; token provisioned
+  with the same PIN conventions as `tests/coverage_matrix.sh`).
+  Baseline regression gating via `pkcs11-check compare-results` is
+  tracked as follow-up. This closes the loop opened by the v1.2.2 /
+  v1.3.0 external reports : the tool that found those defects now
+  watches every commit.
+
 * **`CKO_CERTIFICATE` objects (#110).** `C_CreateObject` accepts
   `CKO_CERTIFICATE` + `CKA_CERTIFICATE_TYPE = CKC_X_509` templates ; the
   DER certificate travels verbatim in `CKA_VALUE` (the module never

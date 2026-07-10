@@ -180,6 +180,15 @@ tests: tests/test_smoke tests/test_token_capacity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_token_capacity
 
+# External behavioral harness (#125) : Denis Mingulov's pkcs11-check
+# (>100k vendor-neutral checks) against the built module. Findings are
+# evidence, not a gate --- see scripts/run_pkcs11_check.sh. Requires
+# opensc (pkcs11-tool) and `pip install pkcs11-check` (Python >= 3.12).
+# Run against an UNSIGNED dev build ; CI runs the signed module.
+.PHONY: pkcs11-check
+pkcs11-check: $(LIB)
+	FHSM_ALLOW_UNSIGNED=1 bash scripts/run_pkcs11_check.sh ./$(LIB) ./reports/pkcs11-check
+
 # ---------------------------------------------------------------------------
 # Integrity --- sign the shipped .so and embed its SHA-256 into the
 # fhsm_module_integrity_digest[] array. Done by scripts/sign_module.sh
