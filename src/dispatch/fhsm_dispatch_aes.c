@@ -190,6 +190,38 @@ fhsm_rv_t dispatch_aes_ecb(unsigned long session, unsigned long key,
     return evp_cipher_oneshot(c, k, FHSM_SLICE(NULL, 0), in, out, outlen, 0);
 }
 
+/* ---- 3DES-CBC (non-FIPS ; interop only). 24-byte key, 8-byte IV,
+ * 8-byte blocks, no padding. EVP "DES-EDE3-CBC" is in the OpenSSL
+ * default provider. #125. ---- */
+fhsm_rv_t dispatch_des3_cbc(unsigned long session, unsigned long key,
+                             const void *params, size_t plen,
+                             fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key;
+    fhsm_slice_t k, iv;
+    fhsm_rv_t rv;
+    if ((rv = fhsm_tlv_find(params, plen, FHSM_TLV_KEY, &k)) != FHSM_RV_OK) return rv;
+    if ((rv = fhsm_tlv_find(params, plen, FHSM_TLV_IV,  &iv)) != FHSM_RV_OK) return rv;
+    if (k.len != 24 || iv.len != 8 || in.len % 8) return FHSM_RV_ARGUMENTS_BAD;
+    if (*outlen < in.len) return FHSM_RV_ARGUMENTS_BAD;
+    EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "DES-EDE3-CBC", NULL);
+    if (!c) return FHSM_RV_MECHANISM_INVALID;
+    rv = evp_cipher_oneshot(c, k, iv, in, out, outlen, 0);
+    EVP_CIPHER_free(c);
+    return rv;
+}
+
+/* ---- 3DES key generation (24 raw bytes from the DRBG). #125. ---- */
+fhsm_rv_t dispatch_des3_keygen(unsigned long session, unsigned long key,
+                                const void *params, size_t plen,
+                                fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen; (void)in;
+    if (out == NULL || outlen == NULL || *outlen < 24) return FHSM_RV_ARGUMENTS_BAD;
+    *outlen = 24;
+    return fhsm_rng_bytes(out, 24);
+}
+
 /* ---- AES-CTR ---- */
 fhsm_rv_t dispatch_aes_ctr(unsigned long session, unsigned long key,
                             const void *params, size_t plen,

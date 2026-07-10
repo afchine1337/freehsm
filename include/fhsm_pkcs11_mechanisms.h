@@ -242,6 +242,8 @@ extern fhsm_rv_t dispatch_hybrid_x25519_ml_kem_768(unsigned long, unsigned long,
 extern fhsm_rv_t dispatch_hybrid_ed25519_ml_dsa_65(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_md5(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha1(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_des3_keygen(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_des3_cbc(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 
 /* ---- Dispatch table ---- */
 typedef struct fhsm_mech_entry_s {

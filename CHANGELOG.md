@@ -19,13 +19,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
   emits a build-profile flag (`FHSM_BUILD_FIPS_STRICT`, and an extern
   `fhsm_build_fips_strict` for TUs that can't include the generated
   header) that the operation gates consult.
-* **Non-FIPS AES-ECB (interop only).** Second family through the
-  operation-gate pattern. `dispatch_aes_ecb` handler (OpenSSL default
-  provider) ; `C_Encrypt`/`C_Decrypt` gain an AES-ECB branch and
-  `op_init` rejects it (and 3DES-CBC) at init time under fips-strict.
+* **Non-FIPS ciphers AES-ECB, 3DES-CBC, 3DES key generation (interop
+  only).** Second family through the operation-gate pattern.
+  `dispatch_aes_ecb` / `dispatch_des3_cbc` / `dispatch_des3_keygen`
+  handlers (OpenSSL default provider). `C_Encrypt`/`C_Decrypt` gain
+  AES-ECB (no IV) and 3DES-CBC (24-byte key, 8-byte IV) branches ;
+  `C_GenerateKey` generates a 24-byte `CKK_DES3` key ; `op_init`
+  rejects AES-ECB and 3DES-CBC at init time under fips-strict.
   Executable + advertised in interop, rejected with
   `CKR_MECHANISM_INVALID` in fips-strict. Profile-adaptive round-trip
-  test `tests/test_legacy_cipher.c`.
+  test `tests/test_legacy_cipher.c` (AES-ECB + 3DES-CBC + 3DES keygen).
 
 * **Non-FIPS legacy digests SHA-1 and MD5 (interop only).** First
   mechanisms wired through the new profile gate: executable in the

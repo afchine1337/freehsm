@@ -1231,6 +1231,7 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
 #define CKO_SECRET_KEY      0x00000004UL
 
 #define CKK_AES             0x0000001FUL
+#define CKK_DES3            0x00000015UL
 #define CKK_GENERIC_SECRET  0x00000010UL
 #define CKK_SHA256_HMAC     0x0000002BUL
 
@@ -1385,16 +1386,24 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 
     uint32_t key_type = 0;
     uint32_t key_len  = 0;
-    switch (pMechanism->mechanism) {
-        case CKM_AES_KEY_GEN:                 key_type = CKK_AES;            break;
-        case CKM_GENERIC_SECRET_KEY_GEN:      key_type = CKK_GENERIC_SECRET; break;
-        default:                               return FHSM_RV_MECHANISM_INVALID;
+    /* CKM_DES3_KEY_GEN (0x130) is non-FIPS : interop only, fixed 24-byte
+     * key, no CKA_VALUE_LEN. #125. */
+    if (pMechanism->mechanism == 0x00000130UL) {
+        if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+        key_type = CKK_DES3; key_len = 24;
+    } else {
+        switch (pMechanism->mechanism) {
+            case CKM_AES_KEY_GEN:            key_type = CKK_AES;            break;
+            case CKM_GENERIC_SECRET_KEY_GEN: key_type = CKK_GENERIC_SECRET; break;
+            default:                          return FHSM_RV_MECHANISM_INVALID;
+        }
+        long j = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+        if (j < 0) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        key_len = (uint32_t)(*(CK_ULONG*)pTemplate[j].pValue);
+        if (key_len != 16 && key_len != 24 && key_len != 32)
+            return FHSM_RV_KEY_SIZE_RANGE;
     }
-    long i = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
-    if (i < 0) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-    key_len = (uint32_t)(*(CK_ULONG*)pTemplate[i].pValue);
-    if (key_len != 16 && key_len != 24 && key_len != 32)
-        return FHSM_RV_KEY_SIZE_RANGE;
+    long i;
 
     char label[64] = ""; const uint8_t *id = NULL; size_t id_len = 0;
     i = find_attr(pTemplate, ulCount, CKA_LABEL);
@@ -3300,6 +3309,12 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         memcpy(op->iv, pMechanism->pParameter, 16);
         op->have_iv = 1;
     }
+    /* 3DES-CBC (non-FIPS) : 8-byte IV passed directly as pParameter. */
+    if (pMechanism->mechanism == 0x00000133UL /* CKM_DES3_CBC */ &&
+        pMechanism->pParameter && pMechanism->ulParameterLen == 8) {
+        memcpy(op->iv, pMechanism->pParameter, 8);
+        op->have_iv = 1;
+    }
     /* AES-CTR : pParameter is either a 16-byte counter block directly or
      * a CK_AES_CTR_PARAMS struct. The simplified path (16 bytes) is the
      * one OpenSC's pkcs11-tool uses with --iv. */
@@ -3539,6 +3554,38 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         return FHSM_RV_OK;
     }
 
+    /* --- 3DES-CBC (non-FIPS ; interop / general-purpose only) --- */
+    if (op->mechanism == 0x00000133UL /* CKM_DES3_CBC */) {
+        if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        if (kt != CKK_DES3) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (!op->have_iv)   { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+        if (kvl != 24)      { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
+        EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "DES-EDE3-CBC", NULL);
+        if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) { EVP_CIPHER_free(c); op->active = 0; return FHSM_RV_HOST_MEMORY; }
+        if (EVP_EncryptInit_ex2(ctx, c, kv, op->iv, NULL) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        EVP_CIPHER_CTX_set_padding(ctx, 0);
+        size_t need = ulDataLen;   /* no padding : 8-aligned in, equal out */
+        if (pEnc == NULL) { *pulEncLen = need; EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c); return FHSM_RV_OK; }
+        if (*pulEncLen < need) { *pulEncLen = need; EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c); return 0x00000150UL; }
+        int outl = 0, finl = 0;
+        if (EVP_EncryptUpdate(ctx, pEnc, &outl, pData, (int)ulDataLen) != 1
+            || EVP_EncryptFinal_ex(ctx, pEnc + outl, &finl) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        *pulEncLen = (CK_ULONG)(outl + finl);
+        EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
     /* --- AES-256-GCM path (symmetric) --- */
     if (op->mechanism != CKM_AES_GCM || kt != CKK_AES) {
         op->active = 0; return FHSM_RV_MECHANISM_INVALID;
@@ -3684,6 +3731,37 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
             return 0x00000150UL;
         }
+        int outl = 0, finl = 0;
+        if (EVP_DecryptUpdate(ctx, pData, &outl, pEnc, (int)ulEncLen) != 1
+            || EVP_DecryptFinal_ex(ctx, pData + outl, &finl) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            op->active = 0; return FHSM_RV_ENCRYPTED_DATA_INVALID;
+        }
+        *pulDataLen = (CK_ULONG)(outl + finl);
+        EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
+    /* --- 3DES-CBC (non-FIPS ; interop / general-purpose only) --- */
+    if (op->mechanism == 0x00000133UL /* CKM_DES3_CBC */) {
+        if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        if (kt != CKK_DES3) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (!op->have_iv)   { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+        if (kvl != 24)      { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
+        EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "DES-EDE3-CBC", NULL);
+        if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) { EVP_CIPHER_free(c); op->active = 0; return FHSM_RV_HOST_MEMORY; }
+        if (EVP_DecryptInit_ex2(ctx, c, kv, op->iv, NULL) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        EVP_CIPHER_CTX_set_padding(ctx, 0);
+        if (pData == NULL) { *pulDataLen = ulEncLen; EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c); return FHSM_RV_OK; }
+        if (*pulDataLen < ulEncLen) { *pulDataLen = ulEncLen; EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c); return 0x00000150UL; }
         int outl = 0, finl = 0;
         if (EVP_DecryptUpdate(ctx, pData, &outl, pEnc, (int)ulEncLen) != 1
             || EVP_DecryptFinal_ex(ctx, pData + outl, &finl) != 1) {
