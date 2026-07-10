@@ -177,6 +177,48 @@ out:
     return r;
 }
 
+/* ---- RSA encryption with legacy padding (non-FIPS ; interop only).
+ * PKCS#1 v1.5 (RSA_PKCS1_PADDING) and raw / X.509 (RSA_NO_PADDING).
+ * Reference implementations ; the operation path lives in
+ * C_Encrypt/C_Decrypt. #125. ---- */
+static fhsm_rv_t rsa_enc_pad(const void *params, size_t plen,
+                              fhsm_slice_t in, uint8_t *out, size_t *outlen,
+                              int padding)
+{
+    fhsm_slice_t pem;
+    fhsm_rv_t rv = fhsm_tlv_find(params, plen, FHSM_TLV_PEM_PUB, &pem);
+    if (rv != FHSM_RV_OK) return rv;
+    EVP_PKEY *pk = load_pub(pem);
+    if (!pk) return FHSM_RV_KEY_HANDLE_INVALID;
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pk, NULL);
+    fhsm_rv_t r = FHSM_RV_FUNCTION_FAILED;
+    if (!ctx) { EVP_PKEY_free(pk); return FHSM_RV_HOST_MEMORY; }
+    if (EVP_PKEY_encrypt_init(ctx) <= 0) goto out;
+    if (EVP_PKEY_CTX_set_rsa_padding(ctx, padding) <= 0) goto out;
+    if (EVP_PKEY_encrypt(ctx, out, outlen, in.data, in.len) <= 0) goto out;
+    r = FHSM_RV_OK;
+out:
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pk);
+    return r;
+}
+
+fhsm_rv_t dispatch_rsa_pkcs(unsigned long s, unsigned long k,
+                             const void *params, size_t plen,
+                             fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)s; (void)k;
+    return rsa_enc_pad(params, plen, in, out, outlen, RSA_PKCS1_PADDING);
+}
+
+fhsm_rv_t dispatch_rsa_x509(unsigned long s, unsigned long k,
+                             const void *params, size_t plen,
+                             fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)s; (void)k;
+    return rsa_enc_pad(params, plen, in, out, outlen, RSA_NO_PADDING);
+}
+
 /* ---------------------------------------------------------------------------
  * RSA keypair generation
  * ------------------------------------------------------------------------- */

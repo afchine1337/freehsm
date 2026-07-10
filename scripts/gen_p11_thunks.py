@@ -186,11 +186,11 @@ MECHANISMS: tuple[Mech, ...] = (
          min_key_bits=2048, max_key_bits=4096,
          refs=("RFC 8017 §7.1",)),
 
-    Mech("CKM_RSA_PKCS",           0x00000001, "RSA",  "encrypt", "dispatch_reject_fips",
+    Mech("CKM_RSA_PKCS",           0x00000001, "RSA",  "encrypt", "dispatch_rsa_pkcs",
          fips="non-approved", key_type="CKK_RSA",
          refs=("RFC 8017 §7.2",),
          notes="PKCS#1 v1.5 encryption is deprecated by NIST; padding-oracle risk."),
-    Mech("CKM_RSA_X_509",          0x00000003, "RSA",  "encrypt", "dispatch_reject_fips",
+    Mech("CKM_RSA_X_509",          0x00000003, "RSA",  "encrypt", "dispatch_rsa_x509",
          fips="non-approved", key_type="CKK_RSA",
          notes="Raw RSA --- forbidden in approved mode."),
     Mech("CKM_SHA1_RSA_PKCS",      0x00000006, "RSA",  "sign",    "dispatch_reject_fips",

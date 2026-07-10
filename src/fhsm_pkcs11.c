@@ -3071,6 +3071,12 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
 #ifndef CKM_AES_CBC
 #define CKM_AES_ECB               0x00001081UL
 #define CKM_AES_CBC               0x00001082UL
+#ifndef CKM_RSA_PKCS
+#define CKM_RSA_PKCS              0x00000001UL
+#endif
+#ifndef CKM_RSA_X_509
+#define CKM_RSA_X_509             0x00000003UL
+#endif
 #endif
 #ifndef CKM_AES_CBC_PAD
 #define CKM_AES_CBC_PAD           0x00001085UL
@@ -3239,6 +3245,8 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         switch (pMechanism->mechanism) {
             case CKM_AES_ECB:
             case 0x00000133UL: /* CKM_DES3_CBC */
+            case 0x00000001UL: /* CKM_RSA_PKCS */
+            case 0x00000003UL: /* CKM_RSA_X_509 */
                 return FHSM_RV_MECHANISM_INVALID;
             default: break;
         }
@@ -3499,6 +3507,39 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         return FHSM_RV_OK;
     }
 
+    /* --- RSA PKCS#1 v1.5 / X.509 raw encryption (non-FIPS ; interop) --- */
+    if (op->mechanism == CKM_RSA_PKCS || op->mechanism == CKM_RSA_X_509) {
+        if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        if (cl != CKO_PUBLIC_KEY || kt != CKK_RSA) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        int pad = (op->mechanism == CKM_RSA_PKCS) ? RSA_PKCS1_PADDING : RSA_NO_PADDING;
+        const uint8_t *pp = kv;
+        EVP_PKEY *pkey = d2i_PUBKEY(NULL, &pp, (long)kvl);
+        if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
+        EVP_PKEY_CTX *ectx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (!ectx || EVP_PKEY_encrypt_init(ectx) <= 0
+            || EVP_PKEY_CTX_set_rsa_padding(ectx, pad) <= 0) {
+            if (ectx) EVP_PKEY_CTX_free(ectx);
+            EVP_PKEY_free(pkey);
+            op->active = 0;
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        size_t out_len = 0;
+        if (EVP_PKEY_encrypt(ectx, NULL, &out_len, pData, ulDataLen) <= 0) {
+            EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        if (pEnc == NULL) { *pulEncLen = out_len; EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey); return FHSM_RV_OK; }
+        if (*pulEncLen < out_len) { *pulEncLen = out_len; EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey); return 0x00000150UL; }
+        size_t bl = *pulEncLen;
+        if (EVP_PKEY_encrypt(ectx, pEnc, &bl, pData, ulDataLen) <= 0) {
+            EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        *pulEncLen = bl;
+        EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey); op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
     /* --- AES-ECB / AES-CBC / AES-CBC-PAD / AES-CTR path ---
      * AES-ECB is non-FIPS : executable only in the interop build. */
     if (op->mechanism == CKM_AES_ECB || op->mechanism == CKM_AES_CBC
@@ -3688,6 +3729,38 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             return FHSM_RV_ENCRYPTED_DATA_INVALID;
         }
         *pulDataLen = buf_len;
+        (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
+    /* --- RSA PKCS#1 v1.5 / X.509 raw decryption (non-FIPS ; interop) --- */
+    if (op->mechanism == CKM_RSA_PKCS || op->mechanism == CKM_RSA_X_509) {
+        if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        if (cl != CKO_PRIVATE_KEY || kt != CKK_RSA) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        int pad = (op->mechanism == CKM_RSA_PKCS) ? RSA_PKCS1_PADDING : RSA_NO_PADDING;
+        const uint8_t *pp = kv;
+        EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &pp, (long)kvl);
+        if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
+        EVP_PKEY_CTX *dctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (!dctx || EVP_PKEY_decrypt_init(dctx) <= 0
+            || EVP_PKEY_CTX_set_rsa_padding(dctx, pad) <= 0) {
+            if (dctx) EVP_PKEY_CTX_free(dctx);
+            EVP_PKEY_free(pkey);
+            op->active = 0;
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        size_t out_len = 0;
+        if (EVP_PKEY_decrypt(dctx, NULL, &out_len, pEnc, ulEncLen) <= 0) {
+            EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_ENCRYPTED_DATA_INVALID;
+        }
+        if (pData == NULL) { *pulDataLen = out_len; EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_OK; }
+        if (*pulDataLen < out_len) { *pulDataLen = out_len; EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0; return 0x00000150UL; }
+        size_t bl = *pulDataLen;
+        int dr = EVP_PKEY_decrypt(dctx, pData, &bl, pEnc, ulEncLen);
+        EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0;
+        if (dr <= 0) return FHSM_RV_ENCRYPTED_DATA_INVALID;
+        *pulDataLen = bl;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
                                 fhsm_session_role(hSession), FHSM_RV_OK, NULL);
         return FHSM_RV_OK;

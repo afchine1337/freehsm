@@ -19,6 +19,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
   emits a build-profile flag (`FHSM_BUILD_FIPS_STRICT`, and an extern
   `fhsm_build_fips_strict` for TUs that can't include the generated
   header) that the operation gates consult.
+* **Non-FIPS RSA legacy padding: PKCS#1 v1.5 + X.509 raw encryption
+  (interop only).** Third family through the operation-gate pattern.
+  `dispatch_rsa_pkcs` / `dispatch_rsa_x509` handlers ; `C_Encrypt`/
+  `C_Decrypt` gain RSA-PKCS-v1.5 (`RSA_PKCS1_PADDING`) and X.509-raw
+  (`RSA_NO_PADDING`) branches (public-key encrypt / private-key
+  decrypt) ; `op_init` rejects both at init under fips-strict.
+  Advertised + executable in interop, rejected in fips-strict.
+  Profile-adaptive test `tests/test_legacy_rsa.c` (RSA-2048 keypair,
+  both padding modes round-tripped). SHA1-RSA-PKCS signature next.
+
 * **Non-FIPS ciphers AES-ECB, 3DES-CBC, 3DES key generation (interop
   only).** Second family through the operation-gate pattern.
   `dispatch_aes_ecb` / `dispatch_des3_cbc` / `dispatch_des3_keygen`

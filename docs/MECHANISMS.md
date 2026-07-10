@@ -195,9 +195,9 @@
 | `CKM_SHA384_RSA_PKCS_PSS` | `0x00000044` | sign | ✅ | `dispatch_rsa_pss_sha384` | FIPS 186-5 |
 | `CKM_SHA512_RSA_PKCS_PSS` | `0x00000045` | sign | ✅ | `dispatch_rsa_pss_sha512` | FIPS 186-5 |
 | `CKM_RSA_PKCS_OAEP` | `0x00000009` | encrypt | ✅ | `dispatch_rsa_oaep` | RFC 8017 §7.1 |
-| `CKM_RSA_PKCS` | `0x00000001` | encrypt | ❌ | `dispatch_reject_fips` | RFC 8017 §7.2 |
+| `CKM_RSA_PKCS` | `0x00000001` | encrypt | ❌ | `dispatch_rsa_pkcs` | RFC 8017 §7.2 |
 | | | | | | _PKCS#1 v1.5 encryption is deprecated by NIST; padding-oracle risk._ |
-| `CKM_RSA_X_509` | `0x00000003` | encrypt | ❌ | `dispatch_reject_fips` | — |
+| `CKM_RSA_X_509` | `0x00000003` | encrypt | ❌ | `dispatch_rsa_x509` | — |
 | | | | | | _Raw RSA --- forbidden in approved mode._ |
 | `CKM_SHA1_RSA_PKCS` | `0x00000006` | sign | ❌ | `dispatch_reject_fips` | — |
 | | | | | | _SHA-1 is forbidden for signature generation per SP 800-131A rev. 2._ |
