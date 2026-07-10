@@ -43,6 +43,10 @@ int main(void){
   CK_RV(*GKP)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_ATTRIBUTE*,CK_ULONG,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*,CK_OBJECT_HANDLE*);SY(GKP,"C_GenerateKeyPair");
   CK_RV(*GML)(CK_SLOT_ID,CK_ULONG*,CK_ULONG*);SY(GML,"C_GetMechanismList");
   SY(EI,"C_EncryptInit");SY(EN,"C_Encrypt");SY(DI,"C_DecryptInit");SY(DE,"C_Decrypt");
+  CK_RV(*SI)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);SY(SI,"C_SignInit");
+  CK_RV(*SG)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);SY(SG,"C_Sign");
+  CK_RV(*VI)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);SY(VI,"C_VerifyInit");
+  CK_RV(*VE)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG);SY(VE,"C_Verify");
   I(0);CK_BYTE so[]="00000000",us[]="user0000";IT(0,so,8,(CK_BYTE*)"t");
   CK_SESSION_HANDLE s;OS(0,4|2,0,0,&s);LI(s,0,so,8);IP(s,us,8);LI(s,1,us,8);
   CK_ULONG mn=0;GML(0,0,&mn);CK_ULONG*ml=calloc(mn,sizeof(CK_ULONG));GML(0,ml,&mn);
@@ -60,6 +64,12 @@ int main(void){
   rc|=rt(s,0x1,pub,prv,msg,16,"RSA-PKCS");
   CK_BYTE raw[256];for(int i=0;i<256;i++)raw[i]=(CK_BYTE)(i&0x7f);raw[0]=0;
   rc|=rt(s,0x3,pub,prv,raw,256,"RSA-X509");
+  /* SHA1-RSA-PKCS sign+verify */
+  CK_MECHANISM sm={0x6,0,0};CK_BYTE smsg[32];for(int i=0;i<32;i++)smsg[i]=(CK_BYTE)i;
+  CK_BYTE sig[512];CK_ULONG sl=512;
+  if((rv=SI(s,&sm,prv))||(rv=SG(s,smsg,32,sig,&sl))||(rv=VI(s,&sm,pub))||(rv=VE(s,smsg,32,sig,sl))){
+    fprintf(stderr,"  FAIL SHA1-RSA sign/verify 0x%lx\n",rv);rc|=1;
+  } else printf("  SHA1-RSA sign+verify : OK\n");
   if(rc)return 1;
   printf("test_legacy_rsa : PASS\n");
   return 0;

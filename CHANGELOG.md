@@ -36,8 +36,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
   (`RSA_NO_PADDING`) branches (public-key encrypt / private-key
   decrypt) ; `op_init` rejects both at init under fips-strict.
   Advertised + executable in interop, rejected in fips-strict.
-  Profile-adaptive test `tests/test_legacy_rsa.c` (RSA-2048 keypair,
-  both padding modes round-tripped). SHA1-RSA-PKCS signature next.
+  SHA1-RSA-PKCS signature (`CKM_SHA1_RSA_PKCS`, 0x06) : SHA-1 digest +
+  RSA PKCS#1 v1.5 signature, wired into the `C_Sign`/`C_Verify` path
+  (`mech_hash_name` -> "SHA1") and the sign/verify accept switches,
+  gated to interop (rejected in fips-strict). `dispatch_sha1_rsa`
+  reference handler. This completes the non-FIPS RSA family (#21).
+  Profile-adaptive test `tests/test_legacy_rsa.c` covers RSA-2048
+  keypair, both encryption padding modes, and SHA1-RSA sign+verify.
 
 * **Non-FIPS ciphers AES-ECB, 3DES-CBC, 3DES key generation (interop
   only).** Second family through the operation-gate pattern.

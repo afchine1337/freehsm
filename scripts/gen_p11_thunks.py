@@ -193,7 +193,7 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_RSA_X_509",          0x00000003, "RSA",  "encrypt", "dispatch_rsa_x509",
          fips="non-approved", key_type="CKK_RSA",
          notes="Raw RSA --- forbidden in approved mode."),
-    Mech("CKM_SHA1_RSA_PKCS",      0x00000006, "RSA",  "sign",    "dispatch_reject_fips",
+    Mech("CKM_SHA1_RSA_PKCS",      0x00000006, "RSA",  "sign",    "dispatch_sha1_rsa",
          fips="non-approved",
          notes="SHA-1 is forbidden for signature generation per SP 800-131A rev. 2."),
 

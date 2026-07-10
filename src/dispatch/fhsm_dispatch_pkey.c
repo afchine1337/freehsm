@@ -150,6 +150,36 @@ fhsm_rv_t dispatch_rsa_pss(unsigned long s, unsigned long k,
                             fhsm_slice_t in, uint8_t *o, size_t *ol)
 { (void)s; (void)k; return rsa_pss_sign(FHSM_HASH_SHA256, p, pl, in, o, ol); }
 
+/* SHA1-RSA-PKCS (non-FIPS ; interop only) : PKCS#1 v1.5 RSA signature
+ * over a SHA-1 digest of the message. Reference impl ; the operation
+ * path is C_Sign (mech_hash_name -> "SHA1", default PKCS#1 v1.5). #125. */
+fhsm_rv_t dispatch_sha1_rsa(unsigned long s, unsigned long k,
+                             const void *params, size_t plen,
+                             fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)s; (void)k;
+    fhsm_slice_t pem;
+    fhsm_rv_t rv = fhsm_tlv_find(params, plen, FHSM_TLV_PEM, &pem);
+    if (rv != FHSM_RV_OK) return rv;
+    EVP_PKEY *pk = load_priv(pem);
+    if (!pk) return FHSM_RV_KEY_HANDLE_INVALID;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (!ctx) { EVP_PKEY_free(pk); return FHSM_RV_HOST_MEMORY; }
+    EVP_PKEY_CTX *pkctx = NULL;
+    fhsm_rv_t r = FHSM_RV_FUNCTION_FAILED;
+    EVP_MD *md = EVP_MD_fetch(NULL, "SHA1", NULL);
+    if (!md) goto out;
+    if (EVP_DigestSignInit_ex(ctx, &pkctx, "SHA1", NULL, NULL, pk, NULL) != 1) goto out;
+    if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PADDING) <= 0) goto out;
+    if (EVP_DigestSign(ctx, out, outlen, in.data, in.len) != 1) goto out;
+    r = FHSM_RV_OK;
+out:
+    if (md) EVP_MD_free(md);
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pk);
+    return r;
+}
+
 /* ---------------------------------------------------------------------------
  * RSA-OAEP encrypt
  * ------------------------------------------------------------------------- */

@@ -3953,6 +3953,7 @@ gcm_out:
 #define CKG_MGF1_SHA384           0x00000003UL
 #define CKG_MGF1_SHA512           0x00000004UL
 #define CKZ_DATA_SPECIFIED        0x00000001UL
+#define CKM_SHA1_RSA_PKCS         0x00000006UL
 #define CKM_SHA256_RSA_PKCS       0x00000040UL
 #define CKM_SHA384_RSA_PKCS       0x00000041UL
 #define CKM_SHA512_RSA_PKCS       0x00000042UL
@@ -3981,6 +3982,9 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
         case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
+            break;
+        case CKM_SHA1_RSA_PKCS: /* non-FIPS : interop only */
+            if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
             break;
         default:
             return FHSM_RV_MECHANISM_INVALID;
@@ -4065,6 +4069,7 @@ static fhsm_rv_t aes_cmac(const uint8_t *key, size_t key_len,
  * (caller-provided digest, used with raw CKM_ECDSA / CKM_RSA_PKCS). */
 static const char *mech_hash_name(uint32_t m) {
     switch (m) {
+        case CKM_SHA1_RSA_PKCS:                                 return "SHA1";
         case CKM_ECDSA_SHA256: case CKM_SHA256_RSA_PKCS:
         case CKM_SHA256_RSA_PKCS_PSS:                            return "SHA256";
         case CKM_ECDSA_SHA384: case CKM_SHA384_RSA_PKCS:
@@ -4342,6 +4347,9 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
         case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
+            break;
+        case CKM_SHA1_RSA_PKCS: /* non-FIPS : interop only */
+            if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
             break;
         default: return FHSM_RV_MECHANISM_INVALID;
     }
