@@ -103,6 +103,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
   values are correct, EdDSA/HKDF are present, and the phantoms are gone.
   Full analysis in `docs/PKCS11_CHECK_FINDINGS.md`.
 
+* **pkcs11-check runner now purges its stale isolation cache (#125).**
+  `pkcs11-check` writes `.pkcs11-check-isolation-*.json` and
+  `..report-records/*.jsonl` into the working directory ; these are
+  gitignored, so `make clean` never removes them, and the
+  mixed-isolation aggregator re-reports the *previous* run's crash
+  records even after the defect is fixed and the module rebuilt (this
+  masked the C_DecryptFinal fix, showing phantom crashes on a clean
+  rebuild). `scripts/run_pkcs11_check.sh` now deletes this cache before
+  every run. Confirmed: after purging, crashes drop to 0.
+
 * **C_DecryptFinal NULL cipher-context dereference / SIGSEGV (#125,
   found by re-running pkcs11-check against the up-to-date module).**
   `C_DecryptFinal` called `EVP_DecryptFinal_ex(op->cipher_ctx, ...)`

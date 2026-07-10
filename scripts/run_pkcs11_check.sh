@@ -44,6 +44,14 @@ mkdir -p "$REPORTS"
 TOKENS_DIR="$(mktemp -d /tmp/fhsm-p11check.XXXXXX)"
 trap 'rm -rf "$TOKENS_DIR"' EXIT
 
+# Purge pkcs11-check's isolation state + per-file report cache. These
+# hidden files (gitignored, so `make clean` never touches them) carry
+# the crash/outcome records of the PREVIOUS run ; the mixed-isolation
+# aggregator would otherwise re-report stale crashes even after the
+# underlying defect is fixed and the module rebuilt. Always start clean.
+rm -f  .pkcs11-check-isolation-*.json 2>/dev/null || true
+rm -rf .*.report-records ..*.report-records "$REPORTS"/*.report-records 2>/dev/null || true
+
 # Environment for the module. OPENSSL_CONF=/dev/null keeps EVP fetches
 # on the default provider in legacy/dev mode (same rationale as
 # coverage_matrix.sh). If the module was digest-signed (make
@@ -97,21 +105,4 @@ except Exception as e:
 def walk(x):
     if isinstance(x, dict):
         o = x.get("outcome") or x.get("result") or x.get("status")
-        if isinstance(o, str):
-            yield o.lower()
-        for v in x.values():
-            yield from walk(v)
-    elif isinstance(x, list):
-        for v in x:
-            yield from walk(v)
-from collections import Counter
-c = Counter(walk(d))
-if c:
-    for k, v in sorted(c.items(), key=lambda kv: -kv[1]):
-        print(f"  {k:12s} {v}")
-else:
-    print("  (no per-test outcomes found in report; see run.log)")
-PYEOF
-
-echo "Report: $REPORTS/results.json (findings are evidence, not a gate)"
-exit 0
+       
