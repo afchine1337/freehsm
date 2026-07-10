@@ -170,4 +170,4 @@ Legend : ✅ implemented · 🟡 partial/scaffold · ⏳ to do
 
 ## Maintainer & brand
 
-**Simorgh Labs — Open Source Crypt
+**Simorgh Labs — Open Source Cryptography and Digital Trust** — sponsoring entity for the FreeHSM project and publisher of **Simorgh PKI** (v2.0, in development: `fhsm-ca` PKI CLI + `fhsm-sign` signing toolkit + PQC composite signatures per IETF LAMPS). Maintained by Afchine Madjlessi (`afchine.mad@gmail.com`). All releases are GPG-signed with key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2` (Ed25519, unchanged across the rebrand). The PKCS#11 module reports `manufacturerID = "Simorgh Labs"` (truncated to the 32-octet field per PKCS#11 v3.2 §C.6.1). The library binary name `libfreehsm-fips.so` and all PKCS#11 identifiers are stable — the rebrand changes no consumer-facing interface. Name and logo usage: see [`TRADEMARK.md`](TRADEMARK.md).

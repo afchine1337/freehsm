@@ -27,9 +27,13 @@
 #define FHSM_CKA_MODULUS            0x00000120UL
 #define FHSM_CKA_PUBLIC_EXPONENT    0x00000122UL
 
+#define FHSM_CKO_CERTIFICATE        0x00000001UL
 #define FHSM_CKO_PUBLIC_KEY         0x00000002UL
 #define FHSM_CKO_PRIVATE_KEY        0x00000003UL
 #define FHSM_CKO_SECRET_KEY         0x00000004UL
+
+#define FHSM_CKA_CERTIFICATE_TYPE   0x00000080UL
+#define FHSM_CKC_X_509              0x00000000UL
 
 #define FHSM_CKK_RSA                0x00000000UL
 #define FHSM_CKK_EC                 0x00000003UL
@@ -194,13 +198,12 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
 
     if (!read_attr_ulong(pTemplate, ulCount, FHSM_CKA_CLASS, &attrs->cko))
         return FHSM_PARSE_TEMPLATE_INCOMPLETE;
-    if (!read_attr_ulong(pTemplate, ulCount, FHSM_CKA_KEY_TYPE, &attrs->ckk))
-        return FHSM_PARSE_TEMPLATE_INCOMPLETE;
 
     /* Validate class is one of the supported ones. */
     if (attrs->cko != FHSM_CKO_PUBLIC_KEY
         && attrs->cko != FHSM_CKO_PRIVATE_KEY
-        && attrs->cko != FHSM_CKO_SECRET_KEY)
+        && attrs->cko != FHSM_CKO_SECRET_KEY
+        && attrs->cko != FHSM_CKO_CERTIFICATE)
         return FHSM_PARSE_TEMPLATE_INCONSISTENT;
 
     /* Optional attributes : label + id. */
@@ -210,6 +213,29 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
         attrs->id_data = (const uint8_t *)pTemplate[idx_id].pValue;
         attrs->id_len  = (size_t)pTemplate[idx_id].ulValueLen;
     }
+
+    /* Certificates (#110) : CKA_KEY_TYPE is NOT part of the class
+     * (PKCS#11 v3.2 par. 4.6.3) ; CKA_CERTIFICATE_TYPE gates instead.
+     * Only CKC_X_509 is supported ; the DER certificate travels in
+     * CKA_VALUE, stored verbatim (the module never parses X.509 ---
+     * that is the PKI layer's job). */
+    if (attrs->cko == FHSM_CKO_CERTIFICATE) {
+        if (!read_attr_ulong(pTemplate, ulCount, FHSM_CKA_CERTIFICATE_TYPE,
+                              &attrs->cert_type))
+            return FHSM_PARSE_TEMPLATE_INCOMPLETE;
+        if (attrs->cert_type != FHSM_CKC_X_509)
+            return FHSM_PARSE_TEMPLATE_INCONSISTENT;
+        long iv = fhsm_find_attr(pTemplate, ulCount, FHSM_CKA_VALUE);
+        if (iv < 0 || pTemplate[iv].ulValueLen == 0)
+            return FHSM_PARSE_TEMPLATE_INCOMPLETE;
+        attrs->value_data = (const uint8_t *)pTemplate[iv].pValue;
+        attrs->value_len  = (size_t)pTemplate[iv].ulValueLen;
+        attrs->path = FHSM_CREATE_PATH_CERT_X509;
+        return FHSM_PARSE_OK;
+    }
+
+    if (!read_attr_ulong(pTemplate, ulCount, FHSM_CKA_KEY_TYPE, &attrs->ckk))
+        return FHSM_PARSE_TEMPLATE_INCOMPLETE;
 
     /* Dispatch on (cko, ckk). */
     if (attrs->cko == FHSM_CKO_SECRET_KEY

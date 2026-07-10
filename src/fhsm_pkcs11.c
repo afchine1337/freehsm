@@ -1618,12 +1618,20 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
  * VALUE so the existing C_VerifyInit / C_Verify path (which does
  * `d2i_PUBKEY` on `kv`) can use it without changes.
  *
- * Other object classes (CKO_SECRET_KEY, CKO_PRIVATE_KEY, certificates,
- * data objects) are not handled here yet --- they return
- * CKR_TEMPLATE_INCONSISTENT until a real need surfaces.
+ * CKO_CERTIFICATE with CKC_X_509 is supported since #110 : the DER
+ * certificate is stored verbatim in CKA_VALUE (the module never parses
+ * X.509 --- validation is the PKI layer's job). Data objects are not
+ * handled yet --- they return CKR_TEMPLATE_INCONSISTENT until a real
+ * need surfaces.
  * ----------------------------------------------------------------------- */
 #ifndef CKA_EC_PARAMS
 #define CKA_EC_PARAMS        0x00000180UL
+#endif
+#ifndef CKO_CERTIFICATE
+#define CKO_CERTIFICATE      0x00000001UL
+#endif
+#ifndef CKA_CERTIFICATE_TYPE
+#define CKA_CERTIFICATE_TYPE 0x00000080UL
 #endif
 #ifndef CKK_EC_CREATEOBJECT
 #define CKK_EC_CREATEOBJECT  0x00000003UL  /* CKK_EC */
@@ -1694,6 +1702,22 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
             t, (uint32_t)a.cko, (uint32_t)a.ckk,
             a.label, a.value_data, a.value_len,
             a.id_data, a.id_len, flags, &handle);
+        if (rv != FHSM_RV_OK) return rv;
+        *phObject = handle;
+        return FHSM_RV_OK;
+    }
+
+    /* --- X.509 certificate path (#110). Certificates are public,
+     * non-sensitive, extractable by definition : CKA_VALUE must be
+     * readable back through C_GetAttributeValue (the PKI layer round-
+     * trips DER through the token). The CKA_CERTIFICATE_TYPE value is
+     * carried in the store's key_type field (CKC_X_509 = 0). */
+    if (a.path == FHSM_CREATE_PATH_CERT_X509) {
+        uint32_t handle = 0;
+        fhsm_rv_t rv = fhsm_token_object_add(
+            t, (uint32_t)CKO_CERTIFICATE, (uint32_t)a.cert_type,
+            a.label, a.value_data, a.value_len,
+            a.id_data, a.id_len, FHSM_OBJF_EXTRACTABLE, &handle);
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
         return FHSM_RV_OK;
@@ -2717,7 +2741,19 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
         const uint8_t *id_p    = NULL; size_t id_len    = 0;
         switch (pTemplate[i].type) {
             case CKA_CLASS:     src = &tmp_class; src_len = sizeof(CK_ULONG); break;
-            case CKA_KEY_TYPE:  src = &tmp_type;  src_len = sizeof(CK_ULONG); break;
+            case CKA_KEY_TYPE:
+                /* Certificates have no CKA_KEY_TYPE (PKCS#11 v3.2
+                 * par. 4.6.3) ; the store's key_type field carries
+                 * CKA_CERTIFICATE_TYPE for that class instead. */
+                if (cko_class == CKO_CERTIFICATE) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                }
+                src = &tmp_type;  src_len = sizeof(CK_ULONG); break;
+            case CKA_CERTIFICATE_TYPE:
+                if (cko_class != CKO_CERTIFICATE) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                }
+                src = &tmp_type;  src_len = sizeof(CK_ULONG); break;
             case CKA_VALUE: {
                 /* Enforce CKA_SENSITIVE : a sensitive object's CKA_VALUE
                  * must NEVER be returned. PKCS#11 v3.2 §C.6.7.2 :

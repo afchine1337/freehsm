@@ -69,8 +69,15 @@
  *   ML-KEM-1024 PKCS#8 priv  ≈ 3168 bytes  (FIPS 203)
  *   SLH-DSA-* priv           ≤ 64 bytes
  * 5500 covers ML-DSA-87 with margin. Symmetric keys use only the
- * first 16-64 bytes ; the unused tail is zeroized. */
-#define FHSM_OBJ_VALUE_LEN  5500
+ * first 16-64 bytes ; the unused tail is zeroized.
+ *
+ * v2 (#110) : FHSM_OBJ_VALUE_LEN is frozen as the LEGACY v1 record
+ * field size (still needed to parse v1 blobs). The in-memory buffer
+ * and the v2 on-disk cap is FHSM_OBJ_VALUE_MAX, sized for X.509
+ * certificates carrying PQC / composite keys and signatures
+ * (ML-DSA-87 cert ~8-10 KB ; composite larger). */
+#define FHSM_OBJ_VALUE_LEN  5500      /* legacy v1 record field size  */
+#define FHSM_OBJ_VALUE_MAX  16384     /* in-memory + v2 per-object cap */
 
 typedef struct fhsm_object_s {
     uint32_t handle;        /* CK_OBJECT_HANDLE, opaque to PKCS#11 caller */
@@ -78,7 +85,7 @@ typedef struct fhsm_object_s {
     uint32_t key_type;      /* CKK_AES, CKK_GENERIC_SECRET, ... */
     uint32_t value_len;     /* actual key bytes used */
     uint8_t  label[FHSM_OBJ_LABEL_LEN];
-    uint8_t  value[FHSM_OBJ_VALUE_LEN];
+    uint8_t  value[FHSM_OBJ_VALUE_MAX];
     uint8_t  id[32];        /* CKA_ID */
     uint32_t id_len;
     uint8_t  flags;         /* bit 0 = CKA_PRIVATE, bit 1 = CKA_EXTRACTABLE */
@@ -219,54 +226,60 @@ static uint64_t get_u64_le(const uint8_t *p) {
  * = 16 + 64 + 5500 + 32 + 4 + 4 = 5620 bytes. */
 #define FHSM_OBJ_REC_SZ   5620
 
+/* v2 blob (#110) : variable-size records so certificates don't pay the
+ * fixed 5500-byte value field. Layout :
+ *   u32 magic = FHSM_OBJ_BLOB_V2_MAGIC | u32 count | u32 next_handle
+ *   per record : u32 rec_len (bytes after this field)
+ *                handle(4) class(4) key_type(4) value_len(4)
+ *                label(64) id(32) id_len(4) flags(1) pad(3)
+ *                value[value_len]
+ * The magic cannot collide with a v1 blob, whose first field is
+ * object_count <= FHSM_MAX_OBJECTS. v1 blobs remain readable ; every
+ * write re-serializes as v2. Spec : docs/TOKEN_STORE_FORMAT.md. */
+#define FHSM_OBJ_BLOB_V2_MAGIC 0xF5B20002u
+#define FHSM_OBJ_REC_V2_FIXED  120u   /* bytes after rec_len, before value */
+
 /* Upper bound of the objects-blob plaintext/ciphertext (GCM keeps
- * length) : count/next_handle prefix + full store. Used as the loader's
+ * length) : the v2 bound (12 + 64 x (4 + 120 + 16384)), which also
+ * covers the smaller v1 bound (8 + 64 x 5620). Used as the loader's
  * sanity cap. v1.4.0 wrongly capped at 65536, which bricked loading of
  * tokens holding more than 11 objects (see docs/TOKEN_STORE_FORMAT.md,
  * "Regression note"). */
-#define FHSM_OBJ_BLOB_MAX (8u + (uint32_t)FHSM_MAX_OBJECTS * FHSM_OBJ_REC_SZ)
+#define FHSM_OBJ_BLOB_MAX \
+    (12u + (uint32_t)FHSM_MAX_OBJECTS * (4u + FHSM_OBJ_REC_V2_FIXED + FHSM_OBJ_VALUE_MAX))
 
 static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
-    /* Returns the number of bytes written. */
-    put_u32_le(out + 0, t->object_count);
-    put_u32_le(out + 4, t->next_handle);
-    size_t off = 8;
-    /* Field offsets within each FHSM_OBJ_REC_SZ-byte record. */
-    const size_t OFF_HDR    = 0;
-    const size_t OFF_LABEL  = 16;
-    const size_t OFF_VALUE  = OFF_LABEL + FHSM_OBJ_LABEL_LEN;
-    const size_t OFF_ID     = OFF_VALUE + FHSM_OBJ_VALUE_LEN;
-    const size_t OFF_IDLEN  = OFF_ID + 32;
-    const size_t OFF_FLAGS  = OFF_IDLEN + 4;
+    /* v2 writer (#110). Returns the number of bytes written. */
+    put_u32_le(out + 0, FHSM_OBJ_BLOB_V2_MAGIC);
+    put_u32_le(out + 4, t->object_count);
+    put_u32_le(out + 8, t->next_handle);
+    size_t off = 12;
     for (uint32_t i = 0; i < t->object_count; ++i) {
         const fhsm_object_t *o = &t->objects[i];
-        put_u32_le(out + off + OFF_HDR + 0,  o->handle);
-        put_u32_le(out + off + OFF_HDR + 4,  o->class);
-        put_u32_le(out + off + OFF_HDR + 8,  o->key_type);
-        put_u32_le(out + off + OFF_HDR + 12, o->value_len);
-        memcpy(out + off + OFF_LABEL, o->label, FHSM_OBJ_LABEL_LEN);
-        memcpy(out + off + OFF_VALUE, o->value, FHSM_OBJ_VALUE_LEN);
-        memcpy(out + off + OFF_ID,    o->id,    32);
-        put_u32_le(out + off + OFF_IDLEN, o->id_len);
-        out[off + OFF_FLAGS] = o->flags;
-        out[off + OFF_FLAGS + 1] = 0;
-        out[off + OFF_FLAGS + 2] = 0;
-        out[off + OFF_FLAGS + 3] = 0;
-        off += FHSM_OBJ_REC_SZ;
+        uint32_t rec_len = FHSM_OBJ_REC_V2_FIXED + o->value_len;
+        put_u32_le(out + off, rec_len); off += 4;
+        put_u32_le(out + off + 0,  o->handle);
+        put_u32_le(out + off + 4,  o->class);
+        put_u32_le(out + off + 8,  o->key_type);
+        put_u32_le(out + off + 12, o->value_len);
+        memcpy(out + off + 16, o->label, FHSM_OBJ_LABEL_LEN);
+        memcpy(out + off + 80, o->id,    32);
+        put_u32_le(out + off + 112, o->id_len);
+        out[off + 116] = o->flags;
+        out[off + 117] = 0; out[off + 118] = 0; out[off + 119] = 0;
+        memcpy(out + off + FHSM_OBJ_REC_V2_FIXED, o->value, o->value_len);
+        off += rec_len;
     }
     return off;
 }
 
-static fhsm_rv_t parse_objects(fhsm_token_t *t, const uint8_t *buf, size_t len) {
-    if (len < 8) return FHSM_RV_FUNCTION_FAILED;
+/* Legacy fixed-record blobs written by v1.4.x and earlier. */
+static fhsm_rv_t parse_objects_v1(fhsm_token_t *t, const uint8_t *buf, size_t len) {
     uint32_t count = get_u32_le(buf + 0);
     if (count > FHSM_MAX_OBJECTS) return FHSM_RV_FUNCTION_FAILED;
     uint32_t next_h = get_u32_le(buf + 4);
     size_t need = 8 + (size_t)count * FHSM_OBJ_REC_SZ;
     if (len < need) return FHSM_RV_FUNCTION_FAILED;
-    t->object_count = count;
-    t->next_handle  = next_h;
-    const size_t OFF_HDR    = 0;
     const size_t OFF_LABEL  = 16;
     const size_t OFF_VALUE  = OFF_LABEL + FHSM_OBJ_LABEL_LEN;
     const size_t OFF_ID     = OFF_VALUE + FHSM_OBJ_VALUE_LEN;
@@ -275,18 +288,68 @@ static fhsm_rv_t parse_objects(fhsm_token_t *t, const uint8_t *buf, size_t len) 
     size_t off = 8;
     for (uint32_t i = 0; i < count; ++i) {
         fhsm_object_t *o = &t->objects[i];
-        o->handle    = get_u32_le(buf + off + OFF_HDR + 0);
-        o->class     = get_u32_le(buf + off + OFF_HDR + 4);
-        o->key_type  = get_u32_le(buf + off + OFF_HDR + 8);
-        o->value_len = get_u32_le(buf + off + OFF_HDR + 12);
+        memset(o, 0, sizeof(*o));
+        o->handle    = get_u32_le(buf + off + 0);
+        o->class     = get_u32_le(buf + off + 4);
+        o->key_type  = get_u32_le(buf + off + 8);
+        o->value_len = get_u32_le(buf + off + 12);
+        if (o->value_len > FHSM_OBJ_VALUE_LEN) return FHSM_RV_FUNCTION_FAILED;
         memcpy(o->label, buf + off + OFF_LABEL, FHSM_OBJ_LABEL_LEN);
         memcpy(o->value, buf + off + OFF_VALUE, FHSM_OBJ_VALUE_LEN);
         memcpy(o->id,    buf + off + OFF_ID,    32);
         o->id_len = get_u32_le(buf + off + OFF_IDLEN);
+        if (o->id_len > 32) return FHSM_RV_FUNCTION_FAILED;
         o->flags  = buf[off + OFF_FLAGS];
         off += FHSM_OBJ_REC_SZ;
     }
+    t->object_count = count;
+    t->next_handle  = next_h;
     return FHSM_RV_OK;
+}
+
+/* v2 variable-record blobs (#110). Every record is bounds-checked
+ * before any copy ; a malformed record rejects the whole blob (the GCM
+ * tag already authenticates it, so corruption here means a logic bug,
+ * not an attacker). */
+static fhsm_rv_t parse_objects_v2(fhsm_token_t *t, const uint8_t *buf, size_t len) {
+    uint32_t count = get_u32_le(buf + 4);
+    if (count > FHSM_MAX_OBJECTS) return FHSM_RV_FUNCTION_FAILED;
+    uint32_t next_h = get_u32_le(buf + 8);
+    size_t off = 12;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (off + 4 > len) return FHSM_RV_FUNCTION_FAILED;
+        uint32_t rec_len = get_u32_le(buf + off); off += 4;
+        if (rec_len < FHSM_OBJ_REC_V2_FIXED
+            || rec_len > FHSM_OBJ_REC_V2_FIXED + FHSM_OBJ_VALUE_MAX
+            || off + rec_len > len) return FHSM_RV_FUNCTION_FAILED;
+        fhsm_object_t *o = &t->objects[i];
+        memset(o, 0, sizeof(*o));
+        o->handle    = get_u32_le(buf + off + 0);
+        o->class     = get_u32_le(buf + off + 4);
+        o->key_type  = get_u32_le(buf + off + 8);
+        o->value_len = get_u32_le(buf + off + 12);
+        if (o->value_len != rec_len - FHSM_OBJ_REC_V2_FIXED)
+            return FHSM_RV_FUNCTION_FAILED;
+        memcpy(o->label, buf + off + 16, FHSM_OBJ_LABEL_LEN);
+        memcpy(o->id,    buf + off + 80, 32);
+        o->id_len = get_u32_le(buf + off + 112);
+        if (o->id_len > 32) return FHSM_RV_FUNCTION_FAILED;
+        o->flags  = buf[off + 116];
+        memcpy(o->value, buf + off + FHSM_OBJ_REC_V2_FIXED, o->value_len);
+        off += rec_len;
+    }
+    t->object_count = count;
+    t->next_handle  = next_h;
+    return FHSM_RV_OK;
+}
+
+static fhsm_rv_t parse_objects(fhsm_token_t *t, const uint8_t *buf, size_t len) {
+    if (len < 8) return FHSM_RV_FUNCTION_FAILED;
+    if (get_u32_le(buf) == FHSM_OBJ_BLOB_V2_MAGIC) {
+        if (len < 12) return FHSM_RV_FUNCTION_FAILED;
+        return parse_objects_v2(t, buf, len);
+    }
+    return parse_objects_v1(t, buf, len);
 }
 
 /* ---------------------------------------------------------------------------
@@ -386,7 +449,9 @@ static fhsm_rv_t write_atomic(const fhsm_token_t *t) {
     uint8_t  blob_nonce[12];
     uint8_t  blob_tag[16];
     if (t->dek && t->objects_loaded && t->object_count > 0) {
-        size_t pt_sz = 8 + (size_t)t->object_count * FHSM_OBJ_REC_SZ;
+        size_t pt_sz = 12;   /* v2 : magic + count + next_handle */
+        for (uint32_t i = 0; i < t->object_count; ++i)
+            pt_sz += 4 + FHSM_OBJ_REC_V2_FIXED + t->objects[i].value_len;
         uint8_t *pt = malloc(pt_sz);
         if (!pt) return FHSM_RV_HOST_MEMORY;
         serialize_objects(t, pt);
@@ -896,7 +961,7 @@ fhsm_rv_t fhsm_token_object_add(fhsm_token_t *t, uint32_t cko_class,
                                  const uint8_t *id,    size_t id_len,
                                  uint8_t flags, uint32_t *out_handle) {
     if (!t || !out_handle) return FHSM_RV_ARGUMENTS_BAD;
-    if (value_len > FHSM_OBJ_VALUE_LEN) return FHSM_RV_KEY_SIZE_RANGE;
+    if (value_len > FHSM_OBJ_VALUE_MAX) return FHSM_RV_KEY_SIZE_RANGE;
     if (id_len > 32) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
     if (!t->dek || !t->objects_loaded) {

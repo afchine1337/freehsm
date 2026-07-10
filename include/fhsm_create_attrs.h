@@ -49,6 +49,11 @@ typedef enum {
     FHSM_CREATE_PATH_ED448_PUB,
     /* CKO_PUBLIC_KEY + CKK_RSA. CKA_MODULUS + CKA_PUBLIC_EXPONENT. */
     FHSM_CREATE_PATH_RSA_PUB,
+    /* CKO_CERTIFICATE + CKA_CERTIFICATE_TYPE = CKC_X_509 (#110).
+     * CKA_VALUE = complete X.509 certificate, DER. CKA_KEY_TYPE is NOT
+     * required for this class (PKCS#11 v3.2 par. 4.6.3) ; cert_type
+     * below carries the CKA_CERTIFICATE_TYPE value instead. */
+    FHSM_CREATE_PATH_CERT_X509,
 } fhsm_create_path_t;
 
 /* All data parsed from the template. Pointer fields (id_data, value_data,
@@ -59,7 +64,8 @@ typedef enum {
 typedef struct fhsm_create_attrs_s {
     fhsm_create_path_t  path;
     unsigned long       cko;        /* CKA_CLASS value */
-    unsigned long       ckk;        /* CKA_KEY_TYPE value */
+    unsigned long       ckk;        /* CKA_KEY_TYPE value (0 for certificates) */
+    unsigned long       cert_type;  /* CKA_CERTIFICATE_TYPE (cert path only) */
 
     char                label[64];  /* CKA_LABEL, NUL-terminated, may be "" */
 

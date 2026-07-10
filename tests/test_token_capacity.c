@@ -129,13 +129,87 @@ static int run_roundtrip(const char *path, uint32_t n_objects) {
     return 0;
 }
 
+/* --- #110 : certificate-sized objects through the v2 blob ------------------
+ * Stores 8 CKO_CERTIFICATE objects with 12 000-byte pseudo-DER values
+ * (larger than the legacy v1 5 500-byte field --- exercising the v2
+ * variable-record writer/parser), closes, reloads, and verifies one
+ * payload byte-for-byte. */
+#define CERT_LEN 12000
+#define N_CERTS  8
+
+static int run_cert_roundtrip(const char *path) {
+    fhsm_token_t *t = NULL;
+    fhsm_rv_t rv;
+    unlink(path);
+
+    rv = fhsm_token_init(path, SO_PIN, "cert-test", &t);
+    if (rv != FHSM_RV_OK) return fail("token_init (cert)", rv);
+    rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN);
+    if (rv != FHSM_RV_OK) return fail("SO login (cert)", rv);
+    rv = fhsm_token_init_user_pin(t, USER_PIN);
+    if (rv != FHSM_RV_OK) return fail("init_user_pin (cert)", rv);
+    fhsm_token_logout(t);
+    rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN);
+    if (rv != FHSM_RV_OK) return fail("USER login (cert)", rv);
+
+    uint8_t *der = malloc(CERT_LEN);
+    if (!der) return fail("malloc", FHSM_RV_HOST_MEMORY);
+    char label[32];
+    uint32_t first_handle = 0;
+    for (uint32_t i = 0; i < N_CERTS; ++i) {
+        for (size_t j = 0; j < CERT_LEN; ++j)
+            der[j] = (uint8_t)(i * 31u + j * 7u);
+        snprintf(label, sizeof(label), "cert-%03u", i);
+        uint32_t h = 0;
+        rv = fhsm_token_object_add(t,
+                                    0x00000001u /* CKO_CERTIFICATE */,
+                                    0x00000000u /* CKC_X_509 */,
+                                    label, der, CERT_LEN,
+                                    NULL, 0,
+                                    0x02 /* CKA_EXTRACTABLE */, &h);
+        if (rv != FHSM_RV_OK) { free(der); return fail("cert object_add", rv); }
+        if (i == 0) first_handle = h;
+    }
+    fhsm_token_logout(t);
+    fhsm_token_close(t);
+    t = NULL;
+
+    rv = fhsm_token_load(path, &t);
+    if (rv != FHSM_RV_OK) { free(der); return fail("token_load (cert reload)", rv); }
+    rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN);
+    if (rv != FHSM_RV_OK) { free(der); return fail("USER login after cert reload", rv); }
+
+    const uint8_t *val = NULL; size_t val_len = 0;
+    uint32_t ocls = 0, okt = 0;
+    rv = fhsm_token_object_get(t, first_handle, &val, &val_len, &ocls, &okt);
+    if (rv != FHSM_RV_OK) { free(der); return fail("cert object_get", rv); }
+    if (val_len != CERT_LEN || ocls != 0x00000001u) {
+        fprintf(stderr, "FAIL: cert len/class mismatch (len=%zu cls=0x%x)\n",
+                val_len, (unsigned)ocls);
+        free(der); return 1;
+    }
+    for (size_t j = 0; j < CERT_LEN; ++j)
+        der[j] = (uint8_t)(j * 7u);
+    if (memcmp(val, der, CERT_LEN) != 0) {
+        fprintf(stderr, "FAIL: cert payload corrupted across reload\n");
+        free(der); return 1;
+    }
+    free(der);
+    fhsm_token_logout(t);
+    fhsm_token_close(t);
+    unlink(path);
+    printf("  cert roundtrip %u x %u bytes : OK\n", N_CERTS, CERT_LEN);
+    return 0;
+}
+
 int main(void) {
     char path[256];
     snprintf(path, sizeof(path), "/tmp/fhsm-capacity-%d.tok", (int)getpid());
 
-    printf("test_token_capacity : objects-blob loader bound (#108)\n");
+    printf("test_token_capacity : objects-blob bounds (#108) + v2 records (#110)\n");
     if (run_roundtrip(path, N_OBJECTS)) return 1;  /* > 11 : the regression */
     if (run_roundtrip(path, N_MAX))     return 1;  /* upper bound (64)      */
+    if (run_cert_roundtrip(path))       return 1;  /* v2 variable records   */
     printf("test_token_capacity : PASS\n");
     return 0;
 }

@@ -252,4 +252,8 @@ Cela permet une **migration sans interruption de service** : on substitue `libfr
   - `REPRODUCIBLE_BUILD.md` procédure de build bit-identical
   - `ATE_FUN.md` test plan + coverage SFR→TSFI→test (ATE_FUN.1)
   - `AVA_VAN.md` vulnerability analysis 9 vulnérabilités notées CEM (AVA_VAN.5)
-  - `ALC_CMC.md` configuration manage
+  - `ALC_CMC.md` configuration management + life-cycle (ALC_CMC.4)
+  - `AGD_PRE.md` guide d'installation administrateur (AGD_PRE.1)
+  - `AGD_OPE.md` manuel opérationnel + service reference (AGD_OPE.1)
+- **~ 8 000 lignes** de code C + Python + Markdown réparties sur 40+ fichiers.
+- **Roadmap restante** : audit code par tiers (cabinet accrédité), soumission CMVP, soumission CC EAL4+ (étapes commerciales 12-24 mois).

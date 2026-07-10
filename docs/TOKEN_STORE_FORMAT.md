@@ -143,9 +143,58 @@ next login** (data intact on disk, store unreadable). Fixed alongside
 this document by raising the loader sanity bound to `FHSM_OBJ_BLOB_MAX`
 (= 8 + `FHSM_MAX_OBJECTS` × `FHSM_OBJ_REC_SZ`), with a regression test.
 
+## Objects blob v2 (#110 — variable-size records)
+
+Implemented with `CKO_CERTIFICATE` support. The 317-byte file header is
+unchanged; the **blob plaintext** is now self-versioned:
+
+```
+u32  magic = 0xF5B20002        (cannot collide with a v1 count <= 64)
+u32  object_count              (<= 64)
+u32  next_handle
+object_count x records:
+    u32  rec_len               (bytes after this field = 120 + value_len)
+    u32  handle | class | key_type | value_len     (16 bytes)
+    u8   label[64]
+    u8   id[32]
+    u32  id_len
+    u8   flags ; u8 pad[3]
+    u8   value[value_len]      (<= FHSM_OBJ_VALUE_MAX = 16 384)
+```
+
+Properties:
+
+* **Read-v1 / write-v2**: the parser dispatches on the first `u32`
+  (<= 64 => legacy v1 fixed records; magic => v2). Any write
+  re-serializes as v2, so tokens migrate transparently on first
+  mutation.
+* `FHSM_OBJ_VALUE_MAX` = 16 384 accommodates X.509 certificates carrying
+  PQC / composite keys and signatures (ML-DSA-87 cert ~ 8-10 KB).
+  `FHSM_OBJ_VALUE_LEN` = 5 500 is frozen as the *legacy v1 field size*.
+* Small objects no longer pay the fixed 5 500-byte value field — a
+  32-byte AES key record shrinks from 5 620 to 156 bytes on disk.
+* Loader bound: `FHSM_OBJ_BLOB_MAX` = 12 + 64 x (4 + 120 + 16 384)
+  = **1 056 524 bytes** (also covers the v1 bound).
+* Every v2 record is bounds-checked before any copy; `value_len` must
+  equal `rec_len - 120` and `id_len <= 32`, else the whole blob is
+  rejected (GCM already authenticates it — a mismatch is a logic bug,
+  not an attacker).
+* Downgrade behavior: a <= v1.4.x binary reading a v2 blob sees
+  `count = 0xF5B20002 > 64` and fails **loudly**
+  (`FHSM_RV_FUNCTION_FAILED`), never silently.
+
+### Certificate objects
+
+`CKO_CERTIFICATE` (0x1) objects store the complete DER certificate in
+`value`; the store's `key_type` field carries `CKA_CERTIFICATE_TYPE`
+(`CKC_X_509` = 0). Certificates are non-sensitive and extractable
+(`flags` = `EXTRACTABLE`): `C_GetAttributeValue(CKA_VALUE)` returns the
+DER. The module never parses X.509 — validation is the PKI layer's job.
+
 ## Versioning policy
 
-`Version` (offset 4) is bumped on any layout change; loaders must reject
-unknown versions rather than guess. Planned v2 extensions (roadmap #110:
-`CKO_CERTIFICATE` objects, variable-size `extras` CBOR attribute blob)
-will be additive and documented here.
+Header `Version` (offset 4) is bumped on any *header* layout change;
+the objects blob is self-versioned by its leading magic. Loaders must
+reject unknown versions/magics rather than guess. Future extensions
+(variable `extras` CBOR attribute blob) will be additive and documented
+here.
