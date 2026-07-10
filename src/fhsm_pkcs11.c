@@ -955,106 +955,54 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
 #define CKM_AES_KEY_WRAP_KWP          0x0000210BUL
 #endif
 
-static const CK_ULONG g_mech_list[] = {
-    CKM_AES_GCM,
-    CKM_AES_KEY_GEN_LIST,
-    CKM_SHA256,
-    CKM_SHA384_LIST,
-    CKM_SHA512_LIST,
-    CKM_SHA256_HMAC,
-    CKM_PKCS5_PBKD2,
-    CKM_GENERIC_SECRET_KEY_GEN_LIST,
-    CKM_RSA_KEY_PAIR_GEN_LIST,
-    CKM_EC_KEY_PAIR_GEN_LIST,
-    CKM_ECDSA_SHA256_LIST,
-    CKM_ECDSA_SHA384_LIST,
-    CKM_ECDSA_SHA512_LIST,
-    CKM_SHA256_RSA_PKCS_LIST,
-    CKM_SHA384_RSA_PKCS_LIST,
-    CKM_SHA512_RSA_PKCS_LIST,
-    CKM_SHA256_RSA_PKCS_PSS_LIST,
-    CKM_RSA_PKCS_OAEP_LIST,
-    /* RSA - bare + legacy variants. */
-    CKM_RSA_PKCS_LIST,
-    CKM_RSA_X_509_LIST,
-    CKM_RSA_PKCS_PSS_LIST,
-    CKM_SHA1_RSA_PKCS_LIST,
-    CKM_SHA224_RSA_PKCS_LIST,
-    CKM_SHA1_RSA_PKCS_PSS_LIST,
-    CKM_SHA224_RSA_PKCS_PSS_LIST,
-    /* EC - bare ECDSA + legacy + ECDH. */
-    CKM_ECDSA_BARE_LIST,
-    CKM_ECDSA_SHA1_LIST,
-    CKM_ECDSA_SHA224_LIST,
-    CKM_ECDH1_DERIVE_LIST,
-    /* AES - all classical modes. */
-    CKM_AES_ECB_LIST,
-    CKM_AES_CBC_LIST,
-    CKM_AES_MAC_LIST,
-    CKM_AES_MAC_GENERAL_LIST,
-    CKM_AES_CBC_PAD_LIST,
-    CKM_AES_CTR_LIST,
-    CKM_AES_CCM_LIST,
-    CKM_AES_GMAC_LIST,
-    CKM_AES_CMAC_LIST,
-    CKM_AES_CMAC_GENERAL_LIST,
-    CKM_AES_ECB_ENCRYPT_DATA_LIST,
-    CKM_AES_CBC_ENCRYPT_DATA_LIST,
-    /* DES3 - legacy, non-FIPS. */
-    CKM_DES2_KEY_GEN_LIST,
-    CKM_DES3_KEY_GEN_LIST,
-    CKM_DES3_ECB_LIST,
-    CKM_DES3_CBC_LIST,
-    CKM_DES3_MAC_LIST,
-    CKM_DES3_MAC_GENERAL_LIST,
-    CKM_DES3_CBC_PAD_LIST,
-    /* Hash / HMAC extras. */
-    CKM_SHA1_LIST,
-    CKM_SHA1_HMAC_LIST,
-    CKM_SHA224_LIST,
-    CKM_SHA224_HMAC_LIST,
-    CKM_SHA256_HMAC_GENERAL_LIST,
-    CKM_SHA384_HMAC_LIST,
-    CKM_SHA384_HMAC_GENERAL_LIST,
-    CKM_SHA512_HMAC_LIST,
-    CKM_SHA512_HMAC_GENERAL_LIST,
-    /* SSL3 KDF family - legacy. */
-    CKM_SSL3_PRE_MASTER_KEY_GEN_LIST,
-    CKM_SSL3_MASTER_KEY_DERIVE_LIST,
-    CKM_SSL3_KEY_AND_MAC_DERIVE_LIST,
-    CKM_SSL3_MASTER_KEY_DERIVE_DH_LIST,
-    /* Misc. */
-    CKM_XOR_BASE_AND_DATA_LIST,
-    /* Post-quantum FIPS 203/204/205. */
-    CKM_ML_KEM_KEY_PAIR_GEN_LIST,
-    CKM_ML_KEM_LIST,
-    CKM_ML_DSA_KEY_PAIR_GEN_LIST,
-    CKM_ML_DSA_LIST,
-    CKM_SLH_DSA_KEY_PAIR_GEN_LIST,
-    CKM_SLH_DSA_LIST,
-    /* Vendor / pre-standardization PQ. */
-    CKM_FALCON_LIST,
-    CKM_KYBER_LIST,
-    /* Key wrap (RFC 3394 / 5649). */
-    CKM_AES_KEY_WRAP,
-    CKM_AES_KEY_WRAP_KWP,
-};
+/* ===========================================================================
+ * Mechanism advertisement (#125) --- derived from the generated dispatch
+ * table (the single source of truth), NOT a hand-maintained list.
+ *
+ *  C_GetMechanismList and C_GetMechanismInfo read fhsm_mechanism_table[]
+ *  (generated into src/gen/fhsm_dispatch.c by scripts/gen_p11_thunks.py),
+ *  so the advertised set can never drift from what the module actually
+ *  dispatches. A mechanism is advertised iff it resolves to a real
+ *  handler in the active build profile :
+ *    - general-purpose (interop) build : every mechanism with a real
+ *      handler is advertised, including non-FIPS ones (the module is a
+ *      general-purpose PKCS#11 provider) ;
+ *    - FIPS (fips-strict) build : non-approved mechanisms are compiled
+ *      to dispatch_reject_fips and are therefore NOT advertised.
+ *
+ *  This replaced the previous hand-written g_mech_list + capability
+ *  switch, which had drifted badly : wrong post-quantum values
+ *  (0x403x vs the dispatched 0x402x), phantom FALCON/KYBER entries not
+ *  backed by any handler, and ~40 dispatched-but-unadvertised
+ *  mechanisms (all SHA-3/SHAKE, KMAC, HKDF, EdDSA, X25519/X448,
+ *  ML-KEM/ML-DSA/SLH-DSA at their correct values, ...). See
+ *  docs/PKCS11_CHECK_FINDINGS.md.
+ *
+ *  Local mirror of the generated dispatch-table interface : this TU
+ *  defines its own CKM_* macros (with a UL suffix) that would collide
+ *  under -Werror with the generated header's (u suffix), so we cannot
+ *  #include it here. The struct layout MUST match the generated one ;
+ *  tests/test_mech_advertise guards against drift at runtime.
+ * ========================================================================= */
+typedef fhsm_rv_t (*fhsm_mech_handler_t)(
+    unsigned long, unsigned long, const void *, size_t,
+    fhsm_slice_t, uint8_t *, size_t *);
+typedef struct fhsm_mech_entry_s {
+    uint32_t              ckm_value;
+    const char           *name;
+    const char           *family;
+    const char           *operation;
+    int                   fips_approved;
+    fhsm_mech_handler_t   handler;
+} fhsm_mech_entry_t;
+extern const fhsm_mech_entry_t fhsm_mechanism_table[];
+extern const size_t            fhsm_mechanism_count;
+const fhsm_mech_entry_t *fhsm_mechanism_lookup(uint32_t ckm);
+fhsm_rv_t dispatch_reject_fips(unsigned long, unsigned long,
+                                const void *, size_t, fhsm_slice_t,
+                                uint8_t *, size_t *);
 
-CK_RV C_GetMechanismList(CK_SLOT_ID slotID, CK_ULONG *pMechanismList,
-                          CK_ULONG *pulCount) {
-    if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
-    if (!pulCount) return FHSM_RV_ARGUMENTS_BAD;
-    CK_ULONG n = sizeof(g_mech_list)/sizeof(g_mech_list[0]);
-    if (!pMechanismList) { *pulCount = n; return FHSM_RV_OK; }
-    if (*pulCount < n) { *pulCount = n; return 0x00000150UL; }
-    for (CK_ULONG i = 0; i < n; ++i) pMechanismList[i] = g_mech_list[i];
-    *pulCount = n;
-    return FHSM_RV_OK;
-}
-
-/* PKCS#11 v3.2 CK_MECHANISM_INFO flag bits (§A.4.6.1). The buggy
- * 0x00040000 used previously was actually CKF_UNWRAP, which is why
- * pkcs11-tool listed every mechanism as "AES-GCM, unwrap". */
+/* PKCS#11 v3.2 CK_MECHANISM_INFO flag bits (§A.4.6.1). */
 #define CKF_HW_MECH              0x00000001UL
 #define CKF_ENCRYPT              0x00000100UL
 #define CKF_DECRYPT              0x00000200UL
@@ -1067,205 +1015,71 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slotID, CK_ULONG *pMechanismList,
 #define CKF_UNWRAP_MECH          0x00040000UL
 #define CKF_DERIVE               0x00080000UL
 
+/* A mechanism is advertised iff it dispatches to a real handler in the
+ * active profile (not the FIPS reject stub). */
+static int fhsm_mech_advertised(const fhsm_mech_entry_t *e) {
+    return e != NULL && e->handler != dispatch_reject_fips;
+}
+
+/* Generated per-mechanism operation class -> CK_MECHANISM_INFO flags. */
+static CK_ULONG fhsm_mech_flags_for(const char *op) {
+    if (!op) return 0;
+    if (!strcmp(op, "digest"))  return CKF_DIGEST;
+    if (!strcmp(op, "sign"))    return CKF_SIGN | CKF_VERIFY;
+    if (!strcmp(op, "encrypt")) return CKF_ENCRYPT | CKF_DECRYPT;
+    if (!strcmp(op, "encap"))   return CKF_ENCRYPT | CKF_DECRYPT;
+    if (!strcmp(op, "wrap"))    return CKF_WRAP | CKF_UNWRAP_MECH;
+    if (!strcmp(op, "derive"))  return CKF_DERIVE;
+    if (!strcmp(op, "keygen"))  return CKF_GENERATE;
+    if (!strcmp(op, "keypair")) return CKF_GENERATE_KEY_PAIR;
+    return 0;
+}
+
+/* Coarse key-size hints by family. Precise per-mechanism reporting is
+ * increment 2 ; 0/0 is spec-valid where a key size is not meaningful
+ * (hashes, PQ parameter-set mechanisms, KDFs). */
+static void fhsm_mech_keysizes_for(const char *fam,
+                                    CK_ULONG *mn, CK_ULONG *mx) {
+    *mn = 0; *mx = 0;
+    if (!fam) return;
+    if (!strcmp(fam, "AES"))     { *mn = 16;   *mx = 32;   return; }
+    if (!strcmp(fam, "TDES") || !strcmp(fam, "DES"))
+                                 { *mn = 8;    *mx = 24;   return; }
+    if (!strcmp(fam, "RSA"))     { *mn = 2048; *mx = 4096; return; }
+    if (!strcmp(fam, "EC") || !strcmp(fam, "EdDSA") || !strcmp(fam, "ECM"))
+                                 { *mn = 256;  *mx = 521;  return; }
+    if (!strcmp(fam, "HMAC") || !strcmp(fam, "KMAC") || !strcmp(fam, "GENERIC"))
+                                 { *mn = 1;    *mx = 64;   return; }
+}
+
+CK_RV C_GetMechanismList(CK_SLOT_ID slotID, CK_ULONG *pMechanismList,
+                          CK_ULONG *pulCount) {
+    if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
+    if (!pulCount) return FHSM_RV_ARGUMENTS_BAD;
+    CK_ULONG n = 0;
+    for (size_t i = 0; i < fhsm_mechanism_count; ++i)
+        if (fhsm_mech_advertised(&fhsm_mechanism_table[i])) ++n;
+    if (!pMechanismList) { *pulCount = n; return FHSM_RV_OK; }
+    if (*pulCount < n) { *pulCount = n; return 0x00000150UL; }
+    CK_ULONG j = 0;
+    for (size_t i = 0; i < fhsm_mechanism_count; ++i)
+        if (fhsm_mech_advertised(&fhsm_mechanism_table[i]))
+            pMechanismList[j++] = (CK_ULONG)fhsm_mechanism_table[i].ckm_value;
+    *pulCount = n;
+    return FHSM_RV_OK;
+}
+
 CK_RV C_GetMechanismInfo(CK_SLOT_ID slotID, CK_ULONG type, CK_VOID_PTR pInfo) {
     if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
     if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
-    int known = 0;
-    for (size_t i = 0; i < sizeof(g_mech_list)/sizeof(g_mech_list[0]); ++i)
-        if (g_mech_list[i] == type) { known = 1; break; }
-    if (!known) return FHSM_RV_MECHANISM_INVALID;
+    const fhsm_mech_entry_t *e = fhsm_mechanism_lookup((uint32_t)type);
+    if (!fhsm_mech_advertised(e)) return FHSM_RV_MECHANISM_INVALID;
     struct fhsm_ck_mech_info {
         CK_ULONG ulMinKeySize, ulMaxKeySize;
         CK_FLAGS flags;
     } *info = pInfo;
-    /* Per-mechanism capabilities. Min/Max key sizes are in BYTES for
-     * symmetric mechanisms (PKCS#11 v3.2 §A.4.6.1). */
-    switch (type) {
-        case CKM_AES_GCM:
-            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
-            info->flags = CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP_MECH;
-            break;
-        case CKM_AES_KEY_GEN_LIST:
-            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
-            info->flags = CKF_GENERATE;
-            break;
-        case CKM_GENERIC_SECRET_KEY_GEN_LIST:
-            info->ulMinKeySize = 1; info->ulMaxKeySize = 64;
-            info->flags = CKF_GENERATE;
-            break;
-        case CKM_SHA256:
-        case CKM_SHA384_LIST:
-        case CKM_SHA512_LIST:
-            info->ulMinKeySize = 0; info->ulMaxKeySize = 0;
-            info->flags = CKF_DIGEST;
-            break;
-        case CKM_SHA256_HMAC:
-            info->ulMinKeySize = 1; info->ulMaxKeySize = 64;
-            info->flags = CKF_SIGN | CKF_VERIFY;
-            break;
-        case CKM_PKCS5_PBKD2:
-            info->ulMinKeySize = 1; info->ulMaxKeySize = 64;
-            info->flags = CKF_GENERATE;
-            break;
-        case CKM_RSA_KEY_PAIR_GEN_LIST:
-            info->ulMinKeySize = 2048; info->ulMaxKeySize = 4096;
-            info->flags = CKF_GENERATE_KEY_PAIR;
-            break;
-        case CKM_EC_KEY_PAIR_GEN_LIST:
-            info->ulMinKeySize = 256; info->ulMaxKeySize = 521;
-            info->flags = CKF_GENERATE_KEY_PAIR;
-            break;
-        case CKM_ECDSA_SHA256_LIST:
-        case CKM_ECDSA_SHA384_LIST:
-        case CKM_ECDSA_SHA512_LIST:
-            info->ulMinKeySize = 256; info->ulMaxKeySize = 521;
-            info->flags = CKF_SIGN | CKF_VERIFY;
-            break;
-        case CKM_SHA256_RSA_PKCS_LIST:
-        case CKM_SHA384_RSA_PKCS_LIST:
-        case CKM_SHA512_RSA_PKCS_LIST:
-        case CKM_SHA256_RSA_PKCS_PSS_LIST:
-            info->ulMinKeySize = 2048; info->ulMaxKeySize = 4096;
-            info->flags = CKF_SIGN | CKF_VERIFY;
-            break;
-        case CKM_RSA_PKCS_OAEP_LIST:
-            info->ulMinKeySize = 2048; info->ulMaxKeySize = 4096;
-            info->flags = CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP_MECH;
-            break;
-        /* --- RSA legacy variants --- */
-        case CKM_RSA_PKCS_LIST:
-        case CKM_RSA_X_509_LIST:
-        case CKM_RSA_PKCS_PSS_LIST:
-        case CKM_SHA1_RSA_PKCS_LIST:
-        case CKM_SHA224_RSA_PKCS_LIST:
-        case CKM_SHA1_RSA_PKCS_PSS_LIST:
-        case CKM_SHA224_RSA_PKCS_PSS_LIST:
-            info->ulMinKeySize = 2048; info->ulMaxKeySize = 4096;
-            info->flags = CKF_SIGN | CKF_VERIFY;
-            break;
-        /* --- EC bare + legacy --- */
-        case CKM_ECDSA_BARE_LIST:
-        case CKM_ECDSA_SHA1_LIST:
-        case CKM_ECDSA_SHA224_LIST:
-            info->ulMinKeySize = 256; info->ulMaxKeySize = 521;
-            info->flags = CKF_SIGN | CKF_VERIFY;
-            break;
-        case CKM_ECDH1_DERIVE_LIST:
-            info->ulMinKeySize = 256; info->ulMaxKeySize = 521;
-            info->flags = CKF_DERIVE;
-            break;
-        /* --- AES classical modes --- */
-        case CKM_AES_ECB_LIST:
-        case CKM_AES_CBC_LIST:
-        case CKM_AES_CBC_PAD_LIST:
-        case CKM_AES_CTR_LIST:
-        case CKM_AES_CCM_LIST:
-            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
-            info->flags = CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP_MECH;
-            break;
-        case CKM_AES_MAC_LIST:
-        case CKM_AES_MAC_GENERAL_LIST:
-        case CKM_AES_GMAC_LIST:
-        case CKM_AES_CMAC_LIST:
-        case CKM_AES_CMAC_GENERAL_LIST:
-            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
-            info->flags = CKF_SIGN | CKF_VERIFY;
-            break;
-        case CKM_AES_ECB_ENCRYPT_DATA_LIST:
-        case CKM_AES_CBC_ENCRYPT_DATA_LIST:
-            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
-            info->flags = CKF_DERIVE;
-            break;
-        /* --- DES3 legacy --- */
-        case CKM_DES2_KEY_GEN_LIST:
-            info->ulMinKeySize = 16; info->ulMaxKeySize = 16;
-            info->flags = CKF_GENERATE;
-            break;
-        case CKM_DES3_KEY_GEN_LIST:
-            info->ulMinKeySize = 24; info->ulMaxKeySize = 24;
-            info->flags = CKF_GENERATE;
-            break;
-        case CKM_DES3_ECB_LIST:
-        case CKM_DES3_CBC_LIST:
-        case CKM_DES3_CBC_PAD_LIST:
-            info->ulMinKeySize = 24; info->ulMaxKeySize = 24;
-            info->flags = CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP_MECH;
-            break;
-        case CKM_DES3_MAC_LIST:
-        case CKM_DES3_MAC_GENERAL_LIST:
-            info->ulMinKeySize = 24; info->ulMaxKeySize = 24;
-            info->flags = CKF_SIGN | CKF_VERIFY;
-            break;
-        /* --- Hash + HMAC --- */
-        case CKM_SHA1_LIST:
-        case CKM_SHA224_LIST:
-            info->ulMinKeySize = 0; info->ulMaxKeySize = 0;
-            info->flags = CKF_DIGEST;
-            break;
-        case CKM_SHA1_HMAC_LIST:
-        case CKM_SHA224_HMAC_LIST:
-        case CKM_SHA256_HMAC_GENERAL_LIST:
-        case CKM_SHA384_HMAC_LIST:
-        case CKM_SHA384_HMAC_GENERAL_LIST:
-        case CKM_SHA512_HMAC_LIST:
-        case CKM_SHA512_HMAC_GENERAL_LIST:
-            info->ulMinKeySize = 1; info->ulMaxKeySize = 128;
-            info->flags = CKF_SIGN | CKF_VERIFY;
-            break;
-        /* --- SSL3 KDFs --- */
-        case CKM_SSL3_PRE_MASTER_KEY_GEN_LIST:
-            info->ulMinKeySize = 48; info->ulMaxKeySize = 48;
-            info->flags = CKF_GENERATE;
-            break;
-        case CKM_SSL3_MASTER_KEY_DERIVE_LIST:
-        case CKM_SSL3_KEY_AND_MAC_DERIVE_LIST:
-        case CKM_SSL3_MASTER_KEY_DERIVE_DH_LIST:
-            info->ulMinKeySize = 0; info->ulMaxKeySize = 0;
-            info->flags = CKF_DERIVE;
-            break;
-        /* --- Misc --- */
-        case CKM_XOR_BASE_AND_DATA_LIST:
-            info->ulMinKeySize = 0; info->ulMaxKeySize = 0;
-            info->flags = CKF_DERIVE;
-            break;
-        /* --- Post-quantum FIPS 203/204/205 --- */
-        case CKM_ML_KEM_KEY_PAIR_GEN_LIST:
-            info->ulMinKeySize = 512; info->ulMaxKeySize = 1024;
-            info->flags = CKF_GENERATE_KEY_PAIR;
-            break;
-        case CKM_ML_KEM_LIST:
-            info->ulMinKeySize = 512; info->ulMaxKeySize = 1024;
-            info->flags = CKF_ENCRYPT | CKF_DECRYPT |
-                          CKF_WRAP | CKF_UNWRAP_MECH;
-            break;
-        case CKM_ML_DSA_KEY_PAIR_GEN_LIST:
-        case CKM_SLH_DSA_KEY_PAIR_GEN_LIST:
-            info->ulMinKeySize = 44; info->ulMaxKeySize = 87;
-            info->flags = CKF_GENERATE_KEY_PAIR;
-            break;
-        case CKM_ML_DSA_LIST:
-        case CKM_SLH_DSA_LIST:
-            info->ulMinKeySize = 44; info->ulMaxKeySize = 87;
-            info->flags = CKF_SIGN | CKF_VERIFY;
-            break;
-        case CKM_FALCON_LIST:
-        case CKM_KYBER_LIST:
-            info->ulMinKeySize = 512; info->ulMaxKeySize = 1024;
-            info->flags = CKF_SIGN | CKF_VERIFY |
-                          CKF_ENCRYPT | CKF_DECRYPT;
-            break;
-        case CKM_AES_KEY_WRAP:
-        case CKM_AES_KEY_WRAP_KWP:
-            info->ulMinKeySize = 16; info->ulMaxKeySize = 32;
-            info->flags = CKF_WRAP | CKF_UNWRAP_MECH;
-            break;
-        default:
-            /* Should not happen because we filtered against g_mech_list,
-             * but be conservative. */
-            info->ulMinKeySize = 0; info->ulMaxKeySize = 0;
-            info->flags = 0;
-            return FHSM_RV_MECHANISM_INVALID;
-    }
+    fhsm_mech_keysizes_for(e->family, &info->ulMinKeySize, &info->ulMaxKeySize);
+    info->flags = fhsm_mech_flags_for(e->operation);
     return FHSM_RV_OK;
 }
 

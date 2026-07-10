@@ -31,6 +31,33 @@ in the harness. This document records the triage.
   exposed; no CVE requested (same informational-disclosure posture as
   the v1.2.x GHSA line).
 
+### F2 — Mechanism advertisement drifted from the dispatch table — FIXED
+* **Finding**: pkcs11-check reported several implemented mechanisms as
+  "missing" (EdDSA, HKDF_DERIVE, ML-DSA, ML-DSA/SLH-DSA key-pair-gen).
+* **Root cause**: `C_GetMechanismList` / `C_GetMechanismInfo` were a
+  hand-maintained list + `switch` that had drifted from the generated
+  dispatch table. Concretely: PQ mechanisms advertised under stale
+  values (ML-DSA `0x403F` instead of the dispatched `0x4024`), phantom
+  `FALCON`/`KYBER` entries with no handler, and ~40 dispatched
+  mechanisms (all SHA-3/SHAKE, KMAC, HKDF, EdDSA, X25519/X448, ML-KEM/
+  ML-DSA/SLH-DSA at correct values) never advertised. PQ signatures
+  were therefore undiscoverable.
+* **Fix**: both functions now derive from `fhsm_mechanism_table[]` (the
+  generated single source of truth). Advertise iff a mechanism resolves
+  to a real handler in the active profile. Coherence guard
+  `tests/test_mech_advertise.c`.
+* **General-purpose / FIPS-by-config note**: the module is intended as a
+  general-purpose PKCS#11 provider that switches to FIPS by profile.
+  The advertisement machinery is now profile-correct (interop advertises
+  every real handler; fips-strict only approved). However, the 12
+  currently-declared non-FIPS mechanisms (MD5, SHA-1, DES, RC4, DSA, DH,
+  ...) have `dispatch_reject_fips` hardcoded in the Mech table, so they
+  are rejected in *both* profiles today — i.e. general-purpose support
+  for those is scaffolded but not yet implemented. Realizing it is a
+  separate item: implement their real handlers and set the Mech
+  `handler` to the real symbol (interop keeps it, fips-strict rejects),
+  after which they will be advertised in interop automatically.
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported

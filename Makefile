@@ -181,12 +181,20 @@ tests/test_token_capacity: tests/test_token_capacity.c $(LIB_OBJ)
 tests/test_decrypt_null_args: tests/test_decrypt_null_args.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Mechanism advertisement coherence guard (#125) : C_GetMechanismList /
+# C_GetMechanismInfo derived from the generated dispatch table must stay
+# consistent (correct PQ values, EdDSA/HKDF present, no phantoms).
+tests/test_mech_advertise: tests/test_mech_advertise.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 .PHONY: tests
-tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args
+tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_token_capacity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_decrypt_null_args
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 OPENSSL_CONF=/dev/null \
+		LD_LIBRARY_PATH=. ./tests/test_mech_advertise
 
 # External behavioral harness (#125) : Denis Mingulov's pkcs11-check
 # (>100k vendor-neutral checks) against the built module. Findings are

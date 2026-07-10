@@ -9,6 +9,30 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Mechanism advertisement rebuilt from the dispatch table (#125,
+  found by pkcs11-check).** `C_GetMechanismList` / `C_GetMechanismInfo`
+  used a hand-maintained list + capability switch that had drifted
+  badly from the generated dispatch table (the single source of truth):
+  the post-quantum signature mechanisms were advertised under **stale,
+  wrong values** (ML-DSA `0x403F` vs the dispatched `0x4024`, likewise
+  ML-DSA/SLH-DSA key-pair-gen), **phantom FALCON/KYBER** entries were
+  advertised with no backing handler, and **~40 dispatched mechanisms
+  were never advertised at all** (every SHA-3/SHAKE, KMAC, HKDF, EdDSA,
+  X25519/X448, and the ML-KEM/ML-DSA/SLH-DSA mechanisms at their correct
+  values). Net effect: post-quantum signatures were undiscoverable via
+  standard enumeration. Both functions are now derived directly from
+  `fhsm_mechanism_table[]`, so the advertised set can never drift from
+  what the module dispatches: a mechanism is advertised iff it resolves
+  to a real handler in the active profile (general-purpose advertises
+  every real handler; FIPS advertises only approved, since non-approved
+  compile to the reject stub). Capability flags come from the generated
+  per-mechanism operation class; precise per-mechanism key-size
+  reporting is a tracked follow-up (increment 2). New coherence guard
+  `tests/test_mech_advertise.c` (wired into `make tests`) asserts every
+  advertised mechanism resolves through `C_GetMechanismInfo`, the PQ
+  values are correct, EdDSA/HKDF are present, and the phantoms are gone.
+  Full analysis in `docs/PKCS11_CHECK_FINDINGS.md`.
+
 * **C_Decrypt NULL-pointer dereference / SIGSEGV (#125, found by
   pkcs11-check).** `C_Decrypt` dereferenced `pulDataLen` on every path
   (size query and copy) without a NULL check, unlike `C_Encrypt` which

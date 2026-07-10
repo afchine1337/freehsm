@@ -100,3 +100,4 @@ reports/
 .pkcs11-check-isolation-*.json
 .pkcs11-check-isolation-*.report-records/
 ..pkcs11-check-isolation-*.report-records/
+tests/test_mech_advertise
