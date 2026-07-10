@@ -21,6 +21,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **FIPS-approved digests and HMACs are now callable, not just advertised
+  (#125).** The dispatch table advertised SHA-224, SHA-512/224,
+  SHA-512/256, SHA3-256/384/512 and the SHA-224 / SHA-3 HMACs, but the
+  hand-written `C_DigestInit` / `C_SignInit` / `C_VerifyInit` switches
+  only handled SHA-256/384/512 (and `C_Verify` only SHA-256-HMAC), so
+  callers got `CKR_MECHANISM_INVALID` (~32 pkcs11-check failures:
+  test_sha3, TestSHA512Truncated, test_mech_flags). Added the missing
+  FIPS 180-4 / 202 hashes to the digest path (new `FHSM_HASH_SHA224 /
+  SHA512_224 / SHA512_256` enum values + EVP names) and a shared
+  `fhsm_hmac_hash_of()` so the sign/verify paths accept the SHA-224 and
+  SHA-3 HMAC families (also fixing SHA-384/512 HMAC *verify*, previously
+  unimplemented). Verified against published "abc" KATs and HMAC
+  round-trips; regression `tests/test_fips_digests.c`.
+
 * **Per-session operation state no longer bleeds across pooled session
   handles (#125).** PKCS#11 session handles are reused, but neither
   `C_OpenSession` nor `C_CloseSession` reset the per-session operation

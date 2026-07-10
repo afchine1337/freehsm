@@ -124,7 +124,12 @@ typedef enum fhsm_hash_e {
     /* Non-FIPS legacy digests (interop / general-purpose profile only ;
      * rejected in the fips-strict operation path). */
     FHSM_HASH_SHA1 = 7,
-    FHSM_HASH_MD5  = 8
+    FHSM_HASH_MD5  = 8,
+    /* Additional FIPS-approved digests (FIPS 180-4 / 202) : advertised by
+     * the dispatch table and now callable through the operation path. */
+    FHSM_HASH_SHA224     = 9,
+    FHSM_HASH_SHA512_224 = 10,
+    FHSM_HASH_SHA512_256 = 11
 } fhsm_hash_t;
 
 size_t fhsm_hash_size(fhsm_hash_t h);

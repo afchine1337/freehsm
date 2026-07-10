@@ -152,6 +152,34 @@ in the harness. This document records the triage.
   touches the object struct + creation paths and is scoped as its own
   item.
 
+### F6 — FIPS-approved digests/HMACs advertised but not callable — FIXED (partial tranche)
+* **Finding**: ~70 `CKR_MECHANISM_INVALID` failures. Triage:
+  - **~32 real gaps** — SHA-224, SHA-512/224, SHA-512/256, SHA3-256/384/512
+    digests and the SHA-224 / SHA-3 HMACs were advertised by the dispatch
+    table but the hand-written `C_DigestInit` / `C_SignInit` /
+    `C_VerifyInit` switches only handled SHA-256/384/512 (and `C_Verify`
+    only SHA-256-HMAC). Callers got `CKR_MECHANISM_INVALID`.
+  - **~18 legitimate** — AES-ECB / SHA-1 etc. are non-FIPS and correctly
+    rejected under the `fips-strict` profile the harness builds against;
+    these are harness-vs-profile expectation mismatches, not defects.
+    (Running the harness against the `interop` build would reclassify
+    them; tracked separately.)
+  - **~8 phantom advertisements** — XEDDSA / X3DH / X2RATCHET (Signal
+    protocol) are advertised with sign flags but not implemented; they
+    should be de-advertised from the dispatch generator (follow-up).
+* **Fix (this tranche)**: wired the FIPS-approved digests (FIPS 180-4 /
+  202) into `C_DigestInit` and added `fhsm_hmac_hash_of()` so
+  `C_SignInit` / `C_Sign` / `C_VerifyInit` / `C_Verify` accept the
+  SHA-224 and SHA-3 HMAC families (and fixed SHA-384/512 HMAC *verify*,
+  which previously only handled SHA-256). New enum values
+  `FHSM_HASH_SHA224 / SHA512_224 / SHA512_256` + EVP names.
+* **Verified**: digest "abc" KATs match FIPS published vectors for
+  SHA-224, SHA-512/224, SHA-512/256, SHA3-256, SHA3-512 ; HMAC
+  sign->verify round-trips for SHA-224/384/512 and SHA3-256/512.
+  Regression: `tests/test_fips_digests.c`, wired into `make tests`.
+* **Follow-up**: de-advertise the phantom Signal mechanisms; optionally
+  run the harness against `interop` to clear the non-FIPS rejections.
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported

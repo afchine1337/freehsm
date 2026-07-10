@@ -1362,6 +1362,14 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
         case CKM_SHA256: op->hash = FHSM_HASH_SHA256; break;
         case CKM_SHA384: op->hash = FHSM_HASH_SHA384; break;
         case CKM_SHA512: op->hash = FHSM_HASH_SHA512; break;
+        /* Additional FIPS-approved digests (FIPS 180-4 / 202) : advertised
+         * by the dispatch table ; now callable in both profiles. #125. */
+        case 0x00000255UL: op->hash = FHSM_HASH_SHA224;     break; /* CKM_SHA224 */
+        case 0x00000048UL: op->hash = FHSM_HASH_SHA512_224; break; /* CKM_SHA512_224 */
+        case 0x0000004CUL: op->hash = FHSM_HASH_SHA512_256; break; /* CKM_SHA512_256 */
+        case 0x000002B0UL: op->hash = FHSM_HASH_SHA3_256;   break; /* CKM_SHA3_256 */
+        case 0x000002C0UL: op->hash = FHSM_HASH_SHA3_384;   break; /* CKM_SHA3_384 */
+        case 0x000002D0UL: op->hash = FHSM_HASH_SHA3_512;   break; /* CKM_SHA3_512 */
         /* Non-FIPS legacy digests : executable only in the interop /
          * general-purpose build (rejected under fips-strict). #125. */
         case 0x00000220UL: /* CKM_SHA_1 */
@@ -4004,6 +4012,36 @@ gcm_out:
 #ifndef CKM_SHA512_HMAC_INIT_VAL
 #define CKM_SHA512_HMAC_INIT_VAL  0x00000271UL
 #endif
+#ifndef CKM_SHA224_HMAC_INIT_VAL
+#define CKM_SHA224_HMAC_INIT_VAL  0x00000256UL
+#endif
+#ifndef CKM_SHA3_256_HMAC_INIT_VAL
+#define CKM_SHA3_256_HMAC_INIT_VAL 0x000002B1UL
+#endif
+#ifndef CKM_SHA3_384_HMAC_INIT_VAL
+#define CKM_SHA3_384_HMAC_INIT_VAL 0x000002C1UL
+#endif
+#ifndef CKM_SHA3_512_HMAC_INIT_VAL
+#define CKM_SHA3_512_HMAC_INIT_VAL 0x000002D1UL
+#endif
+
+/* Map an HMAC mechanism to its hash + MAC length. Returns 1 for a
+ * recognised HMAC mechanism, 0 otherwise. Covers the FIPS-approved
+ * SHA-2 and SHA-3 HMAC families advertised by the dispatch table
+ * (#125 : previously only SHA-256/384/512 sign and SHA-256 verify were
+ * callable, so SHA-3 / SHA-224 HMACs returned CKR_MECHANISM_INVALID). */
+static int fhsm_hmac_hash_of(uint32_t mech, fhsm_hash_t *hash, size_t *maclen) {
+    switch (mech) {
+        case CKM_SHA224_HMAC_INIT_VAL:   *hash = FHSM_HASH_SHA224;   *maclen = 28; return 1;
+        case CKM_SHA256_HMAC_INIT_VAL:   *hash = FHSM_HASH_SHA256;   *maclen = 32; return 1;
+        case CKM_SHA384_HMAC_INIT_VAL:   *hash = FHSM_HASH_SHA384;   *maclen = 48; return 1;
+        case CKM_SHA512_HMAC_INIT_VAL:   *hash = FHSM_HASH_SHA512;   *maclen = 64; return 1;
+        case CKM_SHA3_256_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA3_256; *maclen = 32; return 1;
+        case CKM_SHA3_384_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA3_384; *maclen = 48; return 1;
+        case CKM_SHA3_512_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA3_512; *maclen = 64; return 1;
+        default: return 0;
+    }
+}
 /* CKM_ECDSA* identifiers are now defined in include/fhsm_ecdsa_raw.h which
  * is pulled in near the top of this TU. Kept here as a comment so a grep
  * for "CKM_ECDSA" still lands somewhere readable. */
@@ -4036,9 +4074,13 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     switch (pMechanism->mechanism) {
+        case CKM_SHA224_HMAC_INIT_VAL:
         case CKM_SHA256_HMAC_INIT_VAL:
         case CKM_SHA384_HMAC_INIT_VAL:
         case CKM_SHA512_HMAC_INIT_VAL:
+        case CKM_SHA3_256_HMAC_INIT_VAL:
+        case CKM_SHA3_384_HMAC_INIT_VAL:
+        case CKM_SHA3_512_HMAC_INIT_VAL:
         case CKM_AES_CMAC:
         case CKM_AES_GMAC:
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
@@ -4323,21 +4365,13 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
 
-    if (op->mechanism == CKM_SHA256_HMAC_INIT_VAL
-        || op->mechanism == CKM_SHA384_HMAC_INIT_VAL
-        || op->mechanism == CKM_SHA512_HMAC_INIT_VAL) {
+    fhsm_hash_t hmac_hash; size_t hmac_need;
+    if (fhsm_hmac_hash_of(op->mechanism, &hmac_hash, &hmac_need)) {
         const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
         fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
-        fhsm_hash_t hash = FHSM_HASH_SHA256;
-        size_t need = 32;
-        if (op->mechanism == CKM_SHA384_HMAC_INIT_VAL) {
-            hash = FHSM_HASH_SHA384;
-            need = 48;
-        } else if (op->mechanism == CKM_SHA512_HMAC_INIT_VAL) {
-            hash = FHSM_HASH_SHA512;
-            need = 64;
-        }
+        fhsm_hash_t hash = hmac_hash;
+        size_t need = hmac_need;
         if (pSignature == NULL) { *pulSignatureLen = need; return FHSM_RV_OK; }
         if (*pulSignatureLen < need) { *pulSignatureLen = need; return 0x00000150UL; }
         size_t mac_len = *pulSignatureLen;
@@ -4435,9 +4469,13 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     switch (pMechanism->mechanism) {
+        case CKM_SHA224_HMAC_INIT_VAL:
         case CKM_SHA256_HMAC_INIT_VAL:
         case CKM_SHA384_HMAC_INIT_VAL:
         case CKM_SHA512_HMAC_INIT_VAL:
+        case CKM_SHA3_256_HMAC_INIT_VAL:
+        case CKM_SHA3_384_HMAC_INIT_VAL:
+        case CKM_SHA3_512_HMAC_INIT_VAL:
         case CKM_AES_CMAC:
         case CKM_AES_GMAC:
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
@@ -4472,9 +4510,10 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
 
-    if (op->mechanism == CKM_SHA256_HMAC_INIT_VAL) {
-        uint8_t mac[32]; size_t mac_len = sizeof(mac);
-        rv = fhsm_hmac(FHSM_HASH_SHA256, FHSM_SLICE(kv, kvl),
+    fhsm_hash_t vhash; size_t vneed;
+    if (fhsm_hmac_hash_of(op->mechanism, &vhash, &vneed)) {
+        uint8_t mac[64]; size_t mac_len = sizeof(mac);
+        rv = fhsm_hmac(vhash, FHSM_SLICE(kv, kvl),
                         FHSM_SLICE(pData, ulDataLen), mac, &mac_len);
         op->active = 0;
         if (rv != FHSM_RV_OK) return rv;
