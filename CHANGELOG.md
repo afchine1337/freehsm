@@ -44,6 +44,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   values are correct, EdDSA/HKDF are present, and the phantoms are gone.
   Full analysis in `docs/PKCS11_CHECK_FINDINGS.md`.
 
+* **C_EncryptUpdate / C_DecryptUpdate NULL-pointer dereference /
+  SIGSEGV (#125, remaining pkcs11-check crashes).** Both multi-part
+  update functions dereferenced their length out-parameter
+  (`pulEncLen` / `pulPartLen`) on the size-query path without a NULL
+  check — the same class as the C_Decrypt fix, and the source of the
+  crashes that survived the first fix (7 → 4 in the re-run). Now
+  rejected with `CKR_ARGUMENTS_BAD`, terminating the operation.
+  Confirmed with a negative control (guard removed → SIGSEGV). The
+  regression test `tests/test_decrypt_null_args.c` now also drives a
+  GCM `C_EncryptUpdate(pulEncLen=NULL)` probe.
+
 * **C_Decrypt NULL-pointer dereference / SIGSEGV (#125, found by
   pkcs11-check).** `C_Decrypt` dereferenced `pulDataLen` on every path
   (size query and copy) without a NULL check, unlike `C_Encrypt` which

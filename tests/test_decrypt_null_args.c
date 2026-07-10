@@ -96,6 +96,31 @@ int main(void) {
         return 1;
     }
     printf("test_decrypt_null_args : C_Decrypt(NULL len) -> CKR_ARGUMENTS_BAD : OK\n");
+
+    /* --- C_EncryptUpdate NULL length probe (GCM multipart), #125 ------
+     * Same NULL-deref class as C_Decrypt. Pre-fix: SIGSEGV. */
+    CK_RV (*C_EncryptInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
+    CK_RV (*C_EncryptUpdate)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
+    *(void**)&C_EncryptInit   = dlsym(h,"C_EncryptInit");
+    *(void**)&C_EncryptUpdate = dlsym(h,"C_EncryptUpdate");
+    if (C_EncryptInit && C_EncryptUpdate) {
+        struct { void *pIv; CK_ULONG ulIvLen; CK_ULONG ulIvBits;
+                 void *pAAD; CK_ULONG ulAADLen; CK_ULONG ulTagBits; } gcm;
+        CK_BYTE giv[12] = {0};
+        gcm.pIv = giv; gcm.ulIvLen = 12; gcm.ulIvBits = 96;
+        gcm.pAAD = NULL; gcm.ulAADLen = 0; gcm.ulTagBits = 128;
+        CK_MECHANISM gm = { 0x1087UL /* CKM_AES_GCM */, &gcm, sizeof gcm };
+        CK_RV ir = C_EncryptInit(s, &gm, ko);
+        if (ir != 0) { fprintf(stderr, "FAIL: GCM C_EncryptInit -> 0x%lx\n", ir); return 1; }
+        CK_BYTE part[16] = {0};
+        rv = C_EncryptUpdate(s, part, 16, part, NULL);   /* pulEncLen = NULL */
+        if (rv != CKR_ARGUMENTS_BAD) {
+            fprintf(stderr, "FAIL: C_EncryptUpdate(NULL len) -> 0x%lx\n", rv);
+            return 1;
+        }
+        printf("test_decrypt_null_args : C_EncryptUpdate(NULL len) -> CKR_ARGUMENTS_BAD : OK\n");
+    }
+
     printf("test_decrypt_null_args : PASS\n");
     return 0;
 }

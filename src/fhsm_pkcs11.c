@@ -4679,6 +4679,10 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* pulEncLen is dereferenced on every path (size query and copy) ;
+     * reject NULL rather than crash (#125, same class as the C_Decrypt
+     * fix). Terminate the operation so the session is not stranded. */
+    if (!pulEncLen || (!pPart && ulPartLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 1);
     if (rv != FHSM_RV_OK) return rv;
     if (pEnc == NULL) { *pulEncLen = ulPartLen; return FHSM_RV_OK; }
@@ -4723,6 +4727,9 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* pulPartLen is dereferenced on every path ; reject NULL rather
+     * than crash (#125, same class as the C_Decrypt fix). */
+    if (!pulPartLen || (!pEnc && ulEncLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 0);
     if (rv != FHSM_RV_OK) return rv;
     if (pPart == NULL) { *pulPartLen = ulEncLen; return FHSM_RV_OK; }

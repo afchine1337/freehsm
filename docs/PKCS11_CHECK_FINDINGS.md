@@ -26,6 +26,12 @@ in the harness. This document records the triage.
   139/SIGSEGV; with the fix, `CKR_ARGUMENTS_BAD` (0x7).
 * **Regression test**: `tests/test_decrypt_null_args.c`, wired into
   `make tests` (drives the public API via `dlopen`).
+* **Follow-up (2026-07-10)**: the re-run (crashes 7 → 4) showed the same
+  NULL-deref class in the multi-part update entry points.
+  `C_EncryptUpdate` and `C_DecryptUpdate` dereferenced their length
+  out-parameter without a NULL check ; both now guarded, negative-
+  control confirmed, and covered by the same regression test (GCM
+  `C_EncryptUpdate` probe).
 * Threat-model note: a NULL-deref in a TSFI entry point is an
   availability/robustness defect (AVA_VAN class). No key material is
   exposed; no CVE requested (same informational-disclosure posture as
