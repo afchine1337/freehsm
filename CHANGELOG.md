@@ -9,6 +9,24 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **TSFI robustness: NULL pointers and integer-overflow counts no longer
+  crash the module (#125).** pkcs11-check's raw security probes
+  (`test_api_boundary`, `test_arithmetic_overflow`,
+  `test_ffi_null_pointer`) crashed 21 entry-point calls with SIGSEGV /
+  SIGBUS -- reported as `failed` rather than `crashed` only because the
+  harness isolates each probe in a subprocess. `C_FindObjectsInit`,
+  `C_GenerateKey`, and `C_GenerateKeyPair` iterated the caller template
+  with no guard (NULL pointer, or a `ulCount` of `ULONG_MAX` walking out
+  of bounds); `C_Sign`/`C_Verify`/`C_Digest` (one-shot and `*Update`)
+  passed a NULL data pointer with a non-zero length straight to the
+  digest/HMAC path. A shared `fhsm_check_template()` guard now rejects
+  NULL-with-count and absurd counts (ceiling `FHSM_MAX_TEMPLATE_ATTRS`,
+  default 1024), and the data entry points reject NULL-with-length, all
+  with `CKR_ARGUMENTS_BAD` (operation terminated). Empty templates and
+  zero-length NULL buffers stay legal. Regression:
+  `tests/test_robustness_args.c`. Same AVA_VAN robustness class as the
+  earlier C_Decrypt NULL fix; no key material exposed.
+
 * **CI `reproducibility` compared a signed build against an unsigned one
   (false failure).** The `build` job uploads the module *after*
   `make integrity`, which embeds the SHA-256 self-digest into the

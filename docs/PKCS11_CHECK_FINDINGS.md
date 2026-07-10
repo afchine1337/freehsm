@@ -64,6 +64,37 @@ in the harness. This document records the triage.
   `handler` to the real symbol (interop keeps it, fips-strict rejects),
   after which they will be advertised in interop automatically.
 
+### F3 — TSFI robustness: NULL pointers & integer-overflow counts (SIGSEGV/SIGBUS) — FIXED
+* **Finding**: 21 subprocess-isolated crashes (reported `failed`, not
+  `crashed`, because the harness runs each raw probe in a child):
+  `security/test_api_boundary` (NULL template + non-zero count),
+  `security/test_arithmetic_overflow` (`template_count` = `ULONG_MAX`,
+  `sizeof`-overflow, `0x100000000`), and `security/test_ffi_null_pointer`
+  (NULL data pointer + non-zero length) on `C_FindObjectsInit`,
+  `C_GenerateKey`, `C_GenerateKeyPair`, and `C_Sign`/`C_Verify`/`C_Digest`
+  (one-shot and `*Update`).
+* **Root cause**: template-consuming entry points iterated the caller
+  array (`find_attr`, the `C_FindObjectsInit` loop) with no guard, so a
+  NULL pointer dereferenced and an absurd count walked far out of bounds
+  (SIGBUS on the `ULONG_MAX` case). The data entry points passed the
+  caller pointer straight to the digest/HMAC/EVP path, dereferencing NULL
+  when the length was non-zero.
+* **Fix**: a shared `fhsm_check_template()` guard rejects
+  `pTemplate == NULL && ulCount != 0` and any `ulCount` above a generous
+  ceiling (`FHSM_MAX_TEMPLATE_ATTRS`, default 1024) with
+  `CKR_ARGUMENTS_BAD`, before any iteration; the data entry points reject
+  `pData == NULL && ulDataLen != 0` (terminating the active operation).
+  An empty template / zero-length NULL buffer stays legal.
+* **Confirmed** in the sandbox: a fork-per-probe negative control shows
+  all four representative probes crash (signal 11 / signal 7) before the
+  fix and return `CKR_ARGUMENTS_BAD` after.
+* **Regression test**: `tests/test_robustness_args.c`, wired into
+  `make tests` (in-process via `dlopen`, so a regression faults the
+  test). The full `security/*` subset re-run is done via `make
+  pkcs11-check` (needs opensc + pkcs11-check).
+* Threat-model note: same AVA_VAN availability/robustness class as F1; no
+  key material exposed, no CVE requested.
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported

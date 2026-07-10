@@ -1305,6 +1305,25 @@ static long find_attr(CK_ATTRIBUTE *t, CK_ULONG n, CK_ATTRIBUTE_TYPE type) {
     return -1;
 }
 
+/* Robustness guard for a caller-supplied attribute template. A NULL
+ * template pointer paired with a non-zero count, or an absurd count
+ * (integer-overflow probe), must be rejected before ANY iteration --
+ * walking such a template dereferences NULL or reads far out of bounds.
+ * (pkcs11-check security/test_api_boundary + test_arithmetic_overflow,
+ * #125 -- these were SIGSEGV/SIGBUS in the raw entry points.) An empty
+ * template (count == 0) is legal. FHSM_MAX_TEMPLATE_ATTRS is a generous
+ * ceiling : real PKCS#11 templates hold a handful of attributes, so any
+ * count above this is a caller error, not a valid request. */
+#ifndef FHSM_MAX_TEMPLATE_ATTRS
+#define FHSM_MAX_TEMPLATE_ATTRS 1024u
+#endif
+static CK_RV fhsm_check_template(CK_ATTRIBUTE *t, CK_ULONG n) {
+    if (n == 0) return FHSM_RV_OK;
+    if (t == NULL) return FHSM_RV_ARGUMENTS_BAD;
+    if (n > FHSM_MAX_TEMPLATE_ATTRS) return FHSM_RV_ARGUMENTS_BAD;
+    return FHSM_RV_OK;
+}
+
 /* ---------------------------------------------------------------------------
  * C_GenerateRandom --- FIPS DRBG (CTR_DRBG-AES-256, OpenSSL FIPS provider).
  * ----------------------------------------------------------------------- */
@@ -1354,6 +1373,11 @@ CK_RV C_Digest(CK_SESSION_HANDLE hSession, unsigned char *pData,
     if (!pulDigestLen) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* Reject a NULL data pointer paired with a non-zero length before any
+     * dereference (pkcs11-check security/test_ffi_null_pointer, #125). A
+     * NULL buffer of length 0 is legal (empty message). Errors terminate
+     * the active operation, per PKCS#11 C_Sign/C_Verify/C_Digest rules. */
+    if (pData == NULL && ulDataLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     size_t need = fhsm_hash_size(op->hash);
     if (pDigest == NULL) { *pulDigestLen = need; return FHSM_RV_OK; }
     if (*pulDigestLen < need) { *pulDigestLen = need; return 0x00000150UL; }
@@ -1379,6 +1403,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_OBJECT_HANDLE *phKey) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
+    { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -2309,6 +2334,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                         CK_OBJECT_HANDLE *phPub, CK_OBJECT_HANDLE *phPriv) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phPub || !phPriv) return FHSM_RV_ARGUMENTS_BAD;
+    { CK_RV cr = fhsm_check_template(pPub, ulPub);  if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_template(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -2965,6 +2992,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
         return FHSM_RV_SESSION_HANDLE_INVALID;
     fhsm_find_state_t *f = &g_finds[hSession];
     if (f->active) return FHSM_RV_OPERATION_ACTIVE;
+    { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     memset(f, 0, sizeof(*f));
 
     uint32_t   filter_class = 0;  int has_class = 0;
@@ -4250,6 +4278,11 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pulSignatureLen) return FHSM_RV_ARGUMENTS_BAD;
+    /* Reject a NULL data pointer paired with a non-zero length before any
+     * dereference (pkcs11-check security/test_ffi_null_pointer, #125). A
+     * NULL buffer of length 0 is legal (empty message). Errors terminate
+     * the active operation, per PKCS#11 C_Sign/C_Verify/C_Digest rules. */
+    if (pData == NULL && ulDataLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
 
@@ -4362,6 +4395,11 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
                CK_ULONG ulDataLen, unsigned char *pSig, CK_ULONG ulSigLen) {
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* Reject a NULL data pointer paired with a non-zero length before any
+     * dereference (pkcs11-check security/test_ffi_null_pointer, #125). A
+     * NULL buffer of length 0 is legal (empty message). Errors terminate
+     * the active operation, per PKCS#11 C_Sign/C_Verify/C_Digest rules. */
+    if (pData == NULL && ulDataLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
@@ -4601,6 +4639,9 @@ CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                      CK_ULONG ulPartLen) {
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* NULL part + non-zero length would deref NULL in the EVP update
+     * (pkcs11-check security/test_ffi_null_pointer, #125). */
+    if (pPart == NULL && ulPartLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     if (!op->md_ctx) {
         EVP_MD_CTX *ctx = EVP_MD_CTX_new();
         if (!ctx) return FHSM_RV_HOST_MEMORY;
@@ -4712,6 +4753,9 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                    CK_ULONG ulPartLen) {
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* NULL part + non-zero length would deref NULL in the EVP update
+     * (pkcs11-check security/test_ffi_null_pointer, #125). */
+    if (pPart == NULL && ulPartLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!op->mac_ctx) {
@@ -4785,6 +4829,9 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                      CK_ULONG ulPartLen) {
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* NULL part + non-zero length would deref NULL in the EVP update
+     * (pkcs11-check security/test_ffi_null_pointer, #125). */
+    if (pPart == NULL && ulPartLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (op->mechanism != CKM_SHA256_HMAC_INIT_VAL) {
