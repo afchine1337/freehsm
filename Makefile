@@ -175,10 +175,18 @@ tests/test_token_capacity: tests/test_token_capacity.c $(LIB_OBJ)
 # .fhsm_digest section keeps the zero placeholder (only the shipped .so
 # is patched by `make integrity`). FHSM_INTEGRITY_ALLOW_UNSIGNED=1 is
 # therefore required here, same convention as tests/coverage_matrix.sh.
+# NULL-argument robustness regression (#125 pkcs11-check finding) :
+# drives the PUBLIC API via dlopen, so it links against the built .so
+# rather than the .o files. Requires $(LIB) to exist.
+tests/test_decrypt_null_args: tests/test_decrypt_null_args.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 .PHONY: tests
-tests: tests/test_smoke tests/test_token_capacity
+tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_token_capacity
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		LD_LIBRARY_PATH=. ./tests/test_decrypt_null_args
 
 # External behavioral harness (#125) : Denis Mingulov's pkcs11-check
 # (>100k vendor-neutral checks) against the built module. Findings are

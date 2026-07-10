@@ -7,6 +7,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+* **C_Decrypt NULL-pointer dereference / SIGSEGV (#125, found by
+  pkcs11-check).** `C_Decrypt` dereferenced `pulDataLen` on every path
+  (size query and copy) without a NULL check, unlike `C_Encrypt` which
+  guarded `pulEncLen`. A caller passing `pulDataLen = NULL` (as
+  pkcs11-check's NULL-argument probe does) triggered a NULL-pointer
+  dereference and crashed the module. Now rejected with
+  `CKR_ARGUMENTS_BAD`, terminating the operation so the session is not
+  stranded ; the symmetric `pData`-with-length guard was added to
+  `C_Encrypt`. Confirmed with a negative control (guard removed → exit
+  139/SIGSEGV ; with fix → 0x7). Regression test
+  `tests/test_decrypt_null_args.c` drives the public API via `dlopen`
+  and is wired into `make tests`. Availability/robustness defect
+  (AVA_VAN class) ; no key material exposed, no CVE requested. Triage
+  of the full first-run findings is in `docs/PKCS11_CHECK_FINDINGS.md`.
+
 ### Added
 
 * **CI : pkcs11-check external harness (#125).** New workflow

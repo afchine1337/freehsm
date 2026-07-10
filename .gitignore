@@ -93,3 +93,10 @@ tests/test_smoke.tampered
 
 # test binaries (#110)
 tests/test_token_capacity
+tests/test_decrypt_null_args
+
+# pkcs11-check runtime artifacts (#125)
+reports/
+.pkcs11-check-isolation-*.json
+.pkcs11-check-isolation-*.report-records/
+..pkcs11-check-isolation-*.report-records/

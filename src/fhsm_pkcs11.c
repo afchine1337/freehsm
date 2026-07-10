@@ -3601,7 +3601,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
 
-    if (!pulEncLen) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+    if (!pulEncLen || (!pData && ulDataLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
 
     /* --- RSA-OAEP path (asymmetric encryption) --- */
     if (op->mechanism == CKM_RSA_PKCS_OAEP) {
@@ -3731,6 +3731,19 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* Argument robustness (symmetry with C_Encrypt) : pulDataLen is the
+     * mandatory length in/out pointer and is dereferenced on every path
+     * (size query and copy alike) ; pEncryptedData must be non-NULL when
+     * it carries bytes. Reject NULLs with CKR_ARGUMENTS_BAD instead of
+     * dereferencing them. Regression from pkcs11-check finding
+     * (#125, test_null_argument_rejection_terminates_encrypt_decrypt):
+     * a NULL pulDataLen previously caused a NULL-pointer dereference
+     * (SIGSEGV). The operation is terminated on rejection so the session
+     * is not stranded with op->active = 1. */
+    if (!pulDataLen || (!pEnc && ulEncLen)) {
+        op->active = 0;
+        return FHSM_RV_ARGUMENTS_BAD;
+    }
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
