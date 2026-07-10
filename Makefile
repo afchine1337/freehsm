@@ -127,6 +127,15 @@ LIB_SRC = \
 # Dispatch source files need the dispatch common header on their include path.
 CFLAGS += -Isrc/dispatch
 
+# Optional object-store cap override (default 64, see src/fhsm_token.c).
+# The pkcs11-check target builds with a larger store : the harness
+# creates many objects over a full run and does not destroy the session
+# objects it creates, so the default store would fill and cascade
+# CKR_DEVICE_MEMORY across unrelated later tests. See FINDINGS I1 / F5.
+ifdef FHSM_MAX_OBJECTS
+CFLAGS += -DFHSM_MAX_OBJECTS=$(FHSM_MAX_OBJECTS)
+endif
+
 LIB_OBJ = $(LIB_SRC:.c=.o)
 
 LIB     = libfreehsm-fips.so
@@ -245,7 +254,14 @@ tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args t
 # opensc (pkcs11-tool) and `pip install pkcs11-check` (Python >= 3.12).
 # Run against an UNSIGNED dev build ; CI runs the signed module.
 .PHONY: pkcs11-check
-pkcs11-check: $(LIB)
+pkcs11-check:
+	# Rebuild the module under test with a large object store so the
+	# harness's object churn does not fill the default 64-slot token and
+	# mask real findings behind CKR_DEVICE_MEMORY (FINDINGS I1 / F5). The
+	# deeper fix is destroying session objects on C_CloseSession.
+	$(MAKE) clean
+	$(MAKE) FHSM_MAX_OBJECTS=4096
+	$(MAKE) FHSM_MAX_OBJECTS=4096 integrity
 	FHSM_ALLOW_UNSIGNED=1 bash scripts/run_pkcs11_check.sh ./$(LIB) ./reports/pkcs11-check
 
 # ---------------------------------------------------------------------------

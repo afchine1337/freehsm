@@ -7,6 +7,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+* **`make pkcs11-check` and the CI harness now build the module under
+  test with a larger object store (`FHSM_MAX_OBJECTS=4096`) (#125).** A
+  full pkcs11-check run creates far more than the default 64 objects and
+  (pending the session-object lifecycle fix) never frees them, so the
+  store filled and cascaded `CKR_DEVICE_MEMORY` across ~119 unrelated
+  tests, masking real findings. `FHSM_MAX_OBJECTS` is `#ifndef`-guarded
+  and `-D`-overridable; the default shipped build is unchanged (64). The
+  deeper fix (honour `CKA_TOKEN`, destroy session objects on
+  `C_CloseSession`) is tracked in docs/PKCS11_CHECK_FINDINGS.md F5.
+
 ### Fixed
 
 * **Per-session operation state no longer bleeds across pooled session

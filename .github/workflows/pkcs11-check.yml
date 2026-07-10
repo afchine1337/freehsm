@@ -42,8 +42,11 @@ jobs:
       - name: Build + sign module
         run: |
           make clean
-          make
-          make integrity
+          # Large object store so the harness's object churn does not fill
+          # the default 64-slot token and cascade CKR_DEVICE_MEMORY across
+          # unrelated tests (FINDINGS I1 / F5).
+          make FHSM_MAX_OBJECTS=4096
+          make FHSM_MAX_OBJECTS=4096 integrity
           test -f libfreehsm-fips.so
 
       - name: Install harness (opensc + pkcs11-check)

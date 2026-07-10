@@ -124,6 +124,34 @@ in the harness. This document records the triage.
   non-GCM multipart, which is a separate feature gap (multipart is
   currently GCM-centric) tracked apart from this state-hygiene fix.
 
+### F5 — Object-store exhaustion under the harness (CKR_DEVICE_MEMORY) — MITIGATED + follow-up
+* **Finding**: ~119 `CKR_DEVICE_MEMORY` (0x131) failures fanned out
+  across dozens of unrelated classes (TestObjectSearch, TestECDSASignature,
+  TestRSAOAEPRoundtrip, TestSessionObjectLifecycle, RO-session suites, ...).
+* **Root cause**: two layers.
+  1. *Immediate (masking)*: the token object store is a fixed
+     `FHSM_MAX_OBJECTS` array (default 64). A full pkcs11-check run creates
+     far more objects than that, so once the store fills every later test
+     that creates an object fails with `CKR_DEVICE_MEMORY`, regardless of
+     what it was actually testing.
+  2. *Deeper (real defect)*: `CKA_TOKEN` is not honoured — every created
+     object is treated as a persistent token object and written to the
+     `.tok` file, and **session objects are never destroyed when their
+     session closes**. So the store only ever grows within a run. This
+     also fails the object-lifecycle suites directly
+     (TestSessionObjectLifecycle, TestROSessionObjectsAllowed,
+     TestROTokenObjectCreation).
+* **Mitigation (this change)**: `make pkcs11-check` and the CI workflow
+  build the module under test with `FHSM_MAX_OBJECTS=4096` (an
+  `#ifndef`-guarded, `-D`-overridable cap), so store exhaustion no longer
+  masks unrelated findings. The default shipped build is unchanged (64).
+* **Follow-up (tracked)**: implement PKCS#11 session-object semantics —
+  parse `CKA_TOKEN`, keep session objects (`CKA_TOKEN=FALSE`) in memory
+  only (not persisted), and destroy them in `C_CloseSession`. That is the
+  correct fix and additionally clears the object-lifecycle failures. It
+  touches the object struct + creation paths and is scoped as its own
+  item.
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported
