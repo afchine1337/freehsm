@@ -121,6 +121,23 @@ int main(void) {
         printf("test_decrypt_null_args : C_EncryptUpdate(NULL len) -> CKR_ARGUMENTS_BAD : OK\n");
     }
 
+    /* --- C_DecryptFinal with no multipart context (#125 crash) -------
+     * C_DecryptInit(AES-CBC) with an invalid key handle, then
+     * C_DecryptFinal directly (no Update). Pre-fix: SIGSEGV in
+     * EVP_DecryptFinal_ex(NULL). Post-fix: CKR_OPERATION_NOT_INITIALIZED. */
+    CK_RV (*C_DecryptFinal)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG*);
+    *(void**)&C_DecryptFinal = dlsym(h,"C_DecryptFinal");
+    if (C_DecryptFinal) {
+        CK_BYTE iv[16] = {0};
+        CK_MECHANISM cbc = { 0x1082UL /* CKM_AES_CBC */, iv, 16 };
+        if (C_DecryptInit(s, &cbc, 0 /* invalid key handle */) == 0) {
+            CK_BYTE last[64]; CK_ULONG ll = 64;
+            rv = C_DecryptFinal(s, last, &ll);   /* must not crash */
+            if (rv == 0) { fprintf(stderr, "FAIL: DecryptFinal(no ctx) unexpectedly OK\n"); return 1; }
+            printf("test_decrypt_null_args : C_DecryptFinal(no ctx) -> 0x%lx (no crash) : OK\n", rv);
+        }
+    }
+
     printf("test_decrypt_null_args : PASS\n");
     return 0;
 }

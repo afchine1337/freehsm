@@ -4940,6 +4940,15 @@ CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
     if (pLast == NULL) { *pulLastLen = 0; return FHSM_RV_OK; }
+    /* No multipart context : C_DecryptInit was called but no
+     * C_DecryptUpdate ever created the cipher context (e.g. the key
+     * handle was invalid, or Final was called directly). Guard against
+     * EVP_DecryptFinal_ex(NULL) which segfaults. Mirrors C_EncryptFinal.
+     * #125 (pkcs11-check crash : test_mech_flags decrypt_flag_callable). */
+    if (op->cipher_ctx == NULL) {
+        op->active = 0;
+        return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    }
     int out_len = 0;
     int ok = EVP_DecryptFinal_ex(op->cipher_ctx, pLast, &out_len);
     EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;

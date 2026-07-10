@@ -98,6 +98,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   values are correct, EdDSA/HKDF are present, and the phantoms are gone.
   Full analysis in `docs/PKCS11_CHECK_FINDINGS.md`.
 
+* **C_DecryptFinal NULL cipher-context dereference / SIGSEGV (#125,
+  found by re-running pkcs11-check against the up-to-date module).**
+  `C_DecryptFinal` called `EVP_DecryptFinal_ex(op->cipher_ctx, ...)`
+  with no NULL check. When `C_DecryptInit` was called (e.g. with an
+  invalid key handle, as pkcs11-check's `test_mech_flags`
+  `decrypt_flag_callable` does) and `C_DecryptFinal` was then called
+  directly — no `C_DecryptUpdate` to lazily create the cipher context —
+  `op->cipher_ctx` was NULL and the module crashed. `C_EncryptFinal`
+  already guarded this ; `C_DecryptFinal` now mirrors it, returning
+  `CKR_OPERATION_NOT_INITIALIZED`. Reproduced (exit 139) and fixed
+  (no crash) in the sandbox with the pkcs11-check harness under
+  Python 3.12 ; regression probe added to
+  `tests/test_decrypt_null_args.c`. This was the crash class that
+  survived the earlier C_Encrypt/DecryptUpdate guards.
+
 * **C_EncryptUpdate / C_DecryptUpdate NULL-pointer dereference /
   SIGSEGV (#125, remaining pkcs11-check crashes).** Both multi-part
   update functions dereferenced their length out-parameter
