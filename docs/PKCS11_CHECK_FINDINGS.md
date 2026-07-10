@@ -102,6 +102,35 @@ in the harness. This document records the triage.
   (b) provide a dev-only env knob to relax the throttle for testing
   (mirroring FHSM_INTEGRITY_ALLOW_UNSIGNED). Prefer (a).
 
+## General-purpose non-FIPS mechanisms (#125 tranche A/B)
+
+The module is a general-purpose PKCS#11 provider that switches to FIPS by
+build profile (`FHSM_BUILD_FIPS_STRICT`). The following non-FIPS
+mechanisms are executable in the `interop` build and rejected under
+`fips-strict` (advertised iff executable), each gated in the relevant
+operation function (not `op_init`, which is shared with signing):
+
+* **Digests**: SHA-1, MD5.
+* **Ciphers**: AES-ECB, 3DES-CBC, 3DES key generation.
+* **RSA**: PKCS#1 v1.5 encryption, X.509 raw encryption, SHA1-RSA-PKCS
+  signature.
+
+### Deferred: DSA / DH key generation (#22)
+
+DSA and DH key-pair generation were scoped for tranche B but
+**deferred**: the module has **no consuming operation** for them — there
+is no DSA signature mechanism and no DH `C_DeriveKey` wired anywhere. A
+`CKM_DSA_KEY_PAIR_GEN` / `CKM_DH_PKCS_KEY_PAIR_GEN` would therefore
+produce keys that nothing in the module can use, which is a poorer
+general-purpose experience than not offering them. When a consumer
+actually needs them, they should be added as a *bundle*: keygen +
+paramgen + the consuming operation (DSA `C_Sign` / DH `C_DeriveKey`) +
+the corresponding `FHSM_PAIRWISE_*` family — not keygen alone.
+
+RC4 and single-DES (tranche C) remain deferred as well: they require the
+OpenSSL **legacy** provider, which is a separate provider-loading policy
+decision for the interop build.
+
 ## Method
 
 Run: `make pkcs11-check` (local) 
