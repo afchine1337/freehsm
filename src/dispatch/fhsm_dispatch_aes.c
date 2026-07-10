@@ -170,6 +170,26 @@ fhsm_rv_t dispatch_aes_cbc_pad(unsigned long session, unsigned long key,
     return evp_cipher_oneshot(c, k, iv, in, out, outlen, 1);
 }
 
+/* ---- AES-ECB (non-FIPS ; interop / general-purpose only) ----
+ * No IV, no padding, block-aligned input. Rejected in fips-strict by
+ * the generator (handler rewritten to dispatch_reject_fips) and by the
+ * C_Encrypt/C_Decrypt operation gate. #125. */
+fhsm_rv_t dispatch_aes_ecb(unsigned long session, unsigned long key,
+                            const void *params, size_t plen,
+                            fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key;
+    fhsm_slice_t k;
+    fhsm_rv_t rv;
+    if ((rv = fhsm_tlv_find(params, plen, FHSM_TLV_KEY, &k)) != FHSM_RV_OK) return rv;
+    if (in.len % 16) return FHSM_RV_ARGUMENTS_BAD;
+    if (*outlen < in.len) return FHSM_RV_ARGUMENTS_BAD;
+    const EVP_CIPHER *c = aes_cipher(k.len, EVP_aes_128_ecb,
+                                      EVP_aes_192_ecb, EVP_aes_256_ecb);
+    if (!c) return FHSM_RV_KEY_SIZE_RANGE;
+    return evp_cipher_oneshot(c, k, FHSM_SLICE(NULL, 0), in, out, outlen, 0);
+}
+
 /* ---- AES-CTR ---- */
 fhsm_rv_t dispatch_aes_ctr(unsigned long session, unsigned long key,
                             const void *params, size_t plen,

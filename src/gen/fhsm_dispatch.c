@@ -96,6 +96,16 @@ __attribute__((weak)) fhsm_rv_t dispatch_aes_ctr(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
+__attribute__((weak)) fhsm_rv_t dispatch_aes_ecb(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
 __attribute__((weak)) fhsm_rv_t dispatch_aes_gcm(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,

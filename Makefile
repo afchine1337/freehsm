@@ -192,8 +192,13 @@ tests/test_mech_advertise: tests/test_mech_advertise.c $(LIB)
 tests/test_legacy_digest: tests/test_legacy_digest.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Non-FIPS cipher gating (#125) : AES-ECB (+3DES) executable in interop,
+# rejected in fips-strict. Profile-adaptive round-trip.
+tests/test_legacy_cipher: tests/test_legacy_cipher.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 .PHONY: tests
-tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest
+tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_token_capacity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
@@ -202,6 +207,8 @@ tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args t
 		LD_LIBRARY_PATH=. ./tests/test_mech_advertise
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_legacy_digest
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		LD_LIBRARY_PATH=. ./tests/test_legacy_cipher
 
 # External behavioral harness (#125) : Denis Mingulov's pkcs11-check
 # (>100k vendor-neutral checks) against the built module. Findings are

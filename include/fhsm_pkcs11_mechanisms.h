@@ -182,6 +182,7 @@ extern fhsm_rv_t dispatch_aes_ctr(unsigned long, unsigned long, const void*, siz
 extern fhsm_rv_t dispatch_aes_kw(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_kwp(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_cmac(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_aes_ecb(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha384(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha512(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);

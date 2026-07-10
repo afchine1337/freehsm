@@ -3060,6 +3060,7 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
  * can use them everywhere in this TU without conflicting with the
  * earlier _LIST aliases. */
 #ifndef CKM_AES_CBC
+#define CKM_AES_ECB               0x00001081UL
 #define CKM_AES_CBC               0x00001082UL
 #endif
 #ifndef CKM_AES_CBC_PAD
@@ -3221,6 +3222,18 @@ static uint32_t resolve_mech(uint32_t m);
 static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                          CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey) {
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
+    /* Non-FIPS mechanisms are rejected at init time under fips-strict
+     * (executable only in the interop / general-purpose build). #125.
+     * Kept in sync with the non-approved cipher mechanisms whose
+     * dispatch handler the generator rewrites to reject in fips-strict. */
+    if (fhsm_build_fips_strict) {
+        switch (pMechanism->mechanism) {
+            case CKM_AES_ECB:
+            case 0x00000133UL: /* CKM_DES3_CBC */
+                return FHSM_RV_MECHANISM_INVALID;
+            default: break;
+        }
+    }
     op->key_handle = (uint32_t)hKey;
     /* resolve_mech downgrades CKM_AES_GMAC (0x108A) to CKM_AES_CMAC (0x108C)
      * iff FHSM_OPENSC_GMAC_ALIAS=1 is set in the environment. Done here so
@@ -3471,15 +3484,21 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         return FHSM_RV_OK;
     }
 
-    /* --- AES-CBC / AES-CBC-PAD / AES-CTR path --- */
-    if (op->mechanism == CKM_AES_CBC || op->mechanism == CKM_AES_CBC_PAD
-        || op->mechanism == CKM_AES_CTR) {
+    /* --- AES-ECB / AES-CBC / AES-CBC-PAD / AES-CTR path ---
+     * AES-ECB is non-FIPS : executable only in the interop build. */
+    if (op->mechanism == CKM_AES_ECB || op->mechanism == CKM_AES_CBC
+        || op->mechanism == CKM_AES_CBC_PAD || op->mechanism == CKM_AES_CTR) {
+        int is_ecb = (op->mechanism == CKM_AES_ECB);
+        if (is_ecb && fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
-        if (!op->have_iv)  { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+        if (!is_ecb && !op->have_iv) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
         const char *cname = NULL;
         if (op->mechanism == CKM_AES_CTR) {
             cname = (kvl == 16) ? "AES-128-CTR" :
                     (kvl == 24) ? "AES-192-CTR" : "AES-256-CTR";
+        } else if (is_ecb) {
+            cname = (kvl == 16) ? "AES-128-ECB" :
+                    (kvl == 24) ? "AES-192-ECB" : "AES-256-ECB";
         } else {
             cname = (kvl == 16) ? "AES-128-CBC" :
                     (kvl == 24) ? "AES-192-CBC" : "AES-256-CBC";
@@ -3488,7 +3507,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
         if (!ctx) { EVP_CIPHER_free(c); op->active = 0; return FHSM_RV_HOST_MEMORY; }
-        if (EVP_EncryptInit_ex2(ctx, c, kv, op->iv, NULL) != 1) {
+        if (EVP_EncryptInit_ex2(ctx, c, kv, is_ecb ? NULL : op->iv, NULL) != 1) {
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
             op->active = 0; return FHSM_RV_FUNCTION_FAILED;
         }
@@ -3627,15 +3646,21 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         return FHSM_RV_OK;
     }
 
-    /* --- AES-CBC / AES-CBC-PAD / AES-CTR path --- */
-    if (op->mechanism == CKM_AES_CBC || op->mechanism == CKM_AES_CBC_PAD
-        || op->mechanism == CKM_AES_CTR) {
+    /* --- AES-ECB / AES-CBC / AES-CBC-PAD / AES-CTR path ---
+     * AES-ECB is non-FIPS : executable only in the interop build. */
+    if (op->mechanism == CKM_AES_ECB || op->mechanism == CKM_AES_CBC
+        || op->mechanism == CKM_AES_CBC_PAD || op->mechanism == CKM_AES_CTR) {
+        int is_ecb = (op->mechanism == CKM_AES_ECB);
+        if (is_ecb && fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
-        if (!op->have_iv)  { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+        if (!is_ecb && !op->have_iv) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
         const char *cname = NULL;
         if (op->mechanism == CKM_AES_CTR) {
             cname = (kvl == 16) ? "AES-128-CTR" :
                     (kvl == 24) ? "AES-192-CTR" : "AES-256-CTR";
+        } else if (is_ecb) {
+            cname = (kvl == 16) ? "AES-128-ECB" :
+                    (kvl == 24) ? "AES-192-ECB" : "AES-256-ECB";
         } else {
             cname = (kvl == 16) ? "AES-128-CBC" :
                     (kvl == 24) ? "AES-192-CBC" : "AES-256-CBC";
@@ -3644,7 +3669,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
         if (!ctx) { EVP_CIPHER_free(c); op->active = 0; return FHSM_RV_HOST_MEMORY; }
-        if (EVP_DecryptInit_ex2(ctx, c, kv, op->iv, NULL) != 1) {
+        if (EVP_DecryptInit_ex2(ctx, c, kv, is_ecb ? NULL : op->iv, NULL) != 1) {
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
             op->active = 0; return FHSM_RV_FUNCTION_FAILED;
         }

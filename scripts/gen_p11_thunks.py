@@ -114,7 +114,7 @@ MECHANISMS: tuple[Mech, ...] = (
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197", "SP 800-38B")),
 
-    Mech("CKM_AES_ECB",            0x00001081, "AES",  "encrypt", "dispatch_reject_fips",
+    Mech("CKM_AES_ECB",            0x00001081, "AES",  "encrypt", "dispatch_aes_ecb",
          fips="non-approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197",),
