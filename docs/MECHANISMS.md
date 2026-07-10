@@ -151,7 +151,7 @@
 
 | Mechanism | Value | Op | FIPS | Handler | Reference |
 |---|---|---|---|---|---|
-| `CKM_MD5` | `0x00000210` | digest | ❌ | `dispatch_reject_fips` | RFC 1321 |
+| `CKM_MD5` | `0x00000210` | digest | ❌ | `dispatch_md5` | RFC 1321 |
 | | | | | | _Forbidden by SP 800-131A rev. 2._ |
 
 ## ML-DSA
@@ -206,7 +206,7 @@
 
 | Mechanism | Value | Op | FIPS | Handler | Reference |
 |---|---|---|---|---|---|
-| `CKM_SHA_1` | `0x00000220` | digest | ❌ | `dispatch_reject_fips` | FIPS 180-4 |
+| `CKM_SHA_1` | `0x00000220` | digest | ❌ | `dispatch_sha1` | FIPS 180-4 |
 | | | | | | _Disallowed for digital signature generation; legacy verify only._ |
 
 ## SHA2

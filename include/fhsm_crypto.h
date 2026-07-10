@@ -120,7 +120,11 @@ typedef enum fhsm_hash_e {
     FHSM_HASH_SHA512 = 3,
     FHSM_HASH_SHA3_256 = 4,
     FHSM_HASH_SHA3_384 = 5,
-    FHSM_HASH_SHA3_512 = 6
+    FHSM_HASH_SHA3_512 = 6,
+    /* Non-FIPS legacy digests (interop / general-purpose profile only ;
+     * rejected in the fips-strict operation path). */
+    FHSM_HASH_SHA1 = 7,
+    FHSM_HASH_MD5  = 8
 } fhsm_hash_t;
 
 size_t fhsm_hash_size(fhsm_hash_t h);

@@ -101,3 +101,4 @@ reports/
 .pkcs11-check-isolation-*.report-records/
 ..pkcs11-check-isolation-*.report-records/
 tests/test_mech_advertise
+tests/test_legacy_digest

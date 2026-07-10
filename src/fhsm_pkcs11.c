@@ -998,6 +998,10 @@ typedef struct fhsm_mech_entry_s {
 extern const fhsm_mech_entry_t fhsm_mechanism_table[];
 extern const size_t            fhsm_mechanism_count;
 const fhsm_mech_entry_t *fhsm_mechanism_lookup(uint32_t ckm);
+/* Build-profile flag, generated into fhsm_pkcs11_mechanisms.h (which
+ * this TU cannot include due to CKM_* macro collisions). Mirrored here
+ * as an extern const emitted by the generator into the dispatch TU. */
+extern const int fhsm_build_fips_strict;
 fhsm_rv_t dispatch_reject_fips(unsigned long, unsigned long,
                                 const void *, size_t, fhsm_slice_t,
                                 uint8_t *, size_t *);
@@ -1329,6 +1333,14 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
         case CKM_SHA256: op->hash = FHSM_HASH_SHA256; break;
         case CKM_SHA384: op->hash = FHSM_HASH_SHA384; break;
         case CKM_SHA512: op->hash = FHSM_HASH_SHA512; break;
+        /* Non-FIPS legacy digests : executable only in the interop /
+         * general-purpose build (rejected under fips-strict). #125. */
+        case 0x00000220UL: /* CKM_SHA_1 */
+            if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+            op->hash = FHSM_HASH_SHA1; break;
+        case 0x00000210UL: /* CKM_MD5 */
+            if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+            op->hash = FHSM_HASH_MD5; break;
         default:         return FHSM_RV_MECHANISM_INVALID;
     }
     op->active = 1;

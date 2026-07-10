@@ -340,11 +340,11 @@ MECHANISMS: tuple[Mech, ...] = (
          notes="signature = sig_ed25519 || sig_ml_dsa_65 ; verify requires both to validate."),
 
     # === Legacy / non-approved (rejected in fips-strict) ==============
-    Mech("CKM_MD5",                0x00000210, "MD5",  "digest",  "dispatch_reject_fips",
+    Mech("CKM_MD5",                0x00000210, "MD5",  "digest",  "dispatch_md5",
          fips="non-approved",
          refs=("RFC 1321",),
          notes="Forbidden by SP 800-131A rev. 2."),
-    Mech("CKM_SHA_1",              0x00000220, "SHA1", "digest",  "dispatch_reject_fips",
+    Mech("CKM_SHA_1",              0x00000220, "SHA1", "digest",  "dispatch_sha1",
          fips="non-approved",
          refs=("FIPS 180-4",),
          notes="Disallowed for digital signature generation; legacy verify only."),
@@ -391,7 +391,7 @@ def _validate(mechs: tuple[Mech, ...]) -> None:
 # ---------------------------------------------------------------------------
 # Output 1 --- include/fhsm_pkcs11_mechanisms.h
 # ---------------------------------------------------------------------------
-def gen_header(mechs: tuple[Mech, ...]) -> str:
+def gen_header(mechs: tuple[Mech, ...], profile: str = "fips-strict") -> str:
     lines = [
         "/* Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com> */",
         "/* SPDX-License-Identifier: Apache-2.0                       */",
@@ -406,6 +406,13 @@ def gen_header(mechs: tuple[Mech, ...]) -> str:
         "#ifdef __cplusplus",
         "extern \"C\" {",
         "#endif",
+        "",
+        "/* ---- Build profile flag ----",
+        " * 1 = fips-strict (non-approved mechanisms rejected in the",
+        " *     operation path) ; 0 = interop / general-purpose (non-",
+        " *     approved mechanisms are executable). Consumed by the",
+        " *     hand-written C_*Init operation gates in fhsm_pkcs11.c. */",
+        f"#define FHSM_BUILD_FIPS_STRICT {1 if profile == 'fips-strict' else 0}",
         "",
         "/* ---- CKM_* mechanism identifiers (PKCS#11 v3.2 §6.3) ---- */",
     ]
@@ -563,6 +570,10 @@ def gen_dispatch(mechs: tuple[Mech, ...], profile: str) -> str:
             "}",
             "",
         ]
+    lines.append(
+        f"const int fhsm_build_fips_strict = "
+        f"{1 if profile == 'fips-strict' else 0};")
+    lines.append("")
     lines.append("const fhsm_mech_entry_t fhsm_mechanism_table[] = {")
     for m in sorted_mechs:
         approved = 1 if m.fips == "approved" else 0
@@ -682,7 +693,7 @@ def main(argv: list[str] | None = None) -> int:
     dispatch_path.parent.mkdir(parents=True, exist_ok=True)
     doc_path.parent.mkdir(parents=True, exist_ok=True)
 
-    header_path.write_text(gen_header(MECHANISMS))
+    header_path.write_text(gen_header(MECHANISMS, args.profile))
     dispatch_path.write_text(gen_dispatch(MECHANISMS, args.profile))
     doc_path.write_text(gen_doc(MECHANISMS, args.profile))
 

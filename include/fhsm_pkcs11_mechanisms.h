@@ -12,6 +12,13 @@
 extern "C" {
 #endif
 
+/* ---- Build profile flag ----
+ * 1 = fips-strict (non-approved mechanisms rejected in the
+ *     operation path) ; 0 = interop / general-purpose (non-
+ *     approved mechanisms are executable). Consumed by the
+ *     hand-written C_*Init operation gates in fhsm_pkcs11.c. */
+#define FHSM_BUILD_FIPS_STRICT 1
+
 /* ---- CKM_* mechanism identifiers (PKCS#11 v3.2 §6.3) ---- */
 /* --- AES --- */
 #define CKM_AES_KEY_GEN                      0x00001080u
@@ -232,6 +239,8 @@ extern fhsm_rv_t dispatch_kmac128(unsigned long, unsigned long, const void*, siz
 extern fhsm_rv_t dispatch_kmac256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_hybrid_x25519_ml_kem_768(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_hybrid_ed25519_ml_dsa_65(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_md5(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_sha1(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 
 /* ---- Dispatch table ---- */
 typedef struct fhsm_mech_entry_s {

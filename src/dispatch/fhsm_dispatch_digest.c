@@ -138,6 +138,32 @@ fhsm_rv_t dispatch_sha512_256(unsigned long s, unsigned long k,
     return evp_md_oneshot("SHA2-512/256", in, out, outlen);
 }
 
+/* ---------------------------------------------------------------------------
+ * Non-FIPS legacy digests (general-purpose / interop profile only).
+ * SHA-1 (disallowed as a standalone digest under fips-strict) and MD5
+ * (never FIPS-approved). Both live in the OpenSSL default provider. In
+ * the fips-strict build these mechanisms are rewritten to
+ * dispatch_reject_fips by the generator ; these handlers are only
+ * reachable in the interop (general-purpose) profile. #125.
+ * ------------------------------------------------------------------------- */
+fhsm_rv_t dispatch_sha1(unsigned long s, unsigned long k,
+                         const void *params, size_t plen,
+                         fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)s; (void)k; (void)params; (void)plen;
+    if (out == NULL || outlen == NULL || *outlen < 20) return FHSM_RV_ARGUMENTS_BAD;
+    return evp_md_oneshot("SHA1", in, out, outlen);
+}
+
+fhsm_rv_t dispatch_md5(unsigned long s, unsigned long k,
+                        const void *params, size_t plen,
+                        fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)s; (void)k; (void)params; (void)plen;
+    if (out == NULL || outlen == NULL || *outlen < 16) return FHSM_RV_ARGUMENTS_BAD;
+    return evp_md_oneshot("MD5", in, out, outlen);
+}
+
 /* SHAKE128 / SHAKE256 --- variable-length XOF. The caller MUST set
  * *outlen on entry to the requested output length in octets. PKCS#11
  * v3.2 §6.7.5 leaves the length to the caller; we honor it verbatim. */

@@ -7,6 +7,29 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+* **General-purpose profile now gates the operation path, not just
+  advertisement (#125).** The build profile (`fips-strict` vs `interop`)
+  previously only affected mechanism *advertisement* and the dispatch
+  registry — the actual operation functions (`C_DigestInit`,
+  `C_EncryptInit`, `C_SignInit`, ...) have hand-written approved-only
+  switches and never consulted the dispatch table, so non-FIPS
+  mechanisms were un-executable in *both* profiles. The generator now
+  emits a build-profile flag (`FHSM_BUILD_FIPS_STRICT`, and an extern
+  `fhsm_build_fips_strict` for TUs that can't include the generated
+  header) that the operation gates consult.
+* **Non-FIPS legacy digests SHA-1 and MD5 (interop only).** First
+  mechanisms wired through the new profile gate: executable in the
+  general-purpose (`interop`) build (`dispatch_sha1` / `dispatch_md5`,
+  OpenSSL default provider), rejected with `CKR_MECHANISM_INVALID`
+  under `fips-strict`. Advertised iff executable. Profile-adaptive
+  regression test `tests/test_legacy_digest.c` (verified both builds:
+  correct digests in interop, rejection in fips-strict). Groundwork for
+  the remaining tranche-A/B mechanisms (AES-ECB, 3DES, RSA-PKCS v1.5,
+  RSA-X.509, DSA/DH keygen), which follow the same
+  operation-gate + real-crypto pattern.
+
 ### Fixed
 
 * **Token store-full returns CKR_DEVICE_MEMORY, not CKR_HOST_MEMORY
