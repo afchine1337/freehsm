@@ -171,10 +171,14 @@ tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
 tests/test_token_capacity: tests/test_token_capacity.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+# Test binaries are statically linked against the .o files : their
+# .fhsm_digest section keeps the zero placeholder (only the shipped .so
+# is patched by `make integrity`). FHSM_INTEGRITY_ALLOW_UNSIGNED=1 is
+# therefore required here, same convention as tests/coverage_matrix.sh.
 .PHONY: tests
 tests: tests/test_smoke tests/test_token_capacity
-	LD_LIBRARY_PATH=. ./tests/test_smoke
-	LD_LIBRARY_PATH=. ./tests/test_token_capacity
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_smoke
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_token_capacity
 
 # ---------------------------------------------------------------------------
 # Integrity --- sign the shipped .so and embed its SHA-256 into the

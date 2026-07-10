@@ -90,3 +90,6 @@ tests/test_smoke.tampered
 # sign_module.sh test artifacts
 tests/test_smoke.sha256
 tests/test_smoke.tampered
+
+# test binaries (#110)
+tests/test_token_capacity
