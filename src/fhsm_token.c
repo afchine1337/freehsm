@@ -18,20 +18,19 @@
 /* ===========================================================================
  * fhsm_token.c --- Encrypted token store (slot persistence).
  *
- *  Layout : one JSON file per slot. The DEK is wrapped under PBKDF2 +
- *  AES-GCM keyed by the operator's PIN. The wrap blob lives in the JSON
- *  as base64. Objects live in a second AES-GCM blob keyed by the DEK.
+ *  Layout : one binary file per slot (317-byte fixed header + optional
+ *  AES-256-GCM objects section). The DEK is wrapped under PBKDF2 +
+ *  AES-GCM keyed by the operator's PIN. Objects live in a second
+ *  AES-GCM blob keyed by the DEK. Full byte-level specification :
+ *  docs/TOKEN_STORE_FORMAT.md (#108).
  *
- *  This translation unit deliberately keeps JSON serialization minimal
- *  (no third-party parser) --- every field is serialized with a fixed
- *  template and parsed by a hand-written scanner. This shrinks the
- *  attack surface and is required by CC EAL4+ ADV_TDS.3 ("the simpler
- *  the better"). For full PKCS#11 v3 attribute serialization, the
- *  objects_blob field is a length-prefixed CBOR document.
+ *  Fixed layout = constant-time parse, no allocator on the hot path,
+ *  minimal parser attack surface per CC EAL4+ ADV_TDS.3 ("the simpler
+ *  the better").
  *
  *  PIN throttling and lockout : see header for the rules. Counters are
- *  stored in plain JSON (failed_so, failed_user, throttle_*_until) so
- *  the throttle survives process restart.
+ *  stored plaintext in the header (they must be readable before login)
+ *  so the throttle survives process restart.
  * ========================================================================= */
 
 #include "fhsm_common.h"
@@ -220,6 +219,13 @@ static uint64_t get_u64_le(const uint8_t *p) {
  * = 16 + 64 + 5500 + 32 + 4 + 4 = 5620 bytes. */
 #define FHSM_OBJ_REC_SZ   5620
 
+/* Upper bound of the objects-blob plaintext/ciphertext (GCM keeps
+ * length) : count/next_handle prefix + full store. Used as the loader's
+ * sanity cap. v1.4.0 wrongly capped at 65536, which bricked loading of
+ * tokens holding more than 11 objects (see docs/TOKEN_STORE_FORMAT.md,
+ * "Regression note"). */
+#define FHSM_OBJ_BLOB_MAX (8u + (uint32_t)FHSM_MAX_OBJECTS * FHSM_OBJ_REC_SZ)
+
 static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
     /* Returns the number of bytes written. */
     put_u32_le(out + 0, t->object_count);
@@ -314,7 +320,7 @@ static fhsm_rv_t objects_decrypt_load(fhsm_token_t *t) {
     }
     uint32_t ct_len = get_u32_le(hdr);
     uint8_t nonce[12]; memcpy(nonce, hdr + 4, 12);
-    if (ct_len == 0 || ct_len > 65536) { close(fd); return FHSM_RV_FUNCTION_FAILED; }
+    if (ct_len == 0 || ct_len > FHSM_OBJ_BLOB_MAX) { close(fd); return FHSM_RV_FUNCTION_FAILED; }
     uint8_t *ct = malloc(ct_len + 16);
     if (!ct) { close(fd); return FHSM_RV_HOST_MEMORY; }
     if (read(fd, ct, ct_len + 16) != (ssize_t)(ct_len + 16)) {

@@ -7,6 +7,30 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+* **Token store : objects-blob loader bound (#108 regression finding).**
+  The v1.4.0 loader rejected any encrypted objects section larger than
+  65 536 bytes, while the writer legitimately produces up to 359 688
+  bytes (64 × 5 620-byte records + 8-byte prefix). A token holding more
+  than 11 objects persisted fine but **failed to load at the next
+  login** (data intact on disk, store unreadable). The sanity cap is now
+  `FHSM_OBJ_BLOB_MAX` (= 8 + `FHSM_MAX_OBJECTS` × `FHSM_OBJ_REC_SZ`).
+  Found while writing the byte-level format specification. Regression
+  test : `tests/test_token_capacity.c` (16- and 64-object round-trips).
+  No wire-format change ; no security impact (fail-closed availability
+  bug).
+
+### Documentation
+
+* **`docs/TOKEN_STORE_FORMAT.md` (#108)** : authoritative byte-level
+  specification of the `slotN.tok` format (317-byte header, encrypted
+  objects section, crypto parameters, auditor-checkable invariants,
+  versioning policy). The stale JSON-era comments in `fhsm_token.h` /
+  `fhsm_token.c` (inherited from the Python POC description) were
+  corrected to match the implemented binary format ; the erroneous
+  byte-level-interop claim with POC token files was retracted.
+
 ### Branding / repository
 
 * **Rebrand (July 2026)** : repository renamed `freehsm-c` → `freehsm` ; dual
@@ -1356,25 +1380,4 @@ independent PKCS#11 clients, full asymmetric / symmetric / PQ surface wired.
 
 ### Fixed
 
-* `CKM_AES_CMAC` was defined as `0x108A` in the generated header (legacy
-  OpenSC bug) ; corrected to `0x108C` per PKCS#11 v3.2 §A.4.1.
-* `EVP_PKEY_get_octet_string_param("encoded-pub-key", ...)` two-pass
-  query+fill pattern used for `CKA_EC_POINT` extraction.
-* Buffer-too-small detection (returns `CKR_BUFFER_TOO_SMALL = 0x150`)
-  on every query path of `C_Encrypt`, `C_Sign`, `C_Encapsulate`.
-* PBKDF2 KAT vector adjusted to satisfy FIPS lower bounds (password ≥ 14,
-  salt ≥ 16 bytes) which were rejecting our "smoke" vector.
-
-### Known limitations
-
-* `C_GetInterface` / `C_GetInterfaceList` are not yet exposed because
-  the first attempt segfaulted `pkcs11-tool` (root cause TBD ; the
-  `CK_FUNCTION_LIST_3_0` extended layout is required). `C_EncapsulateKey`
-  / `C_DecapsulateKey` remain reachable via `dlsym` for now.
-* `AES-CTR` decrypt is wired in the module but `OpenSC pkcs11-tool` of
-  Debian 13 doesn't expose `--decrypt --mechanism AES-CTR` ; the
-  integration test skips it transparently with an explanatory message.
-* `ML-DSA` / `SLH-DSA` sign+verify wire is in place but `pkcs11-tool` of
-  Debian 13 doesn't recognize these mechanism names. Tested via
-  `tests/mlkem_e2e.c` for ML-KEM ; ML-DSA can be exercised similarly
-  through a cus
+* `CKM_AES_CMAC` was defined as `0x108

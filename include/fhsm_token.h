@@ -18,11 +18,15 @@
 /* ===========================================================================
  * fhsm_token.h --- Encrypted token store (slot persistence).
  *
- *  One file per slot (slot0.tok, slot1.tok, ...). On-disk format is the
- *  same JSON layout as the Python POC (interop-compatible byte-for-byte
- *  per the regression tests in tests/test_token_interop.c) so that an
- *  organization can migrate from the Python POC to the C TOE without
- *  losing any objects. Format details below.
+ *  One file per slot (slot0.tok, slot1.tok, ...). On-disk format is a
+ *  compact fixed-layout binary : a 317-byte header followed by an
+ *  optional AES-256-GCM-encrypted objects section. The full byte-level
+ *  specification lives in docs/TOKEN_STORE_FORMAT.md (#108).
+ *
+ *  NOTE --- the Python POC used a JSON token layout ; the C TOE does
+ *  NOT retain byte-level interop with POC token files (an earlier
+ *  revision of this comment claimed otherwise). Migration from the POC
+ *  is by re-importing objects, not by copying .tok files.
  *
  *  Authentication model:
  *    --- Two roles : Security Officer (SO) and User (USER), each with its
@@ -36,36 +40,23 @@
  *        is enforced (FHSM_RV_PIN_THROTTLED with delay).
  *
  *  Optional sealing backends:
- *    The DEK can be additionally sealed to a TPM 2.0 / KMS / quorum of
- *    KMS before being stored. The seal/unseal interface is documented
- *    in fhsm_seal.h. When sealing is active, the JSON contains a
- *    "seal_backend" field naming the backend.
+ *    The DEK can be additionally sealed to a TPM 2.0 before being
+ *    stored (companion file {path}.tpm, see fhsm_token_tpm.h). KMS /
+ *    quorum sealing backends are roadmap items (#109 stream). The .tok
+ *    format itself is unchanged by sealing.
  *
- *  On-disk JSON layout (one line per field, sorted keys for
- *  bit-identical re-serialization in tests):
+ *  On-disk layout (summary --- authoritative spec in
+ *  docs/TOKEN_STORE_FORMAT.md):
  *
- *      {
- *        "version":      "1",
- *        "format":       "FreeHSM-token-v1",
- *        "label":        "slot0",
- *        "serial":       "FHSM-00000000-1AABCD",
- *        "so_wrap":      { "kdf":"pbkdf2-sha256", "iter":200000,
- *                          "salt":"<b64>", "nonce":"<b64>",
- *                          "ct":"<b64>", "tag":"<b64>" },
- *        "user_wrap":    { ... same shape ... },
- *        "objects_blob": { "nonce":"<b64>", "ct":"<b64>", "tag":"<b64>" },
- *        "failed_so":         0,
- *        "failed_user":       0,
- *        "throttle_so_until": 0,
- *        "throttle_user_until": 0,
- *        "audit_chain_head":  "<hex-32>",
- *        "seal_backend":      "tpm2|aws-kms|gcp-kms|vault|kms-quorum|none"
- *      }
- *
- *  All `<b64>` fields are base64-no-padding-no-newline. The
- *  "objects_blob" field contains the AES-256-GCM-encrypted JSON array
- *  of objects (handle, class, attributes). The DEK is the AES key for
- *  this blob; the wrap fields decrypt the DEK from the PIN.
+ *      [317-byte fixed header]
+ *        magic "FHSM" | version | label | serial | pbkdf2_iter |
+ *        salt_so | so_wrap (nonce + DEK ct + GCM tag) |
+ *        salt_user | user_wrap | user_initialized |
+ *        failed_so/user | throttle_so/user_until_ms
+ *      [optional objects section]
+ *        u32 ct_len | nonce[12] | AES-256-GCM ct | tag[16]
+ *        (plaintext = u32 count | u32 next_handle | count x 5620-byte
+ *         fixed records ; AAD = token serial)
  *
  * ========================================================================= */
 

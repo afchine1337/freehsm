@@ -164,9 +164,16 @@ $(LIB): $(LIB_OBJ)
 tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+# Regression test for the objects-blob loader bound (#108) : tokens with
+# more than 11 objects must survive a close + reload round-trip. Same
+# INTERNAL linking model as test_smoke.
+tests/test_token_capacity: tests/test_token_capacity.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
 .PHONY: tests
-tests: tests/test_smoke
+tests: tests/test_smoke tests/test_token_capacity
 	LD_LIBRARY_PATH=. ./tests/test_smoke
+	LD_LIBRARY_PATH=. ./tests/test_token_capacity
 
 # ---------------------------------------------------------------------------
 # Integrity --- sign the shipped .so and embed its SHA-256 into the
@@ -295,17 +302,4 @@ dist-verify:
 	@VERSION=$$(grep -oP 'FHSM_VERSION_STRING\s*=\s*"\K[^"]+' include/fhsm_common.h 2>/dev/null); \
 	if [ -f dist/refs/v$$VERSION.sha256 ]; then \
 	    echo "[dist-verify] reference found for v$$VERSION ; comparing local build"; \
-	    scripts/dist_verify_ref.sh; \
-	else \
-	    echo "[dist-verify] no reference at dist/refs/v$$VERSION.sha256"; \
-	    echo "[dist-verify] falling back to build-twice consistency check"; \
-	    scripts/verify_reproducibility.sh; \
-	fi
-
-.PHONY: dist-baseline
-dist-baseline:
-	@scripts/dist_baseline.sh
-
-.PHONY: repro-shell
-repro-shell:
-	@scripts/build_reproducible.sh --shell
+	    
