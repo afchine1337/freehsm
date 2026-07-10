@@ -9,6 +9,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **CI `reproducibility` compared a signed build against an unsigned one
+  (false failure).** The `build` job uploads the module *after*
+  `make integrity`, which embeds the SHA-256 self-digest into the
+  32-byte `.fhsm_digest` section; the `reproducibility` job rebuilt with
+  `make` only (unsigned) and compared. The two therefore differed by
+  exactly those 32 bytes on every run -- an apples-to-oranges comparison,
+  not a determinism defect. The repro job now runs `make integrity` as
+  well, so it compares signed-vs-signed. Signing is deterministic (the
+  digest is a pure function of the reproducible pre-image), so signed
+  builds are bit-identical across independent runs (verified: two
+  signed builds in different directories yield the same SHA-256).
+
 * **Cross-directory build reproducibility restored on gcc < 12 (CI
   `reproducibility` fix).** `REPRO_FLAGS` mapped `$(CURDIR)` to the
   *empty* string via `-ffile-prefix-map` / `-fdebug-prefix-map`. That
