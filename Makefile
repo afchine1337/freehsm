@@ -194,6 +194,12 @@ tests/test_decrypt_null_args: tests/test_decrypt_null_args.c $(LIB)
 tests/test_robustness_args: tests/test_robustness_args.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Per-session operation-state hygiene (#125) : session-handle reuse must
+# not bleed CKR_OPERATION_ACTIVE ; C_Sign undersized buffer must return
+# CKR_BUFFER_TOO_SMALL and preserve the operation.
+tests/test_op_state: tests/test_op_state.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # Mechanism advertisement coherence guard (#125) : C_GetMechanismList /
 # C_GetMechanismInfo derived from the generated dispatch table must stay
 # consistent (correct PQ values, EdDSA/HKDF present, no phantoms).
@@ -215,13 +221,15 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
 .PHONY: tests
-tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args
+tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_token_capacity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_decrypt_null_args
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_robustness_args
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		LD_LIBRARY_PATH=. ./tests/test_op_state
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_mech_advertise
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

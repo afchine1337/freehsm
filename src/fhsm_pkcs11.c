@@ -496,6 +496,8 @@ CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
  * here we only validate parameters and emit audit events.
  * (Prototypes are now in include/fhsm_session.h.)
  * ----------------------------------------------------------------------- */
+static void fhsm_session_ops_reset(CK_SESSION_HANDLE h);
+
 CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
                      CK_VOID_PTR pApp, CK_VOID_PTR Notify,
                      CK_SESSION_HANDLE *phSession) {
@@ -509,6 +511,10 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
     if (!t) return FHSM_RV_TOKEN_NOT_PRESENT;
     fhsm_rv_t rv = fhsm_session_open(slotID, flags, phSession);
     if (rv == FHSM_RV_OK) {
+        /* A pooled session handle may carry stale operation state from a
+         * previously closed session ; clear it so this session starts
+         * with no active crypto operation (#125). */
+        fhsm_session_ops_reset(*phSession);
         /* Attach the slot's token to the new session. */
         fhsm_session_attach_token(*phSession, t);
     }
@@ -517,6 +523,9 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
 
 CK_RV C_CloseSession(CK_SESSION_HANDLE hSession) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    /* Release any in-flight operation state before the handle returns to
+     * the pool, so a later C_OpenSession cannot inherit it (#125). */
+    fhsm_session_ops_reset(hSession);
     return fhsm_session_close(hSession);
 }
 
@@ -3251,6 +3260,34 @@ typedef struct fhsm_session_oaep_s {
 static fhsm_session_oaep_t g_oaep_enc[256];
 static fhsm_session_oaep_t g_oaep_dec[256];
 
+/* Reset ALL per-session cryptographic operation state (encrypt, decrypt,
+ * sign, verify, digest, object-search, OAEP) for one session handle,
+ * freeing any persisted EVP contexts. Session handles come from a
+ * reusable pool, so without this a handle handed out by a fresh
+ * C_OpenSession can inherit a stale active==1 from a previous session
+ * that was closed mid-operation -- which makes the next C_*Init return
+ * CKR_OPERATION_ACTIVE instead of validating its own arguments
+ * (pkcs11-check ckr/test_ckr_{sign,keygen,...}Init and
+ * TestOperationActive, #125). EVP_*_free(NULL) is a documented no-op, so
+ * the frees are unconditional. Called on both C_OpenSession (so a fresh
+ * handle starts clean) and C_CloseSession (so resources are released). */
+static void fhsm_session_ops_reset(CK_SESSION_HANDLE h) {
+    if (h == 0 || h >= 256) return;
+    fhsm_op_t *tabs[] = { &g_op_enc[h], &g_op_dec[h], &g_op_sig[h],
+                          &g_op_dig[h], &g_op_ver[h] };
+    for (size_t i = 0; i < sizeof(tabs) / sizeof(tabs[0]); ++i) {
+        fhsm_op_t *op = tabs[i];
+        EVP_CIPHER_CTX_free((EVP_CIPHER_CTX *)op->cipher_ctx);
+        EVP_MD_CTX_free((EVP_MD_CTX *)op->md_ctx);
+        EVP_MAC_CTX_free((EVP_MAC_CTX *)op->mac_ctx);
+        memset(op, 0, sizeof(*op));
+    }
+    memset(&g_oaep_enc[h], 0, sizeof(g_oaep_enc[h]));
+    memset(&g_oaep_dec[h], 0, sizeof(g_oaep_dec[h]));
+    if (h < sizeof(g_finds) / sizeof(g_finds[0]))
+        memset(&g_finds[h], 0, sizeof(g_finds[h]));
+}
+
 /* Forward decl : mech_is_pss is defined further down (sign/verify
  * section) but op_init needs it to decide whether to parse a
  * CK_RSA_PKCS_PSS_PARAMS from the mechanism's pParameter. */
@@ -4350,13 +4387,42 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         else                                          *pulSignatureLen = 512;
         return FHSM_RV_OK;
     }
-    size_t sig_buf_len = *pulSignatureLen;
-    fhsm_rv_t rv = sign_asymmetric(t, op, pData, ulDataLen, pSignature, &sig_buf_len);
+    /* Sign into a scratch buffer sized to the mechanism upper bound so we
+     * can honour CKR_BUFFER_TOO_SMALL semantics : a caller buffer smaller
+     * than the actual signature must return CKR_BUFFER_TOO_SMALL with the
+     * required length AND leave the operation active for retry
+     * (pkcs11-check TestBufferTooSmall::test_sign_buffer_too_small, #125).
+     * Signing straight into an undersized caller buffer instead made
+     * OpenSSL fail with CKR_FUNCTION_FAILED (0x6). */
+    size_t scratch_cap = (op->mechanism == CKM_SLH_DSA_OP) ? 65536u
+                       : (op->mechanism == CKM_ML_DSA_OP)  ? 8192u : 512u;
+    uint8_t  stackbuf[512];
+    uint8_t *scratch = (scratch_cap <= sizeof(stackbuf))
+                         ? stackbuf : (uint8_t *)malloc(scratch_cap);
+    if (!scratch) { op->active = 0; return FHSM_RV_HOST_MEMORY; }
+    size_t sig_buf_len = scratch_cap;
+    fhsm_rv_t rv = sign_asymmetric(t, op, pData, ulDataLen, scratch, &sig_buf_len);
+    if (rv != FHSM_RV_OK) {
+        if (scratch != stackbuf) free(scratch);
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, NULL);
+        return rv;
+    }
+    if (*pulSignatureLen < sig_buf_len) {
+        /* Caller buffer too small : report the required length and keep
+         * the operation active so it can retry (PKCS#11 v3.2 C_Sign). */
+        *pulSignatureLen = sig_buf_len;
+        if (scratch != stackbuf) free(scratch);
+        return 0x00000150UL;   /* CKR_BUFFER_TOO_SMALL */
+    }
+    memcpy(pSignature, scratch, sig_buf_len);
     *pulSignatureLen = sig_buf_len;
+    if (scratch != stackbuf) free(scratch);
     op->active = 0;
     (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
                             fhsm_session_role(hSession), rv, NULL);
-    return rv;
+    return FHSM_RV_OK;
 }
 
 /* ---------------------------------------------------------------------------
@@ -4933,11 +4999,12 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
      * fix). Terminate the operation so the session is not stranded. */
     if (!pulEncLen || (!pPart && ulPartLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 1);
-    if (rv != FHSM_RV_OK) return rv;
+    if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
     if (pEnc == NULL) { *pulEncLen = ulPartLen; return FHSM_RV_OK; }
     int out_len = 0;
-    if (EVP_EncryptUpdate(op->cipher_ctx, pEnc, &out_len, pPart, (int)ulPartLen) != 1)
-        return FHSM_RV_FUNCTION_FAILED;
+    if (EVP_EncryptUpdate(op->cipher_ctx, pEnc, &out_len, pPart, (int)ulPartLen) != 1) {
+        op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+    }
     *pulEncLen = (CK_ULONG)out_len;
     return FHSM_RV_OK;
 }
@@ -4980,11 +5047,12 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
      * than crash (#125, same class as the C_Decrypt fix). */
     if (!pulPartLen || (!pEnc && ulEncLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 0);
-    if (rv != FHSM_RV_OK) return rv;
+    if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
     if (pPart == NULL) { *pulPartLen = ulEncLen; return FHSM_RV_OK; }
     int out_len = 0;
-    if (EVP_DecryptUpdate(op->cipher_ctx, pPart, &out_len, pEnc, (int)ulEncLen) != 1)
-        return FHSM_RV_FUNCTION_FAILED;
+    if (EVP_DecryptUpdate(op->cipher_ctx, pPart, &out_len, pEnc, (int)ulEncLen) != 1) {
+        op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+    }
     *pulPartLen = (CK_ULONG)out_len;
     return FHSM_RV_OK;
 }

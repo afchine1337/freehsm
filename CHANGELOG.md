@@ -9,6 +9,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Per-session operation state no longer bleeds across pooled session
+  handles (#125).** PKCS#11 session handles are reused, but neither
+  `C_OpenSession` nor `C_CloseSession` reset the per-session operation
+  slots. A session closed mid-operation left `active == 1`, so the next
+  `C_OpenSession` returned a dirty handle and the following `C_*Init`
+  wrongly reported `CKR_OPERATION_ACTIVE` (~18 pkcs11-check failures:
+  `ckr/test_ckr_*Init`, `TestOperationActive`). A new
+  `fhsm_session_ops_reset()` frees the persisted EVP contexts and zeroes
+  every slot (encrypt/decrypt/sign/verify/digest, object search, OAEP)
+  on both open and close; `C_EncryptUpdate` / `C_DecryptUpdate` also now
+  clear `active` on their error paths.
+
+* **`C_Sign` returns `CKR_BUFFER_TOO_SMALL` for an undersized signature
+  buffer (#125).** The asymmetric path signed straight into the caller
+  buffer, so a short buffer made OpenSSL fail with
+  `CKR_FUNCTION_FAILED` (0x6). It now signs into a mechanism-sized
+  scratch buffer, returns `CKR_BUFFER_TOO_SMALL` with the required
+  length when the caller buffer is short, and keeps the operation active
+  for retry. Regression: `tests/test_op_state.c`.
+
 * **TSFI robustness: NULL pointers and integer-overflow counts no longer
   crash the module (#125).** pkcs11-check's raw security probes
   (`test_api_boundary`, `test_arithmetic_overflow`,

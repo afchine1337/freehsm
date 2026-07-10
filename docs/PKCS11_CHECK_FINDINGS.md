@@ -95,6 +95,35 @@ in the harness. This document records the triage.
 * Threat-model note: same AVA_VAN availability/robustness class as F1; no
   key material exposed, no CVE requested.
 
+### F4 — Operation-state hygiene: session reuse & buffer-too-small — FIXED
+* **Finding**: ~18 `CKR_OPERATION_ACTIVE` failures where a param/handle
+  error was expected (`ckr/test_ckr_{sign,encrypt,decrypt}Init`,
+  `TestOperationActive`), plus `TestBufferTooSmall::test_sign_buffer_too_small`
+  returning `CKR_FUNCTION_FAILED` (0x6) instead of `CKR_BUFFER_TOO_SMALL`.
+* **Root cause (state bleed)**: PKCS#11 session handles come from a
+  reusable pool, but neither `C_OpenSession` nor `C_CloseSession` reset
+  the per-session operation slots. A session closed mid-operation left
+  `active == 1`, and the next `C_OpenSession` handed the same handle back
+  dirty, so the first `C_*Init` returned `CKR_OPERATION_ACTIVE` before it
+  could validate its own arguments. Secondary: `C_EncryptUpdate` /
+  `C_DecryptUpdate` did not clear `active` on their error paths.
+* **Root cause (buffer)**: `C_Sign`'s asymmetric path signed straight
+  into the caller buffer, so an undersized buffer made OpenSSL fail with
+  `CKR_FUNCTION_FAILED` rather than the spec's `CKR_BUFFER_TOO_SMALL`.
+* **Fix**: `fhsm_session_ops_reset()` frees the EVP contexts and zeroes
+  every per-session slot (encrypt/decrypt/sign/verify/digest, object
+  search, OAEP); called on both `C_OpenSession` and `C_CloseSession`.
+  The `*Update` error paths now clear `active`. `C_Sign` signs into a
+  scratch buffer sized to the mechanism, returns `CKR_BUFFER_TOO_SMALL`
+  with the required length when the caller buffer is short, and keeps the
+  operation active for retry.
+* **Regression test**: `tests/test_op_state.c` (session-reuse no-bleed +
+  `C_Sign` buffer-too-small + retry), wired into `make tests`.
+* **Residual**: the 3 raw `TestOperationActive` double-init probes and
+  the AES-CBC-PAD / AES-CTR `terminates_after_multipart` cases exercise
+  non-GCM multipart, which is a separate feature gap (multipart is
+  currently GCM-centric) tracked apart from this state-hygiene fix.
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported
