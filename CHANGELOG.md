@@ -9,6 +9,34 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Cross-directory build reproducibility restored on gcc < 12 (CI
+  `reproducibility` fix).** `REPRO_FLAGS` mapped `$(CURDIR)` to the
+  *empty* string via `-ffile-prefix-map` / `-fdebug-prefix-map`. That
+  redacts source paths in `__FILE__` and `.debug_info`, but leaves the
+  DWARF compilation directory (`DW_AT_comp_dir`, emitted into
+  `.debug_line_str`) as the absolute build path. Two checkouts built in
+  different directories therefore differed by exactly one byte at the
+  `comp_dir` offset. gcc 12+ can pin this with
+  `-fdebug-compilation-dir=.`, but that flag is rejected by gcc 11
+  (the CI/container toolchain). Fix: map `$(CURDIR)` to `"."` instead of
+  empty, which rewrites `comp_dir` to `"."` in every build tree.
+  Verified: `git archive HEAD` extracted into two distinct directories
+  now produces byte-identical `libfreehsm-fips.so` (same SHA-256), and
+  the build path no longer appears in the binary.
+
+* **`pkcs11-check` runner summary no longer uses a fragile shell
+  heredoc (#125).** `scripts/run_pkcs11_check.sh` computed its outcome
+  tally with an inline `python3 - <<'PYEOF'` heredoc. Under CRLF line
+  endings (shared-folder / cross-platform checkouts) the delimiter was
+  not recognised, emitting `warning: here-document ... delimited by
+  end-of-file (wanted PYEOF)` and skipping the summary; the embedded
+  parser also assumed `json.load()`, which fails on pkcs11-check's
+  pretty-printed-with-trailing-data report. Extracted to a standalone
+  `scripts/pkcs11_check_summary.py` (schema-tolerant `raw_decode()`
+  walk over any `outcome`/`result`/`status` field) invoked by path, so
+  no heredoc delimiter can break and the crash count is reported
+  explicitly (`=> crashed=N (target: 0)`).
+
 * **`make integrity` no longer depends on `xxd` (CI build fix).**
   `scripts/sign_module.sh` used `xxd` for the binary<->hex conversions
   when reading and patching the `.fhsm_digest` section. `xxd` is absent

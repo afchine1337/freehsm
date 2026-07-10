@@ -46,15 +46,23 @@ HARDEN_FLAGS = \
 # from the resulting .so :
 #
 #   -ffile-prefix-map  redacts absolute paths in __FILE__ / debug info
-#   -fdebug-prefix-map idem for the DWARF .debug_info section
+#   -fdebug-prefix-map idem for the DWARF .debug_info section. Both map
+#                      $(CURDIR) to "." (NOT empty) : mapping to empty
+#                      leaves the DWARF comp_dir (DW_AT_comp_dir, stored
+#                      in .debug_line_str) as the absolute build path,
+#                      which breaks cross-directory reproducibility on
+#                      gcc < 12 (gcc 12+ has -fdebug-compilation-dir).
+#                      Mapping to "." rewrites comp_dir to "." in every
+#                      build tree, so two builds in different dirs are
+#                      byte-identical.
 #   -frandom-seed=fhsm makes gcc's anonymous-namespace / mangling stable
 #   -Wno-builtin-macro-redefined needed because we override __FILE__
 #   -D__DATE__='"redacted"' -D__TIME__='"redacted"' belt-and-braces
 #                        in case SOURCE_DATE_EPOCH is missing
 # ---------------------------------------------------------------------------
 REPRO_FLAGS = \
-    -ffile-prefix-map=$(CURDIR)= \
-    -fdebug-prefix-map=$(CURDIR)= \
+    -ffile-prefix-map=$(CURDIR)=. \
+    -fdebug-prefix-map=$(CURDIR)=. \
     -frandom-seed=fhsm-$(FHSM_VERSION_STRING) \
     -Wno-builtin-macro-redefined \
     -D__DATE__='"redacted"' -D__TIME__='"redacted"'

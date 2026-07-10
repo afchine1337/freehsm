@@ -128,8 +128,8 @@ int main(void) {
     CK_RV (*C_DecryptFinal)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG*);
     *(void**)&C_DecryptFinal = dlsym(h,"C_DecryptFinal");
     if (C_DecryptFinal) {
-        CK_BYTE iv[16] = {0};
-        CK_MECHANISM cbc = { 0x1082UL /* CKM_AES_CBC */, iv, 16 };
+        CK_BYTE iv_f[16] = {0};
+        CK_MECHANISM cbc = { 0x1082UL /* CKM_AES_CBC */, iv_f, 16 };
         if (C_DecryptInit(s, &cbc, 0 /* invalid key handle */) == 0) {
             CK_BYTE last[64]; CK_ULONG ll = 64;
             rv = C_DecryptFinal(s, last, &ll);   /* must not crash */

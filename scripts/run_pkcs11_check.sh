@@ -95,14 +95,14 @@ if [ ! -s "$REPORTS/results.json" ]; then
 fi
 
 echo "== Summary =="
-python3 - "$REPORTS/results.json" <<'PYEOF'
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception as e:
-    print(f"report parse failed: {e}"); sys.exit(0)
-# Be schema-tolerant : count by outcome field wherever it lives.
-def walk(x):
-    if isinstance(x, dict):
-        o = x.get("outcome") or x.get("result") or x.get("status")
-       
+# Standalone parser (no shell heredoc : avoids CRLF / delimiter fragility,
+# and handles pkcs11-check's pretty-printed-with-extra-data report format).
+SUMMARY_PY="$(dirname "$0")/pkcs11_check_summary.py"
+if [ -f "$SUMMARY_PY" ]; then
+    python3 "$SUMMARY_PY" "$REPORTS/results.json" || true
+else
+    echo "  (summary script $SUMMARY_PY missing; see run.log)"
+fi
+
+echo "Report: $REPORTS/results.json (findings are evidence, not a gate)"
+exit 0
