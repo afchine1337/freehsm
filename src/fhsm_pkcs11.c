@@ -3237,20 +3237,6 @@ static uint32_t resolve_mech(uint32_t m);
 static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                          CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey) {
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
-    /* Non-FIPS mechanisms are rejected at init time under fips-strict
-     * (executable only in the interop / general-purpose build). #125.
-     * Kept in sync with the non-approved cipher mechanisms whose
-     * dispatch handler the generator rewrites to reject in fips-strict. */
-    if (fhsm_build_fips_strict) {
-        switch (pMechanism->mechanism) {
-            case CKM_AES_ECB:
-            case 0x00000133UL: /* CKM_DES3_CBC */
-            case 0x00000001UL: /* CKM_RSA_PKCS */
-            case 0x00000003UL: /* CKM_RSA_X_509 */
-                return FHSM_RV_MECHANISM_INVALID;
-            default: break;
-        }
-    }
     op->key_handle = (uint32_t)hKey;
     /* resolve_mech downgrades CKM_AES_GMAC (0x108A) to CKM_AES_CMAC (0x108C)
      * iff FHSM_OPENSC_GMAC_ALIAS=1 is set in the environment. Done here so
@@ -3444,10 +3430,29 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     return FHSM_RV_OK;
 }
 
+/* Non-FIPS symmetric/asymmetric ENCRYPTION mechanisms are executable
+ * only in the interop build. Rejected at C_EncryptInit / C_DecryptInit
+ * time under fips-strict. NOT applied to signing (op_init is shared
+ * with C_SignInit, where e.g. CKM_RSA_PKCS is an approved signature
+ * mechanism). #125. */
+static int fhsm_nonfips_enc_rejected(CK_ULONG mech) {
+    if (!fhsm_build_fips_strict) return 0;
+    switch (mech) {
+        case CKM_AES_ECB:
+        case 0x00000133UL: /* CKM_DES3_CBC */
+        case CKM_RSA_PKCS:
+        case CKM_RSA_X_509:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_OBJECT_HANDLE hKey) {
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
+    if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);
@@ -3653,6 +3658,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_OBJECT_HANDLE hKey) {
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
+    if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);

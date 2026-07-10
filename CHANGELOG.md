@@ -19,6 +19,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
   emits a build-profile flag (`FHSM_BUILD_FIPS_STRICT`, and an extern
   `fhsm_build_fips_strict` for TUs that can't include the generated
   header) that the operation gates consult.
+* **Fix: the non-FIPS encryption gate no longer rejects approved RSA
+  signatures under fips-strict.** The initial RSA-encryption gate lived
+  in `op_init`, which is shared with `C_SignInit` — so it wrongly
+  rejected `CKM_RSA_PKCS` (0x01) as a *signature* mechanism under
+  fips-strict, even though RSASSA-PKCS1-v1.5 is FIPS-approved for
+  signing. The gate was moved to `C_EncryptInit`/`C_DecryptInit`
+  (encrypt-only), leaving the signing path untouched. Verified:
+  fips-strict `C_SignInit(CKM_RSA_PKCS)` succeeds again, while
+  `C_EncryptInit(CKM_RSA_PKCS)` is rejected.
+
 * **Non-FIPS RSA legacy padding: PKCS#1 v1.5 + X.509 raw encryption
   (interop only).** Third family through the operation-gate pattern.
   `dispatch_rsa_pkcs` / `dispatch_rsa_x509` handlers ; `C_Encrypt`/
