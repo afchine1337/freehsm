@@ -7,6 +7,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+* **`make integrity` no longer depends on `xxd` (CI build fix).**
+  `scripts/sign_module.sh` used `xxd` for the binary<->hex conversions
+  when reading and patching the `.fhsm_digest` section. `xxd` is absent
+  from the `freehsm-c-build:debian13-openssl-3.5` CI container, so the
+  new pkcs11-check workflow failed at `make integrity`
+  (`xxd: command not found`). Replaced all three uses with `python3`
+  (already a hard build dependency via `gen_p11_thunks.py`), which also
+  removes the slow byte-at-a-time `dd` reads. Verified in a container
+  with `xxd` removed from PATH: signing completes and the embedded
+  digest byte-matches the recomputed SHA-256 (integrity self-test would
+  pass).
+
 ### Added
 
 * **General-purpose profile now gates the operation path, not just

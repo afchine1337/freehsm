@@ -62,7 +62,7 @@ fi
 echo "[sign_module] .fhsm_digest at offset 0x${sect_off_hex} size 0x${sect_size_hex} (${sect_size} bytes)"
 
 # --- Refuse to overwrite a previously signed module unless --force ---------
-current=$(dd if="${SO_PATH}" bs=1 skip=${sect_off} count=32 status=none | xxd -p | tr -d '\n')
+current=$(python3 -c "print(open('${SO_PATH}','rb').read()[${sect_off}:${sect_off}+32].hex())")
 if [ "${current}" != "0000000000000000000000000000000000000000000000000000000000000000" ] \
    && [ "${FORCE}" != "--force" ]; then
     echo "sign_module: ${SO_PATH} already signed (digest = ${current})." >&2
@@ -80,12 +80,12 @@ digest=$(sha256sum "${tmp}" | awk '{print $1}')
 echo "[sign_module] computed digest = ${digest}"
 
 # --- Patch the digest in place via dd --------------------------------------
-echo "${digest}" | xxd -r -p > "${tmp}.dig"
+python3 -c "open('${tmp}.dig','wb').write(bytes.fromhex('${digest}'))"
 dd if="${tmp}.dig" of="${SO_PATH}" bs=1 seek=${sect_off} count=32 conv=notrunc status=none
 rm -f "${tmp}.dig"
 
 # --- Verify the patch ------------------------------------------------------
-patched=$(dd if="${SO_PATH}" bs=1 skip=${sect_off} count=32 status=none | xxd -p | tr -d '\n')
+patched=$(python3 -c "print(open('${SO_PATH}','rb').read()[${sect_off}:${sect_off}+32].hex())")
 if [ "${patched}" != "${digest}" ]; then
     echo "sign_module: post-patch read-back mismatch !" >&2
     exit 2
