@@ -526,6 +526,11 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE hSession) {
     /* Release any in-flight operation state before the handle returns to
      * the pool, so a later C_OpenSession cannot inherit it (#125). */
     fhsm_session_ops_reset(hSession);
+    /* Destroy the session objects this session created (CKA_TOKEN=FALSE) :
+     * PKCS#11 requires session objects to be automatically destroyed when
+     * their session is closed (#125). */
+    { fhsm_token_t *t = fhsm_session_token(hSession);
+      if (t) (void)fhsm_token_destroy_session_objects(t, (uint32_t)hSession); }
     return fhsm_session_close(hSession);
 }
 
@@ -1369,6 +1374,36 @@ static CK_RV fhsm_check_bool_attr_lengths(CK_ATTRIBUTE *t, CK_ULONG n) {
     return FHSM_RV_OK;
 }
 
+/* Read a CK_BBOOL attribute from a template ; returns `dflt` if absent
+ * or malformed. Used for PKCS#11 CKA_TOKEN / usage-flag semantics. */
+static int tmpl_bbool(CK_ATTRIBUTE *t, CK_ULONG n, CK_ATTRIBUTE_TYPE type, int dflt) {
+    long i = find_attr(t, n, type);
+    if (i < 0 || !t[i].pValue || t[i].ulValueLen != 1) return dflt;
+    return ((const unsigned char *)t[i].pValue)[0] ? 1 : 0;
+}
+
+/* PKCS#11 : creating a token object (CKA_TOKEN=TRUE) on a read-only
+ * session is CKR_SESSION_READ_ONLY. Call before creating the object. */
+static CK_RV fhsm_check_ro_token(CK_SESSION_HANDLE hSession,
+                                 CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    if (tmpl_bbool(tmpl, n, CKA_TOKEN, 0)) {
+        unsigned long flags = 0;
+        if (fhsm_session_info(hSession, NULL, &flags, NULL) == FHSM_RV_OK
+            && !(flags & 0x00000002UL /* CKF_RW_SESSION */))
+            return FHSM_RV_SESSION_READ_ONLY;
+    }
+    return FHSM_RV_OK;
+}
+
+/* Apply CKA_TOKEN scope after creating an object : if the template does
+ * not request a token object (default CKA_TOKEN=FALSE) the object is a
+ * session object owned by hSession -- not persisted, destroyed on close. */
+static void fhsm_apply_token_scope(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                                   CK_ATTRIBUTE *tmpl, CK_ULONG n, uint32_t handle) {
+    if (!tmpl_bbool(tmpl, n, CKA_TOKEN, 0))
+        (void)fhsm_token_object_mark_session(t, handle, (uint32_t)hSession);
+}
+
 /* ---------------------------------------------------------------------------
  * C_GenerateRandom --- FIPS DRBG (CTR_DRBG-AES-256, OpenSSL FIPS provider).
  * ----------------------------------------------------------------------- */
@@ -1458,6 +1493,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -1519,6 +1555,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_zeroize(key, sizeof(key));
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
+    fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     return FHSM_RV_OK;
 }
 
@@ -1594,6 +1631,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     if (!pTemplate || !phObject || ulCount == 0) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
 
     /* === Parser stage : pure C, no OpenSSL. ============================
      * The CK_ATTRIBUTE layout is bit-identical to fhsm_attr_t (see
@@ -1618,6 +1656,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
             a.id_data, a.id_len, flags, &handle);
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
+        fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
         return FHSM_RV_OK;
     }
 
@@ -1634,6 +1673,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
             a.id_data, a.id_len, FHSM_OBJF_EXTRACTABLE, &handle);
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
+        fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
         return FHSM_RV_OK;
     }
 
@@ -1721,6 +1761,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     OPENSSL_free(spki);
     if (rv != FHSM_RV_OK) return rv;
     *phObject = handle;
+    fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     return FHSM_RV_OK;
 }
 
@@ -1898,6 +1939,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_zeroize(z, sizeof(z));
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
+    fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     (void)fhsm_audit_event(FHSM_EV_DERIVE, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, NULL);
     return FHSM_RV_OK;
@@ -2104,6 +2146,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_zeroize(pt, sizeof(pt));
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
+    fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     (void)fhsm_audit_event(FHSM_EV_UNWRAP, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, NULL);
     return FHSM_RV_OK;
@@ -2553,6 +2596,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return rv;
     }
     *phPub = hp; *phPriv = hk;
+    fhsm_apply_token_scope(t, hSession, pPub,  ulPub,  hp);
+    fhsm_apply_token_scope(t, hSession, pPriv, ulPriv, hk);
     return FHSM_RV_OK;
 }
 

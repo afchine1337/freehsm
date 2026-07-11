@@ -231,6 +231,25 @@ in the harness. This document records the triage.
   integrity on unwrap, AES-CCM null-nonce, C_SeedRandom isize length,
   and wrong-key-type rejection for several mechanisms.
 
+### F9 — PKCS#11 session-object lifecycle (CKA_TOKEN) — IMPLEMENTED (F5 follow-up)
+* The deeper fix promised in F5 is now in place. `fhsm_object_t` carries
+  an in-memory `owner_session` (0 = persistent token object ; non-zero =
+  session object). Creation paths (C_GenerateKey, C_GenerateKeyPair,
+  C_CreateObject, C_DeriveKey, C_UnwrapKey) read CKA_TOKEN (default
+  FALSE) and mark session objects owned by the creating session. Session
+  objects are never serialised to the `.tok` file, and
+  `C_CloseSession` destroys the closing session's session objects via
+  `fhsm_token_destroy_session_objects()`.
+* Creating a token object (CKA_TOKEN=TRUE) on a read-only session now
+  returns CKR_SESSION_READ_ONLY.
+* This resolves the object-lifecycle failures (TestSessionObjectLifecycle,
+  TestROSessionObjectsAllowed, TestROTokenObjectCreation) and removes the
+  underlying store-exhaustion cause behind F5 (session objects are now
+  freed on close rather than accumulating). Regression:
+  `tests/test_session_objects.c` (session destroyed on close, token
+  persists, RO token rejected). The large-store harness build (F5) is
+  kept as belt-and-braces.
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported

@@ -95,6 +95,11 @@ typedef struct fhsm_object_s {
     uint8_t  id[32];        /* CKA_ID */
     uint32_t id_len;
     uint8_t  flags;         /* bit 0 = CKA_PRIVATE, bit 1 = CKA_EXTRACTABLE */
+    /* In-memory only (NOT serialised to the .tok file) : 0 = persistent
+     * token object ; non-zero = session object owned by that session
+     * handle, destroyed on C_CloseSession and never written to disk
+     * (#125 PKCS#11 CKA_TOKEN semantics). */
+    uint32_t owner_session;
 } fhsm_object_t;
 
 struct fhsm_token_s {
@@ -257,11 +262,18 @@ static uint64_t get_u64_le(const uint8_t *p) {
 static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
     /* v2 writer (#110). Returns the number of bytes written. */
     put_u32_le(out + 0, FHSM_OBJ_BLOB_V2_MAGIC);
-    put_u32_le(out + 4, t->object_count);
+    /* Persist only token objects (owner_session == 0) ; session objects
+     * live in memory for the lifetime of their session and are never
+     * written to disk. Count them first for the header. */
+    uint32_t token_count = 0;
+    for (uint32_t i = 0; i < t->object_count; ++i)
+        if (t->objects[i].owner_session == 0) token_count++;
+    put_u32_le(out + 4, token_count);
     put_u32_le(out + 8, t->next_handle);
     size_t off = 12;
     for (uint32_t i = 0; i < t->object_count; ++i) {
         const fhsm_object_t *o = &t->objects[i];
+        if (o->owner_session != 0) continue;   /* session object : skip */
         uint32_t rec_len = FHSM_OBJ_REC_V2_FIXED + o->value_len;
         put_u32_le(out + off, rec_len); off += 4;
         put_u32_le(out + off + 0,  o->handle);
@@ -1024,6 +1036,57 @@ fhsm_rv_t fhsm_token_object_get(fhsm_token_t *t, uint32_t handle,
     }
     pthread_mutex_unlock(&t->mu);
     return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+/* Mark an existing object as a session object owned by `owner_session`
+ * (non-zero). Session objects are not persisted, so this re-writes the
+ * token image (dropping the object from disk) and is destroyed on
+ * C_CloseSession. #125. */
+fhsm_rv_t fhsm_token_object_mark_session(fhsm_token_t *t, uint32_t handle,
+                                         uint32_t owner_session) {
+    if (!t || owner_session == 0) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            t->objects[i].owner_session = owner_session;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);   /* now skips this object */
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+/* Destroy every session object owned by `owner_session`. Called from
+ * C_CloseSession so a closing session does not leak its session objects
+ * (nor leave them for a reused session handle to inherit). #125. */
+fhsm_rv_t fhsm_token_destroy_session_objects(fhsm_token_t *t,
+                                             uint32_t owner_session) {
+    if (!t || owner_session == 0) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    int removed = 0;
+    uint32_t i = 0;
+    while (i < t->object_count) {
+        if (t->objects[i].owner_session == owner_session) {
+            fhsm_zeroize(&t->objects[i], sizeof(t->objects[i]));
+            if (i != t->object_count - 1) {
+                t->objects[i] = t->objects[t->object_count - 1];
+                fhsm_zeroize(&t->objects[t->object_count - 1],
+                             sizeof(t->objects[0]));
+            }
+            t->object_count--;
+            removed = 1;
+            /* do not advance i : the swapped-in entry must be checked */
+        } else {
+            i++;
+        }
+    }
+    fhsm_rv_t rv = FHSM_RV_OK;
+    if (removed) { t->objects_dirty = 1; rv = write_atomic(t); }
+    pthread_mutex_unlock(&t->mu);
+    return rv;
 }
 
 fhsm_rv_t fhsm_token_object_find(fhsm_token_t *t,

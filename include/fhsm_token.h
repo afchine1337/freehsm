@@ -210,6 +210,15 @@ fhsm_rv_t fhsm_token_object_set_flags(fhsm_token_t *t, uint32_t handle,
  * blob is rewritten. Returns FHSM_RV_KEY_HANDLE_INVALID if not found. */
 fhsm_rv_t fhsm_token_object_destroy(fhsm_token_t *t, uint32_t handle);
 
+/* Mark an object as a session object owned by `owner_session` (non-zero) :
+ * not persisted, destroyed on session close. #125. */
+fhsm_rv_t fhsm_token_object_mark_session(fhsm_token_t *t, uint32_t handle,
+                                         uint32_t owner_session);
+
+/* Destroy all session objects owned by `owner_session`. #125. */
+fhsm_rv_t fhsm_token_destroy_session_objects(fhsm_token_t *t,
+                                             uint32_t owner_session);
+
 #ifdef __cplusplus
 }
 #endif

@@ -222,6 +222,10 @@ tests/test_attributes: tests/test_attributes.c $(LIB)
 tests/test_input_validation: tests/test_input_validation.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# PKCS#11 CKA_TOKEN semantics : session objects destroyed on close (#125).
+tests/test_session_objects: tests/test_session_objects.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # Mechanism advertisement coherence guard (#125) : C_GetMechanismList /
 # C_GetMechanismInfo derived from the generated dispatch table must stay
 # consistent (correct PQ values, EdDSA/HKDF present, no phantoms).
@@ -243,7 +247,7 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
 .PHONY: tests
-tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation
+tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_token_capacity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
@@ -258,6 +262,8 @@ tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args t
 		LD_LIBRARY_PATH=. ./tests/test_attributes
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_input_validation
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		LD_LIBRARY_PATH=. ./tests/test_session_objects
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_mech_advertise
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

@@ -21,6 +21,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **PKCS#11 session-object lifecycle (CKA_TOKEN) implemented (#125).**
+  The module previously treated every created object as a persistent
+  token object and never destroyed session objects, so the store only
+  grew and object-lifecycle checks failed. `fhsm_object_t` now carries an
+  in-memory `owner_session`; C_GenerateKey/C_GenerateKeyPair/
+  C_CreateObject/C_DeriveKey/C_UnwrapKey read CKA_TOKEN (default FALSE)
+  and mark session objects, which are never persisted to the `.tok` file
+  and are destroyed by C_CloseSession
+  (`fhsm_token_destroy_session_objects`). Creating a token object on a
+  read-only session now returns CKR_SESSION_READ_ONLY. This also removes
+  the root cause of the earlier store-exhaustion cascade (session objects
+  are freed on close). Regression: tests/test_session_objects.c.
+
 * **More input/parameter validation (#125, AVA_VAN, continued).**
   RSA-PSS salt length and RSA-OAEP source-data length beyond a sane
   bound (or a negative 2^63 cast) are rejected at Init with
