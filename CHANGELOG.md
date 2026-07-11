@@ -21,6 +21,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **pkcs11-check summary now reads the freshest report format (#125).**
+  Newer pkcs11-check versions emit a pytest --report-log
+  (`report.jsonl`) and no longer update `results.json`, so
+  `run_pkcs11_check.sh` was summarising a stale prior run's
+  `results.json` -- the printed counts stayed frozen across reruns.
+  `pkcs11_check_summary.py` now parses both the pytest-JSONL and the
+  legacy JSON formats (reducing JSONL to one outcome per test), and the
+  runner picks whichever report file is newest.
+
 * **PQC key-type values, parameter-set validation and ML-KEM usage
   corrected (#125).** With ML-DSA/SLH-DSA/ML-KEM now recognised at their
   official mechanism values, the conformance harness exercised them for

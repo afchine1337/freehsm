@@ -89,20 +89,32 @@ RC_JSON=$?
 # tool supports multi-output ; for now re-emit is too costly, the JSON
 # + log are the canonical artifacts.
 
-if [ ! -s "$REPORTS/results.json" ]; then
+# Select the freshest report the harness produced. Newer pkcs11-check
+# versions write a pytest --report-log at report.jsonl and no longer
+# update results.json ; older ones write results.json. Prefer whichever
+# is newest so the summary never reflects a stale prior run.
+REPORT_FILE=""
+newest=0
+for cand in "$REPORTS/report.jsonl" "$REPORTS/results.json"; do
+    if [ -s "$cand" ]; then
+        m=$(stat -c %Y "$cand" 2>/dev/null || echo 0)
+        if [ "$m" -ge "$newest" ]; then newest=$m; REPORT_FILE="$cand"; fi
+    fi
+done
+if [ -z "$REPORT_FILE" ]; then
     echo "FATAL: pkcs11-check did not produce a report (exit=$RC_JSON) --- harness crash?" >&2
     exit 1
 fi
 
 echo "== Summary =="
-# Standalone parser (no shell heredoc : avoids CRLF / delimiter fragility,
-# and handles pkcs11-check's pretty-printed-with-extra-data report format).
+# Standalone parser (no shell heredoc : avoids CRLF / delimiter fragility).
+# Handles both the pytest --report-log JSONL and the legacy results.json.
 SUMMARY_PY="$(dirname "$0")/pkcs11_check_summary.py"
 if [ -f "$SUMMARY_PY" ]; then
-    python3 "$SUMMARY_PY" "$REPORTS/results.json" || true
+    python3 "$SUMMARY_PY" "$REPORT_FILE" || true
 else
     echo "  (summary script $SUMMARY_PY missing; see run.log)"
 fi
 
-echo "Report: $REPORTS/results.json (findings are evidence, not a gate)"
+echo "Report: $REPORT_FILE (findings are evidence, not a gate)"
 exit 0
