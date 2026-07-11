@@ -85,18 +85,18 @@ extern "C" {
 #define CKM_X448_DERIVE                      0x00001054u
 
 /* --- ML-KEM --- */
-#define CKM_ML_KEM_KEY_PAIR_GEN              0x00004021u
-#define CKM_ML_KEM                           0x00004022u
+#define CKM_ML_KEM_KEY_PAIR_GEN              0x0000000Fu
+#define CKM_ML_KEM                           0x00000017u
 
 /* --- ML-DSA --- */
-#define CKM_ML_DSA_KEY_PAIR_GEN              0x00004023u
-#define CKM_ML_DSA                           0x00004024u
-#define CKM_HASH_ML_DSA_SHA256               0x00004027u
-#define CKM_HASH_ML_DSA_SHA512               0x00004029u
+#define CKM_ML_DSA_KEY_PAIR_GEN              0x0000001Cu
+#define CKM_ML_DSA                           0x0000001Du
+#define CKM_HASH_ML_DSA_SHA256               0x00000024u
+#define CKM_HASH_ML_DSA_SHA512               0x00000026u
 
 /* --- SLH-DSA --- */
-#define CKM_SLH_DSA_KEY_PAIR_GEN             0x00004025u
-#define CKM_SLH_DSA                          0x00004026u
+#define CKM_SLH_DSA_KEY_PAIR_GEN             0x0000002Du
+#define CKM_SLH_DSA                          0x0000002Eu
 
 /* --- HKDF --- */
 #define CKM_HKDF_DERIVE                      0x0000402Au

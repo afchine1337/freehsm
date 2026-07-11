@@ -950,12 +950,12 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
 #define CKM_XOR_BASE_AND_DATA_LIST    0x00000364UL
 /* Post-quantum (PKCS#11 v3.2 §A.4). Values reserved by OASIS in
  * the 0x4030..0x4045 range. */
-#define CKM_ML_KEM_KEY_PAIR_GEN_LIST  0x0000403CUL
-#define CKM_ML_KEM_LIST               0x0000403DUL
-#define CKM_ML_DSA_KEY_PAIR_GEN_LIST  0x0000403EUL
-#define CKM_ML_DSA_LIST               0x0000403FUL
-#define CKM_SLH_DSA_KEY_PAIR_GEN_LIST 0x00004040UL
-#define CKM_SLH_DSA_LIST              0x00004041UL
+#define CKM_ML_KEM_KEY_PAIR_GEN_LIST  0x0000000FUL
+#define CKM_ML_KEM_LIST               0x00000017UL
+#define CKM_ML_DSA_KEY_PAIR_GEN_LIST  0x0000001CUL
+#define CKM_ML_DSA_LIST               0x0000001DUL
+#define CKM_SLH_DSA_KEY_PAIR_GEN_LIST 0x0000002DUL
+#define CKM_SLH_DSA_LIST              0x0000002EUL
 /* Vendor / pre-FIPS PQ. Falcon was not standardized ; Kyber was the
  * pre-standardization name of ML-KEM. Both use vendor-defined OIDs. */
 #define CKM_FALCON_LIST               0xC0001000UL
@@ -1949,7 +1949,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
  * C_DecapsulateKey. The canonical definitions live further down in the
  * C_GenerateKeyPair section ; the values here must match exactly. */
 #ifndef CKM_ML_KEM_OP
-#define CKM_ML_KEM_OP             0x0000403DUL
+#define CKM_ML_KEM_OP             0x00000017UL
 #endif
 #ifndef CKK_ML_KEM
 #define CKK_ML_KEM                0x0000003CUL
@@ -2397,12 +2397,12 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 #define CKA_MODULUS_BITS           0x00000121UL
 #define CKA_EC_PARAMS              0x00000180UL
 /* Post-quantum mechanism + key type IDs (PKCS#11 v3.2 §A.4). */
-#define CKM_ML_KEM_KEY_PAIR_GEN    0x0000403CUL
-#define CKM_ML_KEM_OP              0x0000403DUL
-#define CKM_ML_DSA_KEY_PAIR_GEN    0x0000403EUL
-#define CKM_ML_DSA_OP              0x0000403FUL
-#define CKM_SLH_DSA_KEY_PAIR_GEN   0x00004040UL
-#define CKM_SLH_DSA_OP             0x00004041UL
+#define CKM_ML_KEM_KEY_PAIR_GEN    0x0000000FUL
+#define CKM_ML_KEM_OP              0x00000017UL
+#define CKM_ML_DSA_KEY_PAIR_GEN    0x0000001CUL
+#define CKM_ML_DSA_OP              0x0000001DUL
+#define CKM_SLH_DSA_KEY_PAIR_GEN   0x0000002DUL
+#define CKM_SLH_DSA_OP             0x0000002EUL
 #define CKK_ML_KEM                 0x0000003CUL
 #define CKK_ML_DSA                 0x0000003EUL
 #define CKK_SLH_DSA                0x00004040UL
@@ -3749,8 +3749,8 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * "{ hedgeVariant ; pContext ; ulContextLen }" triple). */
     op->pq_ctx_have = 0;
     op->pq_ctx_len  = 0;
-    if (op->mechanism == 0x0000403FUL /* CKM_ML_DSA_OP */
-        || op->mechanism == 0x00004041UL /* CKM_SLH_DSA_OP */) {
+    if (op->mechanism == 0x0000001DUL /* CKM_ML_DSA_OP */
+        || op->mechanism == 0x0000002EUL /* CKM_SLH_DSA_OP */) {
         unsigned long hedge_variant = 0;
         fhsm_parse_pq_params(pMechanism->pParameter,
                              (size_t)pMechanism->ulParameterLen,

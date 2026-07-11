@@ -21,6 +21,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **PQC mechanism values corrected to the official PKCS#11 v3.2 values
+  (#125, ABI change).** ML-DSA / SLH-DSA / HASH-ML-DSA were advertised in
+  the 0x4021-0x4029 range, which PKCS#11 v3.2 allocates to the
+  Signal-protocol mechanisms (X3DH / X2RATCHET / XEDDSA), so a
+  conformance harness read the module's ML-DSA as X3DH_RESPOND, etc.; the
+  advertised value also disagreed with the operation-path value.
+  Reassigned to the official values (ML-KEM keygen 0x0F / op 0x17,
+  ML-DSA keygen 0x1C / sign 0x1D, HASH-ML-DSA-SHA256 0x24 / SHA512 0x26,
+  SLH-DSA keygen 0x2D / sign 0x2E), unifying advertisement with the
+  operation path. Regenerated the dispatch table and MECHANISMS.md;
+  updated the operation defines, e2e tests and the Wycheproof adapter.
+  Verified: ML-DSA-65 / SLH-DSA / ML-KEM-768 KATs pass and the old
+  colliding values are gone.
+
 * **Per-application login state for access control (#125).** PKCS#11
   login is shared by all sessions of a token, so C_Logout in one session
   must hide private objects from concurrent sessions on the same token.

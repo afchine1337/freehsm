@@ -240,35 +240,35 @@ MECHANISMS: tuple[Mech, ...] = (
          refs=("SP 800-56A rev. 3", "RFC 7748")),
 
     # === ML-KEM (FIPS 203) ============================================
-    Mech("CKM_ML_KEM_KEY_PAIR_GEN", 0x00004021, "ML-KEM", "keypair", "dispatch_ml_kem_keypair",
+    Mech("CKM_ML_KEM_KEY_PAIR_GEN", 0x0000000f, "ML-KEM", "keypair", "dispatch_ml_kem_keypair",
          fips="approved", key_type="CKK_ML_KEM",
          refs=("FIPS 203",),
          notes="Parameter set selected via CKA_PARAMETER_SET = ML-KEM-{512,768,1024}."),
-    Mech("CKM_ML_KEM",             0x00004022, "ML-KEM", "encap",   "dispatch_ml_kem_encap",
+    Mech("CKM_ML_KEM",             0x00000017, "ML-KEM", "encap",   "dispatch_ml_kem_encap",
          fips="approved", key_type="CKK_ML_KEM",
          refs=("FIPS 203",)),
 
     # === ML-DSA (FIPS 204) ============================================
-    Mech("CKM_ML_DSA_KEY_PAIR_GEN", 0x00004023, "ML-DSA", "keypair", "dispatch_ml_dsa_keypair",
+    Mech("CKM_ML_DSA_KEY_PAIR_GEN", 0x0000001c, "ML-DSA", "keypair", "dispatch_ml_dsa_keypair",
          fips="approved", key_type="CKK_ML_DSA",
          refs=("FIPS 204",),
          notes="Parameter set selected via CKA_PARAMETER_SET = ML-DSA-{44,65,87}."),
-    Mech("CKM_ML_DSA",              0x00004024, "ML-DSA","sign",    "dispatch_ml_dsa",
+    Mech("CKM_ML_DSA",              0x0000001d, "ML-DSA","sign",    "dispatch_ml_dsa",
          fips="approved", key_type="CKK_ML_DSA",
          refs=("FIPS 204",)),
-    Mech("CKM_HASH_ML_DSA_SHA256",  0x00004027, "ML-DSA","sign",    "dispatch_hash_ml_dsa_sha256",
+    Mech("CKM_HASH_ML_DSA_SHA256",  0x00000024, "ML-DSA","sign",    "dispatch_hash_ml_dsa_sha256",
          fips="approved", key_type="CKK_ML_DSA",
          refs=("FIPS 204",)),
-    Mech("CKM_HASH_ML_DSA_SHA512",  0x00004029, "ML-DSA","sign",    "dispatch_hash_ml_dsa_sha512",
+    Mech("CKM_HASH_ML_DSA_SHA512",  0x00000026, "ML-DSA","sign",    "dispatch_hash_ml_dsa_sha512",
          fips="approved", key_type="CKK_ML_DSA",
          refs=("FIPS 204",)),
 
     # === SLH-DSA (FIPS 205) ===========================================
-    Mech("CKM_SLH_DSA_KEY_PAIR_GEN", 0x00004025, "SLH-DSA", "keypair", "dispatch_slh_dsa_keypair",
+    Mech("CKM_SLH_DSA_KEY_PAIR_GEN", 0x0000002d, "SLH-DSA", "keypair", "dispatch_slh_dsa_keypair",
          fips="approved", key_type="CKK_SLH_DSA",
          refs=("FIPS 205",),
          notes="Parameter set selected via CKA_PARAMETER_SET = SLH-DSA-{SHA2,SHAKE}-{128,192,256}{s,f}."),
-    Mech("CKM_SLH_DSA",             0x00004026, "SLH-DSA","sign",   "dispatch_slh_dsa",
+    Mech("CKM_SLH_DSA",             0x0000002e, "SLH-DSA","sign",   "dispatch_slh_dsa",
          fips="approved", key_type="CKK_SLH_DSA",
          refs=("FIPS 205",)),
 

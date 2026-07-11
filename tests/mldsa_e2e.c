@@ -71,8 +71,8 @@ typedef struct {
     CK_ULONG          ulValueLen;
 } CK_ATTRIBUTE;
 
-#define CKM_ML_DSA_KEY_PAIR_GEN  0x0000403EUL
-#define CKM_ML_DSA               0x0000403FUL
+#define CKM_ML_DSA_KEY_PAIR_GEN  0x0000001CUL
+#define CKM_ML_DSA               0x0000001DUL
 #define CKA_LABEL                0x00000003UL
 #define CKA_EXTRACTABLE          0x00000162UL
 #define CKR_OK                   0x00000000UL

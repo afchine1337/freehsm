@@ -10,7 +10,7 @@
  *      non-CKR_MECHANISM_INVALID result with a non-zero capability flag
  *      (no advertised-but-unusable phantom).
  *   2. The post-quantum signature mechanisms are advertised at their
- *      correct OASIS values (ML-DSA 0x4024, ML-DSA keygen 0x4023,
+ *      correct OASIS PKCS#11 v3.2 values (ML-DSA 0x1D, ML-DSA keygen 0x1C,
  *      SLH-DSA keygen 0x4025) with CKF_SIGN, and EdDSA (0x1057) +
  *      HKDF_DERIVE (0x402A) are present.
  *   3. The stale/phantom values (ML-DSA 0x403F, FALCON 0xC0001000) are
@@ -55,13 +55,16 @@ int main(void) {
             fprintf(stderr, "FAIL: 0x%04lx advertised with zero capability flags\n", l[i]);
             return 1;
         }
-        if (l[i] == 0x4024) { seen_mldsa = 1; if (!(info.flags & CKF_SIGN)) { fprintf(stderr,"FAIL: ML-DSA no SIGN\n"); return 1; } }
-        if (l[i] == 0x4023) seen_mldsa_kg = 1;
-        if (l[i] == 0x4025) seen_slhdsa_kg = 1;
+        if (l[i] == 0x001D) { seen_mldsa = 1; if (!(info.flags & CKF_SIGN)) { fprintf(stderr,"FAIL: ML-DSA no SIGN\n"); return 1; } }
+        if (l[i] == 0x001C) seen_mldsa_kg = 1;
+        if (l[i] == 0x002D) seen_slhdsa_kg = 1;
         if (l[i] == 0x1057) seen_eddsa = 1;
         if (l[i] == 0x402A) seen_hkdf = 1;
         /* (3) phantoms must not appear */
         if (l[i] == 0x403F || l[i] == 0x403E || l[i] == 0x4040
+            || l[i] == 0x4021 || l[i] == 0x4022 || l[i] == 0x4023
+            || l[i] == 0x4024 || l[i] == 0x4025 || l[i] == 0x4026
+            || l[i] == 0x4027 || l[i] == 0x4029
             || l[i] == 0xC0001000UL || l[i] == 0xC0001001UL) {
             fprintf(stderr, "FAIL: phantom/stale 0x%lx still advertised\n", l[i]);
             return 1;

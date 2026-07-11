@@ -158,19 +158,19 @@
 
 | Mechanism | Value | Op | FIPS | Handler | Reference |
 |---|---|---|---|---|---|
-| `CKM_ML_DSA_KEY_PAIR_GEN` | `0x00004023` | keypair | ✅ | `dispatch_ml_dsa_keypair` | FIPS 204 |
+| `CKM_ML_DSA_KEY_PAIR_GEN` | `0x0000001C` | keypair | ✅ | `dispatch_ml_dsa_keypair` | FIPS 204 |
 | | | | | | _Parameter set selected via CKA_PARAMETER_SET = ML-DSA-{44,65,87}._ |
-| `CKM_ML_DSA` | `0x00004024` | sign | ✅ | `dispatch_ml_dsa` | FIPS 204 |
-| `CKM_HASH_ML_DSA_SHA256` | `0x00004027` | sign | ✅ | `dispatch_hash_ml_dsa_sha256` | FIPS 204 |
-| `CKM_HASH_ML_DSA_SHA512` | `0x00004029` | sign | ✅ | `dispatch_hash_ml_dsa_sha512` | FIPS 204 |
+| `CKM_ML_DSA` | `0x0000001D` | sign | ✅ | `dispatch_ml_dsa` | FIPS 204 |
+| `CKM_HASH_ML_DSA_SHA256` | `0x00000024` | sign | ✅ | `dispatch_hash_ml_dsa_sha256` | FIPS 204 |
+| `CKM_HASH_ML_DSA_SHA512` | `0x00000026` | sign | ✅ | `dispatch_hash_ml_dsa_sha512` | FIPS 204 |
 
 ## ML-KEM
 
 | Mechanism | Value | Op | FIPS | Handler | Reference |
 |---|---|---|---|---|---|
-| `CKM_ML_KEM_KEY_PAIR_GEN` | `0x00004021` | keypair | ✅ | `dispatch_ml_kem_keypair` | FIPS 203 |
+| `CKM_ML_KEM_KEY_PAIR_GEN` | `0x0000000F` | keypair | ✅ | `dispatch_ml_kem_keypair` | FIPS 203 |
 | | | | | | _Parameter set selected via CKA_PARAMETER_SET = ML-KEM-{512,768,1024}._ |
-| `CKM_ML_KEM` | `0x00004022` | encap | ✅ | `dispatch_ml_kem_encap` | FIPS 203 |
+| `CKM_ML_KEM` | `0x00000017` | encap | ✅ | `dispatch_ml_kem_encap` | FIPS 203 |
 
 ## PBKDF2
 
@@ -234,9 +234,9 @@
 
 | Mechanism | Value | Op | FIPS | Handler | Reference |
 |---|---|---|---|---|---|
-| `CKM_SLH_DSA_KEY_PAIR_GEN` | `0x00004025` | keypair | ✅ | `dispatch_slh_dsa_keypair` | FIPS 205 |
+| `CKM_SLH_DSA_KEY_PAIR_GEN` | `0x0000002D` | keypair | ✅ | `dispatch_slh_dsa_keypair` | FIPS 205 |
 | | | | | | _Parameter set selected via CKA_PARAMETER_SET = SLH-DSA-{SHA2,SHAKE}-{128,192,256}{s,f}._ |
-| `CKM_SLH_DSA` | `0x00004026` | sign | ✅ | `dispatch_slh_dsa` | FIPS 205 |
+| `CKM_SLH_DSA` | `0x0000002E` | sign | ✅ | `dispatch_slh_dsa` | FIPS 205 |
 
 ## TDES
 

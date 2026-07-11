@@ -291,6 +291,30 @@ in the harness. This document records the triage.
   explicit CKA_PRIVATE bit, and per-token (per-application) login state
   so C_Logout in one session affects the others, are small follow-ups.
 
+### F12 — PQC mechanism values collided with official Signal mechanisms — FIXED (ABI change)
+* **Finding**: pkcs11-check reported ML-DSA / SLH-DSA / HASH-ML-DSA
+  advertised with sign/verify flags as XEDDSA / X3DH / X2RATCHET
+  (test_mech_flags). Root cause: the module assigned its PQC mechanisms
+  to values in 0x4021-0x4029, a range **already allocated** by
+  PKCS#11 v3.2 to the Signal-protocol mechanisms (CKM_X3DH_RESPOND
+  0x4024, CKM_X2RATCHET_* 0x4025-0x4027, CKM_XEDDSA 0x4029). The harness
+  maps advertised values through the official registry, so it read the
+  module's ML-DSA (0x4024) as X3DH_RESPOND, etc. The advertised value
+  also differed from the operation-path value (ML-DSA advertised 0x4024
+  but C_SignInit expected 0x403F), an internal inconsistency.
+* **Fix**: reassigned the PQC mechanisms to their official PKCS#11 v3.2
+  values and unified advertisement with the operation path:
+  ML-KEM keygen 0x0F / op 0x17, ML-DSA keygen 0x1C / sign 0x1D,
+  HASH-ML-DSA-SHA256 0x24 / SHA512 0x26, SLH-DSA keygen 0x2D / sign 0x2E.
+  Regenerated the dispatch table + `MECHANISMS.md`, updated the operation
+  #defines, the e2e tests and the Wycheproof adapter.
+* **ABI note**: this changes the advertised PQC mechanism identifiers.
+  The module is pre-1.0 (v1.5.0 line); the old values were non-standard
+  and colliding, so this is a conformance correction. Verified: smoke
+  KATs (ML-DSA-65, SLH-DSA, ML-KEM-768) pass, advertisement is at the
+  official values, and the old colliding values are gone
+  (tests/test_mech_advertise.c updated to enforce this).
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported
