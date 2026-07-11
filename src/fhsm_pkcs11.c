@@ -4313,6 +4313,20 @@ static int fhsm_hmac_hash_of(uint32_t mech, fhsm_hash_t *hash, size_t *maclen) {
         default: return 0;
     }
 }
+
+/* EVP_MAC HMAC "digest" parameter name for a hash. #125 multipart HMAC. */
+static const char *hmac_digest_name(fhsm_hash_t h) {
+    switch (h) {
+        case FHSM_HASH_SHA224:   return "SHA224";
+        case FHSM_HASH_SHA256:   return "SHA256";
+        case FHSM_HASH_SHA384:   return "SHA384";
+        case FHSM_HASH_SHA512:   return "SHA512";
+        case FHSM_HASH_SHA3_256: return "SHA3-256";
+        case FHSM_HASH_SHA3_384: return "SHA3-384";
+        case FHSM_HASH_SHA3_512: return "SHA3-512";
+        default:                 return NULL;
+    }
+}
 /* CKM_ECDSA* identifiers are now defined in include/fhsm_ecdsa_raw.h which
  * is pulled in near the top of this TU. Kept here as a comment so a grep
  * for "CKM_ECDSA" still lands somewhere readable. */
@@ -5141,15 +5155,22 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
         uint32_t cl = 0, kt = 0;
         fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv != FHSM_RV_OK) return rv;
+        /* Select the digest from the mechanism (#125 : multipart HMAC was
+         * hard-coded to SHA-256, so SHA-384/512/SHA-3 produced a wrong
+         * MAC that did not match the one-shot path). */
+        fhsm_hash_t uhash; size_t umac;
+        if (!fhsm_hmac_hash_of(op->mechanism, &uhash, &umac))
+            return FHSM_RV_MECHANISM_INVALID;
+        const char *dn = hmac_digest_name(uhash);
+        if (!dn) return FHSM_RV_MECHANISM_INVALID;
         EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
         if (!mac) return FHSM_RV_MECHANISM_INVALID;
         EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
         EVP_MAC_free(mac);
         if (!ctx) return FHSM_RV_HOST_MEMORY;
         OSSL_PARAM params[2];
-        /* OSSL_PARAM_construct_utf8_string takes char* (not const), so use
-         * a local non-const buffer to avoid -Werror=discarded-qualifiers. */
-        char digest_name[] = "SHA256";
+        char digest_name[16];
+        snprintf(digest_name, sizeof digest_name, "%s", dn);
         params[0] = OSSL_PARAM_construct_utf8_string("digest", digest_name, 0);
         params[1] = OSSL_PARAM_construct_end();
         if (EVP_MAC_init(ctx, kv, kvl, params) != 1) {
@@ -5168,8 +5189,12 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pulSigLen) return FHSM_RV_ARGUMENTS_BAD;
-    if (pSig == NULL) { *pulSigLen = 32; return FHSM_RV_OK; }
-    if (*pulSigLen < 32) { *pulSigLen = 32; return 0x00000150UL; }
+    /* Signature length is the MAC length of the mechanism's hash, not a
+     * hard-coded 32 (#125 multipart HMAC for SHA-384/512/SHA-3). */
+    fhsm_hash_t fhash; size_t fmac;
+    if (!fhsm_hmac_hash_of(op->mechanism, &fhash, &fmac)) { fhash = FHSM_HASH_SHA256; fmac = 32; }
+    if (pSig == NULL) { *pulSigLen = fmac; return FHSM_RV_OK; }
+    if (*pulSigLen < fmac) { *pulSigLen = fmac; return 0x00000150UL; }
     size_t out_len = 0;
     fhsm_rv_t rv = FHSM_RV_OK;
     if (!op->mac_ctx) {
@@ -5179,7 +5204,7 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
         rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv == FHSM_RV_OK) {
             out_len = *pulSigLen;
-            rv = fhsm_hmac(FHSM_HASH_SHA256, FHSM_SLICE(kv, kvl),
+            rv = fhsm_hmac(fhash, FHSM_SLICE(kv, kvl),
                             FHSM_SLICE("", 0), pSig, &out_len);
         }
     } else {

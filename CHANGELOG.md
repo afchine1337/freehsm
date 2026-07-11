@@ -21,6 +21,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Multipart HMAC now matches the one-shot result for all hashes
+  (#125).** C_SignUpdate / C_SignFinal hard-coded the HMAC digest to
+  SHA-256 and the signature length to 32 bytes, so a multipart
+  SHA-384 / SHA-512 / SHA-3 HMAC produced a (wrong) SHA-256 MAC that did
+  not match the one-shot C_Sign output (pkcs11-check
+  TestMultipartSign::test_streaming_equals_single). The multipart path
+  now selects the digest and length from the mechanism via the shared
+  fhsm_hmac_hash_of() helper. Verified multipart == one-shot for
+  SHA-256/384/512 and SHA3-256/512. Regression: tests/test_fips_digests.c.
+
 * **Private-object access control also covers direct handle access
   (#125).** In addition to hiding private objects from C_FindObjects,
   C_GetAttributeValue and C_GetObjectSize now return

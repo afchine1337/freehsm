@@ -85,6 +85,27 @@ int main(void) {
     hmac_rt(s, k, 0x2D1, "SHA3-512");
     hmac_rt(s, k, 0x256, "SHA224");
 
+    /* Multipart HMAC must equal one-shot (#125 : was hard-coded to
+     * SHA-256, so SHA-384/512 multipart diverged from one-shot). */
+    { CK_RV (*C_SignUpdate)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
+      CK_RV (*C_SignFinal)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG*);
+      *(void**)&C_SignUpdate = dlsym(H,"C_SignUpdate");
+      *(void**)&C_SignFinal  = dlsym(H,"C_SignFinal");
+      CK_ULONG mechs[] = { 0x261, 0x271, 0x2D1 };  /* SHA384/512/SHA3-512 HMAC */
+      const char *nm[] = { "SHA384", "SHA512", "SHA3-512" };
+      for (int m = 0; m < 3; ++m) {
+          CK_MECHANISM mm = { mechs[m], NULL, 0 };
+          CK_BYTE a[64]; CK_ULONG al = 64;
+          SI(s, &mm, k); SG(s, (CK_BYTE*)"abcdef", 6, a, &al);
+          CK_BYTE b[64]; CK_ULONG bl = 64;
+          SI(s, &mm, k); C_SignUpdate(s, (CK_BYTE*)"abc", 3);
+          C_SignUpdate(s, (CK_BYTE*)"def", 3); C_SignFinal(s, b, &bl);
+          if (al != bl || memcmp(a, b, al) != 0) {
+              fprintf(stderr, "FAIL: %s multipart != one-shot\n", nm[m]); fails++;
+          } else printf("  %-14s multipart == one-shot : OK\n", nm[m]);
+      }
+    }
+
     if (fails) { fprintf(stderr, "test_fips_digests : %d FAIL\n", fails); return 1; }
     printf("test_fips_digests : PASS\n");
     return 0;
