@@ -98,7 +98,10 @@ fhsm_rv_t fhsm_session_login(unsigned long h, fhsm_role_t role,
      * is the boundary that the PKCS#11 façade calls. */
     if (!s->token) return FHSM_RV_TOKEN_NOT_PRESENT;
     fhsm_rv_t rv = fhsm_token_login(s->token, role, pin);
-    if (rv == FHSM_RV_OK) s->role = role;
+    /* Set this session's role when the token is (already) logged in as
+     * that role : CKR_USER_ALREADY_LOGGED_IN means the application is
+     * authenticated, so this session must reflect it too (#125). */
+    if (rv == FHSM_RV_OK || rv == FHSM_RV_USER_ALREADY_LOGGED_IN) s->role = role;
     return rv;
 }
 

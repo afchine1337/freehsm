@@ -433,7 +433,7 @@ CK_RV C_SeedRandom(CK_SESSION_HANDLE hSession,
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pSeed || ulSeedLen == 0) return FHSM_RV_ARGUMENTS_BAD;
-    return 0x00000034UL;   /* CKR_RANDOM_SEED_NOT_SUPPORTED */
+    return 0x00000120UL;   /* CKR_RANDOM_SEED_NOT_SUPPORTED */
 }
 
 /* PKCS#11 v3.2 §C.6.5.6 : C_GetFunctionStatus and C_CancelFunction are

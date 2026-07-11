@@ -21,6 +21,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Login throttle no longer blocks valid re-logins; C_SeedRandom uses
+  the correct CKR (#125).** The exponential PIN throttle was checked
+  before the already-authenticated case, so a re-login by an
+  already-logged-in application returned the vendor code
+  FHSM_RV_PIN_THROTTLED (0x80000004) instead of
+  CKR_USER_ALREADY_LOGGED_IN -- which cascaded across ~8 pkcs11-check
+  setup steps. `fhsm_token_login` now returns
+  CKR_USER_ALREADY_LOGGED_IN when the token is already logged in as the
+  requested role (before the throttle), and `fhsm_session_login` sets
+  the session role on that return so operations proceed. Separately,
+  C_SeedRandom returned 0x34 instead of the correct
+  CKR_RANDOM_SEED_NOT_SUPPORTED (0x120).
+
 * **pkcs11-check summary now reads the freshest report format (#125).**
   Newer pkcs11-check versions emit a pytest --report-log
   (`report.jsonl`) and no longer update `results.json`, so

@@ -660,6 +660,15 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role, const char *pin) {
     if (!t || !pin) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
 
+    /* Already authenticated as this role : a re-login is not a
+     * brute-force attempt, so return CKR_USER_ALREADY_LOGGED_IN before
+     * the throttle check (#125 : the throttle otherwise bled into valid
+     * re-logins and returned a vendor code the harness rejected). */
+    if (t->logged_in == role) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_ALREADY_LOGGED_IN;
+    }
+
     /* Throttle check BEFORE PBKDF2 to defeat timing side-channels. */
     uint64_t now = now_ms();
     uint64_t *until = (role == FHSM_ROLE_SO) ? &t->throttle_so_until_ms
