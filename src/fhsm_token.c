@@ -778,6 +778,15 @@ void fhsm_token_logout(fhsm_token_t *t) {
     pthread_mutex_unlock(&t->mu);
 }
 
+
+/* Current per-token (per-application) login role. PKCS#11 login state is
+ * shared by all sessions of the token, so access control must consult
+ * this rather than a per-session role (#125 F11 : concurrent-session
+ * logout). */
+fhsm_role_t fhsm_token_current_role(const fhsm_token_t *t) {
+    return t ? t->logged_in : FHSM_ROLE_NONE;
+}
+
 const char *fhsm_token_label(const fhsm_token_t *t)  { return t ? t->label  : NULL; }
 const char *fhsm_token_serial(const fhsm_token_t *t) { return t ? t->serial : NULL; }
 uint32_t fhsm_token_failed_count(const fhsm_token_t *t, fhsm_role_t role) {

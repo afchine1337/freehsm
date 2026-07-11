@@ -93,6 +93,19 @@ int main(void) {
       if (rh != 0x82UL) { fprintf(stderr,"FAIL: GetAttr private post-logout 0x%lx (want 0x82)\n",(unsigned long)rh); fails++; }
       else printf("  private handle access denied after logout : OK\n"); }
 
+    /* Per-application login : logout in one session hides private objects
+     * from a concurrent session on the same token (#125 F11). */
+    { CK_RV (*C_Logout)(CK_SESSION_HANDLE); *(void**)&C_Logout = dlsym(H,"C_Logout");
+      CK_SESSION_HANDLE a, b; OS(0,6,NULL,NULL,&a); OS(0,6,NULL,NULL,&b);
+      (void)L(a,1,up,8);                 /* login on a only */
+      mkaes(a, 1);                        /* token private key */
+      int b_in = count(b);               /* b shares the login state */
+      C_Logout(a);                        /* logout via a */
+      int b_out = count(b);
+      if (b_in < 1) { fprintf(stderr,"FAIL: concurrent session sees %d before logout (want >=1)\n",b_in); fails++; }
+      else if (b_out != 0) { fprintf(stderr,"FAIL: concurrent session sees %d after logout (want 0)\n",b_out); fails++; }
+      else printf("  per-application logout hides private in concurrent session : OK\n"); }
+
     if (fails) { fprintf(stderr, "test_session_objects : %d FAIL\n", fails); return 1; }
     printf("test_session_objects : PASS\n");
     return 0;

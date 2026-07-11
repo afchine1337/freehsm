@@ -21,6 +21,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Per-application login state for access control (#125).** PKCS#11
+  login is shared by all sessions of a token, so C_Logout in one session
+  must hide private objects from concurrent sessions on the same token.
+  Access control now consults the token's login role
+  (`fhsm_token_current_role`) instead of the per-session role.
+  Regression: tests/test_session_objects.c.
+
 * **Multipart HMAC now matches the one-shot result for all hashes
   (#125).** C_SignUpdate / C_SignFinal hard-coded the HMAC digest to
   SHA-256 and the signature length to 32 bytes, so a multipart

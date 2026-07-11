@@ -107,6 +107,9 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role, const char *pin);
  * sequence number. The on-disk file is not touched. */
 void fhsm_token_logout(fhsm_token_t *t);
 
+/* Current per-token login role (shared by all sessions). #125. */
+fhsm_role_t fhsm_token_current_role(const fhsm_token_t *t);
+
 /* PIN administration. SO can change either PIN; USER can change only
  * its own. SO C_SetPIN rotates the DEK; USER does not (see header
  * comment). */

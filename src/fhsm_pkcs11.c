@@ -2736,7 +2736,7 @@ static int extract_cert_attr(fhsm_token_t *t, uint32_t handle,
     return rc;
 }
 
-static int fhsm_object_access_denied(CK_SESSION_HANDLE hSession, uint32_t cko_class);
+static int fhsm_object_access_denied(fhsm_token_t *t, uint32_t cko_class);
 
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                            CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
@@ -2747,7 +2747,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hObject, &value, &value_len,
                                           &cko_class, &ckk_type);
     if (rv != FHSM_RV_OK) return rv;
-    if (fhsm_object_access_denied(hSession, cko_class))
+    if (fhsm_object_access_denied(t, cko_class))
         return FHSM_RV_OBJECT_HANDLE_INVALID;
     int fhsm_buf_too_small = 0;
     for (CK_ULONG i = 0; i < ulCount; ++i) {
@@ -2945,7 +2945,7 @@ CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                           &value, &value_len,
                                           &cko_class, &ckk_type);
     if (rv != FHSM_RV_OK) return rv;
-    if (fhsm_object_access_denied(hSession, cko_class))
+    if (fhsm_object_access_denied(t, cko_class))
         return FHSM_RV_OBJECT_HANDLE_INVALID;
 
     *pulSize = (CK_ULONG)value_len;
@@ -3256,7 +3256,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
      * class -- secret and private keys are private ; public keys,
      * certificates and data objects are public (#125 : private object
      * visible in public / post-logout session). */
-    int authed_user = (fhsm_session_role(hSession) == FHSM_ROLE_USER);
+    int authed_user = (fhsm_token_current_role(t) == FHSM_ROLE_USER);
     size_t k = 0;
     for (size_t j = 0; j < got && k < sizeof(f->handles)/sizeof(f->handles[0]); ++j) {
         if (!authed_user) {
@@ -3534,8 +3534,10 @@ static uint32_t resolve_mech(uint32_t m);
  * secret / private keys) is invisible to a session that is not logged in
  * as the normal user. Accessing its handle from such a session returns
  * CKR_OBJECT_HANDLE_INVALID -- the object appears not to exist (#125). */
-static int fhsm_object_access_denied(CK_SESSION_HANDLE hSession, uint32_t cko_class) {
-    if (fhsm_session_role(hSession) == FHSM_ROLE_USER) return 0;
+static int fhsm_object_access_denied(fhsm_token_t *t, uint32_t cko_class) {
+    /* Per-application login state : a private object is accessible iff the
+     * token (not just this session) is logged in as the user. */
+    if (fhsm_token_current_role(t) == FHSM_ROLE_USER) return 0;
     return (cko_class == CKO_SECRET_KEY || cko_class == CKO_PRIVATE_KEY);
 }
 
