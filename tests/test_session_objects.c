@@ -74,13 +74,24 @@ int main(void) {
      * hidden from a session that is not logged in as USER (#125). */
     { CK_RV (*C_Logout)(CK_SESSION_HANDLE); *(void**)&C_Logout = dlsym(H,"C_Logout");
       CK_SESSION_HANDLE s3; OS(0,6,NULL,NULL,&s3); (void)L(s3,1,up,8);
-      mkaes(s3, 1);                          /* token private key */
+      CK_ULONG cls3=4, kt3=0x1F, vl3=32; CK_BYTE T3=1;
+      CK_ATTRIBUTE ka[] = { {0,&cls3,8},{0x100,&kt3,8},{0x161,&vl3,8},{0x01,&T3,1} };
+      CK_OBJECT_HANDLE hpriv_handle = 0;
+      GK(s3, &(CK_MECHANISM){0x1080,0,0}, ka, 4, &hpriv_handle);   /* token private key */
       int seen_in = count(s3);
       C_Logout(s3);
       int seen_out = count(s3);
       if (seen_in < 1) { fprintf(stderr,"FAIL: logged-in sees %d (want >=1)\n",seen_in); fails++; }
       else if (seen_out != 0) { fprintf(stderr,"FAIL: post-logout sees %d private (want 0)\n",seen_out); fails++; }
-      else printf("  private object hidden after logout : OK\n"); }
+      else printf("  private object hidden after logout : OK\n");
+      /* Direct handle access to a private object must also be denied
+       * after logout (not just C_FindObjects). */
+      CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
+      *(void**)&C_GetAttributeValue = dlsym(H,"C_GetAttributeValue");
+      CK_ULONG cc; CK_ATTRIBUTE q = {0,&cc,8};
+      CK_RV rh = C_GetAttributeValue(s3, hpriv_handle, &q, 1);
+      if (rh != 0x82UL) { fprintf(stderr,"FAIL: GetAttr private post-logout 0x%lx (want 0x82)\n",(unsigned long)rh); fails++; }
+      else printf("  private handle access denied after logout : OK\n"); }
 
     if (fails) { fprintf(stderr, "test_session_objects : %d FAIL\n", fails); return 1; }
     printf("test_session_objects : PASS\n");

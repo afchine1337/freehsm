@@ -281,10 +281,15 @@ in the harness. This document records the triage.
   certificates and data objects are public), matching the value
   C_GetAttributeValue reports. Regression added to
   `tests/test_session_objects.c` (private object hidden after logout).
-* **Note**: this derives CKA_PRIVATE from class rather than an explicit
+* **Direct-handle access** is gated too: `C_GetAttributeValue` and
+  `C_GetObjectSize` return CKR_OBJECT_HANDLE_INVALID for a private object
+  when the session is not logged in as the user, so a handle kept from a
+  prior authenticated session cannot read the object after C_Logout.
+* **Note**: CKA_PRIVATE is derived from class rather than an explicit
   stored flag ; an object explicitly created with CKA_PRIVATE=FALSE is
   still treated as private if it is a secret/private key. Storing an
-  explicit CKA_PRIVATE bit is a small follow-up.
+  explicit CKA_PRIVATE bit, and per-token (per-application) login state
+  so C_Logout in one session affects the others, are small follow-ups.
 
 ## Expected gaps (xfail-class, not defects)
 

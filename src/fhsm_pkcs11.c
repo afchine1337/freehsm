@@ -2736,6 +2736,8 @@ static int extract_cert_attr(fhsm_token_t *t, uint32_t handle,
     return rc;
 }
 
+static int fhsm_object_access_denied(CK_SESSION_HANDLE hSession, uint32_t cko_class);
+
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                            CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -2745,6 +2747,8 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hObject, &value, &value_len,
                                           &cko_class, &ckk_type);
     if (rv != FHSM_RV_OK) return rv;
+    if (fhsm_object_access_denied(hSession, cko_class))
+        return FHSM_RV_OBJECT_HANDLE_INVALID;
     int fhsm_buf_too_small = 0;
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         const void *src = NULL; size_t src_len = 0;
@@ -2941,6 +2945,8 @@ CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                           &value, &value_len,
                                           &cko_class, &ckk_type);
     if (rv != FHSM_RV_OK) return rv;
+    if (fhsm_object_access_denied(hSession, cko_class))
+        return FHSM_RV_OBJECT_HANDLE_INVALID;
 
     *pulSize = (CK_ULONG)value_len;
     return FHSM_RV_OK;
@@ -3524,6 +3530,15 @@ static uint32_t resolve_mech(uint32_t m);
  * a keyed operation, so C_*Init on a destroyed or invalid handle fails
  * with CKR_KEY_HANDLE_INVALID instead of succeeding (#125 use-after-
  * destroy: TestSignInitErrors / TestVerifyInitErrors / ...). */
+/* Access control : a private object (CKA_PRIVATE, derived from class :
+ * secret / private keys) is invisible to a session that is not logged in
+ * as the normal user. Accessing its handle from such a session returns
+ * CKR_OBJECT_HANDLE_INVALID -- the object appears not to exist (#125). */
+static int fhsm_object_access_denied(CK_SESSION_HANDLE hSession, uint32_t cko_class) {
+    if (fhsm_session_role(hSession) == FHSM_ROLE_USER) return 0;
+    return (cko_class == CKO_SECRET_KEY || cko_class == CKO_PRIVATE_KEY);
+}
+
 static CK_RV fhsm_require_key(fhsm_token_t *t, CK_OBJECT_HANDLE hKey) {
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;

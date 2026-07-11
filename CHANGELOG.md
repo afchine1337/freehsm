@@ -21,6 +21,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Private-object access control also covers direct handle access
+  (#125).** In addition to hiding private objects from C_FindObjects,
+  C_GetAttributeValue and C_GetObjectSize now return
+  CKR_OBJECT_HANDLE_INVALID for a private object (secret/private key)
+  when the session is not logged in as the user -- so a handle retained
+  from an authenticated session cannot read the object after C_Logout or
+  from a public session. Regression: tests/test_session_objects.c.
+
 * **Private objects are no longer visible to unauthenticated sessions
   (#125, access control).** C_FindObjects returned CKA_PRIVATE objects
   (secret and private keys) to a public session and to a session after
