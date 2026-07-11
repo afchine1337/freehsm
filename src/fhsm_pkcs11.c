@@ -1227,6 +1227,21 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
 #define CKA_SIGN_ATTR       0x00000108UL
 #define CKA_VERIFY_ATTR     0x0000010AUL
 #define CKA_EXTRACTABLE     0x00000162UL
+#define CKA_DERIVE_ATTR     0x0000010CUL
+#define CKA_LOCAL_ATTR      0x00000163UL
+#define CKA_NEVER_EXTRACTABLE_ATTR 0x00000164UL
+#define CKA_ALWAYS_SENSITIVE_ATTR  0x00000165UL
+#define CKA_MODIFIABLE_ATTR 0x00000170UL
+#define CKA_COPYABLE_ATTR   0x00000171UL
+#define CKA_DESTROYABLE_ATTR 0x00000172UL
+#define CKA_ALWAYS_AUTH_ATTR 0x00000202UL
+#define CKA_WRAP_WITH_TRUSTED_ATTR 0x00000210UL
+#define CKA_TRUSTED_ATTR    0x00000086UL
+#define CKA_START_DATE_ATTR 0x00000110UL
+#define CKA_END_DATE_ATTR   0x00000111UL
+#define CKA_SUBJECT_ATTR    0x00000101UL
+#define CKA_ISSUER_ATTR     0x00000081UL
+#define CKA_SERIAL_NUMBER_ATTR 0x00000082UL
 #define CKR_ATTRIBUTE_SENSITIVE 0x00000011UL
 
 /* Object flags stored on disk (1 byte). */
@@ -2604,6 +2619,37 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
     return rc;
 }
 
+/* Extract a DER-encoded X.509 field (subject / issuer / serial number)
+ * from a stored CKO_CERTIFICATE object. Two-pass like
+ * extract_pubkey_attr: out==NULL queries size (returns -2 with *out_len
+ * set), otherwise fills. Returns 0 on success, -1 if not applicable,
+ * -2 if the caller buffer is too small. (#125 pkcs11-check
+ * x509/TestCertificateExtractFields.) */
+static int extract_cert_attr(fhsm_token_t *t, uint32_t handle,
+                             CK_ATTRIBUTE_TYPE type,
+                             uint8_t *out, size_t *out_len) {
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    if (fhsm_token_object_get(t, handle, &kv, &kvl, &cl, &kt) != FHSM_RV_OK) return -1;
+    if (cl != CKO_CERTIFICATE) return -1;
+    const uint8_t *p = kv;
+    X509 *x = d2i_X509(NULL, &p, (long)kvl);
+    if (!x) return -1;
+    int rc = -1; unsigned char *der = NULL; int der_len = 0;
+    if (type == CKA_SUBJECT_ATTR)
+        der_len = i2d_X509_NAME(X509_get_subject_name(x), &der);
+    else if (type == CKA_ISSUER_ATTR)
+        der_len = i2d_X509_NAME(X509_get_issuer_name(x), &der);
+    else if (type == CKA_SERIAL_NUMBER_ATTR)
+        der_len = i2d_ASN1_INTEGER(X509_get_serialNumber(x), &der);
+    if (der_len > 0 && der) {
+        if (*out_len < (size_t)der_len) { *out_len = (size_t)der_len; rc = -2; }
+        else { memcpy(out, der, (size_t)der_len); *out_len = (size_t)der_len; rc = 0; }
+    }
+    OPENSSL_free(der);
+    X509_free(x);
+    return rc;
+}
+
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                            CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -2615,6 +2661,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     if (rv != FHSM_RV_OK) return rv;
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         const void *src = NULL; size_t src_len = 0;
+        unsigned char bval = 0;
         CK_ULONG  tmp_class = cko_class, tmp_type = ckk_type, tmp_len = value_len;
         const char    *label_p = NULL; size_t label_len = 0;
         const uint8_t *id_p    = NULL; size_t id_len    = 0;
@@ -2699,6 +2746,68 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
                 }
                 src = id_p; src_len = id_len; break;
+            /* --- Boolean policy / usage attributes (#125 : previously
+             * returned CK_UNAVAILABLE_INFORMATION, which the harness
+             * reads as "missing" -> KeyError). Values are PKCS#11
+             * defaults, or derived from the stored object flags. Note :
+             * per-key usage restrictions are not yet stored, so usage
+             * flags reflect the class default, not per-object overrides
+             * (tracked follow-up). --- */
+            case CKA_TOKEN:        bval = 1; src = &bval; src_len = 1; break;
+            case CKA_PRIVATE:
+                bval = (cko_class == CKO_PUBLIC_KEY || cko_class == CKO_CERTIFICATE) ? 0 : 1;
+                src = &bval; src_len = 1; break;
+            case CKA_MODIFIABLE_ATTR:  bval = 1; src = &bval; src_len = 1; break;
+            case CKA_COPYABLE_ATTR:    bval = 1; src = &bval; src_len = 1; break;
+            case CKA_DESTROYABLE_ATTR: bval = 1; src = &bval; src_len = 1; break;
+            case CKA_LOCAL_ATTR:       bval = 1; src = &bval; src_len = 1; break;
+            case CKA_ALWAYS_AUTH_ATTR: bval = 0; src = &bval; src_len = 1; break;
+            case CKA_WRAP_WITH_TRUSTED_ATTR: bval = 0; src = &bval; src_len = 1; break;
+            case CKA_TRUSTED_ATTR:     bval = 0; src = &bval; src_len = 1; break;
+            case CKA_ALWAYS_SENSITIVE_ATTR: {
+                uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
+                bval = (of & FHSM_OBJF_SENSITIVE) ? 1 : 0; src = &bval; src_len = 1; break;
+            }
+            case CKA_NEVER_EXTRACTABLE_ATTR: {
+                uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
+                bval = (of & FHSM_OBJF_EXTRACTABLE) ? 0 : 1; src = &bval; src_len = 1; break;
+            }
+            case CKA_ENCRYPT_ATTR:
+                bval = (cko_class == CKO_PRIVATE_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+            case CKA_VERIFY_ATTR:
+                bval = (cko_class == CKO_PRIVATE_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+            case CKA_WRAP_ATTR:
+                bval = (cko_class == CKO_PRIVATE_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+            case CKA_DECRYPT_ATTR:
+                bval = (cko_class == CKO_PUBLIC_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+            case CKA_SIGN_ATTR:
+                bval = (cko_class == CKO_PUBLIC_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+            case CKA_UNWRAP_ATTR:
+                bval = (cko_class == CKO_PUBLIC_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+            case CKA_DERIVE_ATTR:      bval = 0; src = &bval; src_len = 1; break;
+            /* Date attributes : empty (unset) by default. A zero-length
+             * value is the PKCS#11 encoding for "no date". */
+            case CKA_START_DATE_ATTR:
+            case CKA_END_DATE_ATTR:    src = &bval; src_len = 0; break;
+            case CKA_SUBJECT_ATTR:
+            case CKA_ISSUER_ATTR:
+            case CKA_SERIAL_NUMBER_ATTR: {
+                if (pTemplate[i].pValue == NULL) {
+                    size_t need = 0;
+                    int e1 = extract_cert_attr(t, (uint32_t)hObject,
+                                                pTemplate[i].type, NULL, &need);
+                    if (e1 == -1) { pTemplate[i].ulValueLen = (CK_ULONG)-1; continue; }
+                    pTemplate[i].ulValueLen = (CK_ULONG)need;
+                } else {
+                    size_t out_len = pTemplate[i].ulValueLen;
+                    int e2 = extract_cert_attr(t, (uint32_t)hObject,
+                                                pTemplate[i].type,
+                                                pTemplate[i].pValue, &out_len);
+                    if (e2 == 0) pTemplate[i].ulValueLen = (CK_ULONG)out_len;
+                    else         pTemplate[i].ulValueLen = (CK_ULONG)-1;
+                }
+                continue;
+            }
             default:            pTemplate[i].ulValueLen = (CK_ULONG)-1;       continue;
         }
         if (pTemplate[i].pValue == NULL) {

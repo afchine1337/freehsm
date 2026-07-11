@@ -180,6 +180,28 @@ in the harness. This document records the triage.
 * **Follow-up**: de-advertise the phantom Signal mechanisms; optionally
   run the harness against `interop` to clear the non-FIPS rejections.
 
+### F7 — C_GetAttributeValue missing standard attributes (KeyError) — FIXED (partial)
+* **Finding**: 30 pkcs11-check failures surfaced as Python `KeyError` on
+  a `CKA_*` type: the harness queried a standard attribute and the module
+  returned `CK_UNAVAILABLE_INFORMATION`, which it reads as "attribute
+  absent". Affected: boolean policy/usage flags (CKA_TOKEN, CKA_PRIVATE,
+  CKA_ENCRYPT/DECRYPT/SIGN/VERIFY/WRAP/UNWRAP/DERIVE, CKA_LOCAL,
+  CKA_ALWAYS_SENSITIVE, CKA_NEVER_EXTRACTABLE, CKA_MODIFIABLE,
+  CKA_COPYABLE, CKA_ALWAYS_AUTHENTICATE, ...), date attributes
+  (CKA_START_DATE / CKA_END_DATE), certificate fields (CKA_SUBJECT,
+  CKA_ISSUER, CKA_SERIAL_NUMBER), and public-key material on private
+  keys (CKA_MODULUS / CKA_PUBLIC_EXPONENT / CKA_EC_PARAMS).
+* **Fix**: `C_GetAttributeValue` now returns the boolean flags (PKCS#11
+  defaults, or derived from the object's stored sensitive/extractable
+  flags and class), empty date attributes, and X.509 subject/issuer/
+  serial (via a new `extract_cert_attr()` that DER-parses the stored
+  certificate). Regression: `tests/test_attributes.c`.
+* **Residual (follow-up)**: (a) per-object usage restrictions are not
+  stored, so CKA_ENCRYPT/etc. reflect the class default rather than a
+  per-key override -- the two TestKeyUsageRestrictions cases need a
+  stored usage-flag byte; (b) CKA_MODULUS/PUBLIC_EXPONENT/EC_PARAMS on
+  *private* keys (extract_pubkey_attr only handles public keys).
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported

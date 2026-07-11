@@ -21,6 +21,22 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **`C_GetAttributeValue` now returns the standard boolean, date and
+  certificate attributes it previously reported as unavailable (#125).**
+  30 pkcs11-check checks (test_attribute_defaults, test_key_flags,
+  test_access_control, x509 field extraction) failed because the module
+  returned `CK_UNAVAILABLE_INFORMATION` for common attributes, which the
+  harness reads as "missing". The function now returns the policy/usage
+  booleans (CKA_TOKEN, CKA_PRIVATE, CKA_ENCRYPT/DECRYPT/SIGN/VERIFY/WRAP/
+  UNWRAP/DERIVE, CKA_LOCAL, CKA_ALWAYS_SENSITIVE, CKA_NEVER_EXTRACTABLE,
+  CKA_MODIFIABLE, CKA_COPYABLE, CKA_DESTROYABLE, CKA_ALWAYS_AUTHENTICATE,
+  CKA_WRAP_WITH_TRUSTED) from the PKCS#11 defaults and the stored object
+  flags, empty CKA_START_DATE / CKA_END_DATE, and X.509
+  CKA_SUBJECT / CKA_ISSUER / CKA_SERIAL_NUMBER (new `extract_cert_attr()`
+  DER parser). Regression: `tests/test_attributes.c`. Per-object usage
+  restrictions and public-key material on private keys remain a tracked
+  follow-up (docs/PKCS11_CHECK_FINDINGS.md F7).
+
 * **FIPS-approved digests and HMACs are now callable, not just advertised
   (#125).** The dispatch table advertised SHA-224, SHA-512/224,
   SHA-512/256, SHA3-256/384/512 and the SHA-224 / SHA-3 HMACs, but the
