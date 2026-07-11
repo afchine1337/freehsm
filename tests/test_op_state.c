@@ -73,10 +73,14 @@ int main(void) {
     C_Login(s, 0, so, 8); C_InitPIN(s, up, 8); (void)C_Login(s, 1, up, 8);
 
     CK_ULONG cls = CKO_SECRET_KEY, kt = CKK_AES, vl = 32;
-    CK_ATTRIBUTE at[] = { {CKA_CLASS,&cls,8}, {CKA_KEY_TYPE,&kt,8}, {CKA_VALUE_LEN,&vl,8} };
+    /* CKA_TOKEN=TRUE : the key must survive the C_CloseSession below so
+     * the reopened-session probe can reuse its handle (session objects
+     * are now destroyed on close, #125). */
+    CK_BYTE bt = 1;
+    CK_ATTRIBUTE at[] = { {CKA_CLASS,&cls,8}, {CKA_KEY_TYPE,&kt,8}, {CKA_VALUE_LEN,&vl,8}, {1,&bt,1} };
     CK_OBJECT_HANDLE ak = 0;
     CK_MECHANISM aesgen = { CKM_AES_KEY_GEN, NULL, 0 };
-    C_GenerateKey(s, &aesgen, at, 3, &ak);
+    C_GenerateKey(s, &aesgen, at, 4, &ak);
 
     /* (1) leave an operation active, close, reopen : must not bleed */
     CK_BYTE iv[16] = {0};
@@ -107,6 +111,29 @@ int main(void) {
         CK_RV r3 = C_Sign(s2, (CK_BYTE*)"abc", 3, sig, &sl2);   /* retry same op */
         CHECK(r3 == CKR_OK, "C_Sign retry with adequate buffer : op preserved");
     }
+
+    /* Use-after-destroy : C_*Init on a destroyed key handle must fail
+     * with CKR_KEY_HANDLE_INVALID, not succeed (#125). */
+    { CK_RV (*C_DestroyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE);
+      CK_RV (*C_SignInit2)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
+      CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
+      *(void**)&C_DestroyObject   = dlsym(h,"C_DestroyObject");
+      *(void**)&C_SignInit2       = dlsym(h,"C_SignInit");
+      *(void**)&C_GetAttributeValue = dlsym(h,"C_GetAttributeValue");
+      CK_ULONG cls2=4, kt2=0x10, vl2=32; CK_BYTE lbl[]="lbl";
+      CK_ATTRIBUTE gt[] = { {0,&cls2,8}, {0x100,&kt2,8}, {0x161,&vl2,8}, {0x03,lbl,3} };
+      CK_OBJECT_HANDLE gk=0; CK_MECHANISM gg={0x350,NULL,0};
+      C_GenerateKey(s2, &gg, gt, 4, &gk);
+      /* buffer-too-small on a readable attribute */
+      CK_BYTE tiny[1]; CK_ATTRIBUTE q={0x03,tiny,1};
+      CK_RV rb = C_GetAttributeValue(s2, gk, &q, 1);
+      if (rb != 0x150UL) { fprintf(stderr,"FAIL: GetAttr small buf 0x%lx (want 0x150)\n",(unsigned long)rb); fails++; }
+      else printf("  C_GetAttributeValue undersized -> CKR_BUFFER_TOO_SMALL : OK\n");
+      C_DestroyObject(s2, gk);
+      CK_MECHANISM hm={0x251,NULL,0};
+      CK_RV rd = C_SignInit2(s2, &hm, gk);
+      if (rd != 0x60UL) { fprintf(stderr,"FAIL: SignInit destroyed key 0x%lx (want 0x60)\n",(unsigned long)rd); fails++; }
+      else printf("  C_SignInit on destroyed key -> CKR_KEY_HANDLE_INVALID : OK\n"); }
 
     if (fails) { fprintf(stderr, "test_op_state : %d FAIL\n", fails); return 1; }
     printf("test_op_state : PASS\n");

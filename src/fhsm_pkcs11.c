@@ -2745,6 +2745,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hObject, &value, &value_len,
                                           &cko_class, &ckk_type);
     if (rv != FHSM_RV_OK) return rv;
+    int fhsm_buf_too_small = 0;
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         const void *src = NULL; size_t src_len = 0;
         unsigned char bval = 0;
@@ -2900,11 +2901,15 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             pTemplate[i].ulValueLen = (CK_ULONG)src_len;
         } else if (pTemplate[i].ulValueLen < src_len) {
             pTemplate[i].ulValueLen = (CK_ULONG)-1;
+            fhsm_buf_too_small = 1;
         } else {
             memcpy(pTemplate[i].pValue, src, src_len);
             pTemplate[i].ulValueLen = (CK_ULONG)src_len;
         }
     }
+    /* PKCS#11 v3.2 C_GetAttributeValue : if any requested attribute did
+     * not fit the supplied buffer, return CKR_BUFFER_TOO_SMALL (#125). */
+    if (fhsm_buf_too_small) return 0x00000150UL;   /* CKR_BUFFER_TOO_SMALL */
     return FHSM_RV_OK;
 }
 
@@ -3502,6 +3507,18 @@ static int mech_is_pss(uint32_t m);
  * comment block on CKM_AES_GMAC further up for the policy. */
 static uint32_t resolve_mech(uint32_t m);
 
+/* Validate that a key handle resolves to a stored object before starting
+ * a keyed operation, so C_*Init on a destroyed or invalid handle fails
+ * with CKR_KEY_HANDLE_INVALID instead of succeeding (#125 use-after-
+ * destroy: TestSignInitErrors / TestVerifyInitErrors / ...). */
+static CK_RV fhsm_require_key(fhsm_token_t *t, CK_OBJECT_HANDLE hKey) {
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    if (fhsm_token_object_get(t, (uint32_t)hKey, &kv, &kvl, &cl, &kt) != FHSM_RV_OK)
+        return FHSM_RV_KEY_HANDLE_INVALID;
+    return FHSM_RV_OK;
+}
+
 static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                          CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey) {
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
@@ -3750,6 +3767,7 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
+    { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);
@@ -3956,6 +3974,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
+    { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);
@@ -4320,6 +4339,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         default:
             return FHSM_RV_MECHANISM_INVALID;
     }
+    { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);
@@ -4714,6 +4734,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             break;
         default: return FHSM_RV_MECHANISM_INVALID;
     }
+    { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);

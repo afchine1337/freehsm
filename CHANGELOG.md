@@ -21,6 +21,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Key-handle validation at operation Init, and C_GetAttributeValue
+  buffer-too-small (#125).** C_EncryptInit / C_DecryptInit / C_SignInit /
+  C_VerifyInit now reject a destroyed or invalid key handle with
+  CKR_KEY_HANDLE_INVALID (previously such a call succeeded -- a
+  use-after-destroy robustness defect). C_GetAttributeValue returns
+  CKR_BUFFER_TOO_SMALL when a requested attribute does not fit the
+  caller's buffer, instead of silently returning CKR_OK with
+  CK_UNAVAILABLE_INFORMATION. Regression: tests/test_op_state.c.
+
 * **PKCS#11 session-object lifecycle (CKA_TOKEN) implemented (#125).**
   The module previously treated every created object as a persistent
   token object and never destroyed session objects, so the store only

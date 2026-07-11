@@ -250,6 +250,26 @@ in the harness. This document records the triage.
   persists, RO token rejected). The large-store harness build (F5) is
   kept as belt-and-braces.
 
+### F10 — Key-handle validation at Init + C_GetAttributeValue buffer-too-small — FIXED
+* **Finding (use-after-destroy)**: C_EncryptInit / C_DecryptInit /
+  C_SignInit / C_VerifyInit did not check the key handle, so a call on a
+  destroyed or never-created handle *succeeded* (the failure only
+  surfaced later, or not at all). pkcs11-check use-after-destroy probes.
+* **Finding (buffer)**: C_GetAttributeValue returned CKR_OK when a
+  requested attribute did not fit the supplied buffer (it set
+  ulValueLen = CK_UNAVAILABLE_INFORMATION but did not signal the caller).
+  TestGetAttrUndersizedBuffer.
+* **Fix**: a shared `fhsm_require_key()` validates the key handle in all
+  four keyed *Init entry points (CKR_KEY_HANDLE_INVALID otherwise);
+  C_GetAttributeValue now returns CKR_BUFFER_TOO_SMALL if any attribute
+  was truncated. Regression added to `tests/test_op_state.c`.
+* **Note**: this investigation (the 63 unclassified failures) also
+  surfaced further real items now tracked as follow-ups: private-object
+  visibility in public/post-logout sessions (access control),
+  key-type-vs-mechanism mismatch at Init, AES-KW/KWP key-type confusion
+  on unwrap (Tookan), CKA_VALUE on a sensitive key should return
+  CKR_ATTRIBUTE_SENSITIVE, and a few computed-value cross-verifies.
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported
