@@ -77,6 +77,21 @@ int main(void) {
     { CK_ULONG big=1; CK_ATTRIBUTE t[]={{0,&(CK_ULONG){4},8},{0x100,&(CK_ULONG){0x1F},8},{0x161,&(CK_ULONG){32},8},{0x104,&big,8}};
       CK_OBJECT_HANDLE k; expect(GK(s0,&(CK_MECHANISM){0x1080,0,0},t,4,&k), CKR_ATTRIBUTE_VALUE_INVALID, "GenerateKey overlong CKA_ENCRYPT"); }
 
+    /* EC private key created without CKA_EC_PARAMS must be rejected. */
+    { CK_RV (*CO)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
+      *(void**)&CO = dlsym(H, "C_CreateObject");
+      CK_ULONG cko = 3, ckk = 3; CK_BYTE val[32] = {1};
+      CK_ATTRIBUTE ec[] = { {0,&cko,8}, {0x100,&ckk,8}, {0x11,val,32} };
+      CK_OBJECT_HANDLE o; CK_RV r = CO(s0, ec, 3, &o);
+      if (r == CKR_OK) { fprintf(stderr, "FAIL: EC priv no EC_PARAMS accepted\n"); fails++; }
+      else printf("  %-38s -> 0x%lx : OK\n", "CreateObject EC priv no EC_PARAMS", (unsigned long)r); }
+
+    /* AES-GCM with a NULL IV pointer but non-zero length must be rejected. */
+    { CK_SESSION_HANDLE s = fresh();
+      struct { void *pIv; CK_ULONG il, ib; void *pAAD; CK_ULONG al, tb; } g = { NULL, 12, 96, NULL, 0, 128 };
+      CK_MECHANISM m = { 0x1087, &g, sizeof g };
+      expect(EI(s, &m, AESK), CKR_MECHANISM_PARAM_INVALID, "EncryptInit GCM NULL pIv len=12"); CS(s); }
+
     if (fails) { fprintf(stderr, "test_input_validation : %d FAIL\n", fails); return 1; }
     printf("test_input_validation : PASS\n");
     return 0;

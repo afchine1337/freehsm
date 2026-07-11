@@ -222,10 +222,14 @@ in the harness. This document records the triage.
     shared `fhsm_check_bool_attr_lengths()`.
     test_scalar_attr_length_extended.
 * Regression: `tests/test_input_validation.c`.
+* **Fixed in the second half of this tranche**: RSA-PSS salt-length and
+  RSA-OAEP source-length boundaries (absurd/negative lengths rejected at
+  Init with CKR_MECHANISM_PARAM_INVALID); NULL inner IV/AAD/source
+  pointers with non-zero lengths (GCM/OAEP) rejected; EC private key
+  created without CKA_EC_PARAMS rejected (CKR_TEMPLATE_INCONSISTENT).
 * **Remaining in this cluster (follow-up)**: AES-KW/KWP corrupted-blob
-  integrity on unwrap, RSA-PSS salt-length and RSA-OAEP source-length
-  boundary rejection, EC private key created without CKA_EC_PARAMS, and
-  wrong-key-type rejection for several mechanisms.
+  integrity on unwrap, AES-CCM null-nonce, C_SeedRandom isize length,
+  and wrong-key-type rejection for several mechanisms.
 
 ## Expected gaps (xfail-class, not defects)
 

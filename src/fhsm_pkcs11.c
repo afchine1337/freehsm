@@ -3496,6 +3496,10 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
              * recommendation. The Wycheproof corpus always sets an
              * explicit value so this normalisation never fires there. */
             if (tag_bits == 0) tag_bits = 128;
+            /* A non-zero IV/AAD length with a NULL pointer is an invalid
+             * inner parameter (#125 TestMechanismNullInnerParams). */
+            if ((iv_len && !iv_ptr) || (aad_len && !aad_ptr))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
             if (iv_len > sizeof(op->gcm_iv)
                 || aad_len > sizeof(op->gcm_aad)
                 || tag_bits > 128 || (tag_bits & 7)) {
@@ -3598,6 +3602,15 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                                           : &g_oaep_dec[hSession];
         memset(o, 0, sizeof(*o));
         memcpy(&o->p, pMechanism->pParameter, sizeof(o->p));
+        /* Validate the OAEP source (label) parameter : a non-zero length
+         * with a NULL pointer, or a length beyond our label buffer, is an
+         * invalid inner parameter rather than something to silently
+         * ignore (#125 TestMechanismNullInnerParams /
+         * TestRsaOaepSourceDataLengthBoundary). */
+        if (o->p.source == CKZ_DATA_SPECIFIED && o->p.ulSourceDataLen > 0
+            && (o->p.pSourceData == NULL
+                || o->p.ulSourceDataLen > sizeof(o->label_copy)))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
         if (o->p.source == CKZ_DATA_SPECIFIED && o->p.pSourceData
             && o->p.ulSourceDataLen > 0
             && o->p.ulSourceDataLen <= sizeof(o->label_copy)) {
@@ -3627,6 +3640,12 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
          * p[2] = sLen */
         op->pss_mgf     = (uint32_t)p[1];
         op->pss_saltlen = (long)p[2];
+        /* Reject an absurd salt length (#125 TestRsaPssSaltLengthBoundary):
+         * a negative cast (0x8000...) or a value far larger than any
+         * real PSS salt (bounded by emLen - hLen - 2, < 512 for our key
+         * sizes). */
+        if (op->pss_saltlen < 0 || op->pss_saltlen > 1024)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
         op->pss_have    = 1;
     }
     /* CK_ML_DSA_PARAMS (PKCS#11 v3.2 §6.18) and CK_SLH_DSA_PARAMS

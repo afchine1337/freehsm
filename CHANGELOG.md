@@ -21,6 +21,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **More input/parameter validation (#125, AVA_VAN, continued).**
+  RSA-PSS salt length and RSA-OAEP source-data length beyond a sane
+  bound (or a negative 2^63 cast) are rejected at Init with
+  CKR_MECHANISM_PARAM_INVALID; a NULL inner IV/AAD (AES-GCM) or source
+  (RSA-OAEP) pointer paired with a non-zero length is rejected rather
+  than silently ignored; and an EC private key created via C_CreateObject
+  without CKA_EC_PARAMS is rejected (CKR_TEMPLATE_INCONSISTENT) instead
+  of stored as a curveless key. Regression: tests/test_input_validation.c.
+
 * **Input/parameter validation hardening (#125, AVA_VAN).** Several
   invalid inputs that pkcs11-check flagged as silently accepted are now
   rejected: a wrong-size or missing **AES-CBC IV** and an **AES-GCM IV**

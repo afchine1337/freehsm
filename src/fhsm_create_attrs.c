@@ -238,6 +238,13 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
         return FHSM_PARSE_TEMPLATE_INCOMPLETE;
 
     /* Dispatch on (cko, ckk). */
+    /* An EC private key with no CKA_EC_PARAMS is under-specified : the
+     * curve is unknown, so subsequent sign/derive would be undefined.
+     * Reject rather than store a curveless key (#125 TestEcMissingParams). */
+    if (attrs->cko == FHSM_CKO_PRIVATE_KEY && attrs->ckk == FHSM_CKK_EC
+        && fhsm_find_attr(pTemplate, ulCount, FHSM_CKA_EC_PARAMS) < 0)
+        return FHSM_PARSE_TEMPLATE_INCONSISTENT;
+
     if (attrs->cko == FHSM_CKO_SECRET_KEY
         || attrs->cko == FHSM_CKO_PRIVATE_KEY
         || (attrs->cko == FHSM_CKO_PUBLIC_KEY
