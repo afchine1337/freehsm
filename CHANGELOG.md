@@ -21,6 +21,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Input/parameter validation hardening (#125, AVA_VAN).** Several
+  invalid inputs that pkcs11-check flagged as silently accepted are now
+  rejected: a wrong-size or missing **AES-CBC IV** and an **AES-GCM IV**
+  shorter than 96 bits (NIST SP 800-38D) return
+  CKR_MECHANISM_PARAM_INVALID at C_EncryptInit/C_DecryptInit; an invalid
+  **RSA public exponent** (CKA_PUBLIC_EXPONENT even or < 3, per FIPS
+  186-5 -- e=0/1/2/4) returns CKR_ATTRIBUTE_VALUE_INVALID from
+  C_GenerateKeyPair; and an over-long **CK_BBOOL attribute** (length != 1)
+  in C_GenerateKey/C_GenerateKeyPair/C_DeriveKey/C_UnwrapKey returns
+  CKR_ATTRIBUTE_VALUE_INVALID. Regression: tests/test_input_validation.c.
+  Remaining validation items (AES-KW/KWP corrupted-blob rejection,
+  RSA-PSS/OAEP length boundaries, EC-without-params, wrong-key-type) are
+  tracked in docs/PKCS11_CHECK_FINDINGS.md F8.
+
 * **`C_GetAttributeValue` now returns the standard boolean, date and
   certificate attributes it previously reported as unavailable (#125).**
   30 pkcs11-check checks (test_attribute_defaults, test_key_flags,

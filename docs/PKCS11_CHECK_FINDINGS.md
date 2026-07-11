@@ -202,6 +202,31 @@ in the harness. This document records the triage.
   stored usage-flag byte; (b) CKA_MODULUS/PUBLIC_EXPONENT/EC_PARAMS on
   *private* keys (extract_pubkey_attr only handles public keys).
 
+### F8 — Input/parameter validation hardening (AVA_VAN) — FIXED (partial)
+* **Finding**: ~30 pkcs11-check security probes had invalid inputs
+  *accepted* (CKR_OK) instead of rejected.
+* **Fixed this tranche**:
+  - **AES-CBC IV** : a wrong-size or missing IV is now rejected at
+    C_EncryptInit / C_DecryptInit with CKR_MECHANISM_PARAM_INVALID
+    (was deferred / accepted). test_mechanism_param_invalid,
+    TestBadParameters.
+  - **AES-GCM weak IV** : an IV shorter than 96 bits (NIST SP 800-38D)
+    is rejected at init. TestGcmIvWeakness (0/1/4-byte IVs).
+  - **RSA public exponent** : C_GenerateKeyPair validates
+    CKA_PUBLIC_EXPONENT (must be odd and >= 3 per FIPS 186-5) ;
+    e = 0/1/2/4 rejected with CKR_ATTRIBUTE_VALUE_INVALID.
+    TestRsaExponent.
+  - **Over-long boolean attributes** : a CK_BBOOL attribute supplied
+    with a length != 1 (e.g. CK_ULONG-sized) is rejected in
+    C_GenerateKey / C_GenerateKeyPair / C_DeriveKey / C_UnwrapKey via a
+    shared `fhsm_check_bool_attr_lengths()`.
+    test_scalar_attr_length_extended.
+* Regression: `tests/test_input_validation.c`.
+* **Remaining in this cluster (follow-up)**: AES-KW/KWP corrupted-blob
+  integrity on unwrap, RSA-PSS salt-length and RSA-OAEP source-length
+  boundary rejection, EC private key created without CKA_EC_PARAMS, and
+  wrong-key-type rejection for several mechanisms.
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported

@@ -1348,6 +1348,27 @@ static CK_RV fhsm_check_template(CK_ATTRIBUTE *t, CK_ULONG n) {
     return FHSM_RV_OK;
 }
 
+/* Reject a boolean (CK_BBOOL) attribute supplied with a length other
+ * than 1 byte -- e.g. a CK_ULONG-sized value. PKCS#11 CK_BBOOL is
+ * exactly one byte ; an over-long value is CKR_ATTRIBUTE_VALUE_INVALID
+ * (pkcs11-check security/test_scalar_attr_length_extended, #125). */
+static CK_RV fhsm_check_bool_attr_lengths(CK_ATTRIBUTE *t, CK_ULONG n) {
+    static const CK_ULONG bool_attrs[] = {
+        0x001,0x002,0x086,0x103,0x104,0x105,0x106,0x107,0x108,0x109,0x10A,
+        0x10B,0x10C,0x162,0x163,0x164,0x165,0x170,0x171,0x172,0x202,0x210 };
+    if (n == 0 || t == NULL) return FHSM_RV_OK;
+    for (CK_ULONG i = 0; i < n; ++i) {
+        for (size_t j = 0; j < sizeof(bool_attrs)/sizeof(bool_attrs[0]); ++j) {
+            if (t[i].type == bool_attrs[j]) {
+                if (t[i].pValue != NULL && t[i].ulValueLen != 1)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                break;
+            }
+        }
+    }
+    return FHSM_RV_OK;
+}
+
 /* ---------------------------------------------------------------------------
  * C_GenerateRandom --- FIPS DRBG (CTR_DRBG-AES-256, OpenSSL FIPS provider).
  * ----------------------------------------------------------------------- */
@@ -1436,6 +1457,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -1758,6 +1780,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                    CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
+    { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -2004,6 +2027,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                   CK_OBJECT_HANDLE *phKey) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !pWrappedKey || !phKey) return FHSM_RV_ARGUMENTS_BAD;
+    { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -2368,6 +2392,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !phPub || !phPriv) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_template(pPub, ulPub);  if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_template(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_bool_attr_lengths(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_bool_attr_lengths(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -2383,6 +2409,21 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen == sizeof(CK_ULONG))
             bits = (long)(*(CK_ULONG*)pPub[i].pValue);
         if (bits != 2048 && bits != 3072 && bits != 4096) return FHSM_RV_KEY_SIZE_RANGE;
+        /* Validate CKA_PUBLIC_EXPONENT if supplied : FIPS 186-5 requires
+         * an odd exponent >= 3 ; e = 0/1/2/4 are cryptographically
+         * invalid (pkcs11-check TestRsaExponent, #125). A valid exponent
+         * is accepted; generation uses the standard F4 (65537). */
+        long e_i = find_attr(pPub, ulPub, 0x00000122UL /* CKA_PUBLIC_EXPONENT */);
+        if (e_i >= 0 && pPub[e_i].pValue && pPub[e_i].ulValueLen > 0) {
+            BIGNUM *e_bn = BN_bin2bn((const unsigned char *)pPub[e_i].pValue,
+                                      (int)pPub[e_i].ulValueLen, NULL);
+            if (!e_bn) return FHSM_RV_HOST_MEMORY;
+            int bad = (!BN_is_odd(e_bn) || BN_cmp(e_bn, BN_value_one()) <= 0
+                       || BN_is_word(e_bn, 1));
+            /* reject e < 3 : e==1 caught above ; e==2 is even (caught) */
+            BN_free(e_bn);
+            if (bad) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        }
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, "RSA", bits);
         ckk_type = CKK_RSA;
         pw_family = FHSM_PAIRWISE_RSA;
@@ -3607,6 +3648,16 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                              &hedge_variant);
         (void)hedge_variant;  /* recorded for future use ; not applied */
     }
+    /* Parameter validation (#125 input-validation) : reject wrong-size or
+     * weak IVs at *Init with CKR_MECHANISM_PARAM_INVALID rather than
+     * deferring to the operation (pkcs11-check test_mechanism_param_invalid,
+     * TestGcmIvWeakness, TestBadParameters). */
+    if ((pMechanism->mechanism == CKM_AES_CBC ||
+         pMechanism->mechanism == CKM_AES_CBC_PAD) && !op->have_iv)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;   /* CBC requires a 16-byte IV */
+    if (pMechanism->mechanism == CKM_AES_GCM &&
+        (!op->gcm_have || op->gcm_iv_len < 12))
+        return FHSM_RV_MECHANISM_PARAM_INVALID;   /* NIST SP 800-38D : IV >= 96 bits */
     op->active = 1;
     (void)hSession;
     return FHSM_RV_OK;
