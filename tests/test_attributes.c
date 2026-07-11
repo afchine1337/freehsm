@@ -83,7 +83,18 @@ int main(void) {
       CK_BYTE b = 9; CK_ATTRIBUTE q = { 0x104, &b, 1 };
       GA(s, k2, &q, 1);
       if (b != 0) { fprintf(stderr, "FAIL: CKA_ENCRYPT=FALSE override not honored (got %d)\n", b); fails++; }
-      else printf("  %-22s = 0 (override) : OK\n", "CKA_ENCRYPT restricted"); }
+      else printf("  %-22s = 0 (override) : OK\n", "CKA_ENCRYPT restricted");
+      /* Enforcement : an encrypt-only key must refuse decrypt (#125). */
+      CK_RV (*C_DecryptInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
+      *(void**)&C_DecryptInit = dlsym(H,"C_DecryptInit");
+      CK_BYTE F2 = 0; CK_BYTE iv[16] = {0};
+      CK_ATTRIBUTE eo[] = { {0,&cls,8}, {0x100,&kt,8}, {0x161,&vl,8}, {0x105,&F2,1} };
+      CK_OBJECT_HANDLE ek = 0; CK_MECHANISM g3 = { 0x1080, NULL, 0 };
+      GK(s, &g3, eo, 4, &ek);
+      CK_MECHANISM cbc = { 0x1082, iv, 16 };
+      CK_RV re = C_DecryptInit(s, &cbc, ek);
+      if (re != 0x68UL) { fprintf(stderr,"FAIL: encrypt-only key decrypt 0x%lx (want 0x68)\n",(unsigned long)re); fails++; }
+      else printf("  encrypt-only key refuses decrypt : OK\n"); }
 
     if (fails) { fprintf(stderr, "test_attributes : %d FAIL\n", fails); return 1; }
     printf("test_attributes : PASS\n");

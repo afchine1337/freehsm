@@ -1433,6 +1433,8 @@ static unsigned char fhsm_usage_bool(fhsm_token_t *t, CK_OBJECT_HANDLE h,
     return class_default ? 1 : 0;
 }
 
+static CK_RV fhsm_check_usage(fhsm_token_t *t, CK_OBJECT_HANDLE hKey, uint8_t bit);
+
 /* PKCS#11 : creating a token object (CKA_TOKEN=TRUE) on a read-only
  * session is CKR_SESSION_READ_ONLY. Call before creating the object. */
 static CK_RV fhsm_check_ro_token(CK_SESSION_HANDLE hSession,
@@ -1877,6 +1879,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hBaseKey, FHSM_USAGE_DERIVE); if (uc != FHSM_RV_OK) return uc; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -2040,6 +2043,7 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !pulWrappedKeyLen) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    { CK_RV uc = fhsm_check_usage(t, hWrappingKey, FHSM_USAGE_WRAP); if (uc != FHSM_RV_OK) return uc; }
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
 
@@ -2126,6 +2130,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !pWrappedKey || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hUnwrappingKey, FHSM_USAGE_UNWRAP); if (uc != FHSM_RV_OK) return uc; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -3609,6 +3614,18 @@ static CK_RV fhsm_require_key(fhsm_token_t *t, CK_OBJECT_HANDLE hKey) {
     return FHSM_RV_OK;
 }
 
+/* Enforce a per-object usage flag before an operation : if the key
+ * carries explicit usage and the required bit is clear, the operation is
+ * CKR_KEY_FUNCTION_NOT_PERMITTED (#125 TestKeyUsageRestrictions). Legacy
+ * keys (no explicit usage) are permitted. */
+static CK_RV fhsm_check_usage(fhsm_token_t *t, CK_OBJECT_HANDLE hKey, uint8_t bit) {
+    uint8_t u = 0;
+    if (t && fhsm_token_object_get_usage(t, (uint32_t)hKey, &u) == FHSM_RV_OK
+        && (u & FHSM_USAGE_VALID) && !(u & bit))
+        return FHSM_RV_KEY_FUNCTION_NOT_PERMITTED;
+    return FHSM_RV_OK;
+}
+
 static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                          CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey) {
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
@@ -3858,6 +3875,7 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
+    { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_ENCRYPT); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);
@@ -4065,6 +4083,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
+    { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_DECRYPT); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);
@@ -4444,6 +4463,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             return FHSM_RV_MECHANISM_INVALID;
     }
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
+    { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_SIGN); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);
@@ -4839,6 +4859,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         default: return FHSM_RV_MECHANISM_INVALID;
     }
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
+    { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_VERIFY); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);

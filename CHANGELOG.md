@@ -21,6 +21,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Per-object usage flags are now enforced at operation start (#125).**
+  In addition to reporting the stored CKA_ENCRYPT/DECRYPT/SIGN/VERIFY/
+  WRAP/UNWRAP/DERIVE flags, the operation entry points reject a key that
+  lacks the required capability: C_EncryptInit / C_DecryptInit /
+  C_SignInit / C_VerifyInit / C_WrapKey / C_UnwrapKey / C_DeriveKey
+  return CKR_KEY_FUNCTION_NOT_PERMITTED via a shared fhsm_check_usage()
+  helper. Legacy keys without an explicit usage byte remain permitted.
+  Verified: an encrypt-only key (CKA_DECRYPT=FALSE) refuses
+  C_DecryptInit. Regression: tests/test_attributes.c.
+
 * **Per-object usage flags are stored and enforced in reporting (#125).**
   CKA_ENCRYPT/DECRYPT/SIGN/VERIFY/WRAP/UNWRAP/DERIVE were previously
   reported from the class default, so a key created with (e.g.)
