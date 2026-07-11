@@ -270,6 +270,22 @@ in the harness. This document records the triage.
   on unwrap (Tookan), CKA_VALUE on a sensitive key should return
   CKR_ATTRIBUTE_SENSITIVE, and a few computed-value cross-verifies.
 
+### F11 — Private-object access control in C_FindObjects — FIXED
+* **Finding**: objects with CKA_PRIVATE=TRUE were visible to sessions
+  that were not logged in as the normal user -- a public session saw
+  private objects, and a session still saw them after C_Logout
+  (pkcs11-check access-control probes).
+* **Fix**: `C_FindObjectsInit` now filters out private objects when the
+  session role is not `FHSM_ROLE_USER`. CKA_PRIVATE is derived from the
+  object class (secret and private keys are private ; public keys,
+  certificates and data objects are public), matching the value
+  C_GetAttributeValue reports. Regression added to
+  `tests/test_session_objects.c` (private object hidden after logout).
+* **Note**: this derives CKA_PRIVATE from class rather than an explicit
+  stored flag ; an object explicitly created with CKA_PRIVATE=FALSE is
+  still treated as private if it is a secret/private key. Storing an
+  explicit CKA_PRIVATE bit is a small follow-up.
+
 ## Expected gaps (xfail-class, not defects)
 
 ### G1 — CKO_DATA data objects unsupported

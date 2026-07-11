@@ -21,6 +21,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Private objects are no longer visible to unauthenticated sessions
+  (#125, access control).** C_FindObjects returned CKA_PRIVATE objects
+  (secret and private keys) to a public session and to a session after
+  C_Logout. C_FindObjectsInit now hides private objects unless the
+  session is logged in as the normal user (CKA_PRIVATE derived from the
+  object class). Regression: tests/test_session_objects.c.
+
 * **Key-handle validation at operation Init, and C_GetAttributeValue
   buffer-too-small (#125).** C_EncryptInit / C_DecryptInit / C_SignInit /
   C_VerifyInit now reject a destroyed or invalid key handle with

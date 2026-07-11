@@ -3244,8 +3244,21 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
                                            prelim,
                                            sizeof(prelim)/sizeof(prelim[0]),
                                            &got);
+    /* Access control : a session not logged in as the normal user (a
+     * public session, or a session after C_Logout) must not see private
+     * objects (CKA_PRIVATE). CKA_PRIVATE is derived from the object
+     * class -- secret and private keys are private ; public keys,
+     * certificates and data objects are public (#125 : private object
+     * visible in public / post-logout session). */
+    int authed_user = (fhsm_session_role(hSession) == FHSM_ROLE_USER);
     size_t k = 0;
     for (size_t j = 0; j < got && k < sizeof(f->handles)/sizeof(f->handles[0]); ++j) {
+        if (!authed_user) {
+            const uint8_t *pv = NULL; size_t pl = 0; uint32_t ocl = 0, okt = 0;
+            if (fhsm_token_object_get(t, prelim[j], &pv, &pl, &ocl, &okt) == FHSM_RV_OK
+                && (ocl == CKO_SECRET_KEY || ocl == CKO_PRIVATE_KEY))
+                continue;   /* private object hidden from unauthenticated session */
+        }
         if (has_id) {
             const uint8_t *oid = NULL; size_t oidl = 0;
             if (fhsm_token_object_get_id(t, prelim[j], &oid, &oidl) != FHSM_RV_OK)

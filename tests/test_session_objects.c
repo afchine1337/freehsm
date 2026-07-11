@@ -70,6 +70,18 @@ int main(void) {
     if (r != CKR_SESSION_READ_ONLY) { fprintf(stderr, "FAIL: RO token create 0x%lx (want 0xb5)\n", (unsigned long)r); fails++; }
     else printf("  token object on RO session -> CKR_SESSION_READ_ONLY : OK\n");
 
+    /* Access control : a private object (secret/private key) must be
+     * hidden from a session that is not logged in as USER (#125). */
+    { CK_RV (*C_Logout)(CK_SESSION_HANDLE); *(void**)&C_Logout = dlsym(H,"C_Logout");
+      CK_SESSION_HANDLE s3; OS(0,6,NULL,NULL,&s3); (void)L(s3,1,up,8);
+      mkaes(s3, 1);                          /* token private key */
+      int seen_in = count(s3);
+      C_Logout(s3);
+      int seen_out = count(s3);
+      if (seen_in < 1) { fprintf(stderr,"FAIL: logged-in sees %d (want >=1)\n",seen_in); fails++; }
+      else if (seen_out != 0) { fprintf(stderr,"FAIL: post-logout sees %d private (want 0)\n",seen_out); fails++; }
+      else printf("  private object hidden after logout : OK\n"); }
+
     if (fails) { fprintf(stderr, "test_session_objects : %d FAIL\n", fails); return 1; }
     printf("test_session_objects : PASS\n");
     return 0;
