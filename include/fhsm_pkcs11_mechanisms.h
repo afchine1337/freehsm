@@ -91,8 +91,6 @@ extern "C" {
 /* --- ML-DSA --- */
 #define CKM_ML_DSA_KEY_PAIR_GEN              0x0000001Cu
 #define CKM_ML_DSA                           0x0000001Du
-#define CKM_HASH_ML_DSA_SHA256               0x00000024u
-#define CKM_HASH_ML_DSA_SHA512               0x00000026u
 
 /* --- SLH-DSA --- */
 #define CKM_SLH_DSA_KEY_PAIR_GEN             0x0000002Du
@@ -225,8 +223,6 @@ extern fhsm_rv_t dispatch_ml_kem_keypair(unsigned long, unsigned long, const voi
 extern fhsm_rv_t dispatch_ml_kem_encap(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ml_dsa_keypair(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ml_dsa(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
-extern fhsm_rv_t dispatch_hash_ml_dsa_sha256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
-extern fhsm_rv_t dispatch_hash_ml_dsa_sha512(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_slh_dsa_keypair(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_slh_dsa(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_hkdf(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);

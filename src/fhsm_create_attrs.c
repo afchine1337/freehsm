@@ -38,7 +38,7 @@
 #define FHSM_CKK_RSA                0x00000000UL
 #define FHSM_CKK_EC                 0x00000003UL
 #define FHSM_CKK_EC_EDWARDS         0x00000040UL
-#define FHSM_CKK_ML_DSA             0x0000003EUL
+#define FHSM_CKK_ML_DSA             0x0000004AUL
 
 /* ---------------------------------------------------------------------------
  * Curve OID -> group-name lookup. Three NIST curves only, hardcoded for

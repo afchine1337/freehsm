@@ -306,26 +306,6 @@ __attribute__((weak)) fhsm_rv_t dispatch_generic_secret_keygen(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
-__attribute__((weak)) fhsm_rv_t dispatch_hash_ml_dsa_sha256(
-    unsigned long session, unsigned long key,
-    const void *params, size_t plen,
-    fhsm_slice_t in, uint8_t *out, size_t *outlen)
-{
-    (void)session; (void)key; (void)params; (void)plen;
-    (void)in; (void)out; (void)outlen;
-    return FHSM_RV_FUNCTION_FAILED;
-}
-
-__attribute__((weak)) fhsm_rv_t dispatch_hash_ml_dsa_sha512(
-    unsigned long session, unsigned long key,
-    const void *params, size_t plen,
-    fhsm_slice_t in, uint8_t *out, size_t *outlen)
-{
-    (void)session; (void)key; (void)params; (void)plen;
-    (void)in; (void)out; (void)outlen;
-    return FHSM_RV_FUNCTION_FAILED;
-}
-
 __attribute__((weak)) fhsm_rv_t dispatch_hkdf(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
@@ -801,8 +781,6 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x0000001Cu, "CKM_ML_DSA_KEY_PAIR_GEN", "ML-DSA", "keypair", 1, dispatch_ml_dsa_keypair },
     { 0x0000001Du, "CKM_ML_DSA", "ML-DSA", "sign", 1, dispatch_ml_dsa },
     { 0x00000020u, "CKM_DH_PKCS_KEY_PAIR_GEN", "DH", "keypair", 0, dispatch_reject_fips },
-    { 0x00000024u, "CKM_HASH_ML_DSA_SHA256", "ML-DSA", "sign", 1, dispatch_hash_ml_dsa_sha256 },
-    { 0x00000026u, "CKM_HASH_ML_DSA_SHA512", "ML-DSA", "sign", 1, dispatch_hash_ml_dsa_sha512 },
     { 0x0000002Du, "CKM_SLH_DSA_KEY_PAIR_GEN", "SLH-DSA", "keypair", 1, dispatch_slh_dsa_keypair },
     { 0x0000002Eu, "CKM_SLH_DSA", "SLH-DSA", "sign", 1, dispatch_slh_dsa },
     { 0x00000043u, "CKM_SHA256_RSA_PKCS_PSS", "RSA", "sign", 1, dispatch_rsa_pss_sha256 },

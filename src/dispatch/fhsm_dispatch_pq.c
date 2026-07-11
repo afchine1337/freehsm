@@ -260,15 +260,6 @@ fhsm_rv_t dispatch_ml_dsa(unsigned long s, unsigned long k,
                            uint8_t *o, size_t *ol)
 { (void)s; (void)k; return pq_sign(p, pl, NULL,       in, o, ol, "ML-DSA"); }
 
-fhsm_rv_t dispatch_hash_ml_dsa_sha256(unsigned long s, unsigned long k,
-                                        const void *p, size_t pl, fhsm_slice_t in,
-                                        uint8_t *o, size_t *ol)
-{ (void)s; (void)k; return pq_sign(p, pl, "SHA2-256", in, o, ol, "ML-DSA"); }
-
-fhsm_rv_t dispatch_hash_ml_dsa_sha512(unsigned long s, unsigned long k,
-                                        const void *p, size_t pl, fhsm_slice_t in,
-                                        uint8_t *o, size_t *ol)
-{ (void)s; (void)k; return pq_sign(p, pl, "SHA2-512", in, o, ol, "ML-DSA"); }
 
 /* ---- SLH-DSA --------------------------------------------------------- */
 static const char *const SLH_SETS[] = {

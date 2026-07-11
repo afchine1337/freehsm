@@ -21,6 +21,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **PQC key-type values, parameter-set validation and ML-KEM usage
+  corrected (#125).** With ML-DSA/SLH-DSA/ML-KEM now recognised at their
+  official mechanism values, the conformance harness exercised them for
+  real and surfaced: (a) the key-type (CKK) values were still
+  non-standard -- reassigned to the official PKCS#11 v3.2 values
+  (CKK_ML_KEM 0x49, CKK_ML_DSA 0x4A, CKK_SLH_DSA 0x4B); (b) a malformed
+  (CK_ULONG-sized) CKA_PARAMETER_SET was accepted -- now validated
+  against the known parameter-set names (CKR_ATTRIBUTE_VALUE_INVALID);
+  (c) an ML-KEM private key reported CKA_DERIVE=TRUE -- PQC private keys
+  no longer advertise DERIVE. Also de-advertised the CKM_HASH_ML_DSA_*
+  prehash mechanisms, which were advertised with sign flags but not
+  implemented in the operation path. Verified: ML-DSA/SLH-DSA/ML-KEM KATs
+  pass, key-type readback matches, param-set is validated.
+
 * **Per-object usage flags are now enforced at operation start (#125).**
   In addition to reporting the stored CKA_ENCRYPT/DECRYPT/SIGN/VERIFY/
   WRAP/UNWRAP/DERIVE flags, the operation entry points reject a key that

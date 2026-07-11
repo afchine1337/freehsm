@@ -2011,7 +2011,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 #define CKM_ML_KEM_OP             0x00000017UL
 #endif
 #ifndef CKK_ML_KEM
-#define CKK_ML_KEM                0x0000003CUL
+#define CKK_ML_KEM                0x00000049UL
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -2465,9 +2465,9 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 #define CKM_ML_DSA_OP              0x0000001DUL
 #define CKM_SLH_DSA_KEY_PAIR_GEN   0x0000002DUL
 #define CKM_SLH_DSA_OP             0x0000002EUL
-#define CKK_ML_KEM                 0x0000003CUL
-#define CKK_ML_DSA                 0x0000003EUL
-#define CKK_SLH_DSA                0x00004040UL
+#define CKK_ML_KEM                 0x00000049UL
+#define CKK_ML_DSA                 0x0000004AUL
+#define CKK_SLH_DSA                0x0000004BUL
 /* Parameter-set names exposed via CKA_PARAMETER_SET (read from template). */
 #define CKA_PARAMETER_SET          0x00000170UL
 
@@ -2487,6 +2487,23 @@ static const char *match_curve(const uint8_t *der, size_t len) {
             return ec_curves[i].name;
     }
     return NULL;
+}
+
+/* Validate a CKA_PARAMETER_SET value against the known PQC parameter-set
+ * names. A CK_ULONG-sized or otherwise malformed value is rejected
+ * (#125 TestGenerateKeyPairErrors : over/underlong CKA_PARAMETER_SET). */
+static int fhsm_pset_valid(const char *pset) {
+    static const char *ok[] = {
+        "ML-KEM-512","ML-KEM-768","ML-KEM-1024",
+        "ML-DSA-44","ML-DSA-65","ML-DSA-87",
+        "SLH-DSA-SHA2-128s","SLH-DSA-SHA2-128f","SLH-DSA-SHA2-192s",
+        "SLH-DSA-SHA2-192f","SLH-DSA-SHA2-256s","SLH-DSA-SHA2-256f",
+        "SLH-DSA-SHAKE-128s","SLH-DSA-SHAKE-128f","SLH-DSA-SHAKE-192s",
+        "SLH-DSA-SHAKE-192f","SLH-DSA-SHAKE-256s","SLH-DSA-SHAKE-256f",
+    };
+    for (size_t i = 0; i < sizeof(ok)/sizeof(ok[0]); ++i)
+        if (strcmp(pset, ok[i]) == 0) return 1;
+    return 0;
 }
 
 CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
@@ -2551,6 +2568,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen < sizeof(pset)) {
             memcpy(pset, pPub[i].pValue, pPub[i].ulValueLen);
             pset[pPub[i].ulValueLen] = '\0';
+            if (!fhsm_pset_valid(pset)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         }
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, pset);
         ckk_type = CKK_ML_KEM;
@@ -2561,6 +2579,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen < sizeof(pset)) {
             memcpy(pset, pPub[i].pValue, pPub[i].ulValueLen);
             pset[pPub[i].ulValueLen] = '\0';
+            if (!fhsm_pset_valid(pset)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         }
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, pset);
         ckk_type = CKK_ML_DSA;
@@ -2571,6 +2590,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen < sizeof(pset)) {
             memcpy(pset, pPub[i].pValue, pPub[i].ulValueLen);
             pset[pPub[i].ulValueLen] = '\0';
+            if (!fhsm_pset_valid(pset)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         }
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, pset);
         ckk_type = CKK_SLH_DSA;
@@ -2661,7 +2681,12 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_apply_token_scope(t, hSession, pPub,  ulPub,  hp);
     (void)fhsm_token_object_set_usage(t, hp, fhsm_compute_usage(CKO_PUBLIC_KEY, pPub, ulPub));
     fhsm_apply_token_scope(t, hSession, pPriv, ulPriv, hk);
-    (void)fhsm_token_object_set_usage(t, hk, fhsm_compute_usage(CKO_PRIVATE_KEY, pPriv, ulPriv));
+    { uint8_t pu = fhsm_compute_usage(CKO_PRIVATE_KEY, pPriv, ulPriv);
+      /* PQC keys (ML-KEM/ML-DSA/SLH-DSA) do not derive (#125 : ML-KEM
+       * private key must report CKA_DERIVE=FALSE). */
+      if (ckk_type == CKK_ML_KEM || ckk_type == CKK_ML_DSA || ckk_type == CKK_SLH_DSA)
+          pu &= (uint8_t)~FHSM_USAGE_DERIVE;
+      (void)fhsm_token_object_set_usage(t, hk, pu); }
     return FHSM_RV_OK;
 }
 

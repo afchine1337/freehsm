@@ -256,12 +256,6 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_ML_DSA",              0x0000001d, "ML-DSA","sign",    "dispatch_ml_dsa",
          fips="approved", key_type="CKK_ML_DSA",
          refs=("FIPS 204",)),
-    Mech("CKM_HASH_ML_DSA_SHA256",  0x00000024, "ML-DSA","sign",    "dispatch_hash_ml_dsa_sha256",
-         fips="approved", key_type="CKK_ML_DSA",
-         refs=("FIPS 204",)),
-    Mech("CKM_HASH_ML_DSA_SHA512",  0x00000026, "ML-DSA","sign",    "dispatch_hash_ml_dsa_sha512",
-         fips="approved", key_type="CKK_ML_DSA",
-         refs=("FIPS 204",)),
 
     # === SLH-DSA (FIPS 205) ===========================================
     Mech("CKM_SLH_DSA_KEY_PAIR_GEN", 0x0000002d, "SLH-DSA", "keypair", "dispatch_slh_dsa_keypair",
