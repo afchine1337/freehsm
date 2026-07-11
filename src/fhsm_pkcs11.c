@@ -2516,6 +2516,26 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_template(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
+    /* For PQC key generation, CKA_PARAMETER_SET (in either template) must
+     * be a known parameter-set NAME of plausible length : a CK_ULONG-sized
+     * or over/underlong value is CKR_ATTRIBUTE_VALUE_INVALID (#125
+     * TestGenerateKeyPairErrors). */
+    if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN
+        || pMechanism->mechanism == CKM_ML_DSA_KEY_PAIR_GEN
+        || pMechanism->mechanism == CKM_SLH_DSA_KEY_PAIR_GEN) {
+        CK_ATTRIBUTE *tp[2] = { pPub, pPriv }; CK_ULONG tn[2] = { ulPub, ulPriv };
+        for (int ti = 0; ti < 2; ++ti) {
+            long pi = find_attr(tp[ti], tn[ti], CKA_PARAMETER_SET);
+            if (pi >= 0 && tp[ti][pi].pValue) {
+                char pbuf[32];
+                if (tp[ti][pi].ulValueLen == 0 || tp[ti][pi].ulValueLen >= sizeof(pbuf))
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                memcpy(pbuf, tp[ti][pi].pValue, tp[ti][pi].ulValueLen);
+                pbuf[tp[ti][pi].ulValueLen] = '\0';
+                if (!fhsm_pset_valid(pbuf)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            }
+        }
+    }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
