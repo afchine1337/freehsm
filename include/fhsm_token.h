@@ -218,6 +218,10 @@ fhsm_rv_t fhsm_token_object_destroy(fhsm_token_t *t, uint32_t handle);
 fhsm_rv_t fhsm_token_object_mark_session(fhsm_token_t *t, uint32_t handle,
                                          uint32_t owner_session);
 
+/* Per-object usage flags (CKA_ENCRYPT/... bits, 0x80 = explicit). #125. */
+fhsm_rv_t fhsm_token_object_set_usage(fhsm_token_t *t, uint32_t handle, uint8_t usage_flags);
+fhsm_rv_t fhsm_token_object_get_usage(fhsm_token_t *t, uint32_t handle, uint8_t *out);
+
 /* Destroy all session objects owned by `owner_session`. #125. */
 fhsm_rv_t fhsm_token_destroy_session_objects(fhsm_token_t *t,
                                              uint32_t owner_session);

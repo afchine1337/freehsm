@@ -1253,6 +1253,18 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
 #define FHSM_OBJF_SENSITIVE     0x01
 #define FHSM_OBJF_EXTRACTABLE   0x02
 
+/* Per-object usage flag bits (stored via fhsm_token_object_set_usage).
+ * Bit 7 marks the byte as carrying explicit usage ; without it the
+ * class default applies (legacy objects). #125. */
+#define FHSM_USAGE_ENCRYPT  0x01
+#define FHSM_USAGE_DECRYPT  0x02
+#define FHSM_USAGE_SIGN     0x04
+#define FHSM_USAGE_VERIFY   0x08
+#define FHSM_USAGE_WRAP     0x10
+#define FHSM_USAGE_UNWRAP   0x20
+#define FHSM_USAGE_DERIVE   0x40
+#define FHSM_USAGE_VALID    0x80
+
 #define CKO_DATA            0x00000000UL
 #define CKO_CERTIFICATE     0x00000001UL
 #define CKO_PUBLIC_KEY      0x00000002UL
@@ -1380,6 +1392,45 @@ static int tmpl_bbool(CK_ATTRIBUTE *t, CK_ULONG n, CK_ATTRIBUTE_TYPE type, int d
     long i = find_attr(t, n, type);
     if (i < 0 || !t[i].pValue || t[i].ulValueLen != 1) return dflt;
     return ((const unsigned char *)t[i].pValue)[0] ? 1 : 0;
+}
+
+/* Compute the stored usage-flag byte for a new object from its class
+ * default plus any CKA_ENCRYPT/DECRYPT/SIGN/VERIFY/WRAP/UNWRAP/DERIVE
+ * overrides in the creation template (#125). */
+static uint8_t fhsm_compute_usage(uint32_t cko_class, CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    uint8_t u = FHSM_USAGE_VALID;
+    if (cko_class == CKO_SECRET_KEY)
+        u |= FHSM_USAGE_ENCRYPT | FHSM_USAGE_DECRYPT | FHSM_USAGE_SIGN
+           | FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP | FHSM_USAGE_UNWRAP;
+    else if (cko_class == CKO_PUBLIC_KEY)
+        u |= FHSM_USAGE_ENCRYPT | FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP;
+    else if (cko_class == CKO_PRIVATE_KEY)
+        u |= FHSM_USAGE_DECRYPT | FHSM_USAGE_SIGN | FHSM_USAGE_UNWRAP | FHSM_USAGE_DERIVE;
+    static const struct { CK_ATTRIBUTE_TYPE a; uint8_t bit; } map[] = {
+        { CKA_ENCRYPT_ATTR, FHSM_USAGE_ENCRYPT }, { CKA_DECRYPT_ATTR, FHSM_USAGE_DECRYPT },
+        { CKA_SIGN_ATTR, FHSM_USAGE_SIGN }, { CKA_VERIFY_ATTR, FHSM_USAGE_VERIFY },
+        { CKA_WRAP_ATTR, FHSM_USAGE_WRAP }, { CKA_UNWRAP_ATTR, FHSM_USAGE_UNWRAP },
+        { CKA_DERIVE_ATTR, FHSM_USAGE_DERIVE }
+    };
+    for (size_t i = 0; i < sizeof(map)/sizeof(map[0]); ++i) {
+        int b = tmpl_bbool(tmpl, n, map[i].a, -1);
+        if (b == 1) u |= map[i].bit;
+        else if (b == 0) u &= (uint8_t)~map[i].bit;
+    }
+    return u;
+}
+
+/* Report a usage bit for C_GetAttributeValue : the stored value if the
+ * object carries explicit usage, else the class default. */
+static unsigned char fhsm_usage_bool(fhsm_token_t *t, CK_OBJECT_HANDLE h,
+                                     uint32_t cko_class, uint8_t bit,
+                                     int class_default) {
+    uint8_t u = 0;
+    if (fhsm_token_object_get_usage(t, (uint32_t)h, &u) == FHSM_RV_OK
+        && (u & FHSM_USAGE_VALID))
+        return (u & bit) ? 1 : 0;
+    (void)cko_class;
+    return class_default ? 1 : 0;
 }
 
 /* PKCS#11 : creating a token object (CKA_TOKEN=TRUE) on a read-only
@@ -1556,6 +1607,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
     return FHSM_RV_OK;
 }
 
@@ -1657,6 +1709,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+        (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
         return FHSM_RV_OK;
     }
 
@@ -1674,6 +1727,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+        (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
         return FHSM_RV_OK;
     }
 
@@ -1762,6 +1816,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     if (rv != FHSM_RV_OK) return rv;
     *phObject = handle;
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
     return FHSM_RV_OK;
 }
 
@@ -1940,6 +1995,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
     (void)fhsm_audit_event(FHSM_EV_DERIVE, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, NULL);
     return FHSM_RV_OK;
@@ -2147,6 +2203,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
     (void)fhsm_audit_event(FHSM_EV_UNWRAP, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, NULL);
     return FHSM_RV_OK;
@@ -2597,7 +2654,9 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     }
     *phPub = hp; *phPriv = hk;
     fhsm_apply_token_scope(t, hSession, pPub,  ulPub,  hp);
+    (void)fhsm_token_object_set_usage(t, hp, fhsm_compute_usage(CKO_PUBLIC_KEY, pPub, ulPub));
     fhsm_apply_token_scope(t, hSession, pPriv, ulPriv, hk);
+    (void)fhsm_token_object_set_usage(t, hk, fhsm_compute_usage(CKO_PRIVATE_KEY, pPriv, ulPriv));
     return FHSM_RV_OK;
 }
 
@@ -2864,18 +2923,19 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 bval = (of & FHSM_OBJF_EXTRACTABLE) ? 0 : 1; src = &bval; src_len = 1; break;
             }
             case CKA_ENCRYPT_ATTR:
-                bval = (cko_class == CKO_PRIVATE_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+                bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_ENCRYPT, cko_class != CKO_PRIVATE_KEY); src = &bval; src_len = 1; break;
             case CKA_VERIFY_ATTR:
-                bval = (cko_class == CKO_PRIVATE_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+                bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_VERIFY, cko_class != CKO_PRIVATE_KEY); src = &bval; src_len = 1; break;
             case CKA_WRAP_ATTR:
-                bval = (cko_class == CKO_PRIVATE_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+                bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_WRAP, cko_class != CKO_PRIVATE_KEY); src = &bval; src_len = 1; break;
             case CKA_DECRYPT_ATTR:
-                bval = (cko_class == CKO_PUBLIC_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+                bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_DECRYPT, cko_class != CKO_PUBLIC_KEY); src = &bval; src_len = 1; break;
             case CKA_SIGN_ATTR:
-                bval = (cko_class == CKO_PUBLIC_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
+                bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_SIGN, cko_class != CKO_PUBLIC_KEY); src = &bval; src_len = 1; break;
             case CKA_UNWRAP_ATTR:
-                bval = (cko_class == CKO_PUBLIC_KEY) ? 0 : 1; src = &bval; src_len = 1; break;
-            case CKA_DERIVE_ATTR:      bval = 0; src = &bval; src_len = 1; break;
+                bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_UNWRAP, cko_class != CKO_PUBLIC_KEY); src = &bval; src_len = 1; break;
+            case CKA_DERIVE_ATTR:
+                bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_DERIVE, 0); src = &bval; src_len = 1; break;
             /* Date attributes : empty (unset) by default. A zero-length
              * value is the PKCS#11 encoding for "no date". */
             case CKA_START_DATE_ATTR:

@@ -100,6 +100,11 @@ typedef struct fhsm_object_s {
      * handle, destroyed on C_CloseSession and never written to disk
      * (#125 PKCS#11 CKA_TOKEN semantics). */
     uint32_t owner_session;
+    /* Per-object usage flags (CKA_ENCRYPT/DECRYPT/SIGN/VERIFY/WRAP/UNWRAP/
+     * DERIVE), serialised in a previously-spare record byte. Bit 7
+     * (0x80) = "explicit usage stored" ; if unset (legacy objects) the
+     * PKCS#11 layer falls back to class defaults. #125. */
+    uint8_t  usage_flags;
 } fhsm_object_t;
 
 struct fhsm_token_s {
@@ -284,7 +289,8 @@ static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
         memcpy(out + off + 80, o->id,    32);
         put_u32_le(out + off + 112, o->id_len);
         out[off + 116] = o->flags;
-        out[off + 117] = 0; out[off + 118] = 0; out[off + 119] = 0;
+        out[off + 117] = o->usage_flags;
+        out[off + 118] = 0; out[off + 119] = 0;
         memcpy(out + off + FHSM_OBJ_REC_V2_FIXED, o->value, o->value_len);
         off += rec_len;
     }
@@ -353,6 +359,7 @@ static fhsm_rv_t parse_objects_v2(fhsm_token_t *t, const uint8_t *buf, size_t le
         o->id_len = get_u32_le(buf + off + 112);
         if (o->id_len > 32) return FHSM_RV_FUNCTION_FAILED;
         o->flags  = buf[off + 116];
+        o->usage_flags = buf[off + 117];
         memcpy(o->value, buf + off + FHSM_OBJ_REC_V2_FIXED, o->value_len);
         off += rec_len;
     }
@@ -1051,6 +1058,38 @@ fhsm_rv_t fhsm_token_object_get(fhsm_token_t *t, uint32_t handle,
  * (non-zero). Session objects are not persisted, so this re-writes the
  * token image (dropping the object from disk) and is destroyed on
  * C_CloseSession. #125. */
+fhsm_rv_t fhsm_token_object_set_usage(fhsm_token_t *t, uint32_t handle,
+                                      uint8_t usage_flags) {
+    if (!t) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            t->objects[i].usage_flags = usage_flags;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+fhsm_rv_t fhsm_token_object_get_usage(fhsm_token_t *t, uint32_t handle,
+                                      uint8_t *out) {
+    if (!t || !out) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            *out = t->objects[i].usage_flags;
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_OK;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
 fhsm_rv_t fhsm_token_object_mark_session(fhsm_token_t *t, uint32_t handle,
                                          uint32_t owner_session) {
     if (!t || owner_session == 0) return FHSM_RV_ARGUMENTS_BAD;

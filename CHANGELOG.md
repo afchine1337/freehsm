@@ -21,6 +21,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* **Per-object usage flags are stored and enforced in reporting (#125).**
+  CKA_ENCRYPT/DECRYPT/SIGN/VERIFY/WRAP/UNWRAP/DERIVE were previously
+  reported from the class default, so a key created with (e.g.)
+  CKA_ENCRYPT=FALSE still reported CKA_ENCRYPT=TRUE
+  (pkcs11-check TestKeyUsageRestrictions). The creation paths
+  (C_GenerateKey / C_GenerateKeyPair / C_CreateObject / C_DeriveKey /
+  C_UnwrapKey) now compute a usage-flag byte from the class default plus
+  any template overrides and persist it in a previously-spare token
+  record byte; C_GetAttributeValue reports the stored value. Legacy
+  objects (no explicit byte) fall back to the class default.
+  Regression: tests/test_attributes.c.
+
 * **PQC mechanism values corrected to the official PKCS#11 v3.2 values
   (#125, ABI change).** ML-DSA / SLH-DSA / HASH-ML-DSA were advertised in
   the 0x4021-0x4029 range, which PKCS#11 v3.2 allocates to the

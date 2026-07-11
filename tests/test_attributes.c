@@ -74,6 +74,17 @@ int main(void) {
       if (r != 0 || d.ulValueLen != 0) { fprintf(stderr, "FAIL: CKA_START_DATE rv=0x%lx len=%ld\n", (unsigned long)r, (long)d.ulValueLen); fails++; }
       else printf("  %-22s = empty : OK\n", "CKA_START_DATE"); }
 
+    /* Per-object usage flag override : a key created with CKA_ENCRYPT=FALSE
+     * must report CKA_ENCRYPT=0 (#125 usage-flag storage). */
+    { CK_BYTE F = 0;
+      CK_ATTRIBUTE r[] = { {0,&cls,8}, {0x100,&kt,8}, {0x161,&vl,8}, {0x104,&F,1} };
+      CK_OBJECT_HANDLE k2 = 0; CK_MECHANISM g2 = { 0x1080, NULL, 0 };
+      GK(s, &g2, r, 4, &k2);
+      CK_BYTE b = 9; CK_ATTRIBUTE q = { 0x104, &b, 1 };
+      GA(s, k2, &q, 1);
+      if (b != 0) { fprintf(stderr, "FAIL: CKA_ENCRYPT=FALSE override not honored (got %d)\n", b); fails++; }
+      else printf("  %-22s = 0 (override) : OK\n", "CKA_ENCRYPT restricted"); }
+
     if (fails) { fprintf(stderr, "test_attributes : %d FAIL\n", fails); return 1; }
     printf("test_attributes : PASS\n");
     return 0;
