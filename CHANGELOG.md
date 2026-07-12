@@ -9,6 +9,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 conformance — CKA_TOKEN readback.** `C_GetAttributeValue` hard-coded
+  `CKA_TOKEN = TRUE`; it now reflects the object's actual scope (FALSE for a
+  session object, TRUE for a persisted token object) via
+  `fhsm_token_object_is_token` (TestSecretKeyDefaults / TestDataObjectDefaults).
+
 * **#125 behavioural conformance (batch 9).** Added SHA3-224 (`CKM_SHA3_224`,
   `0x000002B5`) as an approved digest: hash enum + size/name, `C_DigestInit`
   case, dispatch handler and advertisement (regenerated tables). Verified

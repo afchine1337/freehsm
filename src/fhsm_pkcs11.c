@@ -3041,7 +3041,15 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
              * per-key usage restrictions are not yet stored, so usage
              * flags reflect the class default, not per-object overrides
              * (tracked follow-up). --- */
-            case CKA_TOKEN:        bval = 1; src = &bval; src_len = 1; break;
+            case CKA_TOKEN: {
+                /* CKA_TOKEN is TRUE for a persisted token object, FALSE for a
+                 * session object (owner_session != 0). Previously hard-coded
+                 * TRUE, which broke the session-object default (#125
+                 * TestSecretKeyDefaults / TestDataObjectDefaults). */
+                int is_tok = 1;
+                (void)fhsm_token_object_is_token(t, (uint32_t)hObject, &is_tok);
+                bval = is_tok ? 1 : 0; src = &bval; src_len = 1; break;
+            }
             case CKA_PRIVATE:
                 bval = (cko_class == CKO_PUBLIC_KEY || cko_class == CKO_CERTIFICATE) ? 0 : 1;
                 src = &bval; src_len = 1; break;

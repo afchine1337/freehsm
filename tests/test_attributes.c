@@ -53,7 +53,7 @@ int main(void) {
     if (GK(s, &gen, at, 3, &k) != 0) { fprintf(stderr, "FAIL keygen\n"); return 1; }
 
     /* Secret key : usage + policy booleans must be present with sane values. */
-    want_bool(s, k, 0x001, 1, "CKA_TOKEN");
+    want_bool(s, k, 0x001, 0, "CKA_TOKEN");  /* session object (no CKA_TOKEN in template) -> FALSE */
     want_bool(s, k, 0x002, 1, "CKA_PRIVATE");
     want_bool(s, k, 0x104, 1, "CKA_ENCRYPT");
     want_bool(s, k, 0x105, 1, "CKA_DECRYPT");
