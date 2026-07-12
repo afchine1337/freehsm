@@ -2033,8 +2033,21 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         && ((unsigned char*)pTemplate[li].pValue)[0] != 0) {
         obj_flags |= FHSM_OBJF_EXTRACTABLE;
     }
+    /* Honour a requested CKA_KEY_TYPE in the derive template (PKCS#11 v3.2
+     * §A.6.4.4 : a derived key takes its type from the template). Default is
+     * CKK_GENERIC_SECRET. Storing the requested type (e.g. CKK_AES) keeps the
+     * key usable with the matching cipher under the mechanism<->key-type gate
+     * (#125 TestECDHDerivedKeyUse). */
+    uint32_t derived_ckk = CKK_GENERIC_SECRET;
+    { long ki = find_attr(pTemplate, ulCount, 0x100 /* CKA_KEY_TYPE */);
+      if (ki >= 0 && pTemplate[ki].pValue
+          && pTemplate[ki].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG req = 0; memcpy(&req, pTemplate[ki].pValue, sizeof(CK_ULONG));
+          derived_ckk = (uint32_t)req;
+      }
+    }
     uint32_t handle = 0;
-    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, CKK_GENERIC_SECRET, label,
+    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, derived_ckk, label,
                                 z, z_len, NULL, 0, obj_flags, &handle);
     fhsm_zeroize(z, sizeof(z));
     if (rv != FHSM_RV_OK) return rv;
@@ -3797,13 +3810,30 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         memcpy(op->iv, pMechanism->pParameter, 8);
         op->have_iv = 1;
     }
-    /* AES-CTR : pParameter is either a 16-byte counter block directly or
-     * a CK_AES_CTR_PARAMS struct. The simplified path (16 bytes) is the
-     * one OpenSC's pkcs11-tool uses with --iv. */
-    if (pMechanism->mechanism == CKM_AES_CTR
-        && pMechanism->pParameter && pMechanism->ulParameterLen >= 16) {
-        memcpy(op->iv, pMechanism->pParameter, 16);
-        op->have_iv = 1;
+    /* AES-CTR : pParameter is either a raw 16-byte counter block (the
+     * OpenSC pkcs11-tool --iv convention) or a CK_AES_CTR_PARAMS struct
+     *   { CK_ULONG ulCounterBits; CK_BYTE cb[16]; }  (24 bytes on LP64).
+     * The struct's counter block is cb[], NOT the first 16 bytes -- copying
+     * the first 16 bytes of the struct mixes ulCounterBits into the counter
+     * and corrupts the keystream (#125 TestMechEncryptKAT[AES_CTR]).
+     * ulCounterBits must be in the spec range 1..128
+     * (#125 TestAESCTR::test_aes_ctr_counter_bits_zero). */
+    if (pMechanism->mechanism == CKM_AES_CTR && pMechanism->pParameter) {
+        if (pMechanism->ulParameterLen == 16) {
+            memcpy(op->iv, pMechanism->pParameter, 16);
+            op->have_iv = 1;
+        } else if (pMechanism->ulParameterLen >= sizeof(CK_ULONG) + 16) {
+            CK_ULONG cbits = 0;
+            memcpy(&cbits, pMechanism->pParameter, sizeof(CK_ULONG));
+            if (cbits == 0 || cbits > 128)
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            memcpy(op->iv,
+                   (const uint8_t *)pMechanism->pParameter + sizeof(CK_ULONG),
+                   16);
+            op->have_iv = 1;
+        } else {
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        }
     }
     /* AES-GMAC : per PKCS#11 v3.2 §6.10.6 the IV is conveyed via
      * pParameter. We accept two calling conventions for interop :
@@ -4015,8 +4045,15 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x0133: want = 0x15; break;                    /* DES3_CBC -> CKK_DES3 */
         default: want = -1; break;
     }
-    if (want >= 0 && (uint32_t)want != kt)
+    if (want >= 0 && (uint32_t)want != kt) {
+        /* A CKK_GENERIC_SECRET secret is legitimately usable with the
+         * symmetric cipher/MAC families (AES, DES3) : do not reject it. The
+         * wrong-key-type security tests use asymmetric keys, which stay
+         * rejected. */
+        if ((want == 0x1F || want == 0x15) && kt == 0x10 /* CKK_GENERIC_SECRET */)
+            return FHSM_RV_OK;
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    }
     return FHSM_RV_OK;
 }
 

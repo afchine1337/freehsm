@@ -9,6 +9,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 behavioural conformance (batch 3).** Fixed a regression from the
+  mechanism↔key-type gate: an ECDH-derived `CKK_GENERIC_SECRET` key used with a
+  symmetric cipher was wrongly rejected. `C_DeriveKey` now honours a requested
+  `CKA_KEY_TYPE` in the derive template, and the gate accepts
+  `CKK_GENERIC_SECRET` for the AES/DES3 families (asymmetric wrong-key-type
+  rejections are unaffected). Fixed AES-CTR parameter parsing: a
+  `CK_AES_CTR_PARAMS` struct's counter block is `cb[]`, not the first 16 bytes —
+  the previous code mixed `ulCounterBits` into the counter and corrupted the
+  keystream (KAT mismatch). `ulCounterBits` outside 1..128 (including 0) is now
+  `CKR_MECHANISM_PARAM_INVALID`; the raw-16-byte OpenSC convention is preserved.
+
 * **#125 behavioural conformance (batch 2).** `C_CreateObject` now runs the
   bool- and scalar-attribute length validators (the scalar check had only been
   wired into `C_GenerateKey`/`C_GenerateKeyPair`/`C_DeriveKey`): an overlong
