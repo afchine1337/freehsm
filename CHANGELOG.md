@@ -9,6 +9,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 robustness — one-shot length bounds & wrap-key size.** `C_Encrypt`
+  and `C_Decrypt` reject a data length beyond `INT_MAX` with
+  `CKR_DATA_LEN_RANGE` instead of silently truncating the `(int)` cast on the
+  OpenSSL path (TestEncryptOutputLengthTruncation / TestDecryptOutputLengthTruncation).
+  `C_WrapKey` rejects an AES wrapping key whose length is not 128/192/256 bits
+  with `CKR_WRAPPING_KEY_SIZE_RANGE` (TestWrapKeyErrors).
+
 * **#125 conformance — CCM de-advertised.** AES-CCM (`0x1088`) is FIPS-approved
   and KAT-covered, but its online `C_Encrypt`/`C_Decrypt` path is not wired, so
   advertising `CKF_ENCRYPT` for a mechanism `C_EncryptInit` rejects was a

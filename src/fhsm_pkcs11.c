@@ -2138,6 +2138,11 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (pMechanism->mechanism == CKM_AES_KEY_WRAP
         || pMechanism->mechanism == CKM_AES_KEY_WRAP_KWP) {
         if (wkt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        /* The wrapping key must be a valid AES key size (128/192/256 bits) ;
+         * anything else is CKR_WRAPPING_KEY_SIZE_RANGE (#125 TestWrapKeyErrors),
+         * not a silent fall-through to the 256-bit cipher name. */
+        if (wkl != 16 && wkl != 24 && wkl != 32)
+            return 0x00000112UL;   /* CKR_WRAPPING_KEY_SIZE_RANGE */
         const char *cname = NULL;
         if (pMechanism->mechanism == CKM_AES_KEY_WRAP) {
             cname = (wkl == 16) ? "AES-128-WRAP" :
@@ -4159,6 +4164,9 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
 
     if (!pulEncLen || (!pData && ulDataLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+    /* A data length beyond INT_MAX would be silently truncated by the (int)
+     * casts on the OpenSSL path (#125 TestEncryptOutputLengthTruncation). */
+    if (ulDataLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
 
     /* --- RSA-OAEP path (asymmetric encryption) --- */
     if (op->mechanism == CKM_RSA_PKCS_OAEP) {
@@ -4412,6 +4420,9 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         op->active = 0;
         return FHSM_RV_ARGUMENTS_BAD;
     }
+    /* A length beyond INT_MAX would be silently truncated by the (int) casts
+     * on the OpenSSL path (#125 TestDecryptOutputLengthTruncation). */
+    if (ulEncLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
