@@ -1362,6 +1362,14 @@ static CK_RV fhsm_check_template(CK_ATTRIBUTE *t, CK_ULONG n) {
     if (n == 0) return FHSM_RV_OK;
     if (t == NULL) return FHSM_RV_ARGUMENTS_BAD;
     if (n > FHSM_MAX_TEMPLATE_ATTRS) return FHSM_RV_ARGUMENTS_BAD;
+    /* An attribute in a creation template with a NULL pValue but a non-zero
+     * ulValueLen is malformed : there is no value of the stated length. This
+     * is CKR_ATTRIBUTE_VALUE_INVALID (#125 TestCreateObjectErrors
+     * CKA_ALLOWED_MECHANISMS NULL_PTR + nonzero len). Creation templates never
+     * use the NULL/size-query convention (that is C_GetAttributeValue only). */
+    for (CK_ULONG i = 0; i < n; ++i)
+        if (t[i].pValue == NULL && t[i].ulValueLen != 0)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     return FHSM_RV_OK;
 }
 
@@ -1711,6 +1719,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     if (!pTemplate || !phObject || ulCount == 0) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    { CK_RV cr = fhsm_check_template(pTemplate, ulCount);          if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount);  if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
@@ -3922,6 +3931,14 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     op->pss_have    = 0;
     op->pss_saltlen = 0;
     op->pss_mgf     = 0;
+    /* The bare CKM_RSA_PKCS_PSS mechanism carries no implicit hash, so its
+     * CK_RSA_PKCS_PSS_PARAMS (hashAlg, mgf, sLen) are mandatory : a missing
+     * or too-short parameter is CKR_MECHANISM_PARAM_INVALID, not a silent
+     * fallback (#125 TestBadParameters RSA_PKCS_PSS missing params). */
+    if (op->mechanism == 0x0000000DUL
+        && (!pMechanism->pParameter
+            || pMechanism->ulParameterLen < 3 * sizeof(CK_ULONG)))
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
     if (mech_is_pss(op->mechanism)
         && pMechanism->pParameter
         && pMechanism->ulParameterLen >= 3 * sizeof(CK_ULONG)) {

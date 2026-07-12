@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 behavioural conformance (batch 5) — creation-template & PSS param
+  validation.** `fhsm_check_template` (now also run by `C_CreateObject`) rejects
+  any attribute with a NULL `pValue` but non-zero `ulValueLen` as
+  `CKR_ATTRIBUTE_VALUE_INVALID` (malformed value; e.g. `CKA_ALLOWED_MECHANISMS`
+  NULL_PTR + non-zero length). The bare `CKM_RSA_PKCS_PSS` mechanism now requires
+  its `CK_RSA_PKCS_PSS_PARAMS` (hashAlg/mgf/sLen): a missing or too-short
+  parameter is `CKR_MECHANISM_PARAM_INVALID` instead of a silent default.
+
 * **#125 behavioural conformance (batch 4) — AES-GCM correctness.** The
   one-shot `C_Encrypt` GCM path ignored the `CK_GCM_PARAMS` captured at
   `C_EncryptInit`: it used a hard-coded 12-byte `op->iv` (randomly generated for
