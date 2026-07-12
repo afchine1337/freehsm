@@ -4176,21 +4176,18 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             op->active = 0; return FHSM_RV_FUNCTION_FAILED;
         }
         if (pData == NULL) {
+            /* Size query : PKCS#11 v3.2 requires the operation to REMAIN
+             * active so the caller can call again with a real buffer. The
+             * operation is terminated only by the actual decrypt below (or
+             * by C_DecryptInit / a NULL-arg rejection). (#125). */
             *pulDataLen = out_len;
             EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
-            /* Per PKCS#11 v3 the operation must terminate when the
-             * caller queries the size --- otherwise we'd strand op-
-             * >active=1 and block every subsequent C_DecryptInit on
-             * this session with CKR_OPERATION_ACTIVE. */
-            op->active = 0;
-            g_oaep_dec[hSession].active = 0;
             return FHSM_RV_OK;
         }
         if (*pulDataLen < out_len) {
+            /* Buffer too small : keep the operation active for retry. */
             *pulDataLen = out_len;
             EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
-            op->active = 0;
-            g_oaep_dec[hSession].active = 0;
             return 0x00000150UL;
         }
         size_t buf_len = *pulDataLen;
@@ -4230,8 +4227,8 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         if (EVP_PKEY_decrypt(dctx, NULL, &out_len, pEnc, ulEncLen) <= 0) {
             EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_ENCRYPTED_DATA_INVALID;
         }
-        if (pData == NULL) { *pulDataLen = out_len; EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_OK; }
-        if (*pulDataLen < out_len) { *pulDataLen = out_len; EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0; return 0x00000150UL; }
+        if (pData == NULL) { *pulDataLen = out_len; EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); return FHSM_RV_OK; }  /* size query : op stays active */
+        if (*pulDataLen < out_len) { *pulDataLen = out_len; EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); return 0x00000150UL; }  /* buffer too small : op stays active for retry */
         size_t bl = *pulDataLen;
         int dr = EVP_PKEY_decrypt(dctx, pData, &bl, pEnc, ulEncLen);
         EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0;
