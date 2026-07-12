@@ -9,6 +9,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 behavioural conformance (batch 4) — AES-GCM correctness.** The
+  one-shot `C_Encrypt` GCM path ignored the `CK_GCM_PARAMS` captured at
+  `C_EncryptInit`: it used a hard-coded 12-byte `op->iv` (randomly generated for
+  the struct calling convention, so it never matched the caller's IV) and an
+  empty AAD. Any non-default IV or any AAD therefore produced the wrong
+  ciphertext and tag, breaking round-trips (`CKR_ENCRYPTED_DATA_INVALID` on
+  decrypt), cross-verification and the AES-GCM KAT. The path is rewritten to
+  honour the caller's IV / AAD / tag length, mirroring `C_Decrypt`. Verified
+  byte-for-byte against NIST SP 800-38D GCM Test Case 4 (ciphertext + tag) and a
+  full encrypt→decrypt round-trip.
+
 * **#125 behavioural conformance (batch 3).** Fixed a regression from the
   mechanism↔key-type gate: an ECDH-derived `CKK_GENERIC_SECRET` key used with a
   symmetric cipher was wrongly rejected. `C_DeriveKey` now honours a requested

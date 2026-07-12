@@ -4245,22 +4245,57 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         return FHSM_RV_OK;
     }
 
-    /* --- AES-256-GCM path (symmetric) --- */
+    /* --- AES-GCM path (symmetric) ---
+     * Honour the caller-provided CK_GCM_PARAMS (IV, AAD, tag length)
+     * captured at C_EncryptInit, mirroring the C_Decrypt path. Output
+     * layout is ciphertext || tag (PKCS#11 v3.x). The earlier code used a
+     * hard-coded 12-byte op->iv (randomly generated for the struct form,
+     * so it did not match the caller's IV) and an EMPTY AAD, producing the
+     * wrong ciphertext/tag whenever a non-default IV or any AAD was present
+     * (#125 TestAESGCM*, TestMechEncryptKAT[AES_GCM], roundtrip). */
     if (op->mechanism != CKM_AES_GCM || kt != CKK_AES) {
         op->active = 0; return FHSM_RV_MECHANISM_INVALID;
     }
-    /* Required output : ciphertext + 16-byte GCM tag appended. */
-    size_t need = ulDataLen + 16;
+    size_t etag_len = op->gcm_tag_len ? op->gcm_tag_len : 16;
+    size_t need = ulDataLen + etag_len;
     if (pEnc == NULL) { *pulEncLen = need; return FHSM_RV_OK; }
     if (*pulEncLen < need) { *pulEncLen = need; return 0x00000150UL; }
-    if (!op->have_iv) fhsm_rng_bytes(op->iv, 12);
-    size_t ct_len = ulDataLen;
-    rv = fhsm_aes_gcm_encrypt(FHSM_SLICE(kv, kvl),
-                              FHSM_SLICE(op->iv, 12),
-                              FHSM_SLICE("", 0),
-                              FHSM_SLICE(pData, ulDataLen),
-                              pEnc, &ct_len, pEnc + ulDataLen);
-    *pulEncLen = ct_len + 16;
+    {
+        const uint8_t *eiv_ptr = op->gcm_iv_len ? op->gcm_iv : op->iv;
+        size_t eiv_len = op->gcm_iv_len ? op->gcm_iv_len : 12;
+        const EVP_CIPHER *ecph = NULL;
+        EVP_CIPHER_CTX *ectx = NULL;
+        int exl = 0;
+        size_t eproduced = 0;
+        if (!op->gcm_iv_len && !op->have_iv) {
+            fhsm_rng_bytes(op->iv, 12); eiv_ptr = op->iv; eiv_len = 12;
+        }
+        switch (kvl) {
+            case 16: ecph = EVP_aes_128_gcm(); break;
+            case 24: ecph = EVP_aes_192_gcm(); break;
+            case 32: ecph = EVP_aes_256_gcm(); break;
+            default: op->active = 0; return FHSM_RV_KEY_SIZE_RANGE;
+        }
+        ectx = EVP_CIPHER_CTX_new();
+        if (!ectx) { op->active = 0; return FHSM_RV_HOST_MEMORY; }
+        rv = FHSM_RV_FUNCTION_FAILED;
+        if (EVP_EncryptInit_ex(ectx, ecph, NULL, NULL, NULL) != 1) goto genc_out;
+        if (eiv_len != 12 && EVP_CIPHER_CTX_ctrl(ectx, EVP_CTRL_GCM_SET_IVLEN,
+                                                 (int)eiv_len, NULL) != 1) goto genc_out;
+        if (EVP_EncryptInit_ex(ectx, NULL, NULL, kv, eiv_ptr) != 1) goto genc_out;
+        if (op->gcm_aad_len > 0 && EVP_EncryptUpdate(ectx, NULL, &exl,
+                                        op->gcm_aad, (int)op->gcm_aad_len) != 1) goto genc_out;
+        if (EVP_EncryptUpdate(ectx, pEnc, &exl, pData, (int)ulDataLen) != 1) goto genc_out;
+        eproduced = (size_t)exl;
+        if (EVP_EncryptFinal_ex(ectx, pEnc + eproduced, &exl) != 1) goto genc_out;
+        eproduced += (size_t)exl;
+        if (EVP_CIPHER_CTX_ctrl(ectx, EVP_CTRL_GCM_GET_TAG,
+                                (int)etag_len, pEnc + eproduced) != 1) goto genc_out;
+        *pulEncLen = eproduced + etag_len;
+        rv = FHSM_RV_OK;
+    genc_out:
+        EVP_CIPHER_CTX_free(ectx);
+    }
     op->active = 0;
     (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
                             fhsm_session_role(hSession), rv, NULL);
