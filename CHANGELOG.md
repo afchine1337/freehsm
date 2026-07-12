@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 conformance — RSA public components on private keys.**
+  `extract_pubkey_attr` only parsed public keys, so `CKA_MODULUS`,
+  `CKA_PUBLIC_EXPONENT` and `CKA_MODULUS_BITS` were unavailable on RSA private
+  keys (KeyError). It now also parses private keys (PKCS#8 via
+  `d2i_AutoPrivateKey`) and returns these non-sensitive components
+  (TestRSAKeypairConsistency). Verified: modulus matches between the public and
+  private key; exponent = 0x010001.
+
 * **#125 conformance — CKA_TOKEN readback.** `C_GetAttributeValue` hard-coded
   `CKA_TOKEN = TRUE`; it now reflects the object's actual scope (FALSE for a
   session object, TRUE for a persisted token object) via

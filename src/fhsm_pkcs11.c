@@ -2821,10 +2821,16 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
     uint32_t cl = 0, kt = 0;
     if (fhsm_token_object_get(t, handle, &kv, &kvl, &cl, &kt) != FHSM_RV_OK)
         return -1;
-    if (cl != CKO_PUBLIC_KEY) return -1;
-
+    /* CKA_MODULUS / CKA_PUBLIC_EXPONENT / CKA_MODULUS_BITS and the EC public
+     * components are non-sensitive and exist on BOTH public and private keys
+     * (PKCS#11 par. 4.9). Public keys are stored as SubjectPublicKeyInfo,
+     * private keys as PKCS#8 (#125 TestRSAKeypairConsistency reads the modulus
+     * from the private key too). */
     const uint8_t *p = kv;
-    EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
+    EVP_PKEY *pkey = NULL;
+    if (cl == CKO_PUBLIC_KEY)       pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
+    else if (cl == CKO_PRIVATE_KEY) pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+    else return -1;
     if (!pkey) return -1;
     int rc = -1;
 
