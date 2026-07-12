@@ -45,8 +45,6 @@ extern "C" {
 #define CKM_SHA3_256                         0x000002B0u
 #define CKM_SHA3_384                         0x000002C0u
 #define CKM_SHA3_512                         0x000002D0u
-#define CKM_SHAKE128                         0x000002B8u
-#define CKM_SHAKE256                         0x000002B9u
 
 /* --- HMAC --- */
 #define CKM_SHA256_HMAC                      0x00000251u
@@ -192,8 +190,6 @@ extern fhsm_rv_t dispatch_sha3_224(unsigned long, unsigned long, const void*, si
 extern fhsm_rv_t dispatch_sha3_256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha3_384(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha3_512(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
-extern fhsm_rv_t dispatch_shake128(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
-extern fhsm_rv_t dispatch_shake256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_hmac_sha256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_hmac_sha384(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_hmac_sha512(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);

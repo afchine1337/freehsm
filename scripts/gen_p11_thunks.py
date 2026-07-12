@@ -143,10 +143,12 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", refs=("FIPS 202",)),
     Mech("CKM_SHA3_512",           0x000002D0, "SHA3", "digest",  "dispatch_sha3_512",
          fips="approved", refs=("FIPS 202",)),
-    Mech("CKM_SHAKE128",           0x000002B8, "SHA3", "digest",  "dispatch_shake128",
-         fips="approved", refs=("FIPS 202",)),
-    Mech("CKM_SHAKE256",           0x000002B9, "SHA3", "digest",  "dispatch_shake256",
-         fips="approved", refs=("FIPS 202",)),
+    # NOTE: SHAKE128/256 as fixed-output digests are NOT standard PKCS#11
+    # mechanisms, and their previous values 0x2B8/0x2B9 collided with the
+    # official CKM_SHA3_224_KEY_GEN (0x2B8) / SHA3-224 HMAC-general region,
+    # which made C_GetMechanismInfo advertise a KEY_GEN as a digest (#125
+    # TestMechFlagBehavioralConformance). De-advertised; the SHAKE XOF is only
+    # exposed via SLH-DSA parameter sets and the (unused) KAT handlers remain.
 
     # === HMAC ==========================================================
     Mech("CKM_SHA256_HMAC",        0x00000251, "HMAC", "sign",    "dispatch_hmac_sha256",

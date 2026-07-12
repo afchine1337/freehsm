@@ -9,6 +9,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 robustness & conformance (batch 10).** `C_GetAttributeValue` now
+  bounds `ulCount` (`> FHSM_MAX_TEMPLATE_ATTRS -> CKR_ARGUMENTS_BAD`) before the
+  per-attribute loop; an absurd count (e.g. `0xffffffffffffffff`) previously
+  walked the template out of bounds and **crashed with SIGSEGV**
+  (TestTemplateCountOverflowValidHandles). `C_EncryptUpdate`/`C_DecryptUpdate`
+  reject a part length beyond `INT_MAX` with `CKR_DATA_LEN_RANGE` instead of
+  silently truncating the `(int)` cast (TestIsizeMaxUpdateLength). SHAKE128/256
+  were de-advertised: their non-standard values `0x2B8`/`0x2B9` collided with
+  the official `CKM_SHA3_224_KEY_GEN`, making `C_GetMechanismInfo` present a
+  key-gen as a digest (TestMechFlagBehavioralConformance).
+
 * **#125 conformance — RSA public components on private keys.**
   `extract_pubkey_attr` only parsed public keys, so `CKA_MODULUS`,
   `CKA_PUBLIC_EXPONENT` and `CKA_MODULUS_BITS` were unavailable on RSA private

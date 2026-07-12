@@ -2945,6 +2945,14 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                            CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* Bound ulCount before the per-attribute loop : an absurd count
+     * (e.g. 0xffffffffffffffff) would walk pTemplate far out of bounds and
+     * crash (#125 TestTemplateCountOverflowValidHandles, SIGSEGV). A NULL
+     * template with a non-zero count is likewise invalid. NOTE : unlike
+     * creation templates, a NULL pValue with a non-zero ulValueLen is the
+     * legal size-query convention here, so fhsm_check_template is not used. */
+    if (ulCount > FHSM_MAX_TEMPLATE_ATTRS) return FHSM_RV_ARGUMENTS_BAD;
+    if (pTemplate == NULL && ulCount != 0)  return FHSM_RV_ARGUMENTS_BAD;
     const uint8_t *value = NULL; size_t value_len = 0;
     uint32_t cko_class = 0, ckk_type = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hObject, &value, &value_len,
@@ -5701,6 +5709,9 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
      * reject NULL rather than crash (#125, same class as the C_Decrypt
      * fix). Terminate the operation so the session is not stranded. */
     if (!pulEncLen || (!pPart && ulPartLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+    /* The length is passed to EVP as an int ; a value beyond INT_MAX would be
+     * silently truncated (#125 TestIsizeMaxUpdateLength). Reject it. */
+    if (ulPartLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 1);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
     if (pEnc == NULL) { *pulEncLen = ulPartLen; return FHSM_RV_OK; }
@@ -5749,6 +5760,7 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
     /* pulPartLen is dereferenced on every path ; reject NULL rather
      * than crash (#125, same class as the C_Decrypt fix). */
     if (!pulPartLen || (!pEnc && ulEncLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+    if (ulEncLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 0);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
     if (pPart == NULL) { *pulPartLen = ulEncLen; return FHSM_RV_OK; }
