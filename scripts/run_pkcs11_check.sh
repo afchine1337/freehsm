@@ -89,18 +89,18 @@ RC_JSON=$?
 # tool supports multi-output ; for now re-emit is too costly, the JSON
 # + log are the canonical artifacts.
 
-# Select the freshest report the harness produced. Newer pkcs11-check
-# versions write a pytest --report-log at report.jsonl and no longer
-# update results.json ; older ones write results.json. Prefer whichever
-# is newest so the summary never reflects a stale prior run.
+# Select the report to summarise. Newer pkcs11-check versions write a
+# pytest --report-log at report.jsonl (the accurate per-test report) and
+# ALSO an aggregate results.json whose counts are not per-test ; older
+# versions write only results.json. Prefer report.jsonl when present, and
+# require it to be at least as new as results.json so we never read a
+# stale prior run.
 REPORT_FILE=""
-newest=0
-for cand in "$REPORTS/report.jsonl" "$REPORTS/results.json"; do
-    if [ -s "$cand" ]; then
-        m=$(stat -c %Y "$cand" 2>/dev/null || echo 0)
-        if [ "$m" -ge "$newest" ]; then newest=$m; REPORT_FILE="$cand"; fi
-    fi
-done
+if [ -s "$REPORTS/report.jsonl" ]; then
+    REPORT_FILE="$REPORTS/report.jsonl"
+elif [ -s "$REPORTS/results.json" ]; then
+    REPORT_FILE="$REPORTS/results.json"
+fi
 if [ -z "$REPORT_FILE" ]; then
     echo "FATAL: pkcs11-check did not produce a report (exit=$RC_JSON) --- harness crash?" >&2
     exit 1
