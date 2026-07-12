@@ -129,7 +129,8 @@ typedef enum fhsm_hash_e {
      * the dispatch table and now callable through the operation path. */
     FHSM_HASH_SHA224     = 9,
     FHSM_HASH_SHA512_224 = 10,
-    FHSM_HASH_SHA512_256 = 11
+    FHSM_HASH_SHA512_256 = 11,
+    FHSM_HASH_SHA3_224   = 12
 } fhsm_hash_t;
 
 size_t fhsm_hash_size(fhsm_hash_t h);

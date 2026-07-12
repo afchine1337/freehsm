@@ -135,6 +135,8 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", refs=("FIPS 180-4",)),
 
     # === SHA-3 / SHAKE =================================================
+    Mech("CKM_SHA3_224",           0x000002B5, "SHA3", "digest",  "dispatch_sha3_224",
+         fips="approved", refs=("FIPS 202",)),
     Mech("CKM_SHA3_256",           0x000002B0, "SHA3", "digest",  "dispatch_sha3_256",
          fips="approved", refs=("FIPS 202",)),
     Mech("CKM_SHA3_384",           0x000002C0, "SHA3", "digest",  "dispatch_sha3_384",

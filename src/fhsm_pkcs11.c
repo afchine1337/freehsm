@@ -1526,6 +1526,7 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
         case 0x00000255UL: op->hash = FHSM_HASH_SHA224;     break; /* CKM_SHA224 */
         case 0x00000048UL: op->hash = FHSM_HASH_SHA512_224; break; /* CKM_SHA512_224 */
         case 0x0000004CUL: op->hash = FHSM_HASH_SHA512_256; break; /* CKM_SHA512_256 */
+        case 0x000002B5UL: op->hash = FHSM_HASH_SHA3_224;   break; /* CKM_SHA3_224 */
         case 0x000002B0UL: op->hash = FHSM_HASH_SHA3_256;   break; /* CKM_SHA3_256 */
         case 0x000002C0UL: op->hash = FHSM_HASH_SHA3_384;   break; /* CKM_SHA3_384 */
         case 0x000002D0UL: op->hash = FHSM_HASH_SHA3_512;   break; /* CKM_SHA3_512 */
@@ -3845,7 +3846,12 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * and corrupts the keystream (#125 TestMechEncryptKAT[AES_CTR]).
      * ulCounterBits must be in the spec range 1..128
      * (#125 TestAESCTR::test_aes_ctr_counter_bits_zero). */
-    if (pMechanism->mechanism == CKM_AES_CTR && pMechanism->pParameter) {
+    if (pMechanism->mechanism == CKM_AES_CTR) {
+        /* AES-CTR requires a counter parameter (raw 16-byte block or
+         * CK_AES_CTR_PARAMS). A missing parameter is CKR_MECHANISM_PARAM_INVALID
+         * (#125 TestBadParameters AES_CTR missing params). */
+        if (!pMechanism->pParameter)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
         if (pMechanism->ulParameterLen == 16) {
             memcpy(op->iv, pMechanism->pParameter, 16);
             op->have_iv = 1;

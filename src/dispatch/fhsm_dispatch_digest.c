@@ -104,6 +104,7 @@ static fhsm_rv_t evp_shake_oneshot(const char *name,
 HASH_HANDLER(dispatch_sha256,   FHSM_HASH_SHA256)
 HASH_HANDLER(dispatch_sha384,   FHSM_HASH_SHA384)
 HASH_HANDLER(dispatch_sha512,   FHSM_HASH_SHA512)
+HASH_HANDLER(dispatch_sha3_224, FHSM_HASH_SHA3_224)
 HASH_HANDLER(dispatch_sha3_256, FHSM_HASH_SHA3_256)
 HASH_HANDLER(dispatch_sha3_384, FHSM_HASH_SHA3_384)
 HASH_HANDLER(dispatch_sha3_512, FHSM_HASH_SHA3_512)

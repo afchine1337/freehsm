@@ -9,6 +9,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 behavioural conformance (batch 9).** Added SHA3-224 (`CKM_SHA3_224`,
+  `0x000002B5`) as an approved digest: hash enum + size/name, `C_DigestInit`
+  case, dispatch handler and advertisement (regenerated tables). Verified
+  byte-exact against OpenSSL SHA3-224("abc"). `C_EncryptInit`/`C_DecryptInit`
+  with `CKM_AES_CTR` and a NULL counter parameter now return
+  `CKR_MECHANISM_PARAM_INVALID` (TestBadParameters).
+
 * **#125 — AES-ECB reclassified as FIPS-approved (SP 800-38A).** AES-ECB was
   rejected under fips-strict (advertised interop-only, `CKR_MECHANISM_INVALID`
   at `C_EncryptInit`/`C_Encrypt`). ECB is a FIPS-approved confidentiality mode
