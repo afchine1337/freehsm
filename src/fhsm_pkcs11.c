@@ -1029,6 +1029,8 @@ fhsm_rv_t dispatch_reject_fips(unsigned long, unsigned long,
 #define CKF_VERIFY               0x00002000UL
 #define CKF_GENERATE             0x00008000UL
 #define CKF_GENERATE_KEY_PAIR    0x00010000UL
+#define CKF_ENCAPSULATE          0x10000000UL
+#define CKF_DECAPSULATE          0x20000000UL
 #define CKF_WRAP                 0x00020000UL
 #define CKF_UNWRAP_MECH          0x00040000UL
 #define CKF_DERIVE               0x00080000UL
@@ -1045,7 +1047,7 @@ static CK_ULONG fhsm_mech_flags_for(const char *op) {
     if (!strcmp(op, "digest"))  return CKF_DIGEST;
     if (!strcmp(op, "sign"))    return CKF_SIGN | CKF_VERIFY;
     if (!strcmp(op, "encrypt")) return CKF_ENCRYPT | CKF_DECRYPT;
-    if (!strcmp(op, "encap"))   return CKF_ENCRYPT | CKF_DECRYPT;
+    if (!strcmp(op, "encap"))   return CKF_ENCAPSULATE | CKF_DECAPSULATE;
     if (!strcmp(op, "wrap"))    return CKF_WRAP | CKF_UNWRAP_MECH;
     if (!strcmp(op, "derive"))  return CKF_DERIVE;
     if (!strcmp(op, "keygen"))  return CKF_GENERATE;

@@ -9,6 +9,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 behavioural conformance (batch 7) — C_GetMechanismInfo flags.**
+  Encapsulation mechanisms (ML-KEM, hybrid KEM) advertised `CKF_ENCRYPT |
+  CKF_DECRYPT` instead of `CKF_ENCAPSULATE | CKF_DECAPSULATE`; fixed in
+  `fhsm_mech_flags_for`. (TestMechFlagBehavioralConformance ML-KEM). AES-CCM/CTS flag↔behaviour
+  consistency remains a follow-up (de-advertise or implement the online path).
+
 * **#125 behavioural conformance (batch 6) — CKO_DATA objects.** The create
   parser rejected data objects (`CKA_CLASS = CKO_DATA`) with
   `CKR_TEMPLATE_INCONSISTENT`. `C_CreateObject` now supports `CKO_DATA`: an
