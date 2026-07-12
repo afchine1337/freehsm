@@ -9,6 +9,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 behavioural conformance (batch 2).** `C_CreateObject` now runs the
+  bool- and scalar-attribute length validators (the scalar check had only been
+  wired into `C_GenerateKey`/`C_GenerateKeyPair`/`C_DeriveKey`): an overlong
+  `CKA_KEY_TYPE` / `CKA_VALUE_LEN` on `C_CreateObject` is now
+  `CKR_ATTRIBUTE_VALUE_INVALID`. Added a mechanism ↔ key-type consistency gate
+  (`fhsm_check_key_mech_type`) on `C_EncryptInit` / `C_DecryptInit` /
+  `C_SignInit` / `C_VerifyInit`: using a key whose type does not match the
+  mechanism family (RSA↔`CKK_RSA`, ECDSA↔`CKK_EC`, EdDSA↔`CKK_EC_EDWARDS`,
+  AES↔`CKK_AES`, DES3↔`CKK_DES3`) returns `CKR_KEY_TYPE_INCONSISTENT` instead of
+  being silently accepted (Tookan key-type-confusion, TestWrongKeyType).
+
 * **#125 behavioural conformance (pkcs11-check hardening).** Scalar
   (`CK_ULONG`) attribute length validation — `CKA_CLASS`, `CKA_KEY_TYPE`,
   `CKA_VALUE_LEN`, `CKA_MODULUS_BITS`, `CKA_CERTIFICATE_TYPE` supplied with a

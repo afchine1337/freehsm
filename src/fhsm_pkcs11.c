@@ -1573,7 +1573,6 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
-    { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -1713,6 +1712,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount);  if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
 
     /* === Parser stage : pure C, no OpenSSL. ============================
      * The CK_ATTRIBUTE layout is bit-identical to fhsm_attr_t (see
@@ -3983,6 +3984,42 @@ static int fhsm_cipher_mech_valid(CK_ULONG mech) {
     }
 }
 
+/* Mechanism <-> key-type consistency. A cryptographic mechanism implies a
+ * key type family (RSA sign/verify/encrypt needs CKK_RSA, ECDSA needs
+ * CKK_EC, AES ciphers need CKK_AES, ...). Using a key of the wrong type is
+ * CKR_KEY_TYPE_INCONSISTENT, not silent acceptance (#125 TestWrongKeyType,
+ * TestSignInitErrors / TestVerifyInitErrors key_type_inconsistent, Tookan
+ * key-type-confusion). Mechanisms with no fixed key-type family (HMAC over
+ * generic secrets, unknown mechanisms) are skipped (want < 0). Missing keys
+ * are left to fhsm_require_key. Uses numeric mechanism/CKK values so it can
+ * live above the per-section macro definitions. */
+static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
+                                      CK_ULONG mech) {
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    if (fhsm_token_object_get(t, (uint32_t)hKey, &kv, &kvl, &cl, &kt) != FHSM_RV_OK)
+        return FHSM_RV_OK;
+    long want = -1;
+    switch (mech) {
+        case 0x0001: case 0x0003: case 0x0009: case 0x000D: /* RSA PKCS/X509/OAEP/PSS */
+        case 0x0006:                                        /* SHA1_RSA_PKCS */
+        case 0x0040: case 0x0041: case 0x0042:              /* SHA{256,384,512}_RSA_PKCS */
+        case 0x0043: case 0x0044: case 0x0045:              /* SHA{256,384,512}_RSA_PKCS_PSS */
+            want = 0x00; break;                             /* CKK_RSA */
+        case 0x1041: case 0x1042: case 0x1043:              /* ECDSA / ECDSA_SHA1 / SHA224 */
+        case 0x1044: case 0x1045: case 0x1046:              /* ECDSA_SHA{256,384,512} */
+            want = 0x03; break;                             /* CKK_EC */
+        case 0x1057: want = 0x40; break;                    /* EDDSA -> CKK_EC_EDWARDS */
+        case 0x1081: case 0x1082: case 0x1085: case 0x1086: /* AES ECB/CBC/CBC_PAD/CTR */
+        case 0x1087: case 0x108A: case 0x108C:              /* AES GCM/GMAC/CMAC */
+            want = 0x1F; break;                             /* CKK_AES */
+        case 0x0133: want = 0x15; break;                    /* DES3_CBC -> CKK_DES3 */
+        default: want = -1; break;
+    }
+    if (want >= 0 && (uint32_t)want != kt)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    return FHSM_RV_OK;
+}
+
 CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_OBJECT_HANDLE hKey) {
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -3990,6 +4027,7 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     if (!fhsm_cipher_mech_valid(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
+    { CK_RV tc = fhsm_check_key_mech_type(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (tc != FHSM_RV_OK) return tc; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_ENCRYPT); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -4199,6 +4237,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     if (!fhsm_cipher_mech_valid(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
+    { CK_RV tc = fhsm_check_key_mech_type(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (tc != FHSM_RV_OK) return tc; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_DECRYPT); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -4576,6 +4615,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             return FHSM_RV_MECHANISM_INVALID;
     }
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
+    { CK_RV tc = fhsm_check_key_mech_type(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (tc != FHSM_RV_OK) return tc; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_SIGN); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -4972,6 +5012,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         default: return FHSM_RV_MECHANISM_INVALID;
     }
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
+    { CK_RV tc = fhsm_check_key_mech_type(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (tc != FHSM_RV_OK) return tc; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_VERIFY); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
