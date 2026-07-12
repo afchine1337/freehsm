@@ -829,7 +829,7 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00001056u, "CKM_EC_MONTGOMERY_KEY_PAIR_GEN", "ECM", "keypair", 1, dispatch_ecm_keypair },
     { 0x00001057u, "CKM_EDDSA", "EdDSA", "sign", 1, dispatch_eddsa },
     { 0x00001080u, "CKM_AES_KEY_GEN", "AES", "keygen", 1, dispatch_aes_keygen },
-    { 0x00001081u, "CKM_AES_ECB", "AES", "encrypt", 0, dispatch_reject_fips },
+    { 0x00001081u, "CKM_AES_ECB", "AES", "encrypt", 1, dispatch_aes_ecb },
     { 0x00001082u, "CKM_AES_CBC", "AES", "encrypt", 1, dispatch_aes_cbc },
     { 0x00001085u, "CKM_AES_CBC_PAD", "AES", "encrypt", 1, dispatch_aes_cbc_pad },
     { 0x00001086u, "CKM_AES_CTR", "AES", "encrypt", 1, dispatch_aes_ctr },

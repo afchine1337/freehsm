@@ -9,6 +9,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 — AES-ECB reclassified as FIPS-approved (SP 800-38A).** AES-ECB was
+  rejected under fips-strict (advertised interop-only, `CKR_MECHANISM_INVALID`
+  at `C_EncryptInit`/`C_Encrypt`). ECB is a FIPS-approved confidentiality mode
+  (NIST SP 800-38A), so it is now `fips="approved"`: advertised in both
+  profiles, executable, KAT-covered, and `CKF_ENCRYPT`/`CKF_DECRYPT` consistent
+  with behaviour. 3DES-CBC and 3DES key generation remain non-approved
+  (interop-only). Verified byte-exact against NIST SP 800-38A ECB-AES128.
+  `test_legacy_cipher` now detects the profile via 3DES keygen advertisement and
+  round-trips AES-ECB in both profiles.
+
 * **#125 behavioural conformance (batch 8) — PQC parameter-set validation.**
   The module read `CKA_PARAMETER_SET` at `0x170`, which is actually
   `CKA_MODIFIABLE`; the spec value is `0x0000061D`. The harness sends the

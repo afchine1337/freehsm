@@ -4,8 +4,8 @@
 
 **Profile generated**: `fips-strict`
 **Total mechanisms**: 76
-**Approved**: 64
-**Non-approved**: 12
+**Approved**: 65
+**Non-approved**: 11
 
 ## Reading this table
 
@@ -31,7 +31,7 @@
 | `CKM_AES_KEY_WRAP` | `0x00002109` | wrap | ✅ | `dispatch_aes_kw` | FIPS 197, SP 800-38F, RFC 3394 |
 | `CKM_AES_KEY_WRAP_KWP` | `0x0000210B` | wrap | ✅ | `dispatch_aes_kwp` | FIPS 197, SP 800-38F §6.3, RFC 5649 |
 | `CKM_AES_CMAC` | `0x0000108C` | sign | ✅ | `dispatch_aes_cmac` | FIPS 197, SP 800-38B |
-| `CKM_AES_ECB` | `0x00001081` | encrypt | ❌ | `dispatch_aes_ecb` | FIPS 197 |
+| `CKM_AES_ECB` | `0x00001081` | encrypt | ✅ | `dispatch_aes_ecb` | FIPS 197, SP 800-38A |
 | | | | | | _ECB single-block only; rejected for any input > 16 bytes._ |
 
 ## DES

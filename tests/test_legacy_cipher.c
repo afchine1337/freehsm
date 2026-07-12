@@ -4,11 +4,10 @@
  * ===========================================================================
  * test_legacy_cipher.c --- Non-FIPS cipher gating (#125 general-purpose).
  *
- *  AES-ECB (0x1081), 3DES-CBC (0x133) and 3DES key generation (0x130)
- *  are executable only in the interop / general-purpose build, rejected
- *  under fips-strict. Profile-adaptive: detects the active build via
- *  C_GetMechanismList (AES-ECB advertised iff interop), then asserts
- *  either correct round-trips (interop) or rejection (fips-strict).
+ *  AES-ECB (0x1081) is FIPS-approved (SP 800-38A) and round-trips in both
+ *  profiles. 3DES-CBC (0x133) and 3DES key generation (0x130) are
+ *  non-approved: executable only in interop, rejected under fips-strict.
+ *  Profile detected via C_GetMechanismList (3DES keygen advertised iff interop).
  * ========================================================================= */
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +61,10 @@ int main(void) {
 
     CK_ULONG mn = 0; GML(0, NULL, &mn);
     CK_ULONG *ml = calloc(mn, sizeof *ml); GML(0, ml, &mn);
-    int strict = 1; for (CK_ULONG i = 0; i < mn; ++i) if (ml[i] == 0x1081) { strict = 0; break; }
+    /* 3DES key generation (0x130) is non-approved -> advertised only in the
+     * interop build ; use it to detect the active profile. AES-ECB is now
+     * FIPS-approved (SP 800-38A) and available in both profiles. */
+    int strict = 1; for (CK_ULONG i = 0; i < mn; ++i) if (ml[i] == 0x130) { strict = 0; break; }
     free(ml);
     printf("test_legacy_cipher : profile = %s\n", strict ? "fips-strict" : "interop");
 
@@ -77,21 +79,22 @@ int main(void) {
     CK_MECHANISM d3 = { 0x133, iv8, 8 };
     CK_MECHANISM kg = { 0x130, NULL, 0 };
 
+    /* AES-ECB is FIPS-approved and must round-trip in BOTH profiles. */
+    int rc = roundtrip(s, &ecb, akey, "AES-ECB");
+
     if (strict) {
-        /* All three must be rejected. AES-ECB + 3DES-CBC at EncryptInit,
-         * 3DES keygen at C_GenerateKey. */
-        if (EI(s, &ecb, akey) == 0) { fprintf(stderr, "  FAIL AES-ECB not rejected\n"); return 1; }
-        printf("  AES-ECB rejected : OK\n");
+        /* 3DES-CBC at EncryptInit and 3DES keygen must be rejected. */
+        if (EI(s, &d3, akey) == 0) { fprintf(stderr, "  FAIL 3DES-CBC not rejected\n"); return 1; }
+        printf("  3DES-CBC rejected : OK\n");
         CK_OBJECT_HANDLE dk = 0;
         if (GK(s, &kg, NULL, 0, &dk) == 0) { fprintf(stderr, "  FAIL DES3 keygen not rejected\n"); return 1; }
         printf("  3DES keygen rejected : OK\n");
+        if (rc) return 1;
         printf("test_legacy_cipher : PASS\n");
         return 0;
     }
 
-    /* interop : real round-trips. */
-    int rc = 0;
-    rc |= roundtrip(s, &ecb, akey, "AES-ECB");
+    /* interop : 3DES round-trips too. */
     CK_OBJECT_HANDLE dk = 0;
     if ((rv = GK(s, &kg, NULL, 0, &dk))) { fprintf(stderr, "  FAIL DES3 keygen 0x%lx\n", rv); return 1; }
     printf("  3DES keygen : OK\n");

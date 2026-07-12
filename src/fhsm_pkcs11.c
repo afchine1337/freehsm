@@ -4016,7 +4016,9 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
 static int fhsm_nonfips_enc_rejected(CK_ULONG mech) {
     if (!fhsm_build_fips_strict) return 0;
     switch (mech) {
-        case CKM_AES_ECB:
+        /* AES-ECB is FIPS-approved (NIST SP 800-38A) and now allowed in
+         * fips-strict ; only genuinely non-approved encryption mechanisms
+         * are rejected here. */
         case 0x00000133UL: /* CKM_DES3_CBC */
         case CKM_RSA_PKCS:
         case CKM_RSA_X_509:
@@ -4198,7 +4200,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
     if (op->mechanism == CKM_AES_ECB || op->mechanism == CKM_AES_CBC
         || op->mechanism == CKM_AES_CBC_PAD || op->mechanism == CKM_AES_CTR) {
         int is_ecb = (op->mechanism == CKM_AES_ECB);
-        if (is_ecb && fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        /* AES-ECB is FIPS-approved (SP 800-38A) and allowed in both profiles. */
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         if (!is_ecb && !op->have_iv) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
         const char *cname = NULL;
@@ -4461,7 +4463,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
     if (op->mechanism == CKM_AES_ECB || op->mechanism == CKM_AES_CBC
         || op->mechanism == CKM_AES_CBC_PAD || op->mechanism == CKM_AES_CTR) {
         int is_ecb = (op->mechanism == CKM_AES_ECB);
-        if (is_ecb && fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        /* AES-ECB is FIPS-approved (SP 800-38A) and allowed in both profiles. */
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         if (!is_ecb && !op->have_iv) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
         const char *cname = NULL;

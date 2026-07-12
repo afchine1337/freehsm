@@ -115,9 +115,9 @@ MECHANISMS: tuple[Mech, ...] = (
          refs=("FIPS 197", "SP 800-38B")),
 
     Mech("CKM_AES_ECB",            0x00001081, "AES",  "encrypt", "dispatch_aes_ecb",
-         fips="non-approved", key_type="CKK_AES",
+         fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
-         refs=("FIPS 197",),
+         refs=("FIPS 197", "SP 800-38A"),
          notes="ECB single-block only; rejected for any input > 16 bytes."),
 
     # === SHA-2 =========================================================
