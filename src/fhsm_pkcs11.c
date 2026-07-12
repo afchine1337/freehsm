@@ -2274,6 +2274,23 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
         obj_flags |= FHSM_OBJF_EXTRACTABLE;
 
+    /* Key-type confusion defence (Tookan §3.x, #125
+     * TestKeyTypeConfusionOnUnwrap) : the unwrapped length must be valid for
+     * the claimed CKA_KEY_TYPE, otherwise a blob wrapped as one key type is
+     * being reinterpreted as an incompatible one. A CKA_VALUE_LEN in the
+     * template must also match the recovered length. */
+    if (key_type == CKK_AES && pt_len != 16 && pt_len != 24 && pt_len != 32)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (key_type == 0x15 /* CKK_DES3 */ && pt_len != 24)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    { long vli = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+      if (vli >= 0 && pTemplate[vli].pValue
+          && pTemplate[vli].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG want_len = *(CK_ULONG*)pTemplate[vli].pValue;
+          if (want_len != pt_len) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+      }
+    }
+
     uint32_t handle = 0;
     rv = fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
                                 pt, pt_len, NULL, 0, obj_flags, &handle);

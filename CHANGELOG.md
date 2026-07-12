@@ -9,6 +9,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 security — key-type confusion on unwrap (Tookan).** `C_UnwrapKey` now
+  validates the recovered key length against the claimed `CKA_KEY_TYPE`
+  (`CKK_AES` -> 16/24/32, `CKK_DES3` -> 24) and against any `CKA_VALUE_LEN` in
+  the template; a mismatch is `CKR_KEY_TYPE_INCONSISTENT` /
+  `CKR_ATTRIBUTE_VALUE_INVALID` instead of silently reinterpreting a blob as an
+  incompatible key type (TestKeyTypeConfusionOnUnwrap).
+
 * **#125 robustness — one-shot length bounds & wrap-key size.** `C_Encrypt`
   and `C_Decrypt` reject a data length beyond `INT_MAX` with
   `CKR_DATA_LEN_RANGE` instead of silently truncating the `(int)` cast on the
