@@ -1,13 +1,3 @@
-- #125 conformance: scalar (`CK_ULONG`) attribute length validation — `CKA_CLASS`,
-  `CKA_KEY_TYPE`, `CKA_VALUE_LEN`, `CKA_MODULUS_BITS`, `CKA_CERTIFICATE_TYPE` supplied
-  with a length other than `sizeof(CK_ULONG)` now return `CKR_ATTRIBUTE_VALUE_INVALID`
-  in `C_GenerateKey`/`C_GenerateKeyPair`/`C_CreateObject`/`C_DeriveKey`
-  (`fhsm_check_ulong_attr_lengths`).
-- #125 conformance: read-only session enforcement extended to `C_GenerateKeyPair`
-  (token public/private template) and `C_DestroyObject` — destroying or generating a
-  token (persisted) object on a read-only session now returns `CKR_SESSION_READ_ONLY`;
-  session objects remain destroyable from a read-only session
-  (`fhsm_token_object_is_token`).
 # Changelog
 
 All notable changes to FreeHSM C are documented in this file.
@@ -18,6 +8,22 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+
+* **#125 behavioural conformance (pkcs11-check hardening).** Scalar
+  (`CK_ULONG`) attribute length validation — `CKA_CLASS`, `CKA_KEY_TYPE`,
+  `CKA_VALUE_LEN`, `CKA_MODULUS_BITS`, `CKA_CERTIFICATE_TYPE` supplied with a
+  length other than `sizeof(CK_ULONG)` now return
+  `CKR_ATTRIBUTE_VALUE_INVALID` across `C_GenerateKey` / `C_GenerateKeyPair` /
+  `C_CreateObject` / `C_DeriveKey` (`fhsm_check_ulong_attr_lengths`). Read-only
+  session enforcement extended to `C_GenerateKeyPair` and `C_DestroyObject`:
+  generating or destroying a token object on a read-only session returns
+  `CKR_SESSION_READ_ONLY` (`fhsm_token_object_is_token`); session objects stay
+  destroyable. `C_EncryptInit` / `C_DecryptInit` enforce a positive whitelist of
+  implemented cipher mechanisms (`fhsm_cipher_mech_valid`) — a digest
+  (`CKM_SHA256`), a signature, or an advertised-but-unwired cipher
+  (`CKM_AES_CCM`) is `CKR_MECHANISM_INVALID` rather than silently accepted.
+  `C_DigestInit` rejects a non-empty mechanism parameter with
+  `CKR_MECHANISM_PARAM_INVALID`.
 
 * **`make pkcs11-check` and the CI harness now build the module under
   test with a larger object store (`FHSM_MAX_OBJECTS=4096`) (#125).** A

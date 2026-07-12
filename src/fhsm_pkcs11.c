@@ -1502,6 +1502,11 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
+    /* Digest mechanisms take no mechanism parameter. A non-NULL pParameter
+     * or a non-zero ulParameterLen is CKR_MECHANISM_PARAM_INVALID (#125
+     * TestDigestInitErrors::test_mechanism_param_invalid). */
+    if (pMechanism->pParameter != NULL || pMechanism->ulParameterLen != 0)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
     switch (pMechanism->mechanism) {
         case CKM_SHA256: op->hash = FHSM_HASH_SHA256; break;
         case CKM_SHA384: op->hash = FHSM_HASH_SHA384; break;
@@ -3955,11 +3960,35 @@ static int fhsm_nonfips_enc_rejected(CK_ULONG mech) {
     }
 }
 
+/* Positive whitelist of mechanisms that C_Encrypt / C_Decrypt actually
+ * implement. C_EncryptInit / C_DecryptInit with any other mechanism --- a
+ * digest (CKM_SHA256), a signature, or an advertised-but-unimplemented
+ * cipher (CKM_AES_CCM) --- is CKR_MECHANISM_INVALID, not silently accepted
+ * (#125 TestEncryptInitErrors / TestDecryptInitErrors / TestAesCcmNullNonce).
+ * op_init itself is shared with C_SignInit and cannot enforce this. */
+static int fhsm_cipher_mech_valid(CK_ULONG mech) {
+    switch (mech) {
+        case CKM_AES_ECB:       /* 0x1081 */
+        case CKM_AES_CBC:       /* 0x1082 */
+        case CKM_AES_CBC_PAD:   /* 0x1085 */
+        case CKM_AES_CTR:       /* 0x1086 */
+        case CKM_AES_GCM:       /* 0x1087 */
+        case 0x00000133UL:      /* CKM_DES3_CBC */
+        case CKM_RSA_PKCS:      /* 0x0001 */
+        case CKM_RSA_X_509:     /* 0x0003 */
+        case CKM_RSA_PKCS_OAEP: /* 0x0009 */
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_OBJECT_HANDLE hKey) {
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
+    if (!fhsm_cipher_mech_valid(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_ENCRYPT); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
@@ -4168,6 +4197,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
+    if (!fhsm_cipher_mech_valid(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_DECRYPT); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_dec, hSession);

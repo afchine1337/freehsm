@@ -385,3 +385,12 @@ decision for the interop build.
 ## Method
 
 Run: `make pkcs11-check` (local) 
+## F13 — Advertised-but-unimplemented online cipher paths (CCM/CTS)
+
+`CKM_AES_CCM` (and `CKM_AES_CTS`) are advertised by `C_GetMechanismList` and
+carry a KAT vector, but the interactive `C_Encrypt`/`C_Decrypt` data path is not
+wired. `C_EncryptInit`/`C_DecryptInit` now return `CKR_MECHANISM_INVALID` for
+them via `fhsm_cipher_mech_valid`, which satisfies the pkcs11-check CCM
+"must-reject" tests (null nonce, missing params). Follow-up: either implement the
+online CCM/CTS path or de-advertise these mechanisms in the fips-strict profile so
+the advertised list and the online behaviour stay consistent.
