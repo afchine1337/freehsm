@@ -394,3 +394,12 @@ them via `fhsm_cipher_mech_valid`, which satisfies the pkcs11-check CCM
 "must-reject" tests (null nonce, missing params). Follow-up: either implement the
 online CCM/CTS path or de-advertise these mechanisms in the fips-strict profile so
 the advertised list and the online behaviour stay consistent.
+
+## F13 update — CCM/CTS de-advertised (was: advertised-but-unimplemented)
+
+AES-CCM was de-advertised (like the non-standard SHAKE128/256 digests) because
+its online C_Encrypt/C_Decrypt path is not wired, so advertising CKF_ENCRYPT was
+inconsistent with C_EncryptInit returning CKR_MECHANISM_INVALID. Follow-up:
+implement the CCM two-pass EVP path (CK_CCM_PARAMS: nonce 7-13B, MAC 4-16B,
+AAD, ulDataLen), validate a NIST SP 800-38C vector, then re-advertise
+fips=approved. The dispatch_aes_ccm KAT handler is retained for that work.
