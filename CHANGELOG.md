@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 security — CKA_MODIFIABLE / CKA_DESTROYABLE honoured.** These were
+  silently ignored at create and always read back TRUE (a "lying module"). They
+  are now persisted (object flag bits `FHSM_OBJF_UNMODIFIABLE` /
+  `FHSM_OBJF_UNDESTROYABLE`), returned truthfully by `C_GetAttributeValue`, and
+  enforced: `C_SetAttributeValue` on a non-modifiable object and
+  `C_DestroyObject` on a non-destroyable object return `CKR_ACTION_PROHIBITED`
+  (TestModifiableAttribute / TestDestroyable).
+
 * **#125 security — key-type confusion on unwrap (Tookan).** `C_UnwrapKey` now
   validates the recovered key length against the claimed `CKA_KEY_TYPE`
   (`CKK_AES` -> 16/24/32, `CKK_DES3` -> 24) and against any `CKA_VALUE_LEN` in

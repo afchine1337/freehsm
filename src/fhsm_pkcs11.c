@@ -1254,6 +1254,8 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
 /* Object flags stored on disk (1 byte). */
 #define FHSM_OBJF_SENSITIVE     0x01
 #define FHSM_OBJF_EXTRACTABLE   0x02
+#define FHSM_OBJF_UNMODIFIABLE  0x04   /* CKA_MODIFIABLE=FALSE persisted */
+#define FHSM_OBJF_UNDESTROYABLE 0x08   /* CKA_DESTROYABLE=FALSE persisted */
 
 /* Per-object usage flag bits (stored via fhsm_token_object_set_usage).
  * Bit 7 marks the byte as carrying explicit usage ; without it the
@@ -1485,6 +1487,15 @@ static void fhsm_apply_token_scope(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                    CK_ATTRIBUTE *tmpl, CK_ULONG n, uint32_t handle) {
     if (!tmpl_bbool(tmpl, n, CKA_TOKEN, 0))
         (void)fhsm_token_object_mark_session(t, handle, (uint32_t)hSession);
+    /* Persist CKA_MODIFIABLE / CKA_DESTROYABLE = FALSE (both default TRUE) so
+     * the read-back is truthful and mutation/destroy can be enforced (#125
+     * TestModifiableAttribute / TestDestroyable). */
+    uint8_t pf = 0;
+    if (fhsm_token_object_get_flags(t, handle, &pf) == FHSM_RV_OK) {
+        if (!tmpl_bbool(tmpl, n, CKA_MODIFIABLE_ATTR, 1))  pf |= FHSM_OBJF_UNMODIFIABLE;
+        if (!tmpl_bbool(tmpl, n, CKA_DESTROYABLE_ATTR, 1)) pf |= FHSM_OBJF_UNDESTROYABLE;
+        (void)fhsm_token_object_set_flags(t, handle, pf);
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1877,6 +1888,13 @@ CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject) {
               && !(flags & 0x00000002UL /* CKF_RW_SESSION */))
               return FHSM_RV_SESSION_READ_ONLY;
       }
+    }
+    /* CKA_DESTROYABLE=FALSE : the object may not be destroyed
+     * (#125 TestDestroyable). */
+    { uint8_t of = 0;
+      if (fhsm_token_object_get_flags(t, (uint32_t)hObject, &of) == FHSM_RV_OK
+          && (of & FHSM_OBJF_UNDESTROYABLE))
+          return 0x0000001BUL;   /* CKR_ACTION_PROHIBITED */
     }
     return fhsm_token_object_destroy(t, (uint32_t)hObject);
 }
@@ -3089,9 +3107,15 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             case CKA_PRIVATE:
                 bval = (cko_class == CKO_PUBLIC_KEY || cko_class == CKO_CERTIFICATE) ? 0 : 1;
                 src = &bval; src_len = 1; break;
-            case CKA_MODIFIABLE_ATTR:  bval = 1; src = &bval; src_len = 1; break;
+            case CKA_MODIFIABLE_ATTR: {
+                uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
+                bval = (of & FHSM_OBJF_UNMODIFIABLE) ? 0 : 1; src = &bval; src_len = 1; break;
+            }
             case CKA_COPYABLE_ATTR:    bval = 1; src = &bval; src_len = 1; break;
-            case CKA_DESTROYABLE_ATTR: bval = 1; src = &bval; src_len = 1; break;
+            case CKA_DESTROYABLE_ATTR: {
+                uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
+                bval = (of & FHSM_OBJF_UNDESTROYABLE) ? 0 : 1; src = &bval; src_len = 1; break;
+            }
             case CKA_LOCAL_ATTR:       bval = 1; src = &bval; src_len = 1; break;
             case CKA_ALWAYS_AUTH_ATTR: bval = 0; src = &bval; src_len = 1; break;
             case CKA_WRAP_WITH_TRUSTED_ATTR: bval = 0; src = &bval; src_len = 1; break;
@@ -3241,6 +3265,9 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     fhsm_rv_t rv_get = fhsm_token_object_get_flags(t, (uint32_t)hObject,
                                                     &flags_now);
     if (rv_get != FHSM_RV_OK) return rv_get;
+    /* CKA_MODIFIABLE=FALSE : the object may not be modified
+     * (#125 TestModifiableAttribute enforcement). */
+    if (flags_now & FHSM_OBJF_UNMODIFIABLE) return 0x0000001BUL; /* CKR_ACTION_PROHIBITED */
     uint8_t flags_new = flags_now;
     int flags_touched = 0;
 
