@@ -27,6 +27,7 @@
 #define FHSM_CKA_MODULUS            0x00000120UL
 #define FHSM_CKA_PUBLIC_EXPONENT    0x00000122UL
 
+#define FHSM_CKO_DATA               0x00000000UL
 #define FHSM_CKO_CERTIFICATE        0x00000001UL
 #define FHSM_CKO_PUBLIC_KEY         0x00000002UL
 #define FHSM_CKO_PRIVATE_KEY        0x00000003UL
@@ -200,7 +201,8 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
         return FHSM_PARSE_TEMPLATE_INCOMPLETE;
 
     /* Validate class is one of the supported ones. */
-    if (attrs->cko != FHSM_CKO_PUBLIC_KEY
+    if (attrs->cko != FHSM_CKO_DATA
+        && attrs->cko != FHSM_CKO_PUBLIC_KEY
         && attrs->cko != FHSM_CKO_PRIVATE_KEY
         && attrs->cko != FHSM_CKO_SECRET_KEY
         && attrs->cko != FHSM_CKO_CERTIFICATE)
@@ -212,6 +214,18 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
     if (idx_id >= 0) {
         attrs->id_data = (const uint8_t *)pTemplate[idx_id].pValue;
         attrs->id_len  = (size_t)pTemplate[idx_id].ulValueLen;
+    }
+
+    /* Data objects (CKO_DATA, PKCS#11 v3.2 par. 4.4) : an application-defined
+     * blob. No key type ; CKA_VALUE is optional (defaults to empty). Stored
+     * verbatim like a secret key value (#125 TestDataObject*). */
+    if (attrs->cko == FHSM_CKO_DATA) {
+        long iv = fhsm_find_attr(pTemplate, ulCount, FHSM_CKA_VALUE);
+        attrs->ckk        = 0;
+        attrs->value_data = (iv >= 0) ? (const uint8_t *)pTemplate[iv].pValue : NULL;
+        attrs->value_len  = (iv >= 0) ? (size_t)pTemplate[iv].ulValueLen : 0;
+        attrs->path       = FHSM_CREATE_PATH_VERBATIM;
+        return FHSM_PARSE_OK;
     }
 
     /* Certificates (#110) : CKA_KEY_TYPE is NOT part of the class

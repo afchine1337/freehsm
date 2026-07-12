@@ -9,6 +9,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 behavioural conformance (batch 6) — CKO_DATA objects.** The create
+  parser rejected data objects (`CKA_CLASS = CKO_DATA`) with
+  `CKR_TEMPLATE_INCONSISTENT`. `C_CreateObject` now supports `CKO_DATA`: an
+  application-defined blob carried in `CKA_VALUE` (optional, defaults to empty),
+  stored verbatim and round-tripped through `C_GetAttributeValue`,
+  `C_FindObjects` and `C_DestroyObject` (#125 TestDataObject* create / read /
+  search / destroy). Values remain bounded by the fixed per-object store cap
+  (16 KiB); multi-hundred-KiB data objects are a separate follow-up (dynamic
+  value storage).
+
 * **#125 behavioural conformance (batch 5) — creation-template & PSS param
   validation.** `fhsm_check_template` (now also run by `C_CreateObject`) rejects
   any attribute with a NULL `pValue` but non-zero `ulValueLen` as
