@@ -9,6 +9,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 conformance — HMAC key-type enforcement.** The mechanism ↔ key-type
+  gate now rejects an asymmetric key (`CKK_RSA` / `CKK_EC` / `CKK_EC_EDWARDS`)
+  used with an HMAC mechanism (`CKM_SHA*_HMAC`) as `CKR_KEY_TYPE_INCONSISTENT`
+  at `C_SignInit`/`C_VerifyInit`, instead of accepting it
+  (TestWrongKeyType hmac_sha256_with_rsa_key).
+
 * **#125 robustness & conformance (batch 10).** `C_GetAttributeValue` now
   bounds `ulCount` (`> FHSM_MAX_TEMPLATE_ATTRS -> CKR_ARGUMENTS_BAD`) before the
   per-attribute loop; an absurd count (e.g. `0xffffffffffffffff`) previously

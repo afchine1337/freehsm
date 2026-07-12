@@ -4108,7 +4108,19 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x1087: case 0x108A: case 0x108C:              /* AES GCM/GMAC/CMAC */
             want = 0x1F; break;                             /* CKK_AES */
         case 0x0133: want = 0x15; break;                    /* DES3_CBC -> CKK_DES3 */
+        case 0x0251: case 0x0261: case 0x0271: case 0x0256: /* SHA{256,384,512,224}_HMAC */
+        case 0x02B1: case 0x02C1: case 0x02D1: case 0x02B6: /* SHA3_{256,384,512,224}_HMAC */
+        case 0x0221:                                        /* SHA_1_HMAC */
+            want = -2; break;   /* any symmetric secret ; reject asymmetric keys */
         default: want = -1; break;
+    }
+    if (want == -2) {
+        /* HMAC requires a symmetric secret key. An asymmetric key
+         * (CKK_RSA / CKK_EC / CKK_EC_EDWARDS) is CKR_KEY_TYPE_INCONSISTENT
+         * (#125 TestWrongKeyType hmac_sha256_with_rsa_key). */
+        if (kt == 0x00 || kt == 0x03 || kt == 0x40)
+            return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        return FHSM_RV_OK;
     }
     if (want >= 0 && (uint32_t)want != kt) {
         /* A CKK_GENERIC_SECRET secret is legitimately usable with the
