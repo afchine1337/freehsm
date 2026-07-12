@@ -2596,6 +2596,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         || pMechanism->mechanism == CKM_SLH_DSA_KEY_PAIR_GEN) {
         CK_ATTRIBUTE *tp[2] = { pPub, pPriv }; CK_ULONG tn[2] = { ulPub, ulPriv };
         for (int ti = 0; ti < 2; ++ti) {
+            /* Legacy ASCII-name form read from 0x170 (kept for the keygen
+             * default logic below). */
             long pi = find_attr(tp[ti], tn[ti], CKA_PARAMETER_SET);
             if (pi >= 0 && tp[ti][pi].pValue) {
                 char pbuf[32];
@@ -2604,6 +2606,20 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                 memcpy(pbuf, tp[ti][pi].pValue, tp[ti][pi].ulValueLen);
                 pbuf[tp[ti][pi].ulValueLen] = '\0';
                 if (!fhsm_pset_valid(pbuf)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            }
+            /* Spec-correct CKA_PARAMETER_SET is 0x0000061D (0x170 is actually
+             * CKA_MODIFIABLE). The harness sends the malformed value here, so
+             * validate it : accept a well-formed CK_ULONG selector or a valid
+             * ASCII name ; reject an under/overlong value
+             * (#125 TestGenerateKeyPairErrors ml_kem/ml_dsa_parameter_set). */
+            long pj = find_attr(tp[ti], tn[ti], 0x0000061DUL);
+            if (pj >= 0 && tp[ti][pj].pValue) {
+                size_t L = (size_t)tp[ti][pj].ulValueLen;
+                if (L != sizeof(CK_ULONG)) {
+                    if (L == 0 || L >= 32) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                    char nbuf[32]; memcpy(nbuf, tp[ti][pj].pValue, L); nbuf[L] = '\0';
+                    if (!fhsm_pset_valid(nbuf)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                }
             }
         }
     }

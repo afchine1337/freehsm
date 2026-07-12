@@ -9,6 +9,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 behavioural conformance (batch 8) — PQC parameter-set validation.**
+  The module read `CKA_PARAMETER_SET` at `0x170`, which is actually
+  `CKA_MODIFIABLE`; the spec value is `0x0000061D`. The harness sends the
+  attribute at the correct address, so a malformed (under/overlong) parameter
+  set was never seen and `C_GenerateKeyPair` accepted it. Added validation at
+  `0x0000061D`: a well-formed `CK_ULONG` selector or a valid parameter-set name
+  is accepted, an under/overlong value is `CKR_ATTRIBUTE_VALUE_INVALID`
+  (TestGenerateKeyPairErrors ml_kem / ml_dsa parameter_set). The keygen default
+  logic (ASCII names) is unchanged.
+
 * **#125 behavioural conformance (batch 7) — C_GetMechanismInfo flags.**
   Encapsulation mechanisms (ML-KEM, hybrid KEM) advertised `CKF_ENCRYPT |
   CKF_DECRYPT` instead of `CKF_ENCAPSULATE | CKF_DECAPSULATE`; fixed in
