@@ -65,28 +65,6 @@ static fhsm_rv_t evp_md_oneshot(const char *name,
     return rv;
 }
 
-/* SHAKE oneshot --- the XOF variant : uses EVP_DigestFinalXOF to emit a
- * caller-defined number of output bytes. */
-static fhsm_rv_t evp_shake_oneshot(const char *name,
-                                     fhsm_slice_t in,
-                                     uint8_t *out, size_t outlen)
-{
-    EVP_MD *md = EVP_MD_fetch(NULL, name, NULL);
-    if (!md) return FHSM_RV_MECHANISM_INVALID;
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    if (!ctx) { EVP_MD_free(md); return FHSM_RV_HOST_MEMORY; }
-
-    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
-    if (EVP_DigestInit_ex2(ctx, md, NULL) == 1 &&
-        EVP_DigestUpdate(ctx, in.data, in.len) == 1 &&
-        EVP_DigestFinalXOF(ctx, out, outlen) == 1) {
-        rv = FHSM_RV_OK;
-    }
-    EVP_MD_CTX_free(ctx);
-    EVP_MD_free(md);
-    return rv;
-}
-
 #define HASH_HANDLER(name, alg)                                               \
     fhsm_rv_t name(unsigned long session, unsigned long key,                  \
                     const void *params, size_t plen,                          \
@@ -165,23 +143,6 @@ fhsm_rv_t dispatch_md5(unsigned long s, unsigned long k,
     return evp_md_oneshot("MD5", in, out, outlen);
 }
 
-/* SHAKE128 / SHAKE256 --- variable-length XOF. The caller MUST set
- * *outlen on entry to the requested output length in octets. PKCS#11
- * v3.2 §6.7.5 leaves the length to the caller; we honor it verbatim. */
-fhsm_rv_t dispatch_shake128(unsigned long s, unsigned long k,
-                             const void *params, size_t plen,
-                             fhsm_slice_t in, uint8_t *out, size_t *outlen)
-{
-    (void)s; (void)k; (void)params; (void)plen;
-    if (out == NULL || outlen == NULL || *outlen == 0) return FHSM_RV_ARGUMENTS_BAD;
-    return evp_shake_oneshot("SHAKE-128", in, out, *outlen);
-}
-
-fhsm_rv_t dispatch_shake256(unsigned long s, unsigned long k,
-                             const void *params, size_t plen,
-                             fhsm_slice_t in, uint8_t *out, size_t *outlen)
-{
-    (void)s; (void)k; (void)params; (void)plen;
-    if (out == NULL || outlen == NULL || *outlen == 0) return FHSM_RV_ARGUMENTS_BAD;
-    return evp_shake_oneshot("SHAKE-256", in, out, *outlen);
-}
+/* SHAKE128/256 handlers removed with the mechanism de-advertisement (#125) :
+ * SHAKE-as-digest is not a standard PKCS#11 mechanism and their 0x2B8/0x2B9
+ * values collided with CKM_SHA3_224_KEY_GEN. */
