@@ -1369,6 +1369,26 @@ static CK_RV fhsm_check_template(CK_ATTRIBUTE *t, CK_ULONG n) {
  * than 1 byte -- e.g. a CK_ULONG-sized value. PKCS#11 CK_BBOOL is
  * exactly one byte ; an over-long value is CKR_ATTRIBUTE_VALUE_INVALID
  * (pkcs11-check security/test_scalar_attr_length_extended, #125). */
+/* Reject a CK_ULONG-typed attribute (CKA_CLASS, CKA_KEY_TYPE,
+ * CKA_VALUE_LEN, CKA_MODULUS_BITS, CKA_CERTIFICATE_TYPE) supplied with a
+ * length other than sizeof(CK_ULONG). An over/underlong scalar is
+ * CKR_ATTRIBUTE_VALUE_INVALID (#125 test_value_len_ulong / key_type). */
+static CK_RV fhsm_check_ulong_attr_lengths(CK_ATTRIBUTE *t, CK_ULONG n) {
+    static const CK_ULONG ulong_attrs[] = {
+        0x000, 0x100, 0x161, 0x121, 0x080 };
+    if (n == 0 || t == NULL) return FHSM_RV_OK;
+    for (CK_ULONG i = 0; i < n; ++i) {
+        for (size_t j = 0; j < sizeof(ulong_attrs)/sizeof(ulong_attrs[0]); ++j) {
+            if (t[i].type == ulong_attrs[j]) {
+                if (t[i].pValue != NULL && t[i].ulValueLen != sizeof(CK_ULONG))
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                break;
+            }
+        }
+    }
+    return FHSM_RV_OK;
+}
+
 static CK_RV fhsm_check_bool_attr_lengths(CK_ATTRIBUTE *t, CK_ULONG n) {
     static const CK_ULONG bool_attrs[] = {
         0x001,0x002,0x086,0x103,0x104,0x105,0x106,0x107,0x108,0x109,0x10A,
@@ -1546,7 +1566,9 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
@@ -1825,6 +1847,19 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
 CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject) {
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* Destroying a token (persisted) object requires a read/write session ;
+     * on a read-only session it is CKR_SESSION_READ_ONLY (#125
+     * TestROTokenObjectMutation / TestROExactCKR). Session objects may be
+     * destroyed from a read-only session. */
+    { int is_tok = 0;
+      if (fhsm_token_object_is_token(t, (uint32_t)hObject, &is_tok) == FHSM_RV_OK
+          && is_tok) {
+          unsigned long flags = 0;
+          if (fhsm_session_info(hSession, NULL, &flags, NULL) == FHSM_RV_OK
+              && !(flags & 0x00000002UL /* CKF_RW_SESSION */))
+              return FHSM_RV_SESSION_READ_ONLY;
+      }
+    }
     return fhsm_token_object_destroy(t, (uint32_t)hObject);
 }
 
@@ -1879,6 +1914,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hBaseKey, FHSM_USAGE_DERIVE); if (uc != FHSM_RV_OK) return uc; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -2130,6 +2166,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !pWrappedKey || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hUnwrappingKey, FHSM_USAGE_UNWRAP); if (uc != FHSM_RV_OK) return uc; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -2516,6 +2553,10 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_template(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ulong_attr_lengths(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ulong_attr_lengths(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ro_token(hSession, pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ro_token(hSession, pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
     /* For PQC key generation, CKA_PARAMETER_SET (in either template) must
      * be a known parameter-set NAME of plausible length : a CK_ULONG-sized
      * or over/underlong value is CKR_ATTRIBUTE_VALUE_INVALID (#125

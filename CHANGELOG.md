@@ -1,3 +1,13 @@
+- #125 conformance: scalar (`CK_ULONG`) attribute length validation — `CKA_CLASS`,
+  `CKA_KEY_TYPE`, `CKA_VALUE_LEN`, `CKA_MODULUS_BITS`, `CKA_CERTIFICATE_TYPE` supplied
+  with a length other than `sizeof(CK_ULONG)` now return `CKR_ATTRIBUTE_VALUE_INVALID`
+  in `C_GenerateKey`/`C_GenerateKeyPair`/`C_CreateObject`/`C_DeriveKey`
+  (`fhsm_check_ulong_attr_lengths`).
+- #125 conformance: read-only session enforcement extended to `C_GenerateKeyPair`
+  (token public/private template) and `C_DestroyObject` — destroying or generating a
+  token (persisted) object on a read-only session now returns `CKR_SESSION_READ_ONLY`;
+  session objects remain destroyable from a read-only session
+  (`fhsm_token_object_is_token`).
 # Changelog
 
 All notable changes to FreeHSM C are documented in this file.

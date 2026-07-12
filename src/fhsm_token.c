@@ -1220,6 +1220,25 @@ fhsm_rv_t fhsm_token_object_get_flags(fhsm_token_t *t, uint32_t handle,
     return FHSM_RV_KEY_HANDLE_INVALID;
 }
 
+/* Report whether `handle` is a token (persisted) object. A session object
+ * has owner_session != 0 ; a token object has owner_session == 0. Used by
+ * C_DestroyObject to enforce CKR_SESSION_READ_ONLY on read-only sessions
+ * (#125 TestROTokenObjectMutation). Returns KEY_HANDLE_INVALID if absent. */
+fhsm_rv_t fhsm_token_object_is_token(fhsm_token_t *t, uint32_t handle,
+                                     int *out_is_token) {
+    if (!t || !out_is_token) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            *out_is_token = (t->objects[i].owner_session == 0);
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_OK;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
 /* ---------------------------------------------------------------------------
  * Mutation accessors (v1.3.0+) --- shared helper finds the object and
  * applies a small mutation, then atomically persists. The token must be

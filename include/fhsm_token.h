@@ -189,6 +189,8 @@ fhsm_rv_t fhsm_token_object_get_id(fhsm_token_t *t, uint32_t handle,
  * Returns FHSM_RV_KEY_HANDLE_INVALID if the handle is unknown. */
 fhsm_rv_t fhsm_token_object_get_flags(fhsm_token_t *t, uint32_t handle,
                                        uint8_t *out_flags);
+fhsm_rv_t fhsm_token_object_is_token(fhsm_token_t *t, uint32_t handle,
+                                     int *out_is_token);
 
 /* Mutation accessors used by C_SetAttributeValue and C_CopyObject
  * (added in v1.3.0 in response to Denis Mingulov's pkcs11-check
