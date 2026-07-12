@@ -45,8 +45,8 @@
  *        unterminated label can escape the parser).
  *   P4.  id_data == NULL ⟹ id_len == 0 (parser doesn't synthesize a
  *        length without a pointer).
- *   P5.  cko ∈ {PUBLIC_KEY, PRIVATE_KEY, SECRET_KEY}.
- *   P6.  VERBATIM      ⟹ value_data != NULL.
+ *   P5.  cko ∈ {DATA, PUBLIC_KEY, PRIVATE_KEY, SECRET_KEY}.
+ *   P6.  VERBATIM (non-DATA) ⟹ value_data != NULL ; DATA may be empty.
  *   P7.  EC_PUB        ⟹ cko == PUBLIC_KEY
  *                      && ec_group ∈ {"P-256","P-384","P-521"}
  *                      && ec_point != NULL.
@@ -115,6 +115,7 @@
  * `cko` field as an unsigned long, so we duplicate the three accepted
  * class values here to express invariants in human-readable form.
  * ----------------------------------------------------------------------- */
+#define HARNESS_CKO_DATA        0x00000000UL
 #define HARNESS_CKO_PUBLIC_KEY  0x00000002UL
 #define HARNESS_CKO_PRIVATE_KEY 0x00000003UL
 #define HARNESS_CKO_SECRET_KEY  0x00000004UL
@@ -192,8 +193,9 @@ static void check_ok(const fhsm_create_attrs_t *a) {
     /* P4 : pointer/length consistency for id. */
     if (a->id_data == NULL && a->id_len != 0) __builtin_trap();
 
-    /* P5 : cko is one of the three supported classes. */
-    if (a->cko != HARNESS_CKO_PUBLIC_KEY
+    /* P5 : cko is one of the supported classes (CKO_DATA added in #125). */
+    if (a->cko != HARNESS_CKO_DATA
+     && a->cko != HARNESS_CKO_PUBLIC_KEY
      && a->cko != HARNESS_CKO_PRIVATE_KEY
      && a->cko != HARNESS_CKO_SECRET_KEY) {
         __builtin_trap();
@@ -201,10 +203,14 @@ static void check_ok(const fhsm_create_attrs_t *a) {
 
     switch (a->path) {
     case FHSM_CREATE_PATH_VERBATIM:
-        /* P6 : VERBATIM carries CKA_VALUE. (value_len may legitimately
-         * be 0 for some experimental zero-length keys, so we do not
-         * trap on that ; we only check pointer presence.) */
-        if (a->value_data == NULL) __builtin_trap();
+        /* P6 : a VERBATIM key (secret/private) carries CKA_VALUE. A CKO_DATA
+         * object's CKA_VALUE is optional (#125), so an empty data object may
+         * have value_data == NULL / value_len == 0 ; only key objects must
+         * carry a value pointer. If a value pointer is present, a non-zero
+         * length must accompany a NULL only via the P4-style invariant. */
+        if (a->cko != HARNESS_CKO_DATA && a->value_data == NULL)
+            __builtin_trap();
+        if (a->value_data == NULL && a->value_len != 0) __builtin_trap();
         break;
 
     case FHSM_CREATE_PATH_EC_PUB:
