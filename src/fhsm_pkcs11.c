@@ -5928,6 +5928,11 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 1);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
     if (pEnc == NULL) { *pulEncLen = ulPartLen; return FHSM_RV_OK; }
+    /* AES-GCM is a stream cipher : C_EncryptUpdate emits exactly ulPartLen
+     * ciphertext bytes. Refuse an undersized output buffer BEFORE EVP writes,
+     * otherwise EVP_EncryptUpdate overruns pEnc (#125 TestUpdateOutputGuard).
+     * The operation stays active so the caller can retry with a larger buffer. */
+    if (*pulEncLen < ulPartLen) { *pulEncLen = ulPartLen; return 0x00000150UL; }
     int out_len = 0;
     if (EVP_EncryptUpdate(op->cipher_ctx, pEnc, &out_len, pPart, (int)ulPartLen) != 1) {
         op->active = 0; return FHSM_RV_FUNCTION_FAILED;
@@ -5977,6 +5982,10 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
     fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 0);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
     if (pPart == NULL) { *pulPartLen = ulEncLen; return FHSM_RV_OK; }
+    /* Symmetric guard to C_EncryptUpdate : AES-GCM decrypt emits exactly
+     * ulEncLen plaintext bytes ; refuse an undersized buffer before EVP
+     * writes rather than overrun pPart (#125 TestUpdateOutputGuard). */
+    if (*pulPartLen < ulEncLen) { *pulPartLen = ulEncLen; return 0x00000150UL; }
     int out_len = 0;
     if (EVP_DecryptUpdate(op->cipher_ctx, pPart, &out_len, pEnc, (int)ulEncLen) != 1) {
         op->active = 0; return FHSM_RV_FUNCTION_FAILED;

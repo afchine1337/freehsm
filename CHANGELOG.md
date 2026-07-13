@@ -9,6 +9,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 security — output-buffer overrun guard in Encrypt/DecryptUpdate.**
+  `C_EncryptUpdate`/`C_DecryptUpdate` (AES-GCM multipart, a stream cipher that
+  emits exactly the input length) passed the caller's output pointer straight to
+  `EVP_*Update` without checking the caller-declared `*pulLen`. An undersized
+  buffer therefore caused an out-of-bounds write. They now return
+  `CKR_BUFFER_TOO_SMALL` (setting the required length) before EVP writes, leaving
+  the operation active for retry (TestUpdateOutputGuard). Proven with a guard-page
+  probe: a 4-byte buffer against 32 bytes returns 0x150 with no fault. (Full
+  multipart-GCM output-length correctness is tracked separately under #57.)
+
 * **#125 security — private objects require an authenticated session.**
   `C_CreateObject` now rejects creating a private object (`CKA_PRIVATE=TRUE`,
   explicit or the class default for secret/private keys) from a public
