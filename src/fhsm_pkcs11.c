@@ -1480,6 +1480,24 @@ static CK_RV fhsm_check_ro_token(CK_SESSION_HANDLE hSession,
     return FHSM_RV_OK;
 }
 
+/* PKCS#11 : a private object (CKA_PRIVATE=TRUE, explicit or derived from the
+ * class default -- TRUE for secret/private keys) may only be created,
+ * derived or unwrapped by an authenticated (logged-in) session. A public
+ * (unauthenticated) session attempting this is CKR_USER_NOT_LOGGED_IN (#125
+ * TestPublicSessionRestrictions). */
+static CK_RV fhsm_check_private_login(CK_SESSION_HANDLE hSession,
+                                      CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    CK_ULONG cls = 0xFFFFFFFFUL;
+    long ci = find_attr(tmpl, n, 0x00 /* CKA_CLASS */);
+    if (ci >= 0 && tmpl[ci].pValue && tmpl[ci].ulValueLen == sizeof(CK_ULONG))
+        cls = *(CK_ULONG *)tmpl[ci].pValue;
+    int default_priv = (cls == CKO_SECRET_KEY || cls == CKO_PRIVATE_KEY) ? 1 : 0;
+    if (tmpl_bbool(tmpl, n, CKA_PRIVATE, default_priv)
+        && fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    return FHSM_RV_OK;
+}
+
 /* Apply CKA_TOKEN scope after creating an object : if the template does
  * not request a token object (default CKA_TOKEN=FALSE) the object is a
  * session object owned by hSession -- not persisted, destroyed on close. */
@@ -1735,6 +1753,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount);          if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_private_login(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount);  if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
 

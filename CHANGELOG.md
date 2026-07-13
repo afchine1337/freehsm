@@ -9,6 +9,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 security — private objects require an authenticated session.**
+  `C_CreateObject` now rejects creating a private object (`CKA_PRIVATE=TRUE`,
+  explicit or the class default for secret/private keys) from a public
+  (unauthenticated) session with `CKR_USER_NOT_LOGGED_IN`
+  (`fhsm_check_private_login`, TestPublicSessionRestrictions). Public objects
+  remain creatable without login.
+
 * **Wycheproof CI — align adapter ML-KEM/ML-DSA key types with the module.**
   The Wycheproof `mldsa`/`mlkem` adapters used the old draft `CKK_ML_KEM=0x3C` /
   `CKK_ML_DSA=0x3E`, but the module was moved to the official PKCS#11 v3.2 /
