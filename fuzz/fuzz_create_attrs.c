@@ -45,7 +45,7 @@
  *        unterminated label can escape the parser).
  *   P4.  id_data == NULL ⟹ id_len == 0 (parser doesn't synthesize a
  *        length without a pointer).
- *   P5.  cko ∈ {DATA, PUBLIC_KEY, PRIVATE_KEY, SECRET_KEY}.
+ *   P5.  cko ∈ {DATA, CERTIFICATE, PUBLIC_KEY, PRIVATE_KEY, SECRET_KEY}.
  *   P6.  VERBATIM (non-DATA) ⟹ value_data != NULL ; DATA may be empty.
  *   P7.  EC_PUB        ⟹ cko == PUBLIC_KEY
  *                      && ec_group ∈ {"P-256","P-384","P-521"}
@@ -116,6 +116,7 @@
  * class values here to express invariants in human-readable form.
  * ----------------------------------------------------------------------- */
 #define HARNESS_CKO_DATA        0x00000000UL
+#define HARNESS_CKO_CERTIFICATE 0x00000001UL
 #define HARNESS_CKO_PUBLIC_KEY  0x00000002UL
 #define HARNESS_CKO_PRIVATE_KEY 0x00000003UL
 #define HARNESS_CKO_SECRET_KEY  0x00000004UL
@@ -172,8 +173,8 @@ static unsigned long build_template(const uint8_t *data, size_t size,
  * the offending input.
  * ----------------------------------------------------------------------- */
 static void check_ok(const fhsm_create_attrs_t *a) {
-    /* P1 : path enum is in range. */
-    if ((unsigned)a->path > (unsigned)FHSM_CREATE_PATH_RSA_PUB) {
+    /* P1 : path enum is in range. CERT_X509 (#110) is the highest value. */
+    if ((unsigned)a->path > (unsigned)FHSM_CREATE_PATH_CERT_X509) {
         __builtin_trap();
     }
     /* P2 : OK implies non-INVALID. */
@@ -195,6 +196,7 @@ static void check_ok(const fhsm_create_attrs_t *a) {
 
     /* P5 : cko is one of the supported classes (CKO_DATA added in #125). */
     if (a->cko != HARNESS_CKO_DATA
+     && a->cko != HARNESS_CKO_CERTIFICATE
      && a->cko != HARNESS_CKO_PUBLIC_KEY
      && a->cko != HARNESS_CKO_PRIVATE_KEY
      && a->cko != HARNESS_CKO_SECRET_KEY) {
@@ -255,6 +257,14 @@ static void check_ok(const fhsm_create_attrs_t *a) {
         if (a->cko != HARNESS_CKO_PUBLIC_KEY) __builtin_trap();
         if (a->rsa_modulus  == NULL)          __builtin_trap();
         if (a->rsa_exponent == NULL)          __builtin_trap();
+        break;
+
+    case FHSM_CREATE_PATH_CERT_X509:
+        /* P11 : an X.509 certificate object (#110) carries CKO_CERTIFICATE
+         * and a non-NULL CKA_VALUE (the DER blob) ; the parser requires a
+         * non-empty value before returning OK on this path. */
+        if (a->cko != HARNESS_CKO_CERTIFICATE) __builtin_trap();
+        if (a->value_data == NULL)             __builtin_trap();
         break;
 
     case FHSM_CREATE_PATH_INVALID:
