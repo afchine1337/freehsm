@@ -3986,6 +3986,36 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     if (op->mechanism == CKM_AES_GMAC && !op->gcm_have) {
         op->mechanism = CKM_AES_CMAC;
     }
+    /* AES-CCM (SP 800-38C) : parse CK_CCM_PARAMS { ulDataLen; pNonce;
+     * ulNonceLen; pAAD; ulAADLen; ulMACLen } (6 CK_ULONG-sized words = 48
+     * bytes on LP64). Nonce length 7-13 and MAC length in {4,6,8,10,12,14,16}
+     * per NIST SP 800-38C; a missing parameter, NULL nonce, or out-of-range
+     * length is CKR_MECHANISM_PARAM_INVALID (#125 TestAesCcmNullNonce /
+     * TestBadParameters). Reuses the GCM nonce/AAD/tag op fields. */
+    if (pMechanism->mechanism == 0x00001088UL /* CKM_AES_CCM */) {
+        if (!pMechanism->pParameter
+            || pMechanism->ulParameterLen < 6 * sizeof(CK_ULONG))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        const CK_ULONG *p = (const CK_ULONG *)pMechanism->pParameter;
+        const uint8_t *nonce = (const uint8_t *)(uintptr_t)p[1];
+        size_t nonce_len = (size_t)p[2];
+        const uint8_t *aad = (const uint8_t *)(uintptr_t)p[3];
+        size_t aad_len = (size_t)p[4];
+        size_t mac_len = (size_t)p[5];
+        if (!nonce || nonce_len < 7 || nonce_len > 13)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        if (mac_len != 4 && mac_len != 6 && mac_len != 8 && mac_len != 10
+            && mac_len != 12 && mac_len != 14 && mac_len != 16)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        if (aad_len > sizeof(op->gcm_aad) || (aad_len && !aad))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        memcpy(op->gcm_iv, nonce, nonce_len);
+        op->gcm_iv_len  = nonce_len;
+        if (aad_len) memcpy(op->gcm_aad, aad, aad_len);
+        op->gcm_aad_len = aad_len;
+        op->gcm_tag_len = mac_len;
+        op->gcm_have    = 1;
+    }
     /* For RSA-OAEP, capture and validate the OAEP params at Init time so
      * the actual Encrypt/Decrypt call can be the bare key-material path. */
     if (pMechanism->mechanism == CKM_RSA_PKCS_OAEP) {
@@ -4118,6 +4148,7 @@ static int fhsm_cipher_mech_valid(CK_ULONG mech) {
         case CKM_AES_CBC_PAD:   /* 0x1085 */
         case CKM_AES_CTR:       /* 0x1086 */
         case CKM_AES_GCM:       /* 0x1087 */
+        case 0x00001088UL:      /* CKM_AES_CCM */
         case 0x00000133UL:      /* CKM_DES3_CBC */
         case CKM_RSA_PKCS:      /* 0x0001 */
         case CKM_RSA_X_509:     /* 0x0003 */
@@ -4372,6 +4403,53 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
                                 fhsm_session_role(hSession), FHSM_RV_OK, NULL);
         return FHSM_RV_OK;
+    }
+
+    /* --- AES-CCM path (SP 800-38C, symmetric) ---
+     * Output layout is ciphertext || MAC. Nonce/AAD/MAC-length come from the
+     * CK_CCM_PARAMS captured at C_EncryptInit. OpenSSL's CCM requires the
+     * strict init sequence: set IV/tag length, key+nonce, declare the total
+     * plaintext length, feed AAD, then encrypt. (#125 CCM online path.) */
+    if (op->mechanism == 0x00001088UL /* CKM_AES_CCM */) {
+        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        size_t mac_len = op->gcm_tag_len ? op->gcm_tag_len : 16;
+        size_t need = ulDataLen + mac_len;
+        if (pEnc == NULL) { *pulEncLen = need; return FHSM_RV_OK; }
+        if (*pulEncLen < need) { *pulEncLen = need; return 0x00000150UL; }
+        {
+            const EVP_CIPHER *cph = (kvl == 16) ? EVP_aes_128_ccm() :
+                                    (kvl == 24) ? EVP_aes_192_ccm() :
+                                    (kvl == 32) ? EVP_aes_256_ccm() : NULL;
+            EVP_CIPHER_CTX *cx = NULL;
+            int cl2 = 0; size_t prod = 0;
+            if (!cph) { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
+            cx = EVP_CIPHER_CTX_new();
+            if (!cx) { op->active = 0; return FHSM_RV_HOST_MEMORY; }
+            rv = FHSM_RV_FUNCTION_FAILED;
+            if (EVP_EncryptInit_ex(cx, cph, NULL, NULL, NULL) != 1) goto cenc_out;
+            if (EVP_CIPHER_CTX_ctrl(cx, EVP_CTRL_CCM_SET_IVLEN,
+                                    (int)op->gcm_iv_len, NULL) != 1) goto cenc_out;
+            if (EVP_CIPHER_CTX_ctrl(cx, EVP_CTRL_CCM_SET_TAG,
+                                    (int)mac_len, NULL) != 1) goto cenc_out;
+            if (EVP_EncryptInit_ex(cx, NULL, NULL, kv, op->gcm_iv) != 1) goto cenc_out;
+            if (EVP_EncryptUpdate(cx, NULL, &cl2, NULL, (int)ulDataLen) != 1) goto cenc_out;
+            if (op->gcm_aad_len > 0 && EVP_EncryptUpdate(cx, NULL, &cl2,
+                                    op->gcm_aad, (int)op->gcm_aad_len) != 1) goto cenc_out;
+            if (EVP_EncryptUpdate(cx, pEnc, &cl2, pData, (int)ulDataLen) != 1) goto cenc_out;
+            prod = (size_t)cl2;
+            if (EVP_EncryptFinal_ex(cx, pEnc + prod, &cl2) != 1) goto cenc_out;
+            prod += (size_t)cl2;
+            if (EVP_CIPHER_CTX_ctrl(cx, EVP_CTRL_CCM_GET_TAG,
+                                    (int)mac_len, pEnc + prod) != 1) goto cenc_out;
+            *pulEncLen = prod + mac_len;
+            rv = FHSM_RV_OK;
+        cenc_out:
+            EVP_CIPHER_CTX_free(cx);
+        }
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, NULL);
+        return rv;
     }
 
     /* --- AES-GCM path (symmetric) ---
@@ -4634,6 +4712,55 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
                                 fhsm_session_role(hSession), FHSM_RV_OK, NULL);
         return FHSM_RV_OK;
+    }
+
+    /* --- AES-CCM path (SP 800-38C, symmetric) ---
+     * Input layout is ciphertext || MAC. For CCM, OpenSSL verifies the MAC
+     * inside the single EVP_DecryptUpdate call (there is no DecryptFinal) :
+     * the expected tag must be set BEFORE the data, and a non-positive
+     * return means authentication failed -> CKR_ENCRYPTED_DATA_INVALID with
+     * the partial plaintext zeroised. (#125 CCM online path.) */
+    if (op->mechanism == 0x00001088UL /* CKM_AES_CCM */) {
+        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        size_t cmac_len = op->gcm_tag_len ? op->gcm_tag_len : 16;
+        if (ulEncLen < cmac_len) { op->active = 0; return FHSM_RV_ENCRYPTED_DATA_INVALID; }
+        size_t ct_len = ulEncLen - cmac_len;
+        if (pData == NULL) { *pulDataLen = ct_len; return FHSM_RV_OK; }
+        if (*pulDataLen < ct_len) { *pulDataLen = ct_len; return 0x00000150UL; }
+        {
+            const EVP_CIPHER *cph = (kvl == 16) ? EVP_aes_128_ccm() :
+                                    (kvl == 24) ? EVP_aes_192_ccm() :
+                                    (kvl == 32) ? EVP_aes_256_ccm() : NULL;
+            EVP_CIPHER_CTX *cx = NULL;
+            int cl2 = 0;
+            if (!cph) { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
+            cx = EVP_CIPHER_CTX_new();
+            if (!cx) { op->active = 0; return FHSM_RV_HOST_MEMORY; }
+            rv = FHSM_RV_FUNCTION_FAILED;
+            if (EVP_DecryptInit_ex(cx, cph, NULL, NULL, NULL) != 1) goto cdec_out;
+            if (EVP_CIPHER_CTX_ctrl(cx, EVP_CTRL_CCM_SET_IVLEN,
+                                    (int)op->gcm_iv_len, NULL) != 1) goto cdec_out;
+            if (EVP_CIPHER_CTX_ctrl(cx, EVP_CTRL_CCM_SET_TAG, (int)cmac_len,
+                                    (void *)(pEnc + ct_len)) != 1) goto cdec_out;
+            if (EVP_DecryptInit_ex(cx, NULL, NULL, kv, op->gcm_iv) != 1) goto cdec_out;
+            if (EVP_DecryptUpdate(cx, NULL, &cl2, NULL, (int)ct_len) != 1) goto cdec_out;
+            if (op->gcm_aad_len > 0 && EVP_DecryptUpdate(cx, NULL, &cl2,
+                                    op->gcm_aad, (int)op->gcm_aad_len) != 1) goto cdec_out;
+            if (EVP_DecryptUpdate(cx, pData, &cl2, pEnc, (int)ct_len) != 1) {
+                /* CCM authentication failure : zeroise partial output. */
+                fhsm_zeroize(pData, *pulDataLen);
+                rv = FHSM_RV_ENCRYPTED_DATA_INVALID;
+                goto cdec_out;
+            }
+            *pulDataLen = (size_t)cl2;
+            rv = FHSM_RV_OK;
+        cdec_out:
+            EVP_CIPHER_CTX_free(cx);
+        }
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, NULL);
+        return rv;
     }
 
     /* --- AES-GCM path (symmetric) ---

@@ -403,3 +403,10 @@ inconsistent with C_EncryptInit returning CKR_MECHANISM_INVALID. Follow-up:
 implement the CCM two-pass EVP path (CK_CCM_PARAMS: nonce 7-13B, MAC 4-16B,
 AAD, ulDataLen), validate a NIST SP 800-38C vector, then re-advertise
 fips=approved. The dispatch_aes_ccm KAT handler is retained for that work.
+
+## F13 — RESOLVED (AES-CCM online implemented)
+
+The AES-CCM online C_Encrypt/C_Decrypt path is now wired (CK_CCM_PARAMS parsing,
+two-pass EVP, NIST SP 800-38C Example 1 byte-exact). CCM is re-advertised
+fips=approved; the flag<->behaviour inconsistency that motivated the earlier
+de-advertisement is gone. The KAT handler dispatch_aes_ccm is back in the table.

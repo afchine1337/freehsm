@@ -240,9 +240,63 @@ fhsm_rv_t dispatch_aes_ctr(unsigned long session, unsigned long key,
     return evp_cipher_oneshot(c, k, iv, in, out, outlen, 0);
 }
 
-/* AES-CCM handler removed with the mechanism de-advertisement (#125 F13) :
- * the online C_Encrypt/C_Decrypt path was never wired. The TLV-based
- * implementation is preserved in git history for re-wiring later. */
+/* ---------------------------------------------------------------------------
+ * AES-CCM (SP 800-38C). The OpenSSL EVP_CIPHER interface for CCM
+ * requires a strict init sequence : set IV-length and tag-length
+ * before keying, then declare the total plaintext length via
+ * EVP_EncryptUpdate(NULL, ...) before feeding AAD and plaintext.
+ * The 12-byte IV + 16-byte tag pair is the FIPS-approved baseline ;
+ * shorter tags are rejected at the dispatcher level.
+ * ----------------------------------------------------------------------- */
+fhsm_rv_t dispatch_aes_ccm(unsigned long session, unsigned long key,
+                            const void *params, size_t plen,
+                            fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key;
+    fhsm_slice_t k, iv, aad;
+    fhsm_rv_t rv;
+    if ((rv = fhsm_tlv_find(params, plen, FHSM_TLV_KEY, &k)) != FHSM_RV_OK) return rv;
+    if ((rv = fhsm_tlv_find(params, plen, FHSM_TLV_IV,  &iv)) != FHSM_RV_OK) return rv;
+    fhsm_tlv_find_optional(params, plen, FHSM_TLV_AAD, &aad);
+    if (iv.len < 7 || iv.len > 13) return FHSM_RV_ARGUMENTS_BAD;
+    if (*outlen < in.len + 16) return FHSM_RV_ARGUMENTS_BAD;
+
+    const EVP_CIPHER *cipher = aes_cipher(k.len, EVP_aes_128_ccm,
+                                            EVP_aes_192_ccm, EVP_aes_256_ccm);
+    if (!cipher) return FHSM_RV_KEY_SIZE_RANGE;
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return FHSM_RV_HOST_MEMORY;
+
+    rv = FHSM_RV_FUNCTION_FAILED;
+    int outl = 0;
+    uint8_t tag[16];
+
+    /* Pass 1: configure cipher with NULL key/iv to set IV/tag length. */
+    if (EVP_EncryptInit_ex2(ctx, cipher, NULL, NULL, NULL) != 1) goto out;
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_IVLEN, (int)iv.len, NULL) != 1) goto out;
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_TAG, 16, NULL) != 1) goto out;
+    /* Pass 2: real key/iv. */
+    if (EVP_EncryptInit_ex2(ctx, NULL, k.data, iv.data, NULL) != 1) goto out;
+    /* Declare plaintext length up-front (mandatory for CCM). */
+    if (EVP_EncryptUpdate(ctx, NULL, &outl, NULL, (int)in.len) != 1) goto out;
+    if (aad.len) {
+        if (EVP_EncryptUpdate(ctx, NULL, &outl, aad.data, (int)aad.len) != 1) goto out;
+    }
+    if (EVP_EncryptUpdate(ctx, out, &outl, in.data, (int)in.len) != 1) goto out;
+    size_t produced = (size_t)outl;
+    if (EVP_EncryptFinal_ex(ctx, out + produced, &outl) != 1) goto out;
+    produced += (size_t)outl;
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_GET_TAG, 16, tag) != 1) goto out;
+    memcpy(out + produced, tag, 16);
+    *outlen = produced + 16;
+    rv = FHSM_RV_OK;
+
+out:
+    fhsm_zeroize(tag, sizeof(tag));
+    EVP_CIPHER_CTX_free(ctx);
+    return rv;
+}
 
 
 /* ---------------------------------------------------------------------------

@@ -9,6 +9,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **AES-CCM online implementation (SP 800-38C).** The interactive
+  `C_Encrypt`/`C_Decrypt` path for `CKM_AES_CCM` is now wired: `op_init` parses
+  `CK_CCM_PARAMS` (nonce 7-13 B, MAC 4-16 B, AAD), validating a missing/NULL
+  nonce or out-of-range length with `CKR_MECHANISM_PARAM_INVALID`; encrypt emits
+  `ciphertext || MAC` and decrypt verifies the MAC in-place (partial plaintext
+  zeroised on failure -> `CKR_ENCRYPTED_DATA_INVALID`). CCM is re-advertised
+  `fips=approved` and added to the cipher whitelist, so `C_GetMechanismInfo`
+  flags now match behaviour. Verified byte-exact against NIST SP 800-38C
+  Example 1, plus a full encrypt→decrypt round-trip and tamper rejection.
+
 * **Wycheproof CI — model the FIPS GCM IV policy.** The AES-GCM adapter
   counted every non-96-bit-IV "valid" vector as a false negative, but FreeHSM
   (fips-strict) deliberately restricts AES-GCM IVs to 96 bits per NIST SP

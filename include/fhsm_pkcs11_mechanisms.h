@@ -25,6 +25,7 @@ extern "C" {
 #define CKM_AES_CBC                          0x00001082u
 #define CKM_AES_CBC_PAD                      0x00001085u
 #define CKM_AES_GCM                          0x00001087u
+#define CKM_AES_CCM                          0x00001088u
 #define CKM_AES_CTR                          0x00001086u
 #define CKM_AES_KEY_WRAP                     0x00002109u
 #define CKM_AES_KEY_WRAP_KWP                 0x0000210Bu
@@ -173,6 +174,7 @@ extern fhsm_rv_t dispatch_aes_keygen(unsigned long, unsigned long, const void*, 
 extern fhsm_rv_t dispatch_aes_cbc(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_cbc_pad(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_gcm(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_aes_ccm(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_ctr(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_kw(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_kwp(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);

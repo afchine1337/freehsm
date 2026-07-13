@@ -93,12 +93,10 @@ MECHANISMS: tuple[Mech, ...] = (
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197", "SP 800-38D"),
          notes="IV length fixed at 96 bits; tag length fixed at 128 bits in approved mode."),
-    # AES-CCM (SP 800-38C) is FIPS-approved and KAT-covered, but the online
-    # C_Encrypt/C_Decrypt data path is not yet wired, so C_EncryptInit rejects
-    # it with CKR_MECHANISM_INVALID. Advertising CKF_ENCRYPT for a mechanism
-    # that cannot be initialised is a flag<->behaviour inconsistency (#125
-    # TestMechFlagBehavioralConformance), so CCM is de-advertised until the
-    # online path is implemented (follow-up F13). The KAT handler is retained.
+    Mech("CKM_AES_CCM",            0x00001088, "AES",  "encrypt", "dispatch_aes_ccm",
+         fips="approved", key_type="CKK_AES",
+         min_key_bits=128, max_key_bits=256,
+         refs=("FIPS 197", "SP 800-38C")),
     Mech("CKM_AES_CTR",            0x00001086, "AES",  "encrypt", "dispatch_aes_ctr",
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
