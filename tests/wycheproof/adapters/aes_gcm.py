@@ -214,7 +214,20 @@ class AesGcmAdapter(Adapter):
                 f"pt_match={plaintext == msg}"
             )
         if expected == "valid":
-            return "match" if accepted else "violation"
+            if accepted:
+                return "match"
+            # FIPS 140-3 IG C.H / NIST SP 800-38D §8.2 : in the approved mode
+            # AES-GCM IVs are fixed at 96 bits. FreeHSM (fips-strict) rejects
+            # any other IV size at C_EncryptInit/C_DecryptInit with
+            # CKR_MECHANISM_PARAM_INVALID. Wycheproof's non-96-bit "valid"
+            # vectors are therefore *expected* rejections for this module, not
+            # implementation faults ; only a rejected 96-bit vector is a real
+            # false-negative.
+            if iv_bits != 96 and rv == 0x00000071:  # CKR_MECHANISM_PARAM_INVALID
+                self.diag["iv_non96_fips_rejected"] = \
+                    self.diag.get("iv_non96_fips_rejected", 0) + 1
+                return "match"
+            return "violation"
         if expected == "invalid":
             # Module must reject (or return wrong plaintext).
             return "match" if not accepted else "violation"

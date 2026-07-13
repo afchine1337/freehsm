@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **Wycheproof CI — model the FIPS GCM IV policy.** The AES-GCM adapter
+  counted every non-96-bit-IV "valid" vector as a false negative, but FreeHSM
+  (fips-strict) deliberately restricts AES-GCM IVs to 96 bits per NIST SP
+  800-38D / FIPS 140-3 IG C.H, rejecting other sizes at init with
+  `CKR_MECHANISM_PARAM_INVALID`. The adapter now classifies a non-96-bit IV
+  rejection as expected (`iv_non96_fips_rejected` diag), not a violation. 37
+  spurious violations cleared; all adapters now report 0.
+
 * **#125 security — CKA_MODIFIABLE / CKA_DESTROYABLE honoured.** These were
   silently ignored at create and always read back TRUE (a "lying module"). They
   are now persisted (object flag bits `FHSM_OBJF_UNMODIFIABLE` /
