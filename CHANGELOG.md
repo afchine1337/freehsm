@@ -9,6 +9,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#125 conformance — all RSA-PSS mechanisms require their parameters.**
+  `CKM_SHAxxx_RSA_PKCS_PSS` (not just the bare `CKM_RSA_PKCS_PSS`) now requires
+  `CK_RSA_PKCS_PSS_PARAMS` at `C_SignInit`/`C_VerifyInit`; a missing/too-short
+  parameter is `CKR_MECHANISM_PARAM_INVALID` instead of a silent salt-length
+  fallback (TestBadParameters SHA256_RSA_PKCS_PSS missing params).
+
 * **#57/#125 — multipart Encrypt/Decrypt made mechanism-generic.** The
   streaming path (`C_EncryptUpdate`/`Final`, `C_DecryptUpdate`/`Final`) was
   hard-wired to AES-GCM and keyed off the wrong IV field, so AES-ECB/CBC/CBC-PAD/

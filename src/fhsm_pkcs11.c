@@ -4075,11 +4075,13 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     op->pss_have    = 0;
     op->pss_saltlen = 0;
     op->pss_mgf     = 0;
-    /* The bare CKM_RSA_PKCS_PSS mechanism carries no implicit hash, so its
-     * CK_RSA_PKCS_PSS_PARAMS (hashAlg, mgf, sLen) are mandatory : a missing
-     * or too-short parameter is CKR_MECHANISM_PARAM_INVALID, not a silent
-     * fallback (#125 TestBadParameters RSA_PKCS_PSS missing params). */
-    if (op->mechanism == 0x0000000DUL
+    /* Every RSA-PSS mechanism (bare CKM_RSA_PKCS_PSS and the
+     * CKM_SHAxxx_RSA_PKCS_PSS variants) requires CK_RSA_PKCS_PSS_PARAMS
+     * (hashAlg, mgf, sLen) per PKCS#11 v3.2 : a missing or too-short
+     * parameter is CKR_MECHANISM_PARAM_INVALID, not a silent fallback
+     * (#125 TestBadParameters RSA_PKCS_PSS / SHA256_RSA_PKCS_PSS missing
+     * params). */
+    if (mech_is_pss(op->mechanism)
         && (!pMechanism->pParameter
             || pMechanism->ulParameterLen < 3 * sizeof(CK_ULONG)))
         return FHSM_RV_MECHANISM_PARAM_INVALID;
