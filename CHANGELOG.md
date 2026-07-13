@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **Wycheproof CI — align adapter ML-KEM/ML-DSA key types with the module.**
+  The Wycheproof `mldsa`/`mlkem` adapters used the old draft `CKK_ML_KEM=0x3C` /
+  `CKK_ML_DSA=0x3E`, but the module was moved to the official PKCS#11 v3.2 /
+  OASIS values (`CKK_ML_KEM=0x49`, `CKK_ML_DSA=0x4A`) during #125, so every
+  PQC public-key import hit `CKR_TEMPLATE_INCONSISTENT` (614 ML-DSA imports
+  failed -> 226 good-sig-rejected; 3 ML-KEM). Update the adapter constants to
+  the official values. Verified: mldsa 614 match / 0 viol, mlkem 21 / 0.
+
 * **AES-CCM online implementation (SP 800-38C).** The interactive
   `C_Encrypt`/`C_Decrypt` path for `CKM_AES_CCM` is now wired: `op_init` parses
   `CK_CCM_PARAMS` (nonce 7-13 B, MAC 4-16 B, AAD), validating a missing/NULL
