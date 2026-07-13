@@ -148,7 +148,18 @@ fhsm_token_t *fhsm_session_token(unsigned long h) {
 fhsm_role_t fhsm_session_role(unsigned long h) {
     if (h == 0 || h >= FHSM_MAX_SESSIONS) return FHSM_ROLE_NONE;
     pthread_mutex_lock(&g_sess_mu);
-    fhsm_role_t r = g_sessions[h].in_use ? g_sessions[h].role : FHSM_ROLE_NONE;
+    fhsm_role_t r = FHSM_ROLE_NONE;
+    if (g_sessions[h].in_use) {
+        /* PKCS#11 v3.2 §5.6: login state is per-application (per-token),
+         * shared across every session the application holds with the token.
+         * When one session performs C_Login, all sibling sessions of the
+         * same token become authenticated. Query the token's authenticated
+         * role rather than this session's local copy, so a key op issued in
+         * a sibling session isn't spuriously rejected USER_NOT_LOGGED_IN.
+         * Fall back to the local role only if no token is attached yet. */
+        const fhsm_token_t *tok = g_sessions[h].token;
+        r = tok ? fhsm_token_current_role(tok) : g_sessions[h].role;
+    }
     pthread_mutex_unlock(&g_sess_mu);
     return r;
 }

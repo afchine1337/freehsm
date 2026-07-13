@@ -108,6 +108,12 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role, const char *pin);
 void fhsm_token_logout(fhsm_token_t *t);
 
 /* Current per-token login role (shared by all sessions). #125. */
+/* Per-token object-store capacity. Overridable via -DFHSM_MAX_OBJECTS ;
+ * kept in the public header so unit tests track the implementation (#125). */
+#ifndef FHSM_MAX_OBJECTS
+#define FHSM_MAX_OBJECTS 256
+#endif
+
 fhsm_role_t fhsm_token_current_role(const fhsm_token_t *t);
 
 /* PIN administration. SO can change either PIN; USER can change only

@@ -51,7 +51,7 @@
 
 /* First failing count under the v1.4.0 bug was 12 ; test well past it. */
 #define N_OBJECTS 16
-#define N_MAX     64   /* FHSM_MAX_OBJECTS --- keep in sync with fhsm_token.c */
+#define N_MAX     FHSM_MAX_OBJECTS   /* tracks fhsm_token.h (#125) */
 
 static int fail(const char *msg, fhsm_rv_t rv) {
     fprintf(stderr, "FAIL: %s (rv=0x%08x)\n", msg, (unsigned)rv);

@@ -8,6 +8,25 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 conformance — login state is per-application (per-token), not
+  per-session.** `fhsm_session_role` now reports the token's authenticated
+  role (shared across every session the application holds with the token,
+  per PKCS#11 v3.2 §5.6) instead of a per-session copy. A key operation
+  issued in a sibling session of a logged-in application is no longer
+  spuriously rejected `CKR_USER_NOT_LOGGED_IN` (TestMultipleSessions,
+  TestConcurrentObjectCreation, TestMultiSessionConcurrency,
+  provisioned-signing coherence, RO token-object mutation).
+
+* **#125 — large object storage: per-object value is now heap-allocated.**
+  The object value moved from a fixed 16 KiB inline buffer to a heap
+  allocation (cap `FHSM_OBJ_VALUE_MAX` raised to 2 MiB), so `CKO_DATA`
+  objects up to 1 MiB create, persist (encrypted `.tok` round-trip) and
+  read back cleanly instead of failing `CKR_KEY_SIZE_RANGE`
+  (TestLargeDataObjects 100 KiB/1 MiB, TestDataObjectCreate large value,
+  TestLargeAttributes). `FHSM_MAX_OBJECTS` raised 64→256 so ≥100 keys
+  coexist (TestBulkOperations). Verified leak/UAF-free under ASAN across
+  create/destroy/compaction/session-close/logout-reload/finalize.
+
 
 * **#125 conformance — all RSA-PSS mechanisms require their parameters.**
   `CKM_SHAxxx_RSA_PKCS_PSS` (not just the bare `CKM_RSA_PKCS_PSS`) now requires

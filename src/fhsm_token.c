@@ -66,7 +66,7 @@
  * larger store ; the fixed in-memory array trades RAM for simplicity
  * (constant-time, no allocator on the object hot path). */
 #ifndef FHSM_MAX_OBJECTS
-#define FHSM_MAX_OBJECTS    64
+#define FHSM_MAX_OBJECTS    256   /* #125 test_resource : >=100 keys coexist */
 #endif
 #define FHSM_OBJ_LABEL_LEN  64
 /* Value buffer sized to hold the largest supported key type :
@@ -83,7 +83,10 @@
  * certificates carrying PQC / composite keys and signatures
  * (ML-DSA-87 cert ~8-10 KB ; composite larger). */
 #define FHSM_OBJ_VALUE_LEN  5500      /* legacy v1 record field size  */
-#define FHSM_OBJ_VALUE_MAX  16384     /* in-memory + v2 per-object cap */
+/* #125 large-object storage : the in-memory value is now heap-allocated
+ * (see fhsm_object_t.value), so this cap no longer costs static memory.
+ * 2 MiB covers 1 MiB data objects (test_large_objects) with headroom. */
+#define FHSM_OBJ_VALUE_MAX  (2u * 1024u * 1024u) /* v2 per-object value cap */
 
 typedef struct fhsm_object_s {
     uint32_t handle;        /* CK_OBJECT_HANDLE, opaque to PKCS#11 caller */
@@ -91,7 +94,7 @@ typedef struct fhsm_object_s {
     uint32_t key_type;      /* CKK_AES, CKK_GENERIC_SECRET, ... */
     uint32_t value_len;     /* actual key bytes used */
     uint8_t  label[FHSM_OBJ_LABEL_LEN];
-    uint8_t  value[FHSM_OBJ_VALUE_MAX];
+    uint8_t *value;         /* heap-allocated, value_len bytes (#125) */
     uint8_t  id[32];        /* CKA_ID */
     uint32_t id_len;
     uint8_t  flags;         /* bit 0 = CKA_PRIVATE, bit 1 = CKA_EXTRACTABLE */
@@ -264,6 +267,24 @@ static uint64_t get_u64_le(const uint8_t *p) {
 #define FHSM_OBJ_BLOB_MAX \
     (12u + (uint32_t)FHSM_MAX_OBJECTS * (4u + FHSM_OBJ_REC_V2_FIXED + FHSM_OBJ_VALUE_MAX))
 
+/* #125 large-object storage helpers. The per-object value is heap-owned;
+ * these keep ownership sane across the struct-copy compaction pattern. */
+static void obj_free_value(fhsm_object_t *o) {
+    if (o && o->value) {
+        if (o->value_len) fhsm_zeroize(o->value, o->value_len);
+        free(o->value);
+        o->value = NULL;
+        o->value_len = 0;
+    }
+}
+/* Free every object value slot (not just [0,object_count)) so partial
+ * allocations from a failed load are also reclaimed, then reset count. */
+static void objects_free_all(fhsm_token_t *t) {
+    if (!t) return;
+    for (uint32_t i = 0; i < FHSM_MAX_OBJECTS; ++i) obj_free_value(&t->objects[i]);
+    t->object_count = 0;
+}
+
 static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
     /* v2 writer (#110). Returns the number of bytes written. */
     put_u32_le(out + 0, FHSM_OBJ_BLOB_V2_MAGIC);
@@ -319,7 +340,11 @@ static fhsm_rv_t parse_objects_v1(fhsm_token_t *t, const uint8_t *buf, size_t le
         o->value_len = get_u32_le(buf + off + 12);
         if (o->value_len > FHSM_OBJ_VALUE_LEN) return FHSM_RV_FUNCTION_FAILED;
         memcpy(o->label, buf + off + OFF_LABEL, FHSM_OBJ_LABEL_LEN);
-        memcpy(o->value, buf + off + OFF_VALUE, FHSM_OBJ_VALUE_LEN);
+        if (o->value_len) {
+            o->value = malloc(o->value_len);
+            if (!o->value) return FHSM_RV_HOST_MEMORY;
+            memcpy(o->value, buf + off + OFF_VALUE, o->value_len);
+        }
         memcpy(o->id,    buf + off + OFF_ID,    32);
         o->id_len = get_u32_le(buf + off + OFF_IDLEN);
         if (o->id_len > 32) return FHSM_RV_FUNCTION_FAILED;
@@ -360,7 +385,11 @@ static fhsm_rv_t parse_objects_v2(fhsm_token_t *t, const uint8_t *buf, size_t le
         if (o->id_len > 32) return FHSM_RV_FUNCTION_FAILED;
         o->flags  = buf[off + 116];
         o->usage_flags = buf[off + 117];
-        memcpy(o->value, buf + off + FHSM_OBJ_REC_V2_FIXED, o->value_len);
+        if (o->value_len) {
+            o->value = malloc(o->value_len);
+            if (!o->value) return FHSM_RV_HOST_MEMORY;
+            memcpy(o->value, buf + off + FHSM_OBJ_REC_V2_FIXED, o->value_len);
+        }
         off += rec_len;
     }
     t->object_count = count;
@@ -385,6 +414,7 @@ static fhsm_rv_t parse_objects(fhsm_token_t *t, const uint8_t *buf, size_t len) 
  * ----------------------------------------------------------------------- */
 static fhsm_rv_t objects_decrypt_load(fhsm_token_t *t) {
     if (!t->dek) return FHSM_RV_USER_NOT_LOGGED_IN;
+    objects_free_all(t);   /* reclaim any values from a prior login (#125) */
     int fd = open(t->path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return FHSM_RV_TOKEN_NOT_PRESENT;
     struct stat st;
@@ -650,6 +680,7 @@ fhsm_rv_t fhsm_token_load(const char *path, fhsm_token_t **out) {
 
 void fhsm_token_close(fhsm_token_t *t) {
     if (!t) return;
+    objects_free_all(t);                 /* free heap object values (#125) */
     if (t->dek) { fhsm_secure_free(t->dek); t->dek = NULL; }
     pthread_mutex_destroy(&t->mu);
     fhsm_zeroize(t, sizeof(*t));
@@ -1025,7 +1056,11 @@ fhsm_rv_t fhsm_token_object_add(fhsm_token_t *t, uint32_t cko_class,
     o->key_type  = ckk_type;
     o->value_len = (uint32_t)value_len;
     if (label) snprintf((char*)o->label, FHSM_OBJ_LABEL_LEN, "%s", label);
-    if (value && value_len) memcpy(o->value, value, value_len);
+    if (value && value_len) {
+        o->value = malloc(value_len);
+        if (!o->value) { pthread_mutex_unlock(&t->mu); return FHSM_RV_HOST_MEMORY; }
+        memcpy(o->value, value, value_len);
+    }
     if (id && id_len)       { memcpy(o->id, id, id_len); o->id_len = (uint32_t)id_len; }
     o->flags = flags;
 
@@ -1127,6 +1162,7 @@ fhsm_rv_t fhsm_token_destroy_session_objects(fhsm_token_t *t,
     uint32_t i = 0;
     while (i < t->object_count) {
         if (t->objects[i].owner_session == owner_session) {
+            obj_free_value(&t->objects[i]);
             fhsm_zeroize(&t->objects[i], sizeof(t->objects[i]));
             if (i != t->object_count - 1) {
                 t->objects[i] = t->objects[t->object_count - 1];
@@ -1336,7 +1372,8 @@ fhsm_rv_t fhsm_token_object_destroy(fhsm_token_t *t, uint32_t handle) {
     }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
-            /* Zeroize before compacting */
+            /* Free the heap value, then zeroize before compacting (#125) */
+            obj_free_value(&t->objects[i]);
             fhsm_zeroize(&t->objects[i], sizeof(t->objects[i]));
             /* Move the last entry into this slot to compact. */
             if (i != t->object_count - 1) {
