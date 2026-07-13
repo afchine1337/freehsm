@@ -5889,24 +5889,71 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
 }
 
 /* AES-GCM Update/Final via EVP_CIPHER_CTX. */
-static fhsm_rv_t ensure_cipher_ctx_aes_gcm(fhsm_op_t *op, fhsm_token_t *t, int enc) {
+/* Multipart cipher kind : 0 = GCM (stream + auth tag), 1 = CTR (stream),
+ * 2 = ECB/CBC (block, no padding), 3 = CBC-PAD (block, PKCS#7 padding).
+ * -1 = not a supported multipart mechanism. */
+static int op_cipher_kind(uint32_t mech) {
+    switch (mech) {
+        case CKM_AES_GCM:     return 0;
+        case CKM_AES_CTR:     return 1;
+        case CKM_AES_ECB:
+        case CKM_AES_CBC:     return 2;
+        case CKM_AES_CBC_PAD: return 3;
+        default:              return -1;
+    }
+}
+
+/* Build the multipart EVP context for the operation's mechanism (not just
+ * GCM). ECB/CBC/CBC-PAD/CTR use the 16-byte op->iv (ECB ignores it); GCM
+ * uses the CK_GCM_PARAMS nonce (op->gcm_iv) with the proper IV length and
+ * AAD. Padding is enabled only for CBC-PAD so that ECB/CBC/CTR multipart is
+ * byte-identical to the single-shot path (#125 #57 TestMultipartEncrypt). */
+static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     if (op->cipher_ctx) return FHSM_RV_OK;
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl=0, kt=0;
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
     if (kt != CKK_AES) return FHSM_RV_MECHANISM_INVALID;
+    int kind = op_cipher_kind(op->mechanism);
+    if (kind < 0) return FHSM_RV_MECHANISM_INVALID;
+    static const char *names[4][3] = {
+        { "AES-128-GCM", "AES-192-GCM", "AES-256-GCM" }, /* 0 GCM */
+        { "AES-128-CTR", "AES-192-CTR", "AES-256-CTR" }, /* 1 CTR */
+        { "AES-128-CBC", "AES-192-CBC", "AES-256-CBC" }, /* 2 ECB/CBC (see below) */
+        { "AES-128-CBC", "AES-192-CBC", "AES-256-CBC" }, /* 3 CBC-PAD */
+    };
+    static const char *ecb[3] = { "AES-128-ECB", "AES-192-ECB", "AES-256-ECB" };
+    int ksel = (kvl == 16) ? 0 : (kvl == 24) ? 1 : (kvl == 32) ? 2 : -1;
+    if (ksel < 0) return FHSM_RV_KEY_SIZE_RANGE;
+    const char *cname = (op->mechanism == CKM_AES_ECB) ? ecb[ksel] : names[kind][ksel];
+    EVP_CIPHER *cipher = EVP_CIPHER_fetch(NULL, cname, NULL);
+    if (!cipher) return FHSM_RV_MECHANISM_INVALID;
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return FHSM_RV_HOST_MEMORY;
-    const EVP_CIPHER *cipher = EVP_CIPHER_fetch(NULL,
-        kvl == 16 ? "AES-128-GCM" : kvl == 24 ? "AES-192-GCM" : "AES-256-GCM", NULL);
-    if (!cipher) { EVP_CIPHER_CTX_free(ctx); return FHSM_RV_MECHANISM_INVALID; }
-    int ok;
-    if (enc) {
-        ok = EVP_EncryptInit_ex2(ctx, cipher, kv, op->have_iv ? op->iv : NULL, NULL);
+    if (!ctx) { EVP_CIPHER_free(cipher); return FHSM_RV_HOST_MEMORY; }
+    int ok = 1;
+    if (kind == 0) {
+        /* GCM : set IV length, key+nonce, then feed AAD. */
+        const uint8_t *iv = op->gcm_iv_len ? op->gcm_iv : op->iv;
+        size_t ivl = op->gcm_iv_len ? op->gcm_iv_len : 12;
+        int exl = 0;
+        ok = enc ? EVP_EncryptInit_ex2(ctx, cipher, NULL, NULL, NULL)
+                 : EVP_DecryptInit_ex2(ctx, cipher, NULL, NULL, NULL);
+        if (ok && ivl != 12)
+            ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)ivl, NULL);
+        if (ok) ok = enc ? EVP_EncryptInit_ex2(ctx, NULL, kv, iv, NULL)
+                         : EVP_DecryptInit_ex2(ctx, NULL, kv, iv, NULL);
+        if (ok && op->gcm_aad_len > 0)
+            ok = enc ? EVP_EncryptUpdate(ctx, NULL, &exl, op->gcm_aad, (int)op->gcm_aad_len)
+                     : EVP_DecryptUpdate(ctx, NULL, &exl, op->gcm_aad, (int)op->gcm_aad_len);
     } else {
-        ok = EVP_DecryptInit_ex2(ctx, cipher, kv, op->have_iv ? op->iv : NULL, NULL);
+        const uint8_t *iv = (op->mechanism == CKM_AES_ECB) ? NULL : op->iv;
+        ok = enc ? EVP_EncryptInit_ex2(ctx, cipher, kv, iv, NULL)
+                 : EVP_DecryptInit_ex2(ctx, cipher, kv, iv, NULL);
+        /* PKCS#7 padding only for CBC-PAD ; ECB/CBC/CTR are raw so multipart
+         * output matches the single-shot path exactly. */
+        if (ok) EVP_CIPHER_CTX_set_padding(ctx, kind == 3 ? 1 : 0);
     }
-    EVP_CIPHER_free((EVP_CIPHER*)cipher);
+    EVP_CIPHER_free(cipher);
     if (!ok) { EVP_CIPHER_CTX_free(ctx); return FHSM_RV_FUNCTION_FAILED; }
     op->cipher_ctx = ctx;
     return FHSM_RV_OK;
@@ -5925,14 +5972,17 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     /* The length is passed to EVP as an int ; a value beyond INT_MAX would be
      * silently truncated (#125 TestIsizeMaxUpdateLength). Reject it. */
     if (ulPartLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
-    fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 1);
+    fhsm_rv_t rv = ensure_cipher_ctx(op, t, 1);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
-    if (pEnc == NULL) { *pulEncLen = ulPartLen; return FHSM_RV_OK; }
-    /* AES-GCM is a stream cipher : C_EncryptUpdate emits exactly ulPartLen
-     * ciphertext bytes. Refuse an undersized output buffer BEFORE EVP writes,
-     * otherwise EVP_EncryptUpdate overruns pEnc (#125 TestUpdateOutputGuard).
-     * The operation stays active so the caller can retry with a larger buffer. */
-    if (*pulEncLen < ulPartLen) { *pulEncLen = ulPartLen; return 0x00000150UL; }
+    /* Output upper bound : stream ciphers (GCM/CTR) emit exactly ulPartLen ;
+     * block ciphers (ECB/CBC/CBC-PAD) may emit up to ulPartLen + one block as
+     * a buffered block completes. Refuse an undersized output buffer BEFORE
+     * EVP writes rather than overrun pEnc (#125 TestUpdateOutputGuard, #57). */
+    { int ek = op_cipher_kind(op->mechanism);
+      size_t need = (ek == 2 || ek == 3) ? ulPartLen + 16 : ulPartLen;
+      if (pEnc == NULL) { *pulEncLen = need; return FHSM_RV_OK; }
+      if (*pulEncLen < need) { *pulEncLen = need; return 0x00000150UL; }
+    }
     int out_len = 0;
     if (EVP_EncryptUpdate(op->cipher_ctx, pEnc, &out_len, pPart, (int)ulPartLen) != 1) {
         op->active = 0; return FHSM_RV_FUNCTION_FAILED;
@@ -5946,24 +5996,33 @@ CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
-    /* Final returns the 16-byte GCM tag appended after any remaining bytes. */
-    if (pLast == NULL) { *pulLastLen = 16; return FHSM_RV_OK; }
-    if (*pulLastLen < 16) { *pulLastLen = 16; return 0x00000150UL; }
+    /* Final output upper bound depends on the mechanism : GCM appends its
+     * auth tag ; CBC-PAD flushes one padding block ; ECB/CBC/CTR emit
+     * nothing (#125 #57 generic multipart). */
+    int fkind = op_cipher_kind(op->mechanism);
+    size_t ftag = (fkind == 0) ? (op->gcm_tag_len ? op->gcm_tag_len : 16) : 0;
+    size_t fmax = (fkind == 0) ? ftag : (fkind == 3) ? 16 : 0;
+    if (pLast == NULL) { *pulLastLen = fmax; return FHSM_RV_OK; }
+    if (*pulLastLen < fmax) { *pulLastLen = fmax; return 0x00000150UL; }
+    if (op->cipher_ctx == NULL) { op->active = 0; return FHSM_RV_OPERATION_NOT_INITIALIZED; }
     int out_len = 0;
-    if (op->cipher_ctx == NULL) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (EVP_EncryptFinal_ex(op->cipher_ctx, pLast, &out_len) != 1) {
         EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
         op->active = 0;
         return FHSM_RV_FUNCTION_FAILED;
     }
-    /* Append the GCM tag. */
-    if (EVP_CIPHER_CTX_ctrl(op->cipher_ctx, EVP_CTRL_AEAD_GET_TAG, 16,
-                              pLast + out_len) != 1) {
-        EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
-        op->active = 0;
-        return FHSM_RV_FUNCTION_FAILED;
+    size_t total = (size_t)out_len;
+    if (fkind == 0) {
+        /* Append the GCM auth tag. */
+        if (EVP_CIPHER_CTX_ctrl(op->cipher_ctx, EVP_CTRL_AEAD_GET_TAG,
+                                (int)ftag, pLast + total) != 1) {
+            EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
+            op->active = 0;
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        total += ftag;
     }
-    *pulLastLen = (CK_ULONG)out_len + 16;
+    *pulLastLen = (CK_ULONG)total;
     EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
     op->active = 0;
     return FHSM_RV_OK;
@@ -5979,13 +6038,17 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
      * than crash (#125, same class as the C_Decrypt fix). */
     if (!pulPartLen || (!pEnc && ulEncLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     if (ulEncLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
-    fhsm_rv_t rv = ensure_cipher_ctx_aes_gcm(op, t, 0);
+    fhsm_rv_t rv = ensure_cipher_ctx(op, t, 0);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
-    if (pPart == NULL) { *pulPartLen = ulEncLen; return FHSM_RV_OK; }
-    /* Symmetric guard to C_EncryptUpdate : AES-GCM decrypt emits exactly
-     * ulEncLen plaintext bytes ; refuse an undersized buffer before EVP
-     * writes rather than overrun pPart (#125 TestUpdateOutputGuard). */
-    if (*pulPartLen < ulEncLen) { *pulPartLen = ulEncLen; return 0x00000150UL; }
+    /* Symmetric guard to C_EncryptUpdate : stream (GCM/CTR) emits exactly
+     * ulEncLen ; block ciphers may emit up to ulEncLen + one block. Refuse an
+     * undersized buffer before EVP writes rather than overrun pPart
+     * (#125 TestUpdateOutputGuard / TestDecryptBufferTooSmallGuards, #57). */
+    { int dk = op_cipher_kind(op->mechanism);
+      size_t need = (dk == 2 || dk == 3) ? ulEncLen + 16 : ulEncLen;
+      if (pPart == NULL) { *pulPartLen = need; return FHSM_RV_OK; }
+      if (*pulPartLen < need) { *pulPartLen = need; return 0x00000150UL; }
+    }
     int out_len = 0;
     if (EVP_DecryptUpdate(op->cipher_ctx, pPart, &out_len, pEnc, (int)ulEncLen) != 1) {
         op->active = 0; return FHSM_RV_FUNCTION_FAILED;

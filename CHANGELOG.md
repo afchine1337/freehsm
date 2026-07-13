@@ -9,6 +9,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **#57/#125 — multipart Encrypt/Decrypt made mechanism-generic.** The
+  streaming path (`C_EncryptUpdate`/`Final`, `C_DecryptUpdate`/`Final`) was
+  hard-wired to AES-GCM and keyed off the wrong IV field, so AES-ECB/CBC/CBC-PAD/
+  CTR multipart produced a GCM ciphertext instead of matching the single-shot
+  output. Replaced `ensure_cipher_ctx_aes_gcm` with a generic `ensure_cipher_ctx`
+  that builds the correct EVP cipher, IV (op->iv for CBC/CTR, the CK_GCM_PARAMS
+  nonce for GCM), AAD and padding (PKCS#7 only for CBC-PAD); `C_EncryptFinal`
+  now appends the GCM tag only for GCM and flushes the padding block for CBC-PAD;
+  the Update buffer guards account for the extra block a block cipher can emit.
+  Verified: multipart == single-shot for ECB/CBC/CTR/GCM, CBC-PAD round-trip
+  (20->32->20), and an undersized output buffer returns CKR_BUFFER_TOO_SMALL with
+  no overrun (TestMultipartEncrypt, TestDecryptBufferTooSmallGuards).
+
 * **#125 security — output-buffer overrun guard in Encrypt/DecryptUpdate.**
   `C_EncryptUpdate`/`C_DecryptUpdate` (AES-GCM multipart, a stream cipher that
   emits exactly the input length) passed the caller's output pointer straight to
