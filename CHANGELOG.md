@@ -8,6 +8,24 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 interop — C_CancelFunction was missing from the function list,
+  shifting every later slot by one.** `CK_FUNCTION_LIST` declared 67 slots
+  ending at `C_WaitForSlotEvent`; the v2.40 list has **68** functions, with
+  `C_CancelFunction` at slot 66 and `C_WaitForSlotEvent` at 67. The function
+  was implemented and exported but never wired, so every caller using the
+  table (rather than `dlsym`) invoked the *wrong function*: `C_CancelFunction`
+  hit `C_WaitForSlotEvent` (`CKR_ARGUMENTS_BAD`), `C_WaitForSlotEvent` hit
+  `C_GetInterfaceList` (`CKR_BUFFER_TOO_SMALL`), and `C_GetInterfaceList` hit
+  `C_GetInterface` — which wrote `*ppInterface` through an uninitialised
+  register, **segfaulting** the caller. This is the real cause of the
+  pkcs11-tool crash previously attributed to a version mismatch.
+  Slots are now 66=`C_CancelFunction`, 67=`C_WaitForSlotEvent`; the v3.0
+  table mirrors all 68 v2.40 slots with 68=`C_GetInterfaceList`,
+  69=`C_GetInterface` (92 slots total), matching PKCS#11 v3.0 §5.18.
+  Fixes TestLegacyParallelFunctions, TestWaitForSlotEventErrors,
+  TestInterfaceV30, TestGetInterfaceList and the last SIGSEGV
+  (TestListBufferTooSmallGuards).
+
 * **#125 conformance — login state is per-application (per-token), not
   per-session.** `fhsm_session_role` now reports the token's authenticated
   role (shared across every session the application holds with the token,

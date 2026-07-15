@@ -6105,7 +6105,7 @@ typedef struct CK_VERSION_s { unsigned char major, minor; } CK_VERSION;
  * casts are reversible. */
 struct CK_FUNCTION_LIST {
     CK_VERSION version;
-    void *pfn[67];   /* C_Initialize ... C_WaitForSlotEvent */
+    void *pfn[68];   /* C_Initialize ... C_WaitForSlotEvent (68 fns, 0..67) */
 };
 
 static CK_RV fhsm_not_supported(void) {
@@ -6193,10 +6193,14 @@ CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
         /* Legacy parallel-function management (v2.40 §C.6.5.6).
          * Both return CKR_FUNCTION_NOT_PARALLEL per spec on every
          * modern non-parallel implementation. */
-        fhsm_function_list.pfn[65] = (void*)(uintptr_t)C_GetFunctionStatus;/* slot 65 (v1.4.0) */
+        fhsm_function_list.pfn[65] = (void*)(uintptr_t)C_GetFunctionStatus;/* slot 65 */
+        fhsm_function_list.pfn[66] = (void*)(uintptr_t)C_CancelFunction;   /* slot 66 (#125) */
         /* Slot event (software token : no hot-plug ; non-blocking returns
-         * CKR_NO_EVENT, blocking returns CKR_FUNCTION_NOT_SUPPORTED). */
-        fhsm_function_list.pfn[66] = (void*)(uintptr_t)C_WaitForSlotEvent; /* slot 66 (v1.3.0) */
+         * CKR_NO_EVENT, blocking returns CKR_FUNCTION_NOT_SUPPORTED).
+         * NOTE: slot 67, NOT 66 --- C_CancelFunction owns 66. Getting this
+         * wrong shifts every later slot and makes v3.0 callers invoke the
+         * wrong function through the table (#125). */
+        fhsm_function_list.pfn[67] = (void*)(uintptr_t)C_WaitForSlotEvent; /* slot 67 */
     }
     *ppFnList = &fhsm_function_list;
     return FHSM_RV_OK;
@@ -6209,9 +6213,9 @@ CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
  *
  * The v3.0 table is a separate static (fhsm_function_list_3_0) with :
  *   - version field = {3, 0}
- *   - 67 v2.40 functions at slots 0..66 (copied from fhsm_function_list)
- *   - slot 67 = C_GetInterfaceList, slot 68 = C_GetInterface
- *   - slots 69..90 = fhsm_not_supported (Login_User, SessionCancel,
+ *   - 68 v2.40 functions at slots 0..67 (copied from fhsm_function_list)
+ *   - slot 68 = C_GetInterfaceList, slot 69 = C_GetInterface
+ *   - slots 70..91 = fhsm_not_supported (C_LoginUser, C_SessionCancel,
  *     Message family) ; can be wired in a future release
  *
  * The previous attempt segfaulted pkcs11-tool because it returned the
@@ -6226,7 +6230,7 @@ typedef struct CK_INTERFACE_s {
 
 struct CK_FUNCTION_LIST_3_0 {
     CK_VERSION version;     /* {3, 0} */
-    void *pfn[91];          /* 67 v2.40 + 24 v3.0 */
+    void *pfn[92];          /* 68 v2.40 (0..67) + 24 v3.0 (68..91) */
 };
 
 static struct CK_FUNCTION_LIST_3_0 fhsm_function_list_3_0 = { { 3, 0 }, { 0 } };
@@ -6245,8 +6249,8 @@ static void fhsm_init_v3_0_table(void) {
          i++) {
         fhsm_function_list_3_0.pfn[i] = (void*)(uintptr_t)fhsm_not_supported;
     }
-    /* Mirror v2.40 slots 0..66 into the v3.0 table. */
-    for (size_t i = 0; i < 67; i++) {
+    /* Mirror v2.40 slots 0..67 (all 68 functions) into the v3.0 table. */
+    for (size_t i = 0; i < 68; i++) {
         fhsm_function_list_3_0.pfn[i] = fhsm_function_list.pfn[i];
     }
     /* v3.0 §5.18 says slot 67 is C_GetInterfaceList and slot 68 is
@@ -6281,10 +6285,10 @@ CK_RV C_GetInterface(unsigned char *pInterfaceName, void *pVersion,
     iface.pFunctionList  = &fhsm_function_list_3_0;
     iface.flags          = 0;
     *ppInterface = &iface;
-    /* Wire slot 67 (C_GetInterfaceList) and slot 68 (C_GetInterface)
+    /* Wire slot 68 (C_GetInterfaceList) and slot 69 (C_GetInterface)
      * on first call ; they couldn't be populated in fhsm_init_v3_0_table
      * because they are these very functions. */
-    fhsm_function_list_3_0.pfn[67] = (void*)(uintptr_t)C_GetInterfaceList;
-    fhsm_function_list_3_0.pfn[68] = (void*)(uintptr_t)C_GetInterface;
+    fhsm_function_list_3_0.pfn[68] = (void*)(uintptr_t)C_GetInterfaceList;
+    fhsm_function_list_3_0.pfn[69] = (void*)(uintptr_t)C_GetInterface;
     return FHSM_RV_OK;
 }
