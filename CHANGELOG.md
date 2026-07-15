@@ -8,6 +8,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 security — CKA_TRUSTED was settable by any application and then
+  reported back as FALSE.** `CKA_TRUSTED` may only be set to TRUE by the SO
+  (§4.6). It gates `CKA_WRAP_WITH_TRUSTED`: a key marked WRAP_WITH_TRUSTED may
+  only be wrapped by a wrapping key that is CKA_TRUSTED. The module accepted
+  `CKA_TRUSTED=TRUE` from any session, so an application could declare its own
+  wrapping key trusted and defeat that control — the classic Tookan-style key
+  export escape. It then returned a hard-coded FALSE on readback, so the
+  attribute was simultaneously unenforced and unobservable.
+
+  Setting it TRUE from a non-SO session is now `CKR_ATTRIBUTE_READ_ONLY`, on
+  both `C_CreateObject` and `C_SetAttributeValue` (guarding only the former
+  would be bypassable: create without the attribute, then set it afterwards).
+  When the SO does set it, it is persisted and read back honestly.
+  Setting it FALSE, or omitting it, is unaffected. (TestCKATrusted.)
+
 * **#125 — CKA_LOCAL and CKA_ALWAYS_AUTHENTICATE are now stored, not
   hard-coded.** `C_GetAttributeValue` returned `CKA_LOCAL = TRUE` and
   `CKA_ALWAYS_AUTHENTICATE = FALSE` as literals for every object. Neither was

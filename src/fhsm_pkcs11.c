@@ -1268,6 +1268,14 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
 /* CKA_ALWAYS_AUTHENTICATE : was hard-coded FALSE, so setting it at keygen
  * silently did nothing (#125). */
 #define FHSM_OBJF_ALWAYS_AUTH   0x20
+/* CKA_TRUSTED (PKCS#11 v3.2 §4.6) : may only be set to TRUE by the SO. It
+ * gates CKA_WRAP_WITH_TRUSTED -- a key marked WRAP_WITH_TRUSTED may only be
+ * wrapped by a wrapping key that is CKA_TRUSTED. If an application could
+ * declare its own key trusted, that control would be worthless (the classic
+ * Tookan-style key-export escape). Previously the module accepted
+ * CKA_TRUSTED=TRUE from any session and then reported it back as a hard-coded
+ * FALSE, so the attribute was both unenforced and unreadable (#125). */
+#define FHSM_OBJF_TRUSTED       0x40
 
 /* CKA_ALWAYS_AUTHENTICATE from a template (default FALSE). Declared early so
  * the keygen paths can use it. */
@@ -1762,6 +1770,18 @@ static CK_RV map_parse_rv(fhsm_parse_rv_t rv) {
     return FHSM_RV_FUNCTION_FAILED;
 }
 
+/* CKA_TRUSTED may only be set to TRUE by the SO (PKCS#11 v3.2 §4.6). From any
+ * other session the attribute is read-only, which is CKR_ATTRIBUTE_READ_ONLY.
+ * Setting it to FALSE, or omitting it, is always fine. #125 TestCKATrusted. */
+static CK_RV fhsm_check_trusted_attr(CK_SESSION_HANDLE hSession,
+                                      CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    long i = find_attr(tmpl, n, CKA_TRUSTED_ATTR);
+    if (i < 0 || !tmpl[i].pValue || tmpl[i].ulValueLen != 1) return FHSM_RV_OK;
+    if (!*(unsigned char *)tmpl[i].pValue) return FHSM_RV_OK;   /* FALSE: fine */
+    if (fhsm_session_role(hSession) == FHSM_ROLE_SO) return FHSM_RV_OK;
+    return 0x00000010UL;   /* CKR_ATTRIBUTE_READ_ONLY */
+}
+
 CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                       CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                       CK_OBJECT_HANDLE *phObject) {
@@ -1772,8 +1792,21 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount);          if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_private_login(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_trusted_attr(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount);  if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+
+    /* CKA_TRUSTED reaching this point can only have been set by the SO (the
+     * guard above rejects it otherwise), so persist it. Computed once here:
+     * C_CreateObject has three object_add paths (verbatim / certificate /
+     * public-key import) and they must not drift apart. #125. */
+    uint8_t trusted_flag = 0;
+    {
+        long ti = find_attr(pTemplate, ulCount, CKA_TRUSTED_ATTR);
+        if (ti >= 0 && pTemplate[ti].pValue && pTemplate[ti].ulValueLen == 1
+            && *(unsigned char *)pTemplate[ti].pValue)
+            trusted_flag = FHSM_OBJF_TRUSTED;
+    }
 
     /* === Parser stage : pure C, no OpenSSL. ============================
      * The CK_ATTRIBUTE layout is bit-identical to fhsm_attr_t (see
@@ -1791,6 +1824,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     /* --- Verbatim path (CKO_SECRET_KEY / CKO_PRIVATE_KEY / ML-DSA pub). */
     if (a.path == FHSM_CREATE_PATH_VERBATIM) {
         uint8_t flags = (a.cko == CKO_PRIVATE_KEY) ? FHSM_OBJF_SENSITIVE : 0;
+        flags |= trusted_flag;   /* CKA_LOCAL stays 0: imported, not generated */
         uint32_t handle = 0;
         fhsm_rv_t rv = fhsm_token_object_add(
             t, (uint32_t)a.cko, (uint32_t)a.ckk,
@@ -1813,7 +1847,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         fhsm_rv_t rv = fhsm_token_object_add(
             t, (uint32_t)CKO_CERTIFICATE, (uint32_t)a.cert_type,
             a.label, a.value_data, a.value_len,
-            a.id_data, a.id_len, FHSM_OBJF_EXTRACTABLE, &handle);
+            a.id_data, a.id_len,
+            (uint8_t)(FHSM_OBJF_EXTRACTABLE | trusted_flag), &handle);
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
@@ -1899,9 +1934,10 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     }
 
     uint32_t handle = 0;
+    /* CKA_LOCAL stays FALSE here: imported, not generated on the token (§4.9). */
     fhsm_rv_t rv = fhsm_token_object_add(t, (uint32_t)a.cko, (uint32_t)a.ckk,
                                           a.label, spki, (size_t)spki_len,
-                                          a.id_data, a.id_len, 0, &handle);
+                                          a.id_data, a.id_len, trusted_flag, &handle);
     OPENSSL_free(spki);
     if (rv != FHSM_RV_OK) return rv;
     *phObject = handle;
@@ -3245,7 +3281,10 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 bval = (of & FHSM_OBJF_ALWAYS_AUTH) ? 1 : 0; src = &bval; src_len = 1; break;
             }
             case CKA_WRAP_WITH_TRUSTED_ATTR: bval = 0; src = &bval; src_len = 1; break;
-            case CKA_TRUSTED_ATTR:     bval = 0; src = &bval; src_len = 1; break;
+            case CKA_TRUSTED_ATTR: {
+                uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
+                bval = (of & FHSM_OBJF_TRUSTED) ? 1 : 0; src = &bval; src_len = 1; break;
+            }
             case CKA_ALWAYS_SENSITIVE_ATTR: {
                 uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
                 bval = (of & FHSM_OBJF_SENSITIVE) ? 1 : 0; src = &bval; src_len = 1; break;
@@ -3382,6 +3421,11 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* Without this, the CKA_TRUSTED guard on C_CreateObject would be trivially
+     * bypassable: create the object without the attribute, then set it after
+     * the fact. Same rule -- only the SO may set it TRUE (#125). */
+    { CK_RV cr = fhsm_check_trusted_attr(hSession, pTemplate, ulCount);
+      if (cr != FHSM_RV_OK) return cr; }
 
     /* Snapshot current flags once : we will apply the SENSITIVE /
      * EXTRACTABLE transitions as a single set_flags call after all
