@@ -8,6 +8,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 conformance — a CKK_GENERIC_SECRET is no longer accepted in place of
+  a typed symmetric key.** `fhsm_check_key_mech_type` carried a tolerance that
+  returned `CKR_OK` when a generic secret was used with an AES/DES3 mechanism.
+  It was added to keep ECDH-derived keys usable with AES, but that need went
+  away once `C_DeriveKey` began honouring `CKA_KEY_TYPE`: a derive requesting
+  `CKK_AES` yields a real `CKK_AES` key. Mismatched key types are now
+  `CKR_KEY_TYPE_INCONSISTENT` per spec (TestWrongKeyType AES_CBC and
+  AES_XCBC_MAC). Mechanisms that legitimately accept a generic secret (HMAC)
+  are unaffected.
+
 * **#125 interop — C_CancelFunction was missing from the function list,
   shifting every later slot by one.** `CK_FUNCTION_LIST` declared 67 slots
   ending at `C_WaitForSlotEvent`; the v2.40 list has **68** functions, with

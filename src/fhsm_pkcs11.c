@@ -4224,12 +4224,18 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         return FHSM_RV_OK;
     }
     if (want >= 0 && (uint32_t)want != kt) {
-        /* A CKK_GENERIC_SECRET secret is legitimately usable with the
-         * symmetric cipher/MAC families (AES, DES3) : do not reject it. The
-         * wrong-key-type security tests use asymmetric keys, which stay
-         * rejected. */
-        if ((want == 0x1F || want == 0x15) && kt == 0x10 /* CKK_GENERIC_SECRET */)
-            return FHSM_RV_OK;
+        /* A CKK_GENERIC_SECRET is NOT a substitute for a typed symmetric key:
+         * PKCS#11 requires CKR_KEY_TYPE_INCONSISTENT when the key's
+         * CKA_KEY_TYPE does not match the mechanism's key family (#125
+         * TestWrongKeyType AES_CBC / AES_XCBC_MAC, which import a
+         * CKK_GENERIC_SECRET as the deliberate "wrong" key).
+         *
+         * This previously carried a tolerance returning OK for generic
+         * secrets, added to keep ECDH-derived keys usable with AES. That is
+         * unnecessary: C_DeriveKey honours CKA_KEY_TYPE, so an ECDH derive
+         * requesting CKK_AES yields a real CKK_AES key. Keys that genuinely
+         * accept a generic secret (HMAC and friends) take the want == -2
+         * path above and are unaffected. */
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     }
     return FHSM_RV_OK;
