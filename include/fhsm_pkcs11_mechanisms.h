@@ -29,7 +29,7 @@ extern "C" {
 #define CKM_AES_CTR                          0x00001086u
 #define CKM_AES_KEY_WRAP                     0x00002109u
 #define CKM_AES_KEY_WRAP_KWP                 0x0000210Bu
-#define CKM_AES_CMAC                         0x0000108Cu
+#define CKM_AES_CMAC                         0x0000108Au
 #define CKM_AES_ECB                          0x00001081u
 
 /* --- SHA2 --- */

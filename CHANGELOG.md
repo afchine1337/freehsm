@@ -8,6 +8,29 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **BREAKING — #125: AES-MAC mechanism code points corrected.** The module
+  advertised its AES-CMAC implementation at `0x108C`, which is
+  `CKM_AES_XCBC_MAC`, and used `0x108A` (the real `CKM_AES_CMAC`) for
+  AES-GMAC. Callers asking for `CKM_AES_CMAC` silently got the GMAC path;
+  callers asking for `CKM_AES_XCBC_MAC` got CMAC. Verified against the OASIS
+  `pkcs11t.h`: 0x108A=`CKM_AES_CMAC`, 0x108B=`CKM_AES_CMAC_GENERAL`,
+  0x108C=`CKM_AES_XCBC_MAC`, 0x108E=`CKM_AES_GMAC`.
+
+  Now: `CKM_AES_CMAC` is advertised and dispatched at **0x108A**,
+  `CKM_AES_GMAC` moved to **0x108E**, and **0x108C is no longer advertised**
+  (RFC 3566 XCBC-MAC is not implemented; it returns
+  `CKR_MECHANISM_INVALID`).
+
+  A prior comment described OpenSC pkcs11-tool's use of 0x108A for AES-CMAC
+  as "a long-standing OpenSC bug". That was backwards — pkcs11-tool was
+  correct. Consequently pkcs11-tool now interoperates without
+  `FHSM_OPENSC_GMAC_ALIAS`, which is retained as an inert compatibility path
+  pending removal.
+
+  **Migration:** callers hard-coding `0x108C` for AES-CMAC must move to
+  `0x108A`. Callers using `0x108A` (e.g. pkcs11-tool) are unaffected and now
+  get real CMAC.
+
 * **#125 conformance — a CKK_GENERIC_SECRET is no longer accepted in place of
   a typed symmetric key.** `fhsm_check_key_mech_type` carried a tolerance that
   returned `CKR_OK` when a generic secret was used with an AES/DES3 mechanism.

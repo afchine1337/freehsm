@@ -922,9 +922,10 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
 #define CKM_AES_CBC_PAD_LIST          0x00001085UL
 #define CKM_AES_CTR_LIST              0x00001086UL
 #define CKM_AES_CCM_LIST              0x00001088UL
-#define CKM_AES_GMAC_LIST             0x0000108AUL
+#define CKM_AES_CMAC_LIST             0x0000108AUL
 #define CKM_AES_CMAC_GENERAL_LIST     0x0000108BUL
-#define CKM_AES_CMAC_LIST             0x0000108CUL
+#define CKM_AES_XCBC_MAC_LIST         0x0000108CUL  /* not implemented */
+#define CKM_AES_GMAC_LIST             0x0000108EUL
 #define CKM_AES_ECB_ENCRYPT_DATA_LIST 0x00001104UL
 #define CKM_AES_CBC_ENCRYPT_DATA_LIST 0x00001105UL
 #define CKM_DES2_KEY_GEN_LIST         0x00000130UL
@@ -3637,25 +3638,39 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
 #define CKM_AES_CTR               0x00001086UL
 #endif
 #ifndef CKM_AES_CMAC
-#define CKM_AES_CMAC              0x0000108CUL
+#define CKM_AES_CMAC              0x0000108AUL
 #endif
-/* CKM_AES_GMAC (PKCS#11 v3.2 §A.4.1) = AES-GMAC = the GHASH-based MAC
- * underlying AES-GCM (NIST SP 800-38D §6.4). Distinct from CKM_AES_CMAC
- * (which is the AES-CBC-based MAC from NIST SP 800-38B).
+/* CKM_AES_GMAC = AES-GMAC = the GHASH-based MAC underlying AES-GCM
+ * (NIST SP 800-38D §6.4). Distinct from CKM_AES_CMAC, the AES-CBC-based
+ * MAC from NIST SP 800-38B.
  *
- * Historical context : OpenSC pkcs11-tool maps its CLI string "AES-CMAC"
- * to 0x108A internally (a long-standing OpenSC bug ; the correct value
- * per PKCS#11 v3.2 §A.4.1 is 0x108C). Before v1.1.18, FreeHSM C aliased
- * 0x108A to CKM_AES_CMAC for pkcs11-tool interop, which was wrong per
- * the spec but pragmatically useful. Starting in v1.1.18, FreeHSM C
- * implements real AES-GMAC at 0x108A, with an opt-in legacy alias
- * controlled by the FHSM_OPENSC_GMAC_ALIAS environment variable :
- *   - default                    : 0x108A = real AES-GMAC (spec-compliant)
- *   - FHSM_OPENSC_GMAC_ALIAS=1   : 0x108A = AES-CMAC (legacy OpenSC alias)
- * The alias is resolved once at op_init time so downstream dispatch
- * only sees the resolved mechanism. Production deployments MUST NOT set
- * FHSM_OPENSC_GMAC_ALIAS ; the AGD_PRE systemd unit leaves it unset. */
-#define CKM_AES_GMAC              0x0000108AUL
+ * Code points, verified against the OASIS pkcs11t.h (PKCS#11 v3.0 os):
+ *   0x1089 CKM_AES_CTS
+ *   0x108A CKM_AES_CMAC
+ *   0x108B CKM_AES_CMAC_GENERAL
+ *   0x108C CKM_AES_XCBC_MAC        (RFC 3566 ; NOT implemented here)
+ *   0x108D CKM_AES_XCBC_MAC_96
+ *   0x108E CKM_AES_GMAC
+ *
+ * Historical note (#125) : this file previously asserted that CKM_AES_CMAC
+ * was 0x108C and CKM_AES_GMAC 0x108A, and described OpenSC pkcs11-tool's
+ * use of 0x108A for "AES-CMAC" as "a long-standing OpenSC bug". That was
+ * backwards: 0x108A *is* CKM_AES_CMAC, so pkcs11-tool was correct and this
+ * module was not. The inversion meant we advertised our CMAC implementation
+ * under CKM_AES_XCBC_MAC's code point and served the GMAC path to callers
+ * asking for CKM_AES_CMAC -- silently returning the wrong algorithm. The
+ * module's own CKM_AES_CMAC_GENERAL = 0x108B (correct, and adjacent to CMAC
+ * in the spec) already contradicted the claim.
+ *
+ * The code points are now spec-correct, which also removes the reason the
+ * FHSM_OPENSC_GMAC_ALIAS escape hatch existed: 0x108A natively resolves to
+ * CMAC, so pkcs11-tool interoperates without any alias. The alias and the
+ * IV-less GMAC->CMAC downgrade are retained only as inert compatibility
+ * paths and are candidates for removal in a follow-up.
+ *
+ * Lesson for the next constant: verify against the OASIS header, not
+ * against a plausible-sounding recollection of the spec. */
+#define CKM_AES_GMAC              0x0000108EUL
 #ifndef CKM_ECDH1_DERIVE
 #define CKM_ECDH1_DERIVE          0x00001050UL
 #endif
@@ -3853,7 +3868,7 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                          CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey) {
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
     op->key_handle = (uint32_t)hKey;
-    /* resolve_mech downgrades CKM_AES_GMAC (0x108A) to CKM_AES_CMAC (0x108C)
+    /* resolve_mech downgrades CKM_AES_GMAC (0x108E) to CKM_AES_CMAC (0x108A)
      * iff FHSM_OPENSC_GMAC_ALIAS=1 is set in the environment. Done here so
      * the rest of op_init / C_Sign / C_Verify see a single resolved value. */
     op->mechanism  = resolve_mech((uint32_t)pMechanism->mechanism);
@@ -3994,10 +4009,11 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     /* AES-GMAC without an IV : implicit downgrade to AES-CMAC. CKM_AES_GMAC
      * per PKCS#11 v3.2 §6.10.6 requires an IV in pParameter ; if the caller
      * provided none (e.g. OpenSC's pkcs11-tool, which sends the spec-
-     * incorrect 0x108A code point for its 'AES-CMAC' CLI string with no
+     * 0x108A code point for its 'AES-CMAC' CLI string -- which is correct --
+     * with no
      * pParameter at all), we infer the caller meant CMAC and route the
      * operation through the CMAC path. This makes the v1.1.18 transition
-     * backward-compatible : any pre-v1.1.18 caller using 0x108A as a CMAC
+     * backward-compatible : any caller using 0x108A as a CMAC
      * alias keeps working unchanged. Callers who actually want real
      * AES-GMAC always pass an IV. The FHSM_OPENSC_GMAC_ALIAS env var
      * (handled in resolve_mech above) is a separate forced override for
@@ -4206,7 +4222,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
             want = 0x03; break;                             /* CKK_EC */
         case 0x1057: want = 0x40; break;                    /* EDDSA -> CKK_EC_EDWARDS */
         case 0x1081: case 0x1082: case 0x1085: case 0x1086: /* AES ECB/CBC/CBC_PAD/CTR */
-        case 0x1087: case 0x108A: case 0x108C:              /* AES GCM/GMAC/CMAC */
+        case 0x1087: case 0x108A: case 0x108E:              /* AES GCM/CMAC/GMAC */
             want = 0x1F; break;                             /* CKK_AES */
         case 0x0133: want = 0x15; break;                    /* DES3_CBC -> CKK_DES3 */
         case 0x0251: case 0x0261: case 0x0271: case 0x0256: /* SHA{256,384,512,224}_HMAC */

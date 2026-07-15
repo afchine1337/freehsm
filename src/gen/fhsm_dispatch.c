@@ -824,7 +824,7 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00001086u, "CKM_AES_CTR", "AES", "encrypt", 1, dispatch_aes_ctr },
     { 0x00001087u, "CKM_AES_GCM", "AES", "encrypt", 1, dispatch_aes_gcm },
     { 0x00001088u, "CKM_AES_CCM", "AES", "encrypt", 1, dispatch_aes_ccm },
-    { 0x0000108Cu, "CKM_AES_CMAC", "AES", "sign", 1, dispatch_aes_cmac },
+    { 0x0000108Au, "CKM_AES_CMAC", "AES", "sign", 1, dispatch_aes_cmac },
     { 0x00002109u, "CKM_AES_KEY_WRAP", "AES", "wrap", 1, dispatch_aes_kw },
     { 0x0000210Bu, "CKM_AES_KEY_WRAP_KWP", "AES", "wrap", 1, dispatch_aes_kwp },
     { 0x0000402Au, "CKM_HKDF_DERIVE", "HKDF", "derive", 1, dispatch_hkdf },

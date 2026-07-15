@@ -109,7 +109,7 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197", "SP 800-38F §6.3", "RFC 5649")),
-    Mech("CKM_AES_CMAC",           0x0000108C, "AES",  "sign",    "dispatch_aes_cmac",
+    Mech("CKM_AES_CMAC",           0x0000108A, "AES",  "sign",    "dispatch_aes_cmac",
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197", "SP 800-38B")),
