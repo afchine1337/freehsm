@@ -1257,6 +1257,21 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
 #define FHSM_OBJF_EXTRACTABLE   0x02
 #define FHSM_OBJF_UNMODIFIABLE  0x04   /* CKA_MODIFIABLE=FALSE persisted */
 #define FHSM_OBJF_UNDESTROYABLE 0x08   /* CKA_DESTROYABLE=FALSE persisted */
+/* CKA_LOCAL (PKCS#11 v3.2 §4.9) : TRUE only for a key generated on the token
+ * by C_GenerateKey / C_GenerateKeyPair. FALSE for anything created by
+ * C_CreateObject, C_UnwrapKey, C_DeriveKey or (de)encapsulation. This was
+ * previously hard-coded TRUE in C_GetAttributeValue, so an *imported* key
+ * claimed to have been generated on the token and never to have existed
+ * outside it -- a false statement about key provenance, which is exactly what
+ * CKA_LOCAL exists to attest (#125). */
+#define FHSM_OBJF_LOCAL         0x10
+/* CKA_ALWAYS_AUTHENTICATE : was hard-coded FALSE, so setting it at keygen
+ * silently did nothing (#125). */
+#define FHSM_OBJF_ALWAYS_AUTH   0x20
+
+/* CKA_ALWAYS_AUTHENTICATE from a template (default FALSE). Declared early so
+ * the keygen paths can use it. */
+#define CKA_ALWAYS_AUTHENTICATE_TMPL 0x00000202UL
 
 /* Per-object usage flag bits (stored via fhsm_token_object_set_usage).
  * Bit 7 marks the byte as carrying explicit usage ; without it the
@@ -1655,7 +1670,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 
     /* Default policy : SENSITIVE=TRUE, EXTRACTABLE=FALSE.
      * The template may override either explicitly (CK_BBOOL=1 byte). */
-    uint8_t obj_flags = FHSM_OBJF_SENSITIVE;
+    uint8_t obj_flags = FHSM_OBJF_SENSITIVE | FHSM_OBJF_LOCAL;  /* generated on token */
     i = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
     if (i >= 0 && pTemplate[i].pValue && pTemplate[i].ulValueLen >= 1) {
         if (((unsigned char*)pTemplate[i].pValue)[0] == 0)
@@ -2905,15 +2920,25 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (li >= 0) { id_priv = pPriv[li].pValue; id_priv_len = pPriv[li].ulValueLen; }
 
     uint32_t hp = 0, hk = 0;
+    /* Both halves are generated on the token -> CKA_LOCAL = TRUE (§4.9). The
+     * private key also honours CKA_ALWAYS_AUTHENTICATE from its template. */
+    uint8_t priv_flags = FHSM_OBJF_SENSITIVE | FHSM_OBJF_LOCAL;
+    {
+        long ai = find_attr(pPriv, ulPriv, CKA_ALWAYS_AUTHENTICATE_TMPL);
+        if (ai >= 0 && pPriv[ai].pValue && pPriv[ai].ulValueLen == 1
+            && *(unsigned char*)pPriv[ai].pValue)
+            priv_flags |= FHSM_OBJF_ALWAYS_AUTH;
+    }
     fhsm_rv_t rv = fhsm_token_object_add(t, CKO_PUBLIC_KEY, ckk_type,
                                           label_pub, pub_der, (size_t)pub_len,
-                                          id_pub, id_pub_len, 0, &hp);
+                                          id_pub, id_pub_len,
+                                          FHSM_OBJF_LOCAL, &hp);
     OPENSSL_free(pub_der);
     if (rv != FHSM_RV_OK) { OPENSSL_free(priv_der); return rv; }
     rv = fhsm_token_object_add(t, CKO_PRIVATE_KEY, ckk_type, label_priv,
                                 priv_der, (size_t)priv_len,
                                 id_priv, id_priv_len,
-                                FHSM_OBJF_SENSITIVE, &hk);
+                                priv_flags, &hk);
     fhsm_zeroize(priv_der, (size_t)priv_len);
     OPENSSL_free(priv_der);
     if (rv != FHSM_RV_OK) {
@@ -3211,8 +3236,14 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
                 bval = (of & FHSM_OBJF_UNDESTROYABLE) ? 0 : 1; src = &bval; src_len = 1; break;
             }
-            case CKA_LOCAL_ATTR:       bval = 1; src = &bval; src_len = 1; break;
-            case CKA_ALWAYS_AUTH_ATTR: bval = 0; src = &bval; src_len = 1; break;
+            case CKA_LOCAL_ATTR: {
+                uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
+                bval = (of & FHSM_OBJF_LOCAL) ? 1 : 0; src = &bval; src_len = 1; break;
+            }
+            case CKA_ALWAYS_AUTH_ATTR: {
+                uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
+                bval = (of & FHSM_OBJF_ALWAYS_AUTH) ? 1 : 0; src = &bval; src_len = 1; break;
+            }
             case CKA_WRAP_WITH_TRUSTED_ATTR: bval = 0; src = &bval; src_len = 1; break;
             case CKA_TRUSTED_ATTR:     bval = 0; src = &bval; src_len = 1; break;
             case CKA_ALWAYS_SENSITIVE_ATTR: {

@@ -8,6 +8,24 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 — CKA_LOCAL and CKA_ALWAYS_AUTHENTICATE are now stored, not
+  hard-coded.** `C_GetAttributeValue` returned `CKA_LOCAL = TRUE` and
+  `CKA_ALWAYS_AUTHENTICATE = FALSE` as literals for every object. Neither was
+  ever persisted.
+
+  `CKA_LOCAL` exists to attest that a key was generated on the token and has
+  never existed outside it (§4.9). Reporting TRUE for a key imported via
+  `C_CreateObject` is a false statement about key provenance — precisely the
+  question the attribute is asked to answer. It is now TRUE only for
+  `C_GenerateKey` / `C_GenerateKeyPair`, and FALSE for `C_CreateObject`,
+  `C_UnwrapKey`, `C_DeriveKey` and (de)encapsulation.
+
+  `CKA_ALWAYS_AUTHENTICATE` is now read from the private-key template at
+  keygen and persisted, so setting it no longer silently does nothing.
+  Both use previously-free bits of the per-object flags byte.
+  (TestRSAPrivateKeyImport::test_imported_key_local_flag_false,
+  TestAlwaysAuthenticate::test_always_authenticate_set_on_keygen.)
+
 * **#125 — CKA_PARAMETER_SET was sitting on CKA_MODIFIABLE's code point; PQC
   parameter sets were unselectable.** `CKA_PARAMETER_SET` was `#define`d as
   `0x170`, which is `CKA_MODIFIABLE`. Two consequences, both reproduced:
