@@ -37,6 +37,26 @@ jobs:
           test -f NOTICE
           grep -q "Afchine Madjlessi" NOTICE
 
+      # PKCS#11 constant audit (#125). GATING, unlike the pkcs11-check harness
+      # run: a behavioural finding is a judgement call, but a constant whose
+      # value belongs to a different name is unambiguously a bug -- callers get
+      # a different algorithm or error than they asked for. Three such bugs
+      # shipped undetected (CKA_PARAMETER_SET on CKA_MODIFIABLE's code point,
+      # AES-CMAC advertised as CKM_AES_XCBC_MAC, and a wrap CKR family that each
+      # decoded to another error); each surfaced only when a test happened to
+      # trip over it. This closes the class.
+      - name: PKCS#11 constant audit
+        run: |
+          python3 -m venv /tmp/p11spec
+          /tmp/p11spec/bin/pip install --quiet pkcs11-check
+          # Locate types_std.py without importing it: the module uses
+          # `from typing import Self` (3.11+) and importing it would tie this
+          # step to the runner's Python version. We only need to read the file.
+          SPEC=$(/tmp/p11spec/bin/python -c \
+            'import os, pkcs11_check as p; print(os.path.join(os.path.dirname(p.__file__), "raw", "types_std.py"))')
+          test -f "$SPEC" || { echo "spec table not found at $SPEC"; exit 1; }
+          python3 scripts/audit_constants.py --spec "$SPEC"
+
   build:
     runs-on: ubuntu-latest
     container:
