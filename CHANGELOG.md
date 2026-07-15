@@ -8,6 +8,40 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 — CKA_PARAMETER_SET was sitting on CKA_MODIFIABLE's code point; PQC
+  parameter sets were unselectable.** `CKA_PARAMETER_SET` was `#define`d as
+  `0x170`, which is `CKA_MODIFIABLE`. Two consequences, both reproduced:
+
+  1. `fhsm_check_bool_attr_lengths` correctly treats `0x170` as a boolean and
+     rejects any value longer than 1 byte — *before* the PQC keygen ever read
+     it. The "ASCII parameter-set name at 0x170" path was therefore dead code:
+     the parameter set could not be chosen, and **every ML-KEM / ML-DSA /
+     SLH-DSA keygen silently used the default** (ML-DSA-65, ML-KEM-768).
+  2. A caller passing a perfectly legal `CKA_MODIFIABLE=TRUE` on a PQC keygen
+     had that byte read as a 1-character parameter-set name and got
+     `CKR_ATTRIBUTE_VALUE_INVALID`.
+
+  `CKA_PARAMETER_SET` now uses its real code point `0x0000061D` and accepts
+  the spec `CK_ULONG` selector (`CKP_ML_DSA_65` & co) as well as the ASCII
+  name form. Verified: CKP_ML_DSA_44/65/87 now yield 1334/1974/2614-byte
+  public keys (three distinct sizes, matching FIPS 204 + DER overhead);
+  previously all three returned the 1974-byte default. `CKA_MODIFIABLE=TRUE`
+  on a PQC keygen is accepted again.
+
+* **#125 — CKM_DES3_KEY_GEN corrected 0x130 -> 0x131.** `0x130` is
+  `CKM_DES2_KEY_GEN`, so a caller asking for DES2 keygen received a 24-byte
+  DES3 key while a caller asking for real DES3 got `CKR_MECHANISM_INVALID`.
+  The module's own `CKM_DES3_KEY_GEN_LIST = 0x131` already contradicted it.
+
+### Added
+
+* **`scripts/audit_constants.py`** — diffs every PKCS#11 constant `#define`d
+  in the module against the spec table and exits non-zero on divergence.
+  Three separate interop bugs in one day (CKA_PARAMETER_SET, the AES-MAC code
+  points, the wrap CKR family) all came from constants written from memory and
+  were each found only when a test happened to trip over them. The audit now
+  reports **274 conform, 0 divergent**; wiring it into CI keeps the class shut.
+
 * **#125 — C_WrapKey/C_UnwrapKey now implement CKM_RSA_PKCS_OAEP.** The
   mechanism was advertised and listed as supported in the C_WrapKey header
   comment, but the code refused it, reasoning that `C_EncryptInit` +

@@ -780,7 +780,7 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x0000004Cu, "CKM_SHA512_256", "SHA2", "digest", 1, dispatch_sha512_256 },
     { 0x00000111u, "CKM_RC4", "RC4", "encrypt", 0, dispatch_reject_fips },
     { 0x00000120u, "CKM_DES_KEY_GEN", "DES", "keygen", 0, dispatch_reject_fips },
-    { 0x00000130u, "CKM_DES3_KEY_GEN", "TDES", "keygen", 0, dispatch_reject_fips },
+    { 0x00000131u, "CKM_DES3_KEY_GEN", "TDES", "keygen", 0, dispatch_reject_fips },
     { 0x00000133u, "CKM_DES3_CBC", "TDES", "encrypt", 0, dispatch_reject_fips },
     { 0x00000210u, "CKM_MD5", "MD5", "digest", 0, dispatch_reject_fips },
     { 0x00000220u, "CKM_SHA_1", "SHA1", "digest", 0, dispatch_reject_fips },

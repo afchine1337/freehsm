@@ -239,7 +239,7 @@
 
 | Mechanism | Value | Op | FIPS | Handler | Reference |
 |---|---|---|---|---|---|
-| `CKM_DES3_KEY_GEN` | `0x00000130` | keygen | ❌ | `dispatch_des3_keygen` | — |
+| `CKM_DES3_KEY_GEN` | `0x00000131` | keygen | ❌ | `dispatch_des3_keygen` | — |
 | | | | | | _Triple-DES disallowed for encryption after Dec 31 2023 (SP 800-131A rev. 2)._ |
 | `CKM_DES3_CBC` | `0x00000133` | encrypt | ❌ | `dispatch_des3_cbc` | — |
 

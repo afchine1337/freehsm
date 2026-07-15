@@ -1621,9 +1621,11 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 
     uint32_t key_type = 0;
     uint32_t key_len  = 0;
-    /* CKM_DES3_KEY_GEN (0x130) is non-FIPS : interop only, fixed 24-byte
-     * key, no CKA_VALUE_LEN. #125. */
-    if (pMechanism->mechanism == 0x00000130UL) {
+    /* CKM_DES3_KEY_GEN (0x131) is non-FIPS : interop only, fixed 24-byte
+     * key, no CKA_VALUE_LEN. Previously keyed off 0x130, which is
+     * CKM_DES2_KEY_GEN -- so a caller asking for DES2 got a 24-byte DES3 key
+     * and a caller asking for real DES3 got CKR_MECHANISM_INVALID (#125). */
+    if (pMechanism->mechanism == 0x00000131UL) {
         if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
         key_type = CKK_DES3; key_len = 24;
     } else {
@@ -2647,8 +2649,20 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 #define CKK_ML_KEM                 0x00000049UL
 #define CKK_ML_DSA                 0x0000004AUL
 #define CKK_SLH_DSA                0x0000004BUL
-/* Parameter-set names exposed via CKA_PARAMETER_SET (read from template). */
-#define CKA_PARAMETER_SET          0x00000170UL
+/* CKA_PARAMETER_SET = 0x0000061D (PKCS#11 v3.2). This was previously
+ * #defined as 0x170, which is CKA_MODIFIABLE -- a plain boolean attribute.
+ * Two consequences, both observed (#125):
+ *   1. fhsm_check_bool_attr_lengths correctly classes 0x170 as a boolean and
+ *      rejects any value that is not 1 byte, so the "ASCII parameter-set name
+ *      at 0x170" path could never be reached: the parameter set was in fact
+ *      unselectable and every PQC keygen silently used the default.
+ *   2. A caller passing a perfectly legal CKA_MODIFIABLE=TRUE on a PQC keygen
+ *      had that byte read as a 1-character parameter-set name and got
+ *      CKR_ATTRIBUTE_VALUE_INVALID.
+ * The attribute now lives at its real code point. Per spec the value is a
+ * CK_ULONG selector (CKP_ML_DSA_65 & co); we also accept the ASCII name form
+ * this module has always documented. */
+#define CKA_PARAMETER_SET          0x0000061DUL
 
 /* DER-encoded OID for common curves (CKA_EC_PARAMS contents). */
 static const struct { const uint8_t *der; size_t len; const char *name; } ec_curves[] = {
@@ -2685,6 +2699,46 @@ static int fhsm_pset_valid(const char *pset) {
     return 0;
 }
 
+/* Map a spec CK_ULONG CKA_PARAMETER_SET selector (CKP_*) to the OpenSSL
+ * parameter-set name. The CKP_ numbering restarts per family, so the
+ * mechanism family selects the table. Returns NULL if unknown. #125. */
+static const char *fhsm_pset_from_selector(CK_ULONG mech, CK_ULONG sel) {
+    static const char *mlkem[] = { NULL, "ML-KEM-512", "ML-KEM-768", "ML-KEM-1024" };
+    static const char *mldsa[] = { NULL, "ML-DSA-44", "ML-DSA-65", "ML-DSA-87" };
+    static const char *slh[]   = { NULL,
+        "SLH-DSA-SHA2-128s","SLH-DSA-SHAKE-128s","SLH-DSA-SHA2-128f","SLH-DSA-SHAKE-128f",
+        "SLH-DSA-SHA2-192s","SLH-DSA-SHAKE-192s","SLH-DSA-SHA2-192f","SLH-DSA-SHAKE-192f",
+        "SLH-DSA-SHA2-256s","SLH-DSA-SHAKE-256s","SLH-DSA-SHA2-256f","SLH-DSA-SHAKE-256f" };
+    const char **tbl; size_t n;
+    if (mech == CKM_ML_KEM_KEY_PAIR_GEN)       { tbl = mlkem; n = sizeof(mlkem)/sizeof(*mlkem); }
+    else if (mech == CKM_ML_DSA_KEY_PAIR_GEN)  { tbl = mldsa; n = sizeof(mldsa)/sizeof(*mldsa); }
+    else if (mech == CKM_SLH_DSA_KEY_PAIR_GEN) { tbl = slh;   n = sizeof(slh)/sizeof(*slh); }
+    else return NULL;
+    if (sel == 0 || (size_t)sel >= n) return NULL;
+    return tbl[sel];
+}
+
+/* Read CKA_PARAMETER_SET from a template into `out` (an OpenSSL name),
+ * accepting either the spec CK_ULONG selector or the ASCII name form.
+ * Returns 1 if present-and-valid, 0 if absent, -1 if present-but-invalid. */
+static int fhsm_pset_read(CK_ATTRIBUTE *tmpl, CK_ULONG n, CK_ULONG mech,
+                           char *out, size_t out_sz) {
+    long i = find_attr(tmpl, n, CKA_PARAMETER_SET);
+    if (i < 0 || !tmpl[i].pValue) return 0;
+    size_t L = (size_t)tmpl[i].ulValueLen;
+    if (L == sizeof(CK_ULONG)) {
+        CK_ULONG sel; memcpy(&sel, tmpl[i].pValue, sizeof(sel));
+        const char *nm = fhsm_pset_from_selector(mech, sel);
+        if (!nm) return -1;
+        snprintf(out, out_sz, "%s", nm);
+        return 1;
+    }
+    if (L == 0 || L >= out_sz) return -1;
+    memcpy(out, tmpl[i].pValue, L); out[L] = '\0';
+    return fhsm_pset_valid(out) ? 1 : -1;
+}
+
+
 CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                         CK_ATTRIBUTE *pPub, CK_ULONG ulPub,
                         CK_ATTRIBUTE *pPriv, CK_ULONG ulPriv,
@@ -2708,31 +2762,10 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         || pMechanism->mechanism == CKM_SLH_DSA_KEY_PAIR_GEN) {
         CK_ATTRIBUTE *tp[2] = { pPub, pPriv }; CK_ULONG tn[2] = { ulPub, ulPriv };
         for (int ti = 0; ti < 2; ++ti) {
-            /* Legacy ASCII-name form read from 0x170 (kept for the keygen
-             * default logic below). */
-            long pi = find_attr(tp[ti], tn[ti], CKA_PARAMETER_SET);
-            if (pi >= 0 && tp[ti][pi].pValue) {
-                char pbuf[32];
-                if (tp[ti][pi].ulValueLen == 0 || tp[ti][pi].ulValueLen >= sizeof(pbuf))
-                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-                memcpy(pbuf, tp[ti][pi].pValue, tp[ti][pi].ulValueLen);
-                pbuf[tp[ti][pi].ulValueLen] = '\0';
-                if (!fhsm_pset_valid(pbuf)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-            }
-            /* Spec-correct CKA_PARAMETER_SET is 0x0000061D (0x170 is actually
-             * CKA_MODIFIABLE). The harness sends the malformed value here, so
-             * validate it : accept a well-formed CK_ULONG selector or a valid
-             * ASCII name ; reject an under/overlong value
-             * (#125 TestGenerateKeyPairErrors ml_kem/ml_dsa_parameter_set). */
-            long pj = find_attr(tp[ti], tn[ti], 0x0000061DUL);
-            if (pj >= 0 && tp[ti][pj].pValue) {
-                size_t L = (size_t)tp[ti][pj].ulValueLen;
-                if (L != sizeof(CK_ULONG)) {
-                    if (L == 0 || L >= 32) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-                    char nbuf[32]; memcpy(nbuf, tp[ti][pj].pValue, L); nbuf[L] = '\0';
-                    if (!fhsm_pset_valid(nbuf)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-                }
-            }
+            char pbuf[32];
+            if (fhsm_pset_read(tp[ti], tn[ti], pMechanism->mechanism,
+                               pbuf, sizeof(pbuf)) < 0)
+                return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         }
     }
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -2782,35 +2815,26 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     } else if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN) {
         /* CKA_PARAMETER_SET = ASCII "ML-KEM-512" | "ML-KEM-768" |
          * "ML-KEM-1024". Default to 768 (NIST level 3). */
-        char pset[32] = "ML-KEM-768";
-        long i = find_attr(pPub, ulPub, CKA_PARAMETER_SET);
-        if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen < sizeof(pset)) {
-            memcpy(pset, pPub[i].pValue, pPub[i].ulValueLen);
-            pset[pPub[i].ulValueLen] = '\0';
-            if (!fhsm_pset_valid(pset)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-        }
+        char pset[32] = "ML-KEM-768";   /* default when unspecified */
+        if (fhsm_pset_read(pPub, ulPub, pMechanism->mechanism,
+                           pset, sizeof(pset)) < 0)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, pset);
         ckk_type = CKK_ML_KEM;
         pw_family = FHSM_PAIRWISE_ML_KEM;
     } else if (pMechanism->mechanism == CKM_ML_DSA_KEY_PAIR_GEN) {
-        char pset[32] = "ML-DSA-65";
-        long i = find_attr(pPub, ulPub, CKA_PARAMETER_SET);
-        if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen < sizeof(pset)) {
-            memcpy(pset, pPub[i].pValue, pPub[i].ulValueLen);
-            pset[pPub[i].ulValueLen] = '\0';
-            if (!fhsm_pset_valid(pset)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-        }
+        char pset[32] = "ML-DSA-65";   /* default when unspecified */
+        if (fhsm_pset_read(pPub, ulPub, pMechanism->mechanism,
+                           pset, sizeof(pset)) < 0)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, pset);
         ckk_type = CKK_ML_DSA;
         pw_family = FHSM_PAIRWISE_ML_DSA;
     } else if (pMechanism->mechanism == CKM_SLH_DSA_KEY_PAIR_GEN) {
-        char pset[32] = "SLH-DSA-SHA2-128s";
-        long i = find_attr(pPub, ulPub, CKA_PARAMETER_SET);
-        if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen < sizeof(pset)) {
-            memcpy(pset, pPub[i].pValue, pPub[i].ulValueLen);
-            pset[pPub[i].ulValueLen] = '\0';
-            if (!fhsm_pset_valid(pset)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-        }
+        char pset[32] = "SLH-DSA-SHA2-128s";   /* default when unspecified */
+        if (fhsm_pset_read(pPub, ulPub, pMechanism->mechanism,
+                           pset, sizeof(pset)) < 0)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, pset);
         ckk_type = CKK_SLH_DSA;
         pw_family = FHSM_PAIRWISE_SLH_DSA;

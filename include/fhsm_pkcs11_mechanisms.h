@@ -135,7 +135,7 @@ extern "C" {
 #define CKM_DES_KEY_GEN                      0x00000120u
 
 /* --- TDES --- */
-#define CKM_DES3_KEY_GEN                     0x00000130u
+#define CKM_DES3_KEY_GEN                     0x00000131u
 #define CKM_DES3_CBC                         0x00000133u
 
 /* --- RC4 --- */
