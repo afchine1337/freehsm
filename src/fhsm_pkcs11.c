@@ -2119,6 +2119,24 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 #define CKK_ML_KEM                0x00000049UL
 #endif
 
+#ifndef CKK_RSA
+#define CKK_RSA                   0x00000000UL
+#endif
+#ifndef CKM_RSA_PKCS_OAEP
+#define CKM_RSA_PKCS_OAEP         0x00000009UL
+#endif
+/* RSA-OAEP wrap/unwrap helpers. Defined further down, next to the other
+ * OAEP machinery (oaep_ctx_init & friends), but needed here by
+ * C_WrapKey / C_UnwrapKey which appear earlier in the file (#125). */
+static fhsm_rv_t fhsm_rsa_oaep_wrap(const uint8_t *pub_der, size_t pub_len,
+                                     CK_MECHANISM *pMechanism,
+                                     const uint8_t *in, size_t in_len,
+                                     unsigned char *out, size_t *out_len);
+static fhsm_rv_t fhsm_rsa_oaep_unwrap(const uint8_t *priv_der, size_t priv_len,
+                                       CK_MECHANISM *pMechanism,
+                                       const uint8_t *in, size_t in_len,
+                                       uint8_t *out, size_t *out_len);
+
 /* ---------------------------------------------------------------------------
  * C_WrapKey / C_UnwrapKey
  *
@@ -2163,7 +2181,7 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     (void)fhsm_token_object_get_flags(t, (uint32_t)hKey, &src_flags);
     if ((src_flags & FHSM_OBJF_SENSITIVE)
         && !(src_flags & FHSM_OBJF_EXTRACTABLE)) {
-        return 0x00000068UL;   /* CKR_KEY_UNEXTRACTABLE */
+        return 0x0000006AUL;   /* CKR_KEY_UNEXTRACTABLE (0x68 is KEY_FUNCTION_NOT_PERMITTED) */
     }
 
     /* Wrapping key : load value or DER. */
@@ -2180,7 +2198,7 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * anything else is CKR_WRAPPING_KEY_SIZE_RANGE (#125 TestWrapKeyErrors),
          * not a silent fall-through to the 256-bit cipher name. */
         if (wkl != 16 && wkl != 24 && wkl != 32)
-            return 0x00000112UL;   /* CKR_WRAPPING_KEY_SIZE_RANGE */
+            return 0x00000114UL;   /* CKR_WRAPPING_KEY_SIZE_RANGE (0x112 is WRAPPED_KEY_LEN_RANGE) */
         const char *cname = NULL;
         if (pMechanism->mechanism == CKM_AES_KEY_WRAP) {
             cname = (wkl == 16) ? "AES-128-WRAP" :
@@ -2224,11 +2242,35 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return FHSM_RV_OK;
     }
 
-    /* RSA-OAEP wrap (CKM_RSA_PKCS_OAEP, 0x9) : not exposed via C_WrapKey
-     * because the same primitive is already reachable through C_EncryptInit
-     * + C_Encrypt with the RSA public key. PKCS#11 v3.2 §C.6 explicitly
-     * allows this : wrapping with RSA-OAEP IS encryption with an
-     * asymmetric public key, semantically identical. */
+    /* RSA-OAEP wrap (CKM_RSA_PKCS_OAEP, 0x9). This was previously refused on
+     * the grounds that C_EncryptInit + C_Encrypt with the RSA public key is
+     * "semantically identical". It is not: C_WrapKey exports the value of a
+     * key object -- including a CKA_SENSITIVE key whose value C_Encrypt can
+     * never obtain, because reading it is CKR_ATTRIBUTE_SENSITIVE. Wrapping
+     * a sensitive key under an RSA public key is the primary use case, and
+     * the encrypt path cannot express it. RSA-OAEP key transport is also
+     * FIPS-approved (SP 800-56B rev2). #125 TestRSAOAEPWrap. */
+    if (pMechanism->mechanism == CKM_RSA_PKCS_OAEP) {
+        if (wcl != CKO_PUBLIC_KEY || wkt != CKK_RSA)
+            return 0x00000115UL;   /* CKR_WRAPPING_KEY_TYPE_INCONSISTENT */
+        size_t need = 0;
+        fhsm_rv_t orv = fhsm_rsa_oaep_wrap(wkv, wkl, pMechanism, kv, kvl,
+                                            NULL, &need);
+        if (orv != FHSM_RV_OK) return orv;
+        if (pWrappedKey == NULL) { *pulWrappedKeyLen = need; return FHSM_RV_OK; }
+        if (*pulWrappedKeyLen < need) {
+            *pulWrappedKeyLen = need;
+            return 0x00000150UL;   /* CKR_BUFFER_TOO_SMALL */
+        }
+        size_t got = *pulWrappedKeyLen;
+        orv = fhsm_rsa_oaep_wrap(wkv, wkl, pMechanism, kv, kvl, pWrappedKey, &got);
+        if (orv != FHSM_RV_OK) return orv;
+        *pulWrappedKeyLen = (CK_ULONG)got;
+        (void)fhsm_audit_event(FHSM_EV_WRAP, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
     return FHSM_RV_MECHANISM_INVALID;
 }
 
@@ -2279,14 +2321,23 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (EVP_DecryptUpdate(ctx, pt, &outl, pWrappedKey, (int)ulWrappedKeyLen) != 1
             || EVP_DecryptFinal_ex(ctx, pt + outl, &finl) != 1) {
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
-            return 0x00000069UL;  /* CKR_WRAPPED_KEY_INVALID */
+            return 0x00000110UL;  /* CKR_WRAPPED_KEY_INVALID (0x69 is KEY_NOT_WRAPPABLE) */
         }
         pt_len = (size_t)(outl + finl);
         EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+    } else if (pMechanism->mechanism == CKM_RSA_PKCS_OAEP) {
+        /* RSA-OAEP unwrap : the inverse of the C_WrapKey branch above. The
+         * decrypt path is not a substitute (see the note there), and the
+         * unwrapped bytes must land in a key object the caller never sees
+         * in the clear. #125 TestRSAOAEPWrap. */
+        if (ucl != CKO_PRIVATE_KEY || ukt != CKK_RSA)
+            return 0x000000F2UL;   /* CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT */
+        pt_len = sizeof(pt);
+        fhsm_rv_t orv = fhsm_rsa_oaep_unwrap(ukv, ukl, pMechanism,
+                                              pWrappedKey, ulWrappedKeyLen,
+                                              pt, &pt_len);
+        if (orv != FHSM_RV_OK) return orv;
     } else {
-        /* RSA-OAEP unwrap : reachable via C_DecryptInit + C_Decrypt with
-         * the RSA private key (semantically identical for primary use
-         * cases). */
         return FHSM_RV_MECHANISM_INVALID;
     }
 
@@ -3769,6 +3820,81 @@ fail_invalid:
 fail:
     EVP_PKEY_CTX_free(ctx);
     return FHSM_RV_FUNCTION_FAILED;
+}
+
+/* RSA-OAEP wrap/unwrap (#125 TestRSAOAEPWrap). Forward-declared up next to
+ * C_WrapKey. Both parse CK_RSA_PKCS_OAEP_PARAMS exactly like the
+ * Encrypt/Decrypt path does, so wrap and encrypt cannot drift apart.
+ *
+ * Passing out == NULL performs a size query: *out_len receives the RSA
+ * modulus size and the call returns FHSM_RV_OK without touching the key. */
+static fhsm_rv_t fhsm_oaep_params_from_mech(CK_MECHANISM *pMechanism,
+                                             fhsm_oaep_params_t *out) {
+    if (!pMechanism->pParameter
+        || pMechanism->ulParameterLen < sizeof(fhsm_oaep_params_t))
+        return FHSM_RV_ARGUMENTS_BAD;
+    memcpy(out, pMechanism->pParameter, sizeof(*out));
+    if (out->source == CKZ_DATA_SPECIFIED && out->ulSourceDataLen > 0
+        && !out->pSourceData)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    return FHSM_RV_OK;
+}
+
+static fhsm_rv_t fhsm_rsa_oaep_wrap(const uint8_t *pub_der, size_t pub_len,
+                                     CK_MECHANISM *pMechanism,
+                                     const uint8_t *in, size_t in_len,
+                                     unsigned char *out, size_t *out_len) {
+    if (!pub_der || !out_len) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_oaep_params_t oaep;
+    fhsm_rv_t rv = fhsm_oaep_params_from_mech(pMechanism, &oaep);
+    if (rv != FHSM_RV_OK) return rv;
+
+    const unsigned char *p = pub_der;
+    EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)pub_len);
+    if (!pkey) return 0x00000113UL;   /* CKR_WRAPPING_KEY_HANDLE_INVALID */
+    if (out == NULL) {                      /* size query : modulus size */
+        int sz = EVP_PKEY_get_size(pkey);
+        EVP_PKEY_free(pkey);
+        if (sz <= 0) return FHSM_RV_FUNCTION_FAILED;
+        *out_len = (size_t)sz;
+        return FHSM_RV_OK;
+    }
+    EVP_PKEY_CTX *ctx = NULL;
+    rv = oaep_ctx_init(pkey, 1, &oaep, &ctx);
+    if (rv != FHSM_RV_OK) { EVP_PKEY_free(pkey); return rv; }
+    size_t len = *out_len;
+    int ok = EVP_PKEY_encrypt(ctx, out, &len, in, in_len);
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    if (ok <= 0) return FHSM_RV_FUNCTION_FAILED;
+    *out_len = len;
+    return FHSM_RV_OK;
+}
+
+static fhsm_rv_t fhsm_rsa_oaep_unwrap(const uint8_t *priv_der, size_t priv_len,
+                                       CK_MECHANISM *pMechanism,
+                                       const uint8_t *in, size_t in_len,
+                                       uint8_t *out, size_t *out_len) {
+    if (!priv_der || !out || !out_len) return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_oaep_params_t oaep;
+    fhsm_rv_t rv = fhsm_oaep_params_from_mech(pMechanism, &oaep);
+    if (rv != FHSM_RV_OK) return rv;
+
+    const unsigned char *p = priv_der;
+    EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)priv_len);
+    if (!pkey) return 0x000000F0UL;   /* CKR_UNWRAPPING_KEY_HANDLE_INVALID */
+    EVP_PKEY_CTX *ctx = NULL;
+    rv = oaep_ctx_init(pkey, 0, &oaep, &ctx);
+    if (rv != FHSM_RV_OK) { EVP_PKEY_free(pkey); return rv; }
+    size_t len = *out_len;
+    int ok = EVP_PKEY_decrypt(ctx, out, &len, in, in_len);
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    /* A failed OAEP unpad means the blob is not a valid wrapping under this
+     * key : CKR_WRAPPED_KEY_INVALID, never a generic failure. */
+    if (ok <= 0) return 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
+    *out_len = len;
+    return FHSM_RV_OK;
 }
 
 /* ---------------------------------------------------------------------------

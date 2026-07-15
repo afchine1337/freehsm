@@ -8,6 +8,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 — C_WrapKey/C_UnwrapKey now implement CKM_RSA_PKCS_OAEP.** The
+  mechanism was advertised and listed as supported in the C_WrapKey header
+  comment, but the code refused it, reasoning that `C_EncryptInit` +
+  `C_Encrypt` with the RSA public key is "semantically identical". It is
+  not: `C_WrapKey` exports the value of a key *object*, including a
+  `CKA_SENSITIVE` key whose value `C_Encrypt` can never obtain (reading it
+  yields `CK_UNAVAILABLE_INFORMATION`). Wrapping a sensitive key under an
+  RSA public key is the primary use case and the encrypt path cannot express
+  it. RSA-OAEP key transport is FIPS-approved (SP 800-56B rev2).
+  (TestRSAOAEPWrap.)
+
+* **#125 — wrap-related CKR constants corrected.** Several wrap error codes
+  were written from memory rather than the spec, so the module returned
+  codes that decode to something else entirely:
+  `CKR_WRAPPING_KEY_SIZE_RANGE` was sent as `0x112` (= `CKR_WRAPPED_KEY_LEN_RANGE`;
+  correct is `0x114`), `CKR_WRAPPED_KEY_INVALID` as `0x69`
+  (= `CKR_KEY_NOT_WRAPPABLE`; correct is `0x110`), and `CKR_KEY_UNEXTRACTABLE`
+  as `0x68` (= `CKR_KEY_FUNCTION_NOT_PERMITTED`; correct is `0x6A`).
+  Fixes TestWrapKeyErrors::test_wrapping_key_size_range.
+
 * **BREAKING — #125: AES-MAC mechanism code points corrected.** The module
   advertised its AES-CMAC implementation at `0x108C`, which is
   `CKM_AES_XCBC_MAC`, and used `0x108A` (the real `CKM_AES_CMAC`) for
