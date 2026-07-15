@@ -2407,10 +2407,27 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     li = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
     if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen == sizeof(CK_ULONG))
         key_type = (uint32_t)(*(CK_ULONG*)pTemplate[li].pValue);
+    /* Tookan §3.3 : an attacker who can wrap a CKA_SENSITIVE key and then
+     * unwrap it used to supply CKA_SENSITIVE=FALSE in the unwrap template and
+     * get a readable copy -- turning a key that was exportable only under a
+     * wrapping key into plaintext. Reproduced before this fix.
+     *
+     * The blob carries no attributes (RFC 3394 wraps key bytes only), so the
+     * module cannot know how sensitive the original was and cannot honour a
+     * downgrade safely. An unwrapped key is therefore always SENSITIVE, and an
+     * explicit request to the contrary is CKR_TEMPLATE_INCONSISTENT rather
+     * than a silent downgrade.
+     *
+     * This costs the ability to unwrap a deliberately non-sensitive key. That
+     * is the right trade: a caller holding the plaintext can use
+     * C_CreateObject, whereas unwrapping means importing material received
+     * under protection, for which "sensitive" is the safe default. A future
+     * CKA_UNWRAP_TEMPLATE on the unwrapping key (§4.9) can relax this
+     * explicitly and auditably. */
     li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
     if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
         && ((unsigned char*)pTemplate[li].pValue)[0] == 0)
-        obj_flags &= (uint8_t)~FHSM_OBJF_SENSITIVE;
+        return 0x000000D1UL;   /* CKR_TEMPLATE_INCONSISTENT */
     li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
     if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
         && ((unsigned char*)pTemplate[li].pValue)[0] != 0)

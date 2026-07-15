@@ -8,6 +8,27 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 SECURITY — Tookan §3.3 key extraction: unwrap honoured an
+  attacker-supplied CKA_SENSITIVE=False.** Reproduced end to end before the
+  fix: generate a key with `CKA_SENSITIVE=True, CKA_EXTRACTABLE=True` (its
+  value unreadable — `CK_UNAVAILABLE_INFORMATION`), wrap it under a wrapping
+  key, then unwrap it with `CKA_SENSITIVE=False` in the template. The module
+  produced a non-sensitive copy and handed back the 16 key bytes in the clear.
+  A key that was exportable only under a wrapping key became plaintext in
+  three calls.
+
+  RFC 3394 wraps key bytes only and carries no attributes, so the module
+  cannot know how sensitive the original was and cannot honour a downgrade
+  safely. An unwrapped key is now always `CKA_SENSITIVE=True`, and an explicit
+  `CKA_SENSITIVE=False` in the unwrap template is `CKR_TEMPLATE_INCONSISTENT`
+  rather than a silent downgrade.
+
+  **Behaviour change:** unwrapping a deliberately non-sensitive key is no
+  longer possible. A caller holding the plaintext can use `C_CreateObject`;
+  unwrapping means importing material received under protection, for which
+  "sensitive" is the safe default. A future `CKA_UNWRAP_TEMPLATE` on the
+  unwrapping key (§4.9) can relax this explicitly and auditably.
+
 * **#125 security — CKA_TRUSTED was settable by any application and then
   reported back as FALSE.** `CKA_TRUSTED` may only be set to TRUE by the SO
   (§4.6). It gates `CKA_WRAP_WITH_TRUSTED`: a key marked WRAP_WITH_TRUSTED may
