@@ -8,6 +8,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **Compiled binaries are no longer tracked in git.** Ten ELF binaries were
+  committed — `tests/test_attributes`, `test_fips_digests`,
+  `test_input_validation`, `test_op_state`, `test_robustness_args`,
+  `test_session_objects`, the three `fuzz/fuzz_*` harnesses — plus, newly and
+  by my own hand, `tests/test_integrity` and its `.sha256` signing artifact.
+  `.gitignore` listed each test binary by name, so every new test silently
+  got committed the first time someone ran `git add -A`.
+
+  In a project that advertises reproducible builds, a committed binary — let
+  alone a *signed* one — is a supply-chain smell: it bloats clones, can be
+  executed by accident, and nobody can tell what it was built from. The rule
+  is now shape-based (ignore extensionless `tests/test_*` and `fuzz/fuzz_*`,
+  re-include `.c`/`.h`/`.sh`/`.py`), so it covers tests that do not exist yet.
+  `make` regenerates all of them.
+
 * **#125 SECURITY — the FIPS 140-3 §7.10.2 integrity self-check never passed
   on a signed build: a documented `volatile` was missing.** The comment on
   `fhsm_module_integrity_digest` stated that "the volatile prevents the

@@ -8,12 +8,26 @@
 *.exe
 
 # Test binaries
-tests/test_smoke
-tests/test_dispatch
+# Compiled test / fuzz binaries and their signing artifacts. Sources keep
+# their extension; the built binaries have none, so ignore the extensionless
+# form and re-include the sources explicitly. The previous list named each
+# binary individually, which meant every new test silently got committed --
+# tests/test_integrity and its .sha256 were added that way (#125). A signed
+# binary in a repo that advertises reproducible builds is a supply-chain
+# smell: it bloats clones, can be run by accident, and nobody can tell what
+# it was built from. `make` regenerates all of them.
+tests/test_*
+!tests/test_*.c
+!tests/test_*.h
+!tests/test_*.sh
+!tests/test_*.py
 tests/mlkem_e2e
 tests/mldsa_e2e
 tests/slhdsa_e2e
 tests/fuzz/
+fuzz/fuzz_*
+!fuzz/fuzz_*.c
+!fuzz/fuzz_*.h
 
 # libFuzzer harness binaries (built by fuzz/Makefile.fuzz, never committed)
 fuzz/fuzz_ecdsa_raw
