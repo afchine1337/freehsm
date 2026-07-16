@@ -8,6 +8,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 — a read-only session could create token objects via unwrap, derive
+  and copy.** `fhsm_check_ro_token` (§5.3: an RO session may not create a
+  token object) was wired into `C_CreateObject`, `C_GenerateKey` and
+  `C_GenerateKeyPair` only. `C_UnwrapKey`, `C_DeriveKey` and `C_CopyObject`
+  reach exactly the same state and were unguarded, so `CKA_TOKEN=True` through
+  any of those three minted a token object from a read-only session.
+
+  The unwrap case had been masked: an unrelated blanket rejection made the
+  test pass for the wrong reason, and the hole only surfaced when that
+  rejection was reverted. A guard applied to a subset of the paths that reach
+  the same state is not a guard. All six creation paths now share it.
+  (TestROWrapUnwrapRestrictions.)
+
 * **#125 — fixed an out-of-bounds read introduced by the CKA_TRUSTED guard.**
   `C_SetAttributeValue` never validated `ulCount` (it only ever iterated
   defensively), so adding a `find_attr` scan to it turned an
