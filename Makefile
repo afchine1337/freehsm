@@ -178,6 +178,38 @@ $(LIB): $(LIB_OBJ)
 # fhsm_rng_bytes, fhsm_aes_gcm_*, fhsm_ct_memcmp, fhsm_kat_results) that
 # are hidden in the shipped .so (visibility=hidden). For testing we link
 # against the .o files directly, which bypasses visibility filtering.
+# Integrity self-check regression (#125). INTERNAL linking model: the test
+# binary embeds its own .fhsm_digest section (from fhsm_integrity.o), so it
+# can be signed by scripts/sign_module.sh exactly like the shipped .so.
+#
+# This is the only place the integrity check is exercised WITHOUT
+# FHSM_INTEGRITY_ALLOW_UNSIGNED. That matters: the check shipped inert twice
+# (an unconditional pass until v1.2.1, then an always-fail caused by a missing
+# `volatile` on the digest slot), and neither was caught because every other
+# caller sets the bypass. `unset` below is deliberate -- the test refuses to
+# run if the variable leaks in from the environment.
+tests/test_integrity: tests/test_integrity.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
+.PHONY: test-integrity
+test-integrity: tests/test_integrity
+	@echo "test_integrity : module integrity self-check (no bypass)"
+	@# 1. Fresh build: digest slot is all zeros -> must NOT verify.
+	@env -u FHSM_INTEGRITY_ALLOW_UNSIGNED ./tests/test_integrity unsigned
+	@# 2. Sign it, exactly as the shipped module is signed.
+	@bash scripts/sign_module.sh ./tests/test_integrity >/dev/null
+	@env -u FHSM_INTEGRITY_ALLOW_UNSIGNED ./tests/test_integrity signed
+	@# 3. Flip one byte of the signed image (in a copy) -> must NOT verify.
+	@cp ./tests/test_integrity ./tests/test_integrity.tampered
+	@python3 -c "import sys; \
+p='./tests/test_integrity.tampered'; d=bytearray(open(p,'rb').read()); \
+off=d.find(b'FHSM_TAMPER_CANARY'); \
+d[off+18]^=0x01; open(p,'wb').write(d)"
+	@chmod +x ./tests/test_integrity.tampered
+	@env -u FHSM_INTEGRITY_ALLOW_UNSIGNED ./tests/test_integrity.tampered tampered
+	@rm -f ./tests/test_integrity.tampered
+	@echo "test_integrity : PASS"
+
 tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 

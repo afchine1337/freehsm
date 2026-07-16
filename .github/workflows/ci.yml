@@ -77,6 +77,12 @@ jobs:
           make integrity 2>&1 | tee integrity.log
           ls -la libfreehsm-fips.so
 
+      # The integrity self-check is the one mechanism that must be exercised
+      # WITHOUT FHSM_INTEGRITY_ALLOW_UNSIGNED -- every other job sets it, which
+      # is why the check shipped inert twice (#125). Gating.
+      - name: Integrity self-check (no bypass)
+        run: make test-integrity
+
       - name: Smoke test (smoke + KAT report)
         run: |
           install -m 755 tests/test_smoke /tmp/smoke

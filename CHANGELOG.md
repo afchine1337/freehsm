@@ -145,6 +145,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+* **`tests/test_integrity` + `make test-integrity`** — exercises the module
+  integrity self-check **without** `FHSM_INTEGRITY_ALLOW_UNSIGNED`, which is
+  the only reason the check shipped inert twice. Three cases: an unsigned
+  binary must fail, a signed binary must verify, and a signed-then-tampered
+  binary must fail. It links `fhsm_integrity.o` so the test binary carries its
+  own `.fhsm_digest` section and is signed by `sign_module.sh` like the real
+  module; no FIPS provider is needed because it calls
+  `fhsm_integrity_verify()` directly. The test refuses to run if the bypass
+  leaks in from the environment. Confirmed to catch the missing-`volatile`
+  regression: reverting the fix turns it red with the computed digest
+  reported. Wired into CI as a gating step.
+
 * **`scripts/audit_constants.py`** — diffs every PKCS#11 constant `#define`d
   in the module against the spec table and exits non-zero on divergence.
   Three separate interop bugs in one day (CKA_PARAMETER_SET, the AES-MAC code
