@@ -42,11 +42,34 @@
  *      before hashing.
  *
  * `aligned(16)` makes the offset reliably found via readelf and gives
- * us a stable 32-byte slot. The volatile prevents the compiler from
- * constant-folding the digest into the code generator.
+ * us a stable 32-byte slot. `const volatile` prevents the compiler from
+ * constant-folding the slot's initialiser into the code generator: the
+ * bytes are patched in after compilation, so every read must hit memory.
+ * Read it only via read_embedded_digest().
  * ----------------------------------------------------------------------- */
 __attribute__((used, section(FHSM_INTEGRITY_SECTION), aligned(16)))
-const uint8_t fhsm_module_integrity_digest[FHSM_INTEGRITY_DIGEST_LEN] = { 0 };
+const volatile uint8_t fhsm_module_integrity_digest[FHSM_INTEGRITY_DIGEST_LEN] = { 0 };
+
+/* Copy the embedded digest out of the .fhsm_digest slot.
+ *
+ * The slot is patched into the binary by scripts/sign_module.sh AFTER
+ * compilation, so the compiler must never assume it still holds its
+ * initialiser. It is declared `const volatile` for exactly that reason, and
+ * this accessor performs the volatile reads, handing back a plain buffer the
+ * constant-time helpers can take.
+ *
+ * This was documented but not implemented: the comment on the declaration
+ * claimed "the volatile prevents the compiler from constant-folding the digest
+ * into the code generator", yet the keyword was absent. GCC duly folded the
+ * explicitly-initialised element [0] to zero, so byte 0 of the comparison came
+ * from the code generator and bytes 1..31 from memory. Every signed build
+ * failed its own integrity check on byte 0, and nothing caught it because the
+ * whole chain -- CI included -- runs with FHSM_INTEGRITY_ALLOW_UNSIGNED=1.
+ * FIPS 140-3 §7.10.2 was therefore never actually enforced (#125). */
+static void read_embedded_digest(uint8_t *out) {
+    const volatile uint8_t *p = fhsm_module_integrity_digest;
+    for (size_t i = 0; i < FHSM_INTEGRITY_DIGEST_LEN; ++i) out[i] = p[i];
+}
 
 /* ---------------------------------------------------------------------------
  * Internal state
@@ -267,15 +290,16 @@ static fhsm_rv_t do_verify(void) {
      * the integrity check whenever the env var was unset. That
      * effectively disabled FIPS 140-3 §7.10.2 in all signed
      * production builds. Fixed in v1.2.1 (CVE candidate). */
-    if (is_all_zero(fhsm_module_integrity_digest, FHSM_INTEGRITY_DIGEST_LEN)) {
+    uint8_t embedded[FHSM_INTEGRITY_DIGEST_LEN];
+    read_embedded_digest(embedded);
+    if (is_all_zero(embedded, FHSM_INTEGRITY_DIGEST_LEN)) {
         if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")) {
             return FHSM_RV_OK;   /* unsigned build, allowed by explicit opt-in */
         }
         return FHSM_RV_INTEGRITY_FAILED;
     }
 
-    if (fhsm_ct_memcmp(g_last_digest,
-                        fhsm_module_integrity_digest,
+    if (fhsm_ct_memcmp(g_last_digest, embedded,
                         FHSM_INTEGRITY_DIGEST_LEN) != 0) {
         if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")) {
             return FHSM_RV_OK;   /* dev override, mismatch tolerated */
@@ -320,8 +344,9 @@ fhsm_rv_t fhsm_integrity_verify(void) {
 }
 
 int fhsm_integrity_is_signed(void) {
-    return !is_all_zero(fhsm_module_integrity_digest,
-                         FHSM_INTEGRITY_DIGEST_LEN);
+    uint8_t embedded[FHSM_INTEGRITY_DIGEST_LEN];
+    read_embedded_digest(embedded);
+    return !is_all_zero(embedded, FHSM_INTEGRITY_DIGEST_LEN);
 }
 
 const uint8_t *fhsm_integrity_last_computed(void) {

@@ -8,6 +8,37 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 SECURITY — the FIPS 140-3 §7.10.2 integrity self-check never passed
+  on a signed build: a documented `volatile` was missing.** The comment on
+  `fhsm_module_integrity_digest` stated that "the volatile prevents the
+  compiler from constant-folding the digest into the code generator" — but the
+  declaration had no `volatile`. The slot is patched by
+  `scripts/sign_module.sh` *after* compilation, so GCC folded the explicitly
+  initialised element `[0]` of `= { 0 }` to a literal zero. Byte 0 of the
+  comparison therefore came from the code generator and bytes 1..31 from
+  memory:
+
+  ```
+  computed = 52fad82b6ccecf78306ca4249d37a173031b514276c318ab742755faa7a94e5a
+  embedded = 00fad82b6ccecf78306ca4249d37a173031b514276c318ab742755faa7a94e5a
+             ^^
+  ```
+
+  Every correctly signed build failed its own integrity check on that one
+  byte. It went unnoticed because the whole chain — CI included — runs with
+  `FHSM_INTEGRITY_ALLOW_UNSIGNED=1`, which downgrades the failure to a
+  warning. The check was thus present, documented, exercised, and inert.
+
+  The slot is now `const volatile` and read only through
+  `read_embedded_digest()`, which performs the volatile reads and hands back
+  a plain buffer for the constant-time comparison. Verified: computed and
+  embedded digests now match byte for byte on a freshly signed module.
+
+  Note that a v1.2.1 fix had already removed a *different* bypass in this
+  function (a fall-through `return FHSM_RV_OK`). That turned "always passes"
+  into "always fails", which the env var then masked — so the check has never
+  actually gated anything.
+
 * **#125 — a read-only session could create token objects via unwrap, derive
   and copy.** `fhsm_check_ro_token` (§5.3: an RO session may not create a
   token object) was wired into `C_CreateObject`, `C_GenerateKey` and

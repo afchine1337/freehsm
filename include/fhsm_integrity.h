@@ -64,7 +64,7 @@ extern "C" {
  * accepts in development mode under FHSM_INTEGRITY_ALLOW_UNSIGNED).
  *
  * Declared in fhsm_integrity.c with __attribute__((section(".fhsm_digest"))). */
-extern const uint8_t fhsm_module_integrity_digest[32];
+extern const volatile uint8_t fhsm_module_integrity_digest[32];
 
 /* Size of the trailing section, used by the verifier to skip the
  * digest bytes when re-computing the hash. Build-time constant. */
