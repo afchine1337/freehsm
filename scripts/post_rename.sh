@@ -27,6 +27,33 @@ rc=0
 
 say() { printf '  %s\n' "$*"; }
 
+# --- 0. Refuse to run before the renames actually happened --------------------
+# Applying the new URLs while the repo is still called freehsm-c points every
+# remote at a repository that does not exist: the next push fails with
+# "Repository not found", and mirror.yml is left broken in the working tree.
+# The first version of this script printed the 404 as a TODO and then applied
+# the changes anyway, which is exactly the state it should have prevented.
+# --check still reports (that is its job); apply mode aborts.
+if [ "$CHECK" = 0 ] && command -v curl >/dev/null 2>&1; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 10 \
+        "https://github.com/afchine1337/${NEW}" || echo "000")
+    if [ "$code" != "200" ]; then
+        cat >&2 <<MSG
+post_rename: refusing to run -- https://github.com/afchine1337/${NEW} -> ${code}
+
+  The repository has not been renamed yet, so pointing the remotes and
+  mirror.yml at "${NEW}" would break every push. Do the renames first:
+
+    GitHub   : Settings -> rename ${OLD} -> ${NEW}
+    GitLab   : Settings -> General -> path ${OLD} -> ${NEW}
+    Codeberg : Settings -> rename ${OLD} -> ${NEW}
+
+  Then run this script again. Use --check to inspect without changing anything.
+MSG
+        exit 2
+    fi
+fi
+
 # --- 1. mirror.yml push URLs -------------------------------------------------
 # These are the only hard-coded repo URLs that break on rename. The ghcr.io
 # image names (freehsm-c-build / freehsm-c-test) are image names, not repo
