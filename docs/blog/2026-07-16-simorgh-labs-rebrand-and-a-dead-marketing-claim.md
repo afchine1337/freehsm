@@ -5,7 +5,7 @@ title: "Simorgh Labs, FreeHSM, and a marketing claim we killed ourselves"
 
 # Simorgh Labs, FreeHSM, and a marketing claim we killed ourselves
 
-*2026-07-12*
+*2026-07-16*
 
 Two announcements today. One is cosmetic, one is not.
 

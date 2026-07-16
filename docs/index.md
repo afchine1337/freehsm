@@ -18,7 +18,7 @@ An open-source PKCS#11 v3.2 cryptographic module targeting FIPS 140-3 Level 1 an
 
 ## Blog
 
-- [2026-07-12 — Simorgh Labs, FreeHSM, and a marketing claim we killed ourselves](blog/2026-07-12-simorgh-labs-rebrand-and-a-dead-marketing-claim.html)
+- [2026-07-16 — Simorgh Labs, FreeHSM, and a marketing claim we killed ourselves](blog/2026-07-16-simorgh-labs-rebrand-and-a-dead-marketing-claim.html)
 - [2026-06-28 — FreeHSM C v1.2.2 → v1.3.0: The methodology meets an external reporter](blog/2026-06-28-v1.3.0-methodology-meets-external-reporter.html)
 
 ## Documentation

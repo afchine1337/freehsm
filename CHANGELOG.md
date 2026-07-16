@@ -160,6 +160,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+* **`scripts/post_rename.sh`** — repo-side fixups for the `freehsm-c` →
+  `freehsm` rename. `mirror.yml` hard-codes the GitLab and Codeberg push URLs,
+  and GitLab does **not** redirect git remotes on rename (GitHub does), so the
+  mirror breaks the moment the rename lands. The script updates those URLs and
+  the local remotes; `--check` reports without changing anything and exits
+  non-zero while work remains — including a live check that
+  `github.com/afchine1337/freehsm` resolves.
+
+  It is a script rather than a commit made in advance because landing the new
+  URLs *before* the rename would break the mirror; landing them after is a
+  one-liner. The ghcr.io image names (`freehsm-c-build` / `freehsm-c-test`)
+  are image names, not repo names — they keep working and are left alone.
+
 * **`tests/test_integrity` + `make test-integrity`** — exercises the module
   integrity self-check **without** `FHSM_INTEGRITY_ALLOW_UNSIGNED`, which is
   the only reason the check shipped inert twice. Three cases: an unsigned

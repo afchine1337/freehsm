@@ -1,4 +1,4 @@
-# Rebrand Weekend — Execution Checklist (target 2026-07-12)
+# Rebrand Weekend — Execution Checklist (cible 2026-07-12 ; en cours 2026-07-16)
 
 Prepared 2026-07-08. Everything markable ✅ PRÉPARÉ is already written and
 committed (or staged) — the weekend is mostly clicking, not writing.
@@ -19,7 +19,18 @@ committed (or staged) — the weekend is mostly clicking, not writing.
   pour l'UE — chercher "Simorgh" et "FreeHSM" classes 9 et 42. But : absence de
   conflit bloquant, pas un dépôt (le dépôt INPI ~190€ peut attendre la v2.0).
 
-## Phase 2 — Renames (30 min)
+## Phase 2 — Renames (30 min) — ⚠ BLOQUANT
+
+> La Phase 3 a été commitée AVANT celle-ci : le README annonce déjà
+> `github.com/afchine1337/freehsm`, qui renvoie **404** aujourd'hui, donc
+> les cinq badges sont cassés pour tout visiteur. Ce n'est plus « l'étape
+> suivante » mais une réparation.
+>
+> Juste après les renames : `bash scripts/post_rename.sh`. Il met à jour
+> `mirror.yml` (qui code en dur les URLs GitLab/Codeberg — GitLab ne
+> redirige pas les remotes git, le miroir casserait) et les remotes locaux.
+> `bash scripts/post_rename.sh --check` vérifie sans rien modifier et sort
+> en erreur tant qu'il reste du travail, y compris le 404 ci-dessus.
 
 - [ ] GitHub : Settings → rename `freehsm-c` → `freehsm` (redirects auto)
 - [ ] GitLab : Settings → General → rename path `freehsm-c` → `freehsm`
@@ -36,7 +47,9 @@ committed (or staged) — the weekend is mostly clicking, not writing.
 - ✅ PRÉPARÉ `TRADEMARK.md` (nouveau)
 - ✅ PRÉPARÉ `CHANGELOG.md` : entrée Unreleased "Branding / repository"
 - ✅ PRÉPARÉ `docs/index.md` (Jekyll) : rebrandé, release v1.4.0, URLs freehsm
-- ✅ PRÉPARÉ `docs/blog/2026-07-12-simorgh-labs-rebrand-and-a-dead-marketing-claim.md`
+- ✅ PRÉPARÉ `docs/blog/2026-07-16-simorgh-labs-rebrand-and-a-dead-marketing-claim.md`
+  (redaté du 12 au 16 : la date pilote l'URL Jekyll ET le lien depuis
+  `docs/index.md`, qui pointait vers l'ancien nom — lien mort corrigé)
 - ✅ (fait avant) `docs/PRIMACY_AUDIT_PQC_COMPOSITE.md` + `DOC_INDEX.md` (commit c443ada)
 - [ ] NON MODIFIÉ (volontaire) : `SECURITY.md` §incident 2026-06-12 garde les
   anciennes URLs `freehsm-c` (texte historique ; les redirects GitHub couvrent)
