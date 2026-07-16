@@ -15,25 +15,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
   by `fhsm_check_template` before anything walks the template.
   (TestTemplateCountOverflowValidHandles.)
 
-* **#125 — known limitation: Tookan §3.3 CKA_SENSITIVE downgrade on unwrap.**
-  Reproduced: a key created `CKA_SENSITIVE=True, CKA_EXTRACTABLE=True` (value
-  unreadable) can be wrapped and then unwrapped with `CKA_SENSITIVE=False`,
-  yielding a readable copy of the key bytes.
+* **#125 SECURITY — CKA_UNWRAP_TEMPLATE closes the Tookan §3.3 downgrade
+  (partial support).** A wrapping/unwrapping key may now carry
+  `CKA_UNWRAP_TEMPLATE` (§4.9). When it demands `CKA_SENSITIVE`, an unwrap
+  supplying `CKA_SENSITIVE=False` is `CKR_ATTRIBUTE_READ_ONLY` instead of
+  handing back a readable copy of a sensitive key.
 
-  A fix refusing the downgrade was implemented and **reverted**: RFC 3394 wraps
-  key bytes only, so the module cannot distinguish an attacker's downgrade from
-  a non-sensitive key being legitimately re-imported. Refusing every downgrade
-  broke seven legitimate round-trips (wrap → unwrap → read back and compare is
-  the standard way to verify a wrapping mechanism at all) to block one attack.
-  That is not a defence, it is a denial of the feature.
+  This is the spec's own answer to Tookan: RFC 3394 wraps key bytes only, so
+  the module cannot distinguish an attacker's downgrade from a non-sensitive
+  key being legitimately re-imported — but the *unwrapping key's owner* knows
+  what that key is for and can say so up front. An earlier attempt refused all
+  downgrades unconditionally and was reverted: it broke seven legitimate
+  round-trips to block one attack.
 
-  The correct fix is `CKA_UNWRAP_TEMPLATE` on the unwrapping key (§4.9), which
-  lets the wrapping key's policy — the only party that legitimately knows what
-  it wraps — constrain the unwrapped key's attributes. Tracked as follow-up.
+  **Support is deliberately partial.** Only `CKA_SENSITIVE=TRUE` and
+  `CKA_EXTRACTABLE=FALSE` are honoured — the attributes that defend the key,
+  and the ones that fit the per-object flags byte without a store format
+  change. Any other attribute in the template (`CKA_LABEL`, `CKA_KEY_TYPE`, …)
+  is `CKR_ATTRIBUTE_VALUE_INVALID` at creation: the module refuses what it
+  cannot enforce rather than accepting it and silently ignoring it, which
+  would be a false claim of protection. Full nested-template support needs a
+  v3 store record and is tracked separately.
 
-  **Preconditions for the attack:** the caller must already hold wrap+unwrap
-  rights on a wrapping key, and the target key must be `CKA_EXTRACTABLE=True`
-  (a key with `CKA_EXTRACTABLE=False` cannot be wrapped at all).
+  **Unchanged:** an unwrapping key *without* `CKA_UNWRAP_TEMPLATE` still
+  honours a `CKA_SENSITIVE=False` template. Deployments that wrap sensitive
+  keys should set the policy on their wrapping keys.
 
 * **#125 security — CKA_TRUSTED was settable by any application and then
   reported back as FALSE.** `CKA_TRUSTED` may only be set to TRUE by the SO

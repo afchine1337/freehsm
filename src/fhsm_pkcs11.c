@@ -1276,6 +1276,24 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
  * CKA_TRUSTED=TRUE from any session and then reported it back as a hard-coded
  * FALSE, so the attribute was both unenforced and unreadable (#125). */
 #define FHSM_OBJF_TRUSTED       0x40
+/* CKA_UNWRAP_TEMPLATE (§4.9) present on this key and requiring that keys
+ * unwrapped with it be CKA_SENSITIVE. This is the spec's answer to Tookan
+ * §3.3: the module cannot tell an attacker's CKA_SENSITIVE=FALSE downgrade
+ * from a non-sensitive key being legitimately re-imported (RFC 3394 carries no
+ * attributes), but the *wrapping key's owner* knows what that key wraps and
+ * can say so up front. §4.9: the user template is applied "as if the object
+ * has already been created", so the one-way CKA_SENSITIVE rule (FALSE->TRUE
+ * only) makes a downgrade CKR_ATTRIBUTE_READ_ONLY.
+ *
+ * NOTE: this is the last free bit of the flags byte. The next per-object
+ * boolean needs a wider field, which means a v3 store record. */
+#define FHSM_OBJF_UNWRAP_SENS   0x80
+
+/* CKA_UNWRAP_TEMPLATE parser. Defined further down next to the other template
+ * guards; every creation path (C_GenerateKey, C_GenerateKeyPair,
+ * C_CreateObject) must parse it, and the first of them appears before that
+ * definition. */
+static long fhsm_parse_unwrap_template(CK_ATTRIBUTE *tmpl, CK_ULONG n);
 
 /* CKA_ALWAYS_AUTHENTICATE from a template (default FALSE). Declared early so
  * the keygen paths can use it. */
@@ -1679,6 +1697,14 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     /* Default policy : SENSITIVE=TRUE, EXTRACTABLE=FALSE.
      * The template may override either explicitly (CK_BBOOL=1 byte). */
     uint8_t obj_flags = FHSM_OBJF_SENSITIVE | FHSM_OBJF_LOCAL;  /* generated on token */
+    /* A symmetric key generated here can itself be an unwrapping key, so it
+     * carries CKA_UNWRAP_TEMPLATE too. Every creation path must parse it: a
+     * guard wired into only some of them is not a guard (#125). */
+    {
+        long ut = fhsm_parse_unwrap_template(pTemplate, ulCount);
+        if (ut < 0) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        obj_flags |= (uint8_t)ut;
+    }
     i = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
     if (i >= 0 && pTemplate[i].pValue && pTemplate[i].ulValueLen >= 1) {
         if (((unsigned char*)pTemplate[i].pValue)[0] == 0)
@@ -1770,6 +1796,51 @@ static CK_RV map_parse_rv(fhsm_parse_rv_t rv) {
     return FHSM_RV_FUNCTION_FAILED;
 }
 
+/* CKA_UNWRAP_TEMPLATE is an array attribute (0x40000212): its pValue is an
+ * array of CK_ATTRIBUTE and ulValueLen is that array's size in BYTES.
+ *
+ * Support is deliberately partial: only CKA_SENSITIVE=TRUE and
+ * CKA_EXTRACTABLE=FALSE are honoured, because those are what defend the key,
+ * and they fit the per-object flags byte without a store format change.
+ * Anything else in the template is CKR_ATTRIBUTE_VALUE_INVALID at creation
+ * time -- we refuse what we cannot enforce rather than accept it and silently
+ * ignore it, which would be a false claim of protection. Documented as partial
+ * in MECHANISMS.md.
+ *
+ * Returns the flag bits to OR into the key's flags, or -1 on a malformed or
+ * unsupported template. #125.
+ */
+#define CKA_UNWRAP_TEMPLATE_ATTR 0x40000212UL
+static long fhsm_parse_unwrap_template(CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    long i = find_attr(tmpl, n, CKA_UNWRAP_TEMPLATE_ATTR);
+    if (i < 0) return 0;                       /* absent: nothing to enforce */
+    if (!tmpl[i].pValue || tmpl[i].ulValueLen == 0) return -1;
+    /* The length must be a whole number of CK_ATTRIBUTE, and bounded like any
+     * other template. An attacker-supplied byte count must never become an
+     * unbounded scan (the mistake made in C_SetAttributeValue, #125). */
+    if (tmpl[i].ulValueLen % sizeof(CK_ATTRIBUTE)) return -1;
+    CK_ULONG cnt = (CK_ULONG)(tmpl[i].ulValueLen / sizeof(CK_ATTRIBUTE));
+    if (cnt == 0 || cnt > FHSM_MAX_TEMPLATE_ATTRS) return -1;
+    CK_ATTRIBUTE *nest = (CK_ATTRIBUTE *)tmpl[i].pValue;
+    long flags = 0;
+    for (CK_ULONG k = 0; k < cnt; ++k) {
+        if (!nest[k].pValue || nest[k].ulValueLen != 1) return -1;
+        unsigned char v = *(unsigned char *)nest[k].pValue;
+        switch (nest[k].type) {
+            case CKA_SENSITIVE:
+                if (!v) return -1;             /* "must be non-sensitive": no */
+                flags |= FHSM_OBJF_UNWRAP_SENS;
+                break;
+            case CKA_EXTRACTABLE:
+                if (v) return -1;              /* only the restricting sense */
+                break;
+            default:
+                return -1;                     /* not enforceable here */
+        }
+    }
+    return flags;
+}
+
 /* CKA_TRUSTED may only be set to TRUE by the SO (PKCS#11 v3.2 §4.6). From any
  * other session the attribute is read-only, which is CKR_ATTRIBUTE_READ_ONLY.
  * Setting it to FALSE, or omitting it, is always fine. #125 TestCKATrusted. */
@@ -1806,6 +1877,9 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (ti >= 0 && pTemplate[ti].pValue && pTemplate[ti].ulValueLen == 1
             && *(unsigned char *)pTemplate[ti].pValue)
             trusted_flag = FHSM_OBJF_TRUSTED;
+        long ut = fhsm_parse_unwrap_template(pTemplate, ulCount);
+        if (ut < 0) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        trusted_flag |= (uint8_t)ut;
     }
 
     /* === Parser stage : pure C, no OpenSSL. ============================
@@ -2423,8 +2497,21 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * documented as a known limitation until then. */
     li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
     if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
-        && ((unsigned char*)pTemplate[li].pValue)[0] == 0)
+        && ((unsigned char*)pTemplate[li].pValue)[0] == 0) {
+        /* Tookan §3.3 defence. The blob carries no attributes, so the module
+         * cannot know how sensitive the original was -- but if the unwrapping
+         * key was created with CKA_UNWRAP_TEMPLATE demanding CKA_SENSITIVE,
+         * its owner has already answered that question. §4.9 applies the user
+         * template "as if the object has already been created", so the one-way
+         * CKA_SENSITIVE rule makes this downgrade CKR_ATTRIBUTE_READ_ONLY.
+         * Without such a policy the downgrade is honoured, as refusing every
+         * one breaks legitimate round-trips (see the reverted attempt). */
+        uint8_t uwf = 0;
+        (void)fhsm_token_object_get_flags(t, (uint32_t)hUnwrappingKey, &uwf);
+        if (uwf & FHSM_OBJF_UNWRAP_SENS)
+            return 0x00000010UL;   /* CKR_ATTRIBUTE_READ_ONLY */
         obj_flags &= (uint8_t)~FHSM_OBJF_SENSITIVE;
+    }
     li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
     if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
         && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
@@ -2978,6 +3065,9 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (ai >= 0 && pPriv[ai].pValue && pPriv[ai].ulValueLen == 1
             && *(unsigned char*)pPriv[ai].pValue)
             priv_flags |= FHSM_OBJF_ALWAYS_AUTH;
+        long ut = fhsm_parse_unwrap_template(pPriv, ulPriv);
+        if (ut < 0) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        priv_flags |= (uint8_t)ut;
     }
     fhsm_rv_t rv = fhsm_token_object_add(t, CKO_PUBLIC_KEY, ckk_type,
                                           label_pub, pub_der, (size_t)pub_len,
