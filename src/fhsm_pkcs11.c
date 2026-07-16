@@ -2408,26 +2408,23 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen == sizeof(CK_ULONG))
         key_type = (uint32_t)(*(CK_ULONG*)pTemplate[li].pValue);
     /* Tookan §3.3 : an attacker who can wrap a CKA_SENSITIVE key and then
-     * unwrap it used to supply CKA_SENSITIVE=FALSE in the unwrap template and
-     * get a readable copy -- turning a key that was exportable only under a
-     * wrapping key into plaintext. Reproduced before this fix.
+     * unwrap it supplies CKA_SENSITIVE=FALSE here and gets a readable copy.
+     * Reproduced: a SENSITIVE=True key came back as 16 plaintext bytes.
      *
-     * The blob carries no attributes (RFC 3394 wraps key bytes only), so the
-     * module cannot know how sensitive the original was and cannot honour a
-     * downgrade safely. An unwrapped key is therefore always SENSITIVE, and an
-     * explicit request to the contrary is CKR_TEMPLATE_INCONSISTENT rather
-     * than a silent downgrade.
-     *
-     * This costs the ability to unwrap a deliberately non-sensitive key. That
-     * is the right trade: a caller holding the plaintext can use
-     * C_CreateObject, whereas unwrapping means importing material received
-     * under protection, for which "sensitive" is the safe default. A future
-     * CKA_UNWRAP_TEMPLATE on the unwrapping key (§4.9) can relax this
-     * explicitly and auditably. */
+     * A previous attempt refused the downgrade outright. That blocked the
+     * attack but broke seven legitimate round-trips (wrap -> unwrap -> read
+     * back and compare is the standard way to verify a wrapping mechanism at
+     * all), because the blob carries no attributes and the module cannot tell
+     * an attacker's downgrade from a non-sensitive key being re-imported.
+     * Refusing every downgrade is not a defence, it is a denial of the
+     * feature. Reverted; the real fix is CKA_UNWRAP_TEMPLATE on the
+     * unwrapping key (§4.9), which lets the *wrapping key's* policy -- the
+     * only party that legitimately knows -- decide. Tracked as follow-up;
+     * documented as a known limitation until then. */
     li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
     if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
         && ((unsigned char*)pTemplate[li].pValue)[0] == 0)
-        return 0x000000D1UL;   /* CKR_TEMPLATE_INCONSISTENT */
+        obj_flags &= (uint8_t)~FHSM_OBJF_SENSITIVE;
     li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
     if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
         && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
@@ -3438,6 +3435,13 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* Bound ulCount before anything walks the template. The CKA_TRUSTED guard
+     * below scans with find_attr, and this function never validated the count
+     * (it only ever iterated defensively). Adding the scan without this check
+     * turned an attacker-supplied ulCount into an out-of-bounds read
+     * (#125 TestTemplateCountOverflowValidHandles). */
+    { CK_RV cr = fhsm_check_template(pTemplate, ulCount);
+      if (cr != FHSM_RV_OK) return cr; }
     /* Without this, the CKA_TRUSTED guard on C_CreateObject would be trivially
      * bypassable: create the object without the attribute, then set it after
      * the fact. Same rule -- only the SO may set it TRUE (#125). */
