@@ -55,7 +55,7 @@ jobs:
           ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
           GIT_SSH_COMMAND="ssh -i ~/.ssh/gitlab_key -o StrictHostKeyChecking=yes" \
             git push --force --prune \
-              git@gitlab.com:afchine.mad/freehsm-c.git \
+              git@gitlab.com:afchine.mad/freehsm.git \
               "refs/remotes/origin/*:refs/heads/*" \
               "refs/tags/*:refs/tags/*"
 
@@ -71,6 +71,6 @@ jobs:
           ssh-keyscan codeberg.org >> ~/.ssh/known_hosts
           GIT_SSH_COMMAND="ssh -i ~/.ssh/codeberg_key -o StrictHostKeyChecking=yes" \
             git push --force --prune \
-              git@codeberg.org:afchine1337/freehsm-c.git \
+              git@codeberg.org:afchine1337/freehsm.git \
               "refs/remotes/origin/*:refs/heads/*" \
               "refs/tags/*:refs/tags/*"
