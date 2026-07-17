@@ -29,7 +29,6 @@
 
 #include "fhsm_common.h"
 #include "fhsm_session.h"
-#include "fhsm_session.h"
 #include "fhsm_token.h"
 
 #include <pthread.h>
@@ -143,6 +142,17 @@ fhsm_token_t *fhsm_session_token(unsigned long h) {
     fhsm_token_t *t = g_sessions[h].in_use ? g_sessions[h].token : NULL;
     pthread_mutex_unlock(&g_sess_mu);
     return t;
+}
+
+/* Post-fork reset. A child inherits the parent's session table verbatim, so
+ * every handle the parent held would keep working -- including its logged-in
+ * role and its token pointer -- in a process that never authenticated. Wiping
+ * the table is enough here: the tokens themselves are reset separately, and
+ * this must not free them (other slots may still reference them). #125. */
+void fhsm_session_reset_all(void) {
+    pthread_mutex_lock(&g_sess_mu);
+    fhsm_zeroize(g_sessions, sizeof(g_sessions));
+    pthread_mutex_unlock(&g_sess_mu);
 }
 
 fhsm_role_t fhsm_session_role(unsigned long h) {

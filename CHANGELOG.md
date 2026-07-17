@@ -8,6 +8,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 SECURITY — a forked child inherited the parent's session objects AND
+  its authenticated state.** The module had no fork detection of any kind.
+  `fork()` copies the whole address space, so a child inherited the slot
+  registry, the in-memory object store, the session table with its handles and
+  roles, and the token's decrypted DEK. `C_Finalize` frees none of it — it
+  closes crypto and drops the state machine to `POWER_OFF` — so a child doing
+  `C_Finalize` then `C_Initialize`, exactly as PKCS#11 v3.2 fork semantics
+  require, came up holding all of it.
+
+  Reproduced before the fix: the child found the parent's session object **and**
+  generated a key with `C_GenerateKey` having never presented a PIN. The
+  harness only checks the object; inheriting the login state is the worse half
+  and was invisible to it.
+
+  `C_Initialize` now records the PID that built the state and, on a call from a
+  different process, discards everything rather than adopting it: tokens are
+  closed (zeroizing each DEK and freeing object values), and the session table,
+  find state and operation slots are wiped. A child is a different application
+  in PKCS#11 terms; inheriting authenticated state is precisely the bug, so
+  nothing is preserved. Same-process `C_Initialize` is unaffected.
+
+  Verified both ways: with detection disabled the child sees the object and
+  generates a key unauthenticated; with it enabled, 0 objects and
+  `CKR_USER_NOT_LOGGED_IN`. (TestSessionObjectProcessIsolation.)
+
 * **#125 — C_SetAttributeValue left partial mutations behind on failure.** A
   single loop validated and applied each template row as it went, so a
   template of `{CKA_LABEL: "x", CKA_CLASS: ...}` wrote the label and *then*

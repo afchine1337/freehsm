@@ -41,6 +41,12 @@ fhsm_rv_t fhsm_session_attach_token(unsigned long h, fhsm_token_t *t);
 fhsm_token_t *fhsm_session_token(unsigned long h);
 fhsm_role_t   fhsm_session_role(unsigned long h);
 
+/* Drop every session without touching the tokens they point at. Used by the
+ * post-fork reset in C_Initialize: a forked child inherits the parent's whole
+ * session table -- handles, roles, token pointers -- and must not keep using
+ * sessions it never opened (#125). */
+void fhsm_session_reset_all(void);
+
 /* Aggregate accessor for C_GetSessionInfo : populates slot ID, open
  * flags, and authenticated role for the given session handle in one
  * mutex-protected lookup. Returns FHSM_RV_OK on success, or

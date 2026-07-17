@@ -46,6 +46,7 @@
 #include "fhsm_session.h"
 #include "fhsm_pairwise.h"
 
+#include <unistd.h>      /* getpid() : post-fork state detection (#125) */
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -319,8 +320,38 @@ static void fhsm_pack_field(unsigned char *dst, const char *src, size_t n) {
 /* ---------------------------------------------------------------------------
  * Module lifecycle.
  * ----------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+ * Post-fork state reset (#125 TestSessionObjectProcessIsolation).
+ *
+ * fork() copies the parent's entire address space, so a child inherits this
+ * module's global state verbatim: the slot registry with its loaded tokens,
+ * the in-memory object store (session objects included), the session table
+ * with its handles and authenticated roles, and the token's decrypted DEK.
+ * C_Finalize does not free any of it -- it only closes crypto and drops the
+ * state machine to POWER_OFF -- so a child that calls C_Finalize and then
+ * C_Initialize, exactly as PKCS#11 v3.2 fork semantics require, came up
+ * holding the parent's session objects AND the parent's logged-in state,
+ * without ever presenting a PIN.
+ *
+ * The module had no fork detection at all. The fix is the conventional one:
+ * remember the PID that set the state up, and on any later C_Initialize from a
+ * different process, discard everything rather than adopt it. We do NOT try to
+ * preserve the parent's work -- a child is a different application in PKCS#11
+ * terms, and inheriting authenticated state is precisely the bug.
+ * ----------------------------------------------------------------------- */
+static pid_t g_init_pid = 0;
+static void fhsm_reset_after_fork(void);   /* defined below, next to the state it clears */
+
 CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
     (void)pInitArgs;
+    /* Before anything else: if the state was built by another process, this is
+     * a forked child adopting its parent's memory. Drop it. */
+    pid_t self = getpid();
+    if (g_init_pid != 0 && g_init_pid != self) {
+        fhsm_reset_after_fork();
+    }
+    g_init_pid = self;
+
     fhsm_rv_t rv = fhsm_secure_heap_init();
     if (rv != FHSM_RV_OK) return rv;
     rv = fhsm_state_set(FHSM_STATE_INITIALIZING);
@@ -1384,6 +1415,25 @@ typedef struct fhsm_op_s {
 } fhsm_op_t;
 static fhsm_op_t g_op_enc[256];
 static fhsm_op_t g_op_dec[256];
+
+/* Post-fork reset. Declared far above, next to C_Initialize; defined here
+ * because it clears g_slots / g_finds / g_op_* which are declared between the
+ * two. See the comment on g_init_pid for why this exists. */
+static void fhsm_reset_after_fork(void) {
+    /* Tokens first: this zeroizes each DEK and frees the heap-allocated object
+     * values, so the child cannot reach the parent's key material. */
+    for (size_t i = 0; i < FHSM_MAX_SLOTS; ++i) {
+        if (g_slots[i].token) {
+            fhsm_token_close(g_slots[i].token);
+            g_slots[i].token = NULL;
+        }
+    }
+    g_slots_initialized = 0;
+    fhsm_session_reset_all();
+    fhsm_zeroize(g_finds,  sizeof(g_finds));
+    fhsm_zeroize(g_op_enc, sizeof(g_op_enc));
+    fhsm_zeroize(g_op_dec, sizeof(g_op_dec));
+}
 static fhsm_op_t g_op_sig[256];
 static fhsm_op_t g_op_dig[256];
 static fhsm_op_t g_op_ver[256];
