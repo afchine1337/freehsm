@@ -1322,9 +1322,16 @@ static long fhsm_parse_unwrap_template(CK_ATTRIBUTE *tmpl, CK_ULONG n);
 #define CKK_GENERIC_SECRET  0x00000010UL
 #define CKK_SHA256_HMAC     0x0000002BUL
 
-/* Per-session find-objects state. */
+/* Per-session find-objects state.
+ *
+ * The handle buffer is bounded by the store's capacity: a search cannot return
+ * more objects than the token can hold. It used to be a literal 64, which was
+ * FHSM_MAX_OBJECTS at the time; raising the store to 256 left this behind, so
+ * C_FindObjects silently truncated every result set at 64 no matter how many
+ * objects matched (#125 TestBulkOperations: 100 keys created, 64 found). A
+ * constant duplicated as a literal is a constant that will drift. */
 typedef struct fhsm_find_state_s {
-    uint32_t  handles[64];
+    uint32_t  handles[FHSM_MAX_OBJECTS];
     size_t    count;
     size_t    next;
     int       active;
@@ -4571,7 +4578,8 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
             want = 0x03; break;                             /* CKK_EC */
         case 0x1057: want = 0x40; break;                    /* EDDSA -> CKK_EC_EDWARDS */
         case 0x1081: case 0x1082: case 0x1085: case 0x1086: /* AES ECB/CBC/CBC_PAD/CTR */
-        case 0x1087: case 0x108A: case 0x108E:              /* AES GCM/CMAC/GMAC */
+        case 0x1087: case 0x1088:                           /* AES GCM/CCM */
+        case 0x108A: case 0x108E:                           /* AES CMAC/GMAC */
             want = 0x1F; break;                             /* CKK_AES */
         case 0x0133: want = 0x15; break;                    /* DES3_CBC -> CKK_DES3 */
         case 0x0251: case 0x0261: case 0x0271: case 0x0256: /* SHA{256,384,512,224}_HMAC */

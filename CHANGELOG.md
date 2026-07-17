@@ -8,6 +8,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 — C_FindObjects silently truncated every result set at 64.** The
+  per-session find buffer was declared `uint32_t handles[64]` — a literal that
+  happened to be `FHSM_MAX_OBJECTS` when it was written. Raising the store to
+  256 left it behind, so a search returned at most 64 matches no matter how
+  many objects existed, without any error. It now tracks `FHSM_MAX_OBJECTS`:
+  a search cannot return more objects than the token can hold.
+  Verified: 100 keys created, 100 found (previously 64).
+  (TestBulkOperations::test_100_keys_coexist.)
+
+* **#125 — `CKM_AES_CCM` was missing from the key-type gate.** CCM is
+  advertised (`0x1088`) but `fhsm_check_key_mech_type` covered ECB/CBC/CBC_PAD/
+  CTR/GCM/CMAC/GMAC only, so a `CKK_GENERIC_SECRET` key was accepted for
+  AES-CCM. Now `CKR_KEY_TYPE_INCONSISTENT` like every other AES mechanism.
+  (TestWrongKeyType[AES_CCM].)
+
 * **Compiled binaries are no longer tracked in git.** Ten ELF binaries were
   committed — `tests/test_attributes`, `test_fips_digests`,
   `test_input_validation`, `test_op_state`, `test_robustness_args`,
