@@ -3569,44 +3569,45 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     uint8_t flags_new = flags_now;
     int flags_touched = 0;
 
+    /* Two passes: validate everything, then apply. A single loop that
+     * validated and applied as it went left a partial mutation behind on
+     * failure -- a template of {CKA_LABEL: "x", CKA_CLASS: ...} wrote the label
+     * and then rejected the read-only class, so the caller got an error AND a
+     * renamed object (#125 TestSetAttributeAtomicity). The flags transitions
+     * were already deferred to a single set_flags below; CKA_LABEL and CKA_ID
+     * were not, and there is no reason for them to be less atomic than the
+     * flags they sit next to.
+     *
+     * Pass 1 writes nothing. flags_new accumulates the intended flag state so
+     * the one-way CKA_SENSITIVE / CKA_EXTRACTABLE rules still see the effect of
+     * earlier rows in the same template. */
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         CK_ATTRIBUTE *a = &pTemplate[i];
         switch (a->type) {
-            case CKA_LABEL: {
-                /* Use the template buffer directly ; the setter does a
-                 * bounded copy. ulValueLen of 0 is allowed and yields
-                 * an empty label. */
-                char buf[64];
-                size_t n = a->ulValueLen;
-                if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-                memcpy(buf, a->pValue, n);
-                buf[n] = '\0';
-                fhsm_rv_t r = fhsm_token_object_set_label(
-                                t, (uint32_t)hObject, buf);
-                if (r != FHSM_RV_OK) return r;
+            case CKA_LABEL:
+                if (a->ulValueLen && !a->pValue)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 break;
-            }
-            case CKA_ID: {
-                fhsm_rv_t r = fhsm_token_object_set_id(
-                                t, (uint32_t)hObject,
-                                (const uint8_t *)a->pValue,
-                                (size_t)a->ulValueLen);
-                if (r != FHSM_RV_OK) return r;
+            case CKA_ID:
+                if (a->ulValueLen && !a->pValue)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                if (a->ulValueLen > 32) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 break;
-            }
             case CKA_SENSITIVE: {
-                if (a->ulValueLen != 1) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                if (a->ulValueLen != 1 || !a->pValue)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 uint8_t want = *(const uint8_t *)a->pValue ? 1 : 0;
                 uint8_t is_now = (flags_new & FHSM_OBJF_SENSITIVE) ? 1 : 0;
                 if (want == is_now) break;          /* no-op */
                 if (want == 0)
                     return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
-                flags_new |= FHSM_OBJF_SENSITIVE;
+                flags_new |= FHSM_OBJF_SENSITIVE;   /* intent only, not written */
                 flags_touched = 1;
                 break;
             }
             case CKA_EXTRACTABLE: {
-                if (a->ulValueLen != 1) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                if (a->ulValueLen != 1 || !a->pValue)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 uint8_t want = *(const uint8_t *)a->pValue ? 1 : 0;
                 uint8_t is_now = (flags_new & FHSM_OBJF_EXTRACTABLE) ? 1 : 0;
                 if (want == is_now) break;          /* no-op */
@@ -3623,6 +3624,28 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
                 return 0x00000010UL;                 /* CKR_ATTRIBUTE_READ_ONLY */
             default:
                 return 0x00000012UL;                 /* CKR_ATTRIBUTE_TYPE_INVALID */
+        }
+    }
+
+    /* Pass 2: every row was accepted, so apply. The setters can still fail on
+     * a storage error; that is a device-level failure, not a template one, and
+     * is the one case where a partial write remains possible. */
+    for (CK_ULONG i = 0; i < ulCount; ++i) {
+        CK_ATTRIBUTE *a = &pTemplate[i];
+        if (a->type == CKA_LABEL) {
+            char buf[64];
+            size_t n = a->ulValueLen;
+            if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+            if (n) memcpy(buf, a->pValue, n);
+            buf[n] = '\0';
+            fhsm_rv_t r = fhsm_token_object_set_label(t, (uint32_t)hObject, buf);
+            if (r != FHSM_RV_OK) return r;
+        } else if (a->type == CKA_ID) {
+            fhsm_rv_t r = fhsm_token_object_set_id(
+                            t, (uint32_t)hObject,
+                            (const uint8_t *)a->pValue,
+                            (size_t)a->ulValueLen);
+            if (r != FHSM_RV_OK) return r;
         }
     }
 

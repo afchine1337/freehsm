@@ -8,6 +8,24 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 — C_SetAttributeValue left partial mutations behind on failure.** A
+  single loop validated and applied each template row as it went, so a
+  template of `{CKA_LABEL: "x", CKA_CLASS: ...}` wrote the label and *then*
+  rejected the read-only class: the caller got an error **and** a renamed
+  object. The flag transitions (`CKA_SENSITIVE`/`CKA_EXTRACTABLE`) were already
+  deferred to a single write; `CKA_LABEL` and `CKA_ID` were not, and there was
+  no reason for them to be less atomic than the flags sitting beside them.
+
+  Now two passes: validate every row (writing nothing), then apply. Verified
+  in both orderings — `{LABEL, CLASS}` and `{CLASS, LABEL}` — both reject with
+  `CKR_ATTRIBUTE_READ_ONLY` and leave the label untouched, while legitimate
+  single- and multi-attribute templates still apply in full.
+  (TestSetAttributeAtomicity.)
+
+  A storage failure inside the apply pass can still leave a partial write.
+  That is a device-level error rather than a template one, and closing it
+  needs a journalled object store — out of scope here, noted deliberately.
+
 * **#125 — C_FindObjects silently truncated every result set at 64.** The
   per-session find buffer was declared `uint32_t handles[64]` — a literal that
   happened to be `FHSM_MAX_OBJECTS` when it was written. Raising the store to
