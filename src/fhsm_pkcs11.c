@@ -3826,6 +3826,17 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 copy_flags &= (uint8_t)~FHSM_OBJF_EXTRACTABLE;
                 break;
             }
+            case CKA_TOKEN:
+            case CKA_PRIVATE:
+            case CKA_MODIFIABLE_ATTR:
+            case CKA_DESTROYABLE_ATTR:
+                /* Scope / persistence attributes: legal in a copy template and
+                 * consumed after this loop (CKA_TOKEN sets session vs token,
+                 * the flags set MODIFIABLE/DESTROYABLE). No value to copy here,
+                 * so accept and move on rather than rejecting as unknown
+                 * (#125 TestCopyObject: an explicit CKA_TOKEN override was
+                 * CKR_ATTRIBUTE_TYPE_INVALID). */
+                break;
             case CKA_CLASS:
             case CKA_KEY_TYPE:
             case CKA_VALUE:
@@ -3845,6 +3856,42 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                           copy_id, copy_id_len,
                                           copy_flags, &new_handle);
     if (r2 != FHSM_RV_OK) return r2;
+
+    /* Scope the copy. C_CopyObject was the one creation path that never called
+     * fhsm_apply_token_scope, so every copy landed with owner_session = 0 -- a
+     * token object -- and copying a session object silently promoted it to
+     * persistent storage (#125 TestCopyObject; fifth of six creation paths to
+     * be missed by a guard wired only to the others).
+     *
+     * CKA_TOKEN is inherited from the source unless the template overrides it
+     * (PKCS#11 v3.2 §C.6.7.3). apply_token_scope keys off CKA_TOKEN in the
+     * template and defaults an absent one to FALSE (session), which is wrong
+     * when the source was a token object. So compute the effective scope here:
+     * template value if the caller stated it, else the source's own scope.
+     * Mark the copy a session object only when that effective scope is FALSE.
+     * The MODIFIABLE / DESTROYABLE persistence is handled the same way as the
+     * other creation paths. */
+    {
+        long ti = find_attr(pTemplate, ulCount, CKA_TOKEN);
+        int want_token;
+        if (ti >= 0 && pTemplate[ti].pValue && pTemplate[ti].ulValueLen == 1) {
+            want_token = *(unsigned char *)pTemplate[ti].pValue ? 1 : 0;
+        } else {
+            int it = 1;
+            (void)fhsm_token_object_is_token(t, (uint32_t)hObject, &it);
+            want_token = it;
+        }
+        if (!want_token)
+            (void)fhsm_token_object_mark_session(t, new_handle, (uint32_t)hSession);
+        uint8_t pf = 0;
+        if (fhsm_token_object_get_flags(t, new_handle, &pf) == FHSM_RV_OK) {
+            if (!tmpl_bbool(pTemplate, ulCount, CKA_MODIFIABLE_ATTR, 1))
+                pf |= FHSM_OBJF_UNMODIFIABLE;
+            if (!tmpl_bbool(pTemplate, ulCount, CKA_DESTROYABLE_ATTR, 1))
+                pf |= FHSM_OBJF_UNDESTROYABLE;
+            (void)fhsm_token_object_set_flags(t, new_handle, pf);
+        }
+    }
 
     *phNewObject = (CK_OBJECT_HANDLE)new_handle;
     return FHSM_RV_OK;

@@ -8,6 +8,22 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **#125 — C_CopyObject promoted session objects to token objects.** It was
+  the one creation path of six that never called `fhsm_apply_token_scope`, so
+  every copy landed with `owner_session = 0` — a persistent token object.
+  Copying a `CKA_TOKEN=False` session object silently made it a token object.
+  (CKA_TRUSTED, CKA_UNWRAP_TEMPLATE, fhsm_check_ro_token and this are all the
+  same shape: a rule wired to some of the paths that reach a shared state but
+  not all. The module has six routes to "object created" and nothing forces a
+  guard to cover them.)
+
+  The copy now inherits `CKA_TOKEN` from the source unless the template
+  overrides it (§C.6.7.3), and the copy template accepts the scope attributes
+  (`CKA_TOKEN`, `CKA_PRIVATE`, `CKA_MODIFIABLE`, `CKA_DESTROYABLE`) instead of
+  rejecting an explicit `CKA_TOKEN` with `CKR_ATTRIBUTE_TYPE_INVALID`.
+  Verified: session→session, token→token, and an explicit session→token
+  override all correct. (TestCopyObject::test_copy_session_object_stays_session.)
+
 * **#125 SECURITY — a forked child inherited the parent's session objects AND
   its authenticated state.** The module had no fork detection of any kind.
   `fork()` copies the whole address space, so a child inherited the slot
