@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.5.0] --- 2026-07-18
+
 ### Changed
 * **#125 — C_CopyObject promoted session objects to token objects.** It was
   the one creation path of six that never called `fhsm_apply_token_scope`, so
