@@ -3830,12 +3830,17 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             case CKA_PRIVATE:
             case CKA_MODIFIABLE_ATTR:
             case CKA_DESTROYABLE_ATTR:
-                /* Scope / persistence attributes: legal in a copy template and
+                /* Scope / persistence booleans: legal in a copy template and
                  * consumed after this loop (CKA_TOKEN sets session vs token,
-                 * the flags set MODIFIABLE/DESTROYABLE). No value to copy here,
-                 * so accept and move on rather than rejecting as unknown
-                 * (#125 TestCopyObject: an explicit CKA_TOKEN override was
-                 * CKR_ATTRIBUTE_TYPE_INVALID). */
+                 * the flags set MODIFIABLE/DESTROYABLE). Accept them here rather
+                 * than rejecting as unknown (an explicit CKA_TOKEN override was
+                 * CKR_ATTRIBUTE_TYPE_INVALID), but still validate the shape: a
+                 * CK_BBOOL is exactly one byte, so a CK_ULONG-sized value is
+                 * CKR_ATTRIBUTE_VALUE_INVALID -- accepting it as a no-op was the
+                 * regression that let TestCopyObjectErrors::
+                 * test_copy_token_bool_overlong_length through (#125). */
+                if (a->ulValueLen != 1 || !a->pValue)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 break;
             case CKA_CLASS:
             case CKA_KEY_TYPE:
