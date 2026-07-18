@@ -3599,6 +3599,22 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
      * (#125 TestTemplateCountOverflowValidHandles). */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount);
       if (cr != FHSM_RV_OK) return cr; }
+    /* A read-only session may not modify a TOKEN object (PKCS#11 v3.2 §5.3).
+     * fhsm_check_ro_token guards *creating* a token object in an RO session by
+     * looking at the template's CKA_TOKEN, but here the target already exists
+     * and the template need not mention CKA_TOKEN at all -- so check the object
+     * itself. Session objects stay mutable in an RO session (#125
+     * TestROTokenObjectMutation::test_set_attribute_token_object_in_ro_fails). */
+    {
+        int is_tok = 0;
+        if (fhsm_token_object_is_token(t, (uint32_t)hObject, &is_tok) == FHSM_RV_OK
+            && is_tok) {
+            unsigned long sflags = 0;
+            if (fhsm_session_info(hSession, NULL, &sflags, NULL) == FHSM_RV_OK
+                && !(sflags & 0x00000002UL /* CKF_RW_SESSION */))
+                return FHSM_RV_SESSION_READ_ONLY;
+        }
+    }
     /* Without this, the CKA_TRUSTED guard on C_CreateObject would be trivially
      * bypassable: create the object without the attribute, then set it after
      * the fact. Same rule -- only the SO may set it TRUE (#125). */
