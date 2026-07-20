@@ -1437,6 +1437,11 @@ typedef struct fhsm_op_s {
     int         pq_ctx_have;
     uint8_t     pq_ctx[256];
     size_t      pq_ctx_len;
+    /* hedgeVariant from the same triple (CKH_HEDGE_PREFERRED /
+     * CKH_HEDGE_REQUIRED / CKH_DETERMINISTIC_REQUIRED). Parsed since
+     * v1.1.14 but discarded until now; see the forwarding in the ML-DSA /
+     * SLH-DSA sign branch. */
+    unsigned long pq_hedge;
 } fhsm_op_t;
 static fhsm_op_t g_op_enc[256];
 static fhsm_op_t g_op_dec[256];
@@ -4745,7 +4750,12 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                              op->pq_ctx, sizeof(op->pq_ctx),
                              &op->pq_ctx_len, &op->pq_ctx_have,
                              &hedge_variant);
-        (void)hedge_variant;  /* recorded for future use ; not applied */
+        /* Only the three variants defined in PKCS#11 v3.2 §6.18 exist.
+         * Anything else was silently folded into "preferred" along with the
+         * other two, which is the same shape as every other bug in this
+         * series: accept the caller's request, ignore it, report success. */
+        if (hedge_variant > 2UL) return FHSM_RV_MECHANISM_PARAM_INVALID;
+        op->pq_hedge = hedge_variant;
     }
     /* Parameter validation (#125 input-validation) : reject wrong-size or
      * weak IVs at *Init with CKR_MECHANISM_PARAM_INVALID rather than
@@ -5747,18 +5757,44 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
          * remains unforwarded ; OpenSSL's default policy (hedged
          * when randomness is available) matches CKH_HEDGE_PREFERRED.
          * EdDSA stays on the empty-context default for this branch. */
-        if ((op->mechanism == CKM_ML_DSA_OP
-             || op->mechanism == CKM_SLH_DSA_OP)
-            && op->pq_ctx_have && op->pq_ctx_len > 0) {
-            OSSL_PARAM ctx_params[2] = {
-                OSSL_PARAM_construct_octet_string(
-                    OSSL_SIGNATURE_PARAM_CONTEXT_STRING,
-                    op->pq_ctx, op->pq_ctx_len),
-                OSSL_PARAM_construct_end(),
-            };
-            if (EVP_PKEY_CTX_set_params(pkctx, ctx_params) <= 0) {
-                EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
-                return FHSM_RV_FUNCTION_FAILED;
+        if (op->mechanism == CKM_ML_DSA_OP
+            || op->mechanism == CKM_SLH_DSA_OP) {
+            OSSL_PARAM sp[3];
+            int n = 0;
+            if (op->pq_ctx_have && op->pq_ctx_len > 0)
+                sp[n++] = OSSL_PARAM_construct_octet_string(
+                              OSSL_SIGNATURE_PARAM_CONTEXT_STRING,
+                              op->pq_ctx, op->pq_ctx_len);
+            /* hedgeVariant, finally applied. FIPS 204 §5.2 and FIPS 205 §9.2
+             * both define a hedged (randomized) and a deterministic signing
+             * path; OpenSSL selects between them with "deterministic".
+             *
+             *   CKH_HEDGE_PREFERRED (0) : hedged if randomness is available.
+             *   CKH_HEDGE_REQUIRED  (1) : must be hedged.
+             *   CKH_DETERMINISTIC_REQUIRED (2) : must be deterministic.
+             *
+             * 0 and 1 are both served by OpenSSL's default, which hedges
+             * whenever the DRBG is up -- and if it is not, EVP_DigestSign
+             * fails rather than quietly falling back, so REQUIRED is honoured
+             * by construction. Only variant 2 needs a parameter, so only
+             * variant 2 sets one.
+             *
+             * Until this commit all three produced randomized signatures.
+             * A caller asking for DETERMINISTIC_REQUIRED got a fresh
+             * signature every call and no indication it had been overruled --
+             * and deterministic ML-DSA is not a preference, it is what makes
+             * a signature reproducible for the auditor who has the key and
+             * the message and needs to confirm the artefact came from them.
+             * We were answering a question we had not been asked. */
+            int det = (op->pq_hedge == 2UL) ? 1 : 0;
+            if (det) sp[n++] = OSSL_PARAM_construct_int(
+                                   OSSL_SIGNATURE_PARAM_DETERMINISTIC, &det);
+            if (n) {
+                sp[n] = OSSL_PARAM_construct_end();
+                if (EVP_PKEY_CTX_set_params(pkctx, sp) <= 0) {
+                    EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+                    return FHSM_RV_FUNCTION_FAILED;
+                }
             }
         }
         size_t out_len = *sig_len;
