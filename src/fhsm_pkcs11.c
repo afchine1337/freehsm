@@ -3340,6 +3340,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     if (fhsm_object_access_denied(t, cko_class))
         return FHSM_RV_OBJECT_HANDLE_INVALID;
     int fhsm_buf_too_small = 0;
+    int fhsm_type_invalid  = 0;   /* an unknown attribute type was requested */
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         const void *src = NULL; size_t src_len = 0;
         unsigned char bval = 0;
@@ -3513,7 +3514,14 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 }
                 continue;
             }
-            default:            pTemplate[i].ulValueLen = (CK_ULONG)-1;       continue;
+            default:
+                /* Unknown attribute type for this object. Set the length to
+                 * CK_UNAVAILABLE_INFORMATION (spec §5.7.5) AND remember to fail
+                 * the call: returning CKR_OK for a nonsense attribute type is
+                 * a silent lie (#125 TestCKRAttributeErrors). */
+                pTemplate[i].ulValueLen = (CK_ULONG)-1;
+                fhsm_type_invalid = 1;
+                continue;
         }
         if (pTemplate[i].pValue == NULL) {
             pTemplate[i].ulValueLen = (CK_ULONG)src_len;
@@ -3528,6 +3536,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     /* PKCS#11 v3.2 C_GetAttributeValue : if any requested attribute did
      * not fit the supplied buffer, return CKR_BUFFER_TOO_SMALL (#125). */
     if (fhsm_buf_too_small) return 0x00000150UL;   /* CKR_BUFFER_TOO_SMALL */
+    if (fhsm_type_invalid)  return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
     return FHSM_RV_OK;
 }
 
