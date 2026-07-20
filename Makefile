@@ -157,13 +157,49 @@ tools/freehsm-audit: tools/freehsm_audit.c
 # ---------------------------------------------------------------------------
 PROFILE ?= fips-strict
 
+# Witness file recording the profile the generated sources were produced with.
+#
+# Without this, `make PROFILE=interop` silently did nothing: the generated
+# artifacts depended only on gen_p11_thunks.py, so an existing set built for
+# another profile satisfied the rule and the build linked the wrong dispatch
+# table. The failure is silent in the dangerous direction too -- a tree last
+# generated for interop, rebuilt without PROFILE, ships the non-FIPS mechanisms
+# enabled while every visible sign says fips-strict. Getting the profile right
+# should not depend on remembering to run `make generate` first.
+#
+# .profile.stamp is rewritten only when the profile actually changes, so it does
+# not force a rebuild on every invocation.
+PROFILE_STAMP := src/gen/.profile.stamp
+
+.PHONY: profile-stamp
+profile-stamp:
+	@mkdir -p $(dir $(PROFILE_STAMP))
+	@if [ "$$(cat $(PROFILE_STAMP) 2>/dev/null)" != "$(PROFILE)" ]; then \
+	    printf '%s' '$(PROFILE)' > $(PROFILE_STAMP); \
+	    echo "[freehsm] profile -> $(PROFILE) (regenerating)"; \
+	fi
+
+$(PROFILE_STAMP): profile-stamp
+	@:
+
 .PHONY: generate
 generate:
 	python3 scripts/gen_p11_thunks.py --profile=$(PROFILE)
 
-# Generated artifacts depend on the script (so editing it triggers a re-gen).
-include/fhsm_pkcs11_mechanisms.h src/gen/fhsm_dispatch.c docs/MECHANISMS.md: scripts/gen_p11_thunks.py
+# Generated artifacts depend on the script (so editing it triggers a re-gen)
+# AND on the profile witness (so switching profiles does too).
+include/fhsm_pkcs11_mechanisms.h src/gen/fhsm_dispatch.c docs/MECHANISMS.md: scripts/gen_p11_thunks.py $(PROFILE_STAMP)
 	$(MAKE) generate
+
+# Report the profile the current generated sources were built for. Cheap way to
+# answer "what am I actually running?" without reading fhsm_dispatch.c.
+.PHONY: show-profile
+show-profile:
+	@echo "PROFILE (requested) : $(PROFILE)"
+	@echo "generated sources   : $$(cat $(PROFILE_STAMP) 2>/dev/null || echo '<jamais genere>')"
+	@echo -n "fhsm_build_fips_strict = "
+	@grep -oE 'fhsm_build_fips_strict = [01]' src/gen/fhsm_dispatch.c 2>/dev/null \
+	    | grep -oE '[01]$$' || echo '?'
 
 $(LIB): $(LIB_OBJ)
 	$(CC) -shared -Wl,-soname,$(LIB) -o $@ $^ $(LDFLAGS)

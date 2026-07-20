@@ -118,3 +118,4 @@ tests/test_mech_advertise
 tests/test_legacy_digest
 tests/test_legacy_cipher
 tests/test_legacy_rsa
+src/gen/.profile.stamp
