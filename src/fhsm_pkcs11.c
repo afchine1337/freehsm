@@ -1638,6 +1638,75 @@ static CK_RV fhsm_check_private_login(CK_SESSION_HANDLE hSession,
 /* Apply CKA_TOKEN scope after creating an object : if the template does
  * not request a token object (default CKA_TOKEN=FALSE) the object is a
  * session object owned by hSession -- not persisted, destroyed on close. */
+#define CKA_APPLICATION_ATTR 0x00000010UL
+
+/* CKA_START_DATE / CKA_END_DATE / CKA_APPLICATION on a freshly created object.
+ *
+ * PKCS#11 v3.2 calls the dates informational and explicitly does NOT have
+ * Cryptoki enforce them, so this validates the shape and stores the value and
+ * nothing else ever consults it. Enforcing an expiry the spec says is advisory
+ * would be the mirror image of the bug this fixes: claiming a control nobody
+ * asked for is no better than dropping one that was.
+ *
+ * Storage is in-memory only -- serialize_objects() has no field for these. A
+ * TOKEN object carrying any of the three is therefore refused with
+ * CKR_TEMPLATE_INCONSISTENT rather than accepted and silently dropped at the
+ * next load. Nobody sets CKA_END_DATE on a key they expect to lose. The v3
+ * record that persists them is the follow-up; refusing until then is the same
+ * line taken for CKA_UNWRAP_TEMPLATE and CKU_CONTEXT_SPECIFIC.
+ *
+ * Length 0 is a legal value and is distinct from absent: a caller that sets an
+ * empty date gets an empty date back, and one that sets nothing gets nothing.
+ * That is why presence rides on the *_len fields and not on a zero test. */
+static int fhsm_date_wellformed(const uint8_t *d, size_t n) {
+    if (n == 0) return 1;                 /* explicitly empty : legal */
+    if (n != 8) return 0;
+    for (size_t i = 0; i < 8; ++i) if (d[i] < '0' || d[i] > '9') return 0;
+    int mm = (d[4]-'0')*10 + (d[5]-'0');
+    int dd = (d[6]-'0')*10 + (d[7]-'0');
+    /* Shape only -- no calendar arithmetic. 2026-02-31 passes, and that is the
+     * right amount of checking for a field the spec calls informational. */
+    return mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31;
+}
+
+static CK_RV fhsm_apply_obj_meta(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                                 CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                                 uint32_t handle) {
+    (void)hSession;
+    long si = find_attr(pTemplate, ulCount, CKA_START_DATE_ATTR);
+    long ei = find_attr(pTemplate, ulCount, CKA_END_DATE_ATTR);
+    long ai = find_attr(pTemplate, ulCount, CKA_APPLICATION_ATTR);
+    if (si < 0 && ei < 0 && ai < 0) return FHSM_RV_OK;
+
+    int is_tok = 0;
+    if (fhsm_token_object_is_token(t, handle, &is_tok) == FHSM_RV_OK && is_tok)
+        return 0x000000D1UL;   /* CKR_TEMPLATE_INCONSISTENT : cannot persist */
+
+    const uint8_t *sd = NULL, *ed = NULL, *ap = NULL;
+    size_t sl = 0, el = 0, al = 0;
+    if (si >= 0) {
+        sd = (const uint8_t *)pTemplate[si].pValue; sl = pTemplate[si].ulValueLen;
+        if ((sl && !sd) || !fhsm_date_wellformed(sd, sl))
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    }
+    if (ei >= 0) {
+        ed = (const uint8_t *)pTemplate[ei].pValue; el = pTemplate[ei].ulValueLen;
+        if ((el && !ed) || !fhsm_date_wellformed(ed, el))
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    }
+    if (ai >= 0) {
+        ap = (const uint8_t *)pTemplate[ai].pValue; al = pTemplate[ai].ulValueLen;
+        if ((al && !ap) || al > 64) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    }
+    /* A zero-length component still has to be recorded, so pass a non-NULL
+     * pointer for it -- set_meta skips components whose pointer is NULL. */
+    static const uint8_t empty[1] = { 0 };
+    if (si >= 0 && !sd) sd = empty;
+    if (ei >= 0 && !ed) ed = empty;
+    if (ai >= 0 && !ap) ap = empty;
+    return fhsm_token_object_set_meta(t, handle, sd, sl, ed, el, ap, al);
+}
+
 static void fhsm_apply_token_scope(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                    CK_ATTRIBUTE *tmpl, CK_ULONG n, uint32_t handle) {
     if (!tmpl_bbool(tmpl, n, CKA_TOKEN, 0))
@@ -1832,6 +1901,8 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+    { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
+      if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
     (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
     return FHSM_RV_OK;
 }
@@ -2012,6 +2083,10 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+        { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
+          if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
+    { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
+      if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
         (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
         return FHSM_RV_OK;
     }
@@ -2031,6 +2106,10 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+        { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
+          if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
+    { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
+      if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
         (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
         return FHSM_RV_OK;
     }
@@ -2121,6 +2200,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     if (rv != FHSM_RV_OK) return rv;
     *phObject = handle;
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+    { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
+      if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
     (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
     return FHSM_RV_OK;
 }
@@ -2337,6 +2418,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+    { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
+      if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
     (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
     (void)fhsm_audit_event(FHSM_EV_DERIVE, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, NULL);
@@ -2734,6 +2817,8 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+    { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
+      if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
     (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
     (void)fhsm_audit_event(FHSM_EV_UNWRAP, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, NULL);
@@ -3280,8 +3365,14 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     }
     *phPub = hp; *phPriv = hk;
     fhsm_apply_token_scope(t, hSession, pPub,  ulPub,  hp);
+    { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pPub, ulPub, hp);
+      if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
+                              (void)fhsm_token_object_destroy(t, hk); return mr; } }
     (void)fhsm_token_object_set_usage(t, hp, fhsm_compute_usage(CKO_PUBLIC_KEY, pPub, ulPub));
     fhsm_apply_token_scope(t, hSession, pPriv, ulPriv, hk);
+    { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pPriv, ulPriv, hk);
+      if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
+                              (void)fhsm_token_object_destroy(t, hk); return mr; } }
     { uint8_t pu = fhsm_compute_usage(CKO_PRIVATE_KEY, pPriv, ulPriv);
       /* PQC keys (ML-KEM/ML-DSA/SLH-DSA) do not derive (#125 : ML-KEM
        * private key must report CKA_DERIVE=FALSE). */
@@ -3607,8 +3698,35 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_DERIVE, 0); src = &bval; src_len = 1; break;
             /* Date attributes : empty (unset) by default. A zero-length
              * value is the PKCS#11 encoding for "no date". */
-            case CKA_START_DATE_ATTR:
-            case CKA_END_DATE_ATTR:    src = &bval; src_len = 0; break;
+            /* Dates and CKA_APPLICATION used to answer empty for every
+             * object, whatever the caller had set at creation. Now read back
+             * what was stored; still empty when nothing was set, which is the
+             * documented default (#125 TestDateAttributes,
+             * TestDataObjectReadValue::test_read_label_and_application). */
+            case CKA_START_DATE_ATTR: {
+                const uint8_t *m = NULL; size_t ml = 0;
+                if (fhsm_token_object_get_meta(t, (uint32_t)hObject,
+                        FHSM_OBJ_META_START_DATE, &m, &ml) == FHSM_RV_OK && ml) {
+                    src = m; src_len = ml;
+                } else { src = &bval; src_len = 0; }
+                break;
+            }
+            case CKA_END_DATE_ATTR: {
+                const uint8_t *m = NULL; size_t ml = 0;
+                if (fhsm_token_object_get_meta(t, (uint32_t)hObject,
+                        FHSM_OBJ_META_END_DATE, &m, &ml) == FHSM_RV_OK && ml) {
+                    src = m; src_len = ml;
+                } else { src = &bval; src_len = 0; }
+                break;
+            }
+            case CKA_APPLICATION_ATTR: {
+                const uint8_t *m = NULL; size_t ml = 0;
+                if (fhsm_token_object_get_meta(t, (uint32_t)hObject,
+                        FHSM_OBJ_META_APPLICATION, &m, &ml) == FHSM_RV_OK && ml) {
+                    src = m; src_len = ml;
+                } else { src = &bval; src_len = 0; }
+                break;
+            }
             case CKA_SUBJECT_ATTR:
             case CKA_ISSUER_ATTR:
             case CKA_SERIAL_NUMBER_ATTR: {
@@ -4083,6 +4201,38 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             if (!tmpl_bbool(pTemplate, ulCount, CKA_DESTROYABLE_ATTR, 1))
                 pf |= FHSM_OBJF_UNDESTROYABLE;
             (void)fhsm_token_object_set_flags(t, new_handle, pf);
+        }
+    }
+
+    /* Carry the source's dates and CKA_APPLICATION across, then let the
+     * override template replace them. Without the inherit step a copy would
+     * quietly lose metadata the original had -- the same silent-drop shape the
+     * scope fix above was written for. */
+    {
+        const uint8_t *m = NULL; size_t ml = 0;
+        const uint8_t *sd = NULL, *ed = NULL, *ap = NULL;
+        uint8_t sbuf[8], ebuf[8], abuf[64];
+        size_t sl = 0, el = 0, al = 0;
+        if (fhsm_token_object_get_meta(t, (uint32_t)hObject,
+                FHSM_OBJ_META_START_DATE, &m, &ml) == FHSM_RV_OK && ml <= sizeof(sbuf)) {
+            memcpy(sbuf, m, ml); sd = sbuf; sl = ml;
+        }
+        if (fhsm_token_object_get_meta(t, (uint32_t)hObject,
+                FHSM_OBJ_META_END_DATE, &m, &ml) == FHSM_RV_OK && ml <= sizeof(ebuf)) {
+            memcpy(ebuf, m, ml); ed = ebuf; el = ml;
+        }
+        if (fhsm_token_object_get_meta(t, (uint32_t)hObject,
+                FHSM_OBJ_META_APPLICATION, &m, &ml) == FHSM_RV_OK && ml <= sizeof(abuf)) {
+            memcpy(abuf, m, ml); ap = abuf; al = ml;
+        }
+        if (sl || el || al)
+            (void)fhsm_token_object_set_meta(t, (uint32_t)new_handle,
+                                             sd, sl, ed, el, ap, al);
+        CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount,
+                                       (uint32_t)new_handle);
+        if (mr != FHSM_RV_OK) {
+            (void)fhsm_token_object_destroy(t, (uint32_t)new_handle);
+            return mr;
         }
     }
 

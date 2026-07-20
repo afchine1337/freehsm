@@ -108,6 +108,19 @@ typedef struct fhsm_object_s {
      * (0x80) = "explicit usage stored" ; if unset (legacy objects) the
      * PKCS#11 layer falls back to class defaults. #125. */
     uint8_t  usage_flags;
+    /* CKA_START_DATE / CKA_END_DATE (CK_DATE, "YYYYMMDD") and
+     * CKA_APPLICATION. In-memory only for now: serialize_objects() does not
+     * write them, so they exist on session objects and the PKCS#11 layer
+     * refuses them on token objects rather than accept a value it would drop
+     * at the next load. The v3 record that persists them is the follow-up;
+     * see docs/TOKEN_STORE_FORMAT.md. Presence is tracked by the *_len fields
+     * -- "absent" and "set to empty" are different answers to a reader. */
+    uint8_t  start_date[8];
+    uint8_t  start_date_len;
+    uint8_t  end_date[8];
+    uint8_t  end_date_len;
+    uint8_t  application[FHSM_OBJ_LABEL_LEN];
+    uint8_t  application_len;
 } fhsm_object_t;
 
 struct fhsm_token_s {
@@ -1217,6 +1230,60 @@ fhsm_rv_t fhsm_token_object_get_label(fhsm_token_t *t, uint32_t handle,
             *out     = (const char*)t->objects[i].label;
             *out_len = strnlen((const char*)t->objects[i].label,
                                 FHSM_OBJ_LABEL_LEN);
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_OK;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+/* CK_DATE / CKA_APPLICATION accessors. See the note on the struct fields:
+ * these live in memory only until the v3 record lands. */
+fhsm_rv_t fhsm_token_object_set_meta(fhsm_token_t *t, uint32_t handle,
+                                     const uint8_t *start, size_t start_len,
+                                     const uint8_t *end,   size_t end_len,
+                                     const uint8_t *app,   size_t app_len) {
+    if (!t) return FHSM_RV_ARGUMENTS_BAD;
+    if (start_len > 8 || end_len > 8 || app_len > FHSM_OBJ_LABEL_LEN)
+        return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    pthread_mutex_lock(&t->mu);
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            fhsm_object_t *o = &t->objects[i];
+            if (start) { memcpy(o->start_date, start, start_len);
+                         o->start_date_len = (uint8_t)start_len; }
+            if (end)   { memcpy(o->end_date, end, end_len);
+                         o->end_date_len = (uint8_t)end_len; }
+            if (app)   { memcpy(o->application, app, app_len);
+                         o->application_len = (uint8_t)app_len; }
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_OK;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+fhsm_rv_t fhsm_token_object_get_meta(fhsm_token_t *t, uint32_t handle,
+                                     fhsm_obj_meta_t which,
+                                     const uint8_t **out, size_t *out_len) {
+    if (!t || !out || !out_len) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            fhsm_object_t *o = &t->objects[i];
+            switch (which) {
+                case FHSM_OBJ_META_START_DATE:
+                    *out = o->start_date;  *out_len = o->start_date_len;  break;
+                case FHSM_OBJ_META_END_DATE:
+                    *out = o->end_date;    *out_len = o->end_date_len;    break;
+                case FHSM_OBJ_META_APPLICATION:
+                    *out = o->application; *out_len = o->application_len; break;
+                default:
+                    pthread_mutex_unlock(&t->mu);
+                    return FHSM_RV_ARGUMENTS_BAD;
+            }
             pthread_mutex_unlock(&t->mu);
             return FHSM_RV_OK;
         }

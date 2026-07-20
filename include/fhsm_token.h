@@ -188,6 +188,24 @@ fhsm_rv_t fhsm_token_object_find(fhsm_token_t *t,
  * pointers reference token-owned storage ; the caller must not free. */
 fhsm_rv_t fhsm_token_object_get_label(fhsm_token_t *t, uint32_t handle,
                                        const char **out, size_t *out_len);
+/* Which of the in-memory metadata attributes to read. */
+typedef enum {
+    FHSM_OBJ_META_START_DATE = 0,
+    FHSM_OBJ_META_END_DATE   = 1,
+    FHSM_OBJ_META_APPLICATION = 2
+} fhsm_obj_meta_t;
+
+/* CKA_START_DATE / CKA_END_DATE / CKA_APPLICATION. NOT persisted: the object
+ * blob has no field for them yet, so the PKCS#11 layer only accepts them on
+ * session objects. Pass NULL for a component to leave it unchanged. */
+fhsm_rv_t fhsm_token_object_set_meta(fhsm_token_t *t, uint32_t handle,
+                                     const uint8_t *start, size_t start_len,
+                                     const uint8_t *end,   size_t end_len,
+                                     const uint8_t *app,   size_t app_len);
+fhsm_rv_t fhsm_token_object_get_meta(fhsm_token_t *t, uint32_t handle,
+                                     fhsm_obj_meta_t which,
+                                     const uint8_t **out, size_t *out_len);
+
 fhsm_rv_t fhsm_token_object_get_id(fhsm_token_t *t, uint32_t handle,
                                     const uint8_t **out, size_t *out_len);
 
