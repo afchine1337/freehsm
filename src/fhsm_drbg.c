@@ -93,6 +93,16 @@
 
 /* Reseed thresholds : whichever fires first triggers a reseed. */
 #define FHSM_RESEED_BYTES_MAX  (1024UL * 1024UL)    /* 1 MiB output */
+
+/* Largest number of bytes handed to RAND_bytes in one call.
+ *
+ * SP 800-90A gives CTR_DRBG max_number_of_bits_per_request = 2^19 bits, i.e.
+ * 65536 bytes; generating more than that is defined as a sequence of requests,
+ * which is exactly what the loop in fhsm_drbg_bytes now does. Keeping the
+ * chunk at the standard's own limit also keeps it far below INT_MAX, so the
+ * int parameter of RAND_bytes can never be reached by a caller-controlled
+ * length again. */
+#define FHSM_DRBG_MAX_REQUEST  65536u
 #define FHSM_RESEED_SECS_MAX   3600                  /* 1 hour wall-clock */
 
 /* Continuous test : 16-byte block comparison. SP 800-90B §4.4.3. */
@@ -327,31 +337,76 @@ fhsm_rv_t fhsm_drbg_bytes(uint8_t *out, size_t n) {
         g_initialised = 1;
     }
 
-    /* Periodic reseed. */
-    time_t now = time(NULL);
-    if (g_bytes_since_reseed > FHSM_RESEED_BYTES_MAX ||
-        (now - g_last_reseed_t) > FHSM_RESEED_SECS_MAX) {
-        (void)condition_and_seed();   /* best effort ; not fatal */
+    /* Produce in bounded chunks.
+     *
+     * This was a single `RAND_bytes(out, (int)n)`. n is a size_t and the
+     * parameter is an int, so any caller-reachable length above INT_MAX was
+     * silently reinterpreted, and C_GenerateRandom passes ulRandomLen straight
+     * through. Two ways it went wrong, both ending in a latched error state
+     * that killed the module for the rest of the process:
+     *
+     *   n = 2 GiB + 8 : (int)n is negative, RAND_bytes fails, and we latched
+     *                   "RAND_bytes failed".
+     *   n = 4 GiB + 8 : (int)n is 8. RAND_bytes writes eight bytes and reports
+     *                   success -- then health_rct_apt(out, n) read all four
+     *                   gibibytes, of which we had written eight. The rest was
+     *                   whatever the caller's buffer held (a fresh mmap: zeros).
+     *                   Six identical bytes reach FHSM_RCT_CUTOFF, so we
+     *                   latched "DRBG RCT alarm".
+     *
+     * The second is the one that matters. "DRBG RCT alarm" is the FIPS 140-3
+     * continuous health test firing: an operator reading that log line has to
+     * assume the entropy source failed and treat every key generated since as
+     * suspect. Nothing had happened to the entropy source. We reported an
+     * entropy failure because we read memory we never wrote, and the honest
+     * report of our own bug was the most alarming message the module can emit.
+     * A module that cries RCT alarm when it is not one teaches its operators
+     * to discount the alarm.
+     *
+     * The loop fixes the cast by construction: every chunk is bounded by
+     * FHSM_DRBG_MAX_REQUEST, and the health tests only ever see bytes the DRBG
+     * actually produced. The reseed check moves inside the loop -- it used to
+     * be evaluated once per call, so a single request larger than
+     * FHSM_RESEED_BYTES_MAX emitted the whole thing without ever reseeding,
+     * which is the interval SP 800-90A asks us to honour.
+     *
+     * Oversized requests are served, not refused: PKCS#11 defines no maximum
+     * for C_GenerateRandom, and inventing one to dodge a bug of ours would be
+     * a limit the caller cannot discover. #125. */
+    size_t done = 0;
+    while (done < n) {
+        size_t want = n - done;
+        if (want > (size_t)FHSM_DRBG_MAX_REQUEST) want = FHSM_DRBG_MAX_REQUEST;
+
+        time_t now = time(NULL);
+        if (g_bytes_since_reseed > FHSM_RESEED_BYTES_MAX ||
+            (now - g_last_reseed_t) > FHSM_RESEED_SECS_MAX) {
+            (void)condition_and_seed();   /* best effort ; not fatal */
+        }
+
+        if (RAND_bytes(out + done, (int)want) != 1) {
+            fhsm_state_latch_error("RAND_bytes failed");
+            pthread_mutex_unlock(&g_mtx);
+            return FHSM_RV_RNG_FAILURE;
+        }
+
+        /* Health checks see this chunk only -- never unwritten memory. */
+        fhsm_rv_t rv = health_rct_apt(out + done, want);
+        if (rv == FHSM_RV_OK) rv = health_crngt(out + done, want);
+        if (rv != FHSM_RV_OK) {
+            /* Clear everything produced so far, not just the failing chunk:
+             * output that preceded a health failure is not output we stand
+             * behind. */
+            memset(out, 0, done + want);
+            pthread_mutex_unlock(&g_mtx);
+            return rv;
+        }
+
+        g_bytes_since_reseed += want;
+        g_stats.bytes_emitted += want;
+        done += want;
     }
 
-    /* Produce. */
-    if (RAND_bytes(out, (int)n) != 1) {
-        fhsm_state_latch_error("RAND_bytes failed");
-        pthread_mutex_unlock(&g_mtx);
-        return FHSM_RV_RNG_FAILURE;
-    }
-
-    /* Health checks on the output. */
-    fhsm_rv_t rv = health_rct_apt(out, n);
-    if (rv == FHSM_RV_OK) rv = health_crngt(out, n);
-    if (rv != FHSM_RV_OK) {
-        memset(out, 0, n);
-        pthread_mutex_unlock(&g_mtx);
-        return rv;
-    }
-
-    g_bytes_since_reseed += n;
-    g_stats.bytes_emitted += n;
     pthread_mutex_unlock(&g_mtx);
     return FHSM_RV_OK;
 }
