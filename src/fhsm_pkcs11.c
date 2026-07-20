@@ -1276,6 +1276,8 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
 #define CKA_ALWAYS_AUTH_ATTR 0x00000202UL
 #define CKA_WRAP_WITH_TRUSTED_ATTR 0x00000210UL
 #define CKA_TRUSTED_ATTR    0x00000086UL
+#define CKA_ENCAPSULATE_ATTR 0x00000633UL   /* ML-KEM only (#125) */
+#define CKA_DECAPSULATE_ATTR 0x00000634UL
 #define CKA_START_DATE_ATTR 0x00000110UL
 #define CKA_END_DATE_ATTR   0x00000111UL
 #define CKA_SUBJECT_ATTR    0x00000101UL
@@ -1716,6 +1718,16 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+
+    /* C_GenerateKey only ever produces symmetric keys (AES, generic-secret,
+     * 3DES) -- never a KEM key. CKA_ENCAPSULATE / CKA_DECAPSULATE are defined
+     * only for ML-KEM encapsulation keys (PKCS#11 v3.2), so their presence on
+     * a symmetric key-gen template is CKR_ATTRIBUTE_TYPE_INVALID rather than
+     * something to silently ignore (#125 TestV240V32AttributeMix
+     * test_encapsulate_attr_on_non_pqc). */
+    if (find_attr(pTemplate, ulCount, CKA_ENCAPSULATE_ATTR) >= 0 ||
+        find_attr(pTemplate, ulCount, CKA_DECAPSULATE_ATTR) >= 0)
+        return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
 
     uint32_t key_type = 0;
     uint32_t key_len  = 0;
