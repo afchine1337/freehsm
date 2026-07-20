@@ -2446,8 +2446,32 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
             return FHSM_RV_FUNCTION_FAILED;
         }
-        /* Output size : RFC 3394 → 8N + 8 ; KWP → ceil((N+4)/8)*8 + 8. */
-        size_t need = kvl + 16;
+        /* Exact output size, per mechanism.
+         *
+         * This was a single `kvl + 16` for both mechanisms, which is neither
+         * formula. It is always an over-estimate -- never an overflow, since
+         * roundup8(n)+8 <= n+15 -- but the size query is a contract: the
+         * caller allocates what we ask for, calls again, and gets a different,
+         * smaller length back. A caller that trusts the first number writes a
+         * 32-byte record for 24 bytes of ciphertext and pads the tail with
+         * whatever the buffer held (#125 test_wrap_key_buffer_too_small).
+         *
+         * RFC 3394 (KW):  input must be a multiple of 8 and at least 16;
+         *                 output is exactly n + 8 (one added AIV block).
+         * RFC 5649 (KWP): input is padded up to a multiple of 8, then the
+         *                 8-byte AIV is prepended: roundup8(n) + 8. */
+        size_t need;
+        if (pMechanism->mechanism == CKM_AES_KEY_WRAP) {
+            /* Reject unsuitable input lengths here rather than letting
+             * EVP_EncryptUpdate fail below and surfacing it as the catch-all
+             * CKR_FUNCTION_FAILED. KWP exists precisely to carry these. */
+            if (kvl < 16 || (kvl % 8) != 0)
+                return 0x00000062UL;   /* CKR_KEY_SIZE_RANGE */
+            need = kvl + 8;
+        } else {
+            if (kvl == 0) return 0x00000062UL;   /* CKR_KEY_SIZE_RANGE */
+            need = ((kvl + 7) & ~(size_t)7) + 8;
+        }
         if (pWrappedKey == NULL) {
             *pulWrappedKeyLen = need;
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
