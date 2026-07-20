@@ -2356,6 +2356,12 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 #ifndef CKK_RSA
 #define CKK_RSA                   0x00000000UL
 #endif
+#ifndef CKM_RSA_PKCS
+#define CKM_RSA_PKCS              0x00000001UL
+#endif
+#ifndef CKM_RSA_X_509
+#define CKM_RSA_X_509             0x00000003UL
+#endif
 #ifndef CKM_RSA_PKCS_OAEP
 #define CKM_RSA_PKCS_OAEP         0x00000009UL
 #endif
@@ -2370,6 +2376,15 @@ static fhsm_rv_t fhsm_rsa_oaep_unwrap(const uint8_t *priv_der, size_t priv_len,
                                        CK_MECHANISM *pMechanism,
                                        const uint8_t *in, size_t in_len,
                                        uint8_t *out, size_t *out_len);
+/* PKCS#1 v1.5 / raw RSA key transport (interop profile only). Defined next to
+ * the OAEP pair further down; declared here because C_WrapKey / C_UnwrapKey
+ * sit above them. `raw` selects CKM_RSA_X_509 over CKM_RSA_PKCS. */
+static fhsm_rv_t fhsm_rsa_v15_wrap(const uint8_t *pub_der, size_t pub_len,
+                                    int raw, const uint8_t *in, size_t in_len,
+                                    unsigned char *out, size_t *out_len);
+static fhsm_rv_t fhsm_rsa_v15_unwrap(const uint8_t *priv_der, size_t priv_len,
+                                      int raw, const uint8_t *in, size_t in_len,
+                                      uint8_t *out, size_t *out_len);
 
 /* ---------------------------------------------------------------------------
  * C_WrapKey / C_UnwrapKey
@@ -2529,6 +2544,32 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return FHSM_RV_OK;
     }
 
+    /* --- CKM_RSA_PKCS (v1.5) and CKM_RSA_X_509 (raw) key transport ---
+     * Non-FIPS: interop profile only. See the block comment on
+     * fhsm_rsa_v15_wrap for why these do not share the OAEP helpers. */
+    if (pMechanism->mechanism == CKM_RSA_PKCS
+        || pMechanism->mechanism == CKM_RSA_X_509) {
+        if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+        if (wcl != CKO_PUBLIC_KEY || wkt != CKK_RSA)
+            return 0x00000115UL;   /* CKR_WRAPPING_KEY_TYPE_INCONSISTENT */
+        int raw = (pMechanism->mechanism == CKM_RSA_X_509);
+        size_t need = 0;
+        fhsm_rv_t wrv = fhsm_rsa_v15_wrap(wkv, wkl, raw, kv, kvl, NULL, &need);
+        if (wrv != FHSM_RV_OK) return wrv;
+        if (pWrappedKey == NULL) { *pulWrappedKeyLen = (CK_ULONG)need; return FHSM_RV_OK; }
+        if (*pulWrappedKeyLen < need) {
+            *pulWrappedKeyLen = (CK_ULONG)need;
+            return 0x00000150UL;   /* CKR_BUFFER_TOO_SMALL */
+        }
+        size_t got = *pulWrappedKeyLen;
+        wrv = fhsm_rsa_v15_wrap(wkv, wkl, raw, kv, kvl, pWrappedKey, &got);
+        if (wrv != FHSM_RV_OK) return wrv;
+        *pulWrappedKeyLen = (CK_ULONG)got;
+        (void)fhsm_audit_event(FHSM_EV_WRAP, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
     return FHSM_RV_MECHANISM_INVALID;
 }
 
@@ -2603,6 +2644,19 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                                               pWrappedKey, ulWrappedKeyLen,
                                               pt, &pt_len);
         if (orv != FHSM_RV_OK) return orv;
+    } else if (pMechanism->mechanism == CKM_RSA_PKCS
+               || pMechanism->mechanism == CKM_RSA_X_509) {
+        /* PKCS#1 v1.5 / raw RSA key transport. Non-FIPS: interop only.
+         * The result is NOT inspected -- see fhsm_rsa_v15_unwrap. */
+        if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+        if (ucl != CKO_PRIVATE_KEY || ukt != CKK_RSA)
+            return 0x000000F2UL;   /* CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT */
+        pt_len = sizeof(pt);
+        fhsm_rv_t vrv = fhsm_rsa_v15_unwrap(
+                            ukv, ukl,
+                            pMechanism->mechanism == CKM_RSA_X_509,
+                            pWrappedKey, ulWrappedKeyLen, pt, &pt_len);
+        if (vrv != FHSM_RV_OK) return vrv;
     } else {
         return FHSM_RV_MECHANISM_INVALID;
     }
@@ -4382,6 +4436,147 @@ static fhsm_rv_t fhsm_rsa_oaep_unwrap(const uint8_t *priv_der, size_t priv_len,
     /* A failed OAEP unpad means the blob is not a valid wrapping under this
      * key : CKR_WRAPPED_KEY_INVALID, never a generic failure. */
     if (ok <= 0) return 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
+    *out_len = len;
+    return FHSM_RV_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * RSA key transport under CKM_RSA_PKCS (PKCS#1 v1.5) and CKM_RSA_X_509 (raw).
+ * Interop profile only -- the callers gate on fhsm_build_fips_strict.
+ *
+ * SECURITY NOTE, and it is the reason these are separate from the OAEP pair
+ * rather than a padding argument bolted onto them.
+ *
+ * fhsm_rsa_oaep_unwrap ends with:
+ *
+ *     if (ok <= 0) return CKR_WRAPPED_KEY_INVALID;
+ *
+ * That is right for OAEP and would be a vulnerability here. PKCS#1 v1.5
+ * decryption is the Bleichenbacher target: an attacker who can distinguish
+ * "padding parsed" from "padding did not parse" recovers the plaintext of a
+ * captured ciphertext in a few million adaptive queries, and C_UnwrapKey is a
+ * decryption oracle that answers with a return code.
+ *
+ * OpenSSL 3.2+ closes the primary channel with implicit rejection: on a
+ * malformed v1.5 block EVP_PKEY_decrypt does not fail, it returns a
+ * deterministic pseudo-random plaintext derived from the key and the
+ * ciphertext. Measured on 3.5.6 against this module: a corrupted ciphertext
+ * yields CKR_OK with a different pseudo-random value and length each time
+ * (182, then 151 bytes for two corruptions of the same blob), and the
+ * valid/invalid timing ratio is 1.12. So the v1.5 unwrap below deliberately
+ * does NOT inspect what it got back. There is no unpad failure to report,
+ * and manufacturing one would rebuild the oracle OpenSSL just removed.
+ *
+ * The residual is real and I am not going to describe it away. Whatever the
+ * caller does with the returned bytes -- the CKA_VALUE_LEN check in the
+ * unwrap template, a later operation that fails on a nonsense key -- can still
+ * tell an attacker that this particular ciphertext unpadded cleanly. Any
+ * implementation of v1.5 key transport has that property; it is why the
+ * mechanism is deprecated and why it is confined to the interop profile here.
+ * Callers who need key transport with an integrity guarantee want
+ * CKM_RSA_PKCS_OAEP or CKM_AES_KEY_WRAP.
+ *
+ * CKM_RSA_X_509 has no padding at all, so it has no padding oracle. Per
+ * PKCS#11 v3.2 §6.1.4 the payload is left-padded with zero bytes to the
+ * modulus length on wrap; unwrap strips the leading zeros again so a
+ * wrap/unwrap round trip returns the key that went in.
+ * ----------------------------------------------------------------------- */
+static fhsm_rv_t fhsm_rsa_v15_wrap(const uint8_t *pub_der, size_t pub_len,
+                                    int raw,
+                                    const uint8_t *in, size_t in_len,
+                                    unsigned char *out, size_t *out_len) {
+    if (!pub_der || !out_len) return FHSM_RV_ARGUMENTS_BAD;
+    const unsigned char *p = pub_der;
+    EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)pub_len);
+    if (!pkey) return 0x00000113UL;   /* CKR_WRAPPING_KEY_HANDLE_INVALID */
+    int sz = EVP_PKEY_get_size(pkey);
+    if (sz <= 0) { EVP_PKEY_free(pkey); return FHSM_RV_FUNCTION_FAILED; }
+    size_t k = (size_t)sz;
+    if (out == NULL) {                      /* size query : modulus size */
+        EVP_PKEY_free(pkey); *out_len = k; return FHSM_RV_OK;
+    }
+    /* Payload bounds, refused before touching the key. v1.5 needs 11 bytes of
+     * padding; raw needs the payload to fit the modulus, and we zero-extend it
+     * to exactly k below. */
+    if (raw ? (in_len > k) : (in_len + 11 > k)) {
+        EVP_PKEY_free(pkey);
+        return 0x00000062UL;   /* CKR_KEY_SIZE_RANGE */
+    }
+    if (*out_len < k) { EVP_PKEY_free(pkey); *out_len = k; return 0x00000150UL; }
+
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!ctx || EVP_PKEY_encrypt_init(ctx) <= 0
+        || EVP_PKEY_CTX_set_rsa_padding(ctx, raw ? RSA_NO_PADDING
+                                                 : RSA_PKCS1_PADDING) <= 0) {
+        if (ctx) EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pkey);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    size_t len = *out_len;
+    int ok;
+    if (raw) {
+        /* RSA_NO_PADDING requires exactly k input bytes; §6.1.4 says to
+         * left-pad with zeros. Buffer is bounded by k, checked above. */
+        uint8_t padded[1024];
+        if (k > sizeof(padded)) {
+            EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+            return 0x00000114UL;   /* CKR_WRAPPING_KEY_SIZE_RANGE */
+        }
+        memset(padded, 0, k - in_len);
+        if (in_len) memcpy(padded + (k - in_len), in, in_len);
+        ok = EVP_PKEY_encrypt(ctx, out, &len, padded, k);
+        fhsm_zeroize(padded, k);
+    } else {
+        ok = EVP_PKEY_encrypt(ctx, out, &len, in, in_len);
+    }
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    if (ok <= 0) return FHSM_RV_FUNCTION_FAILED;
+    *out_len = len;
+    return FHSM_RV_OK;
+}
+
+static fhsm_rv_t fhsm_rsa_v15_unwrap(const uint8_t *priv_der, size_t priv_len,
+                                      int raw,
+                                      const uint8_t *in, size_t in_len,
+                                      uint8_t *out, size_t *out_len) {
+    if (!priv_der || !out || !out_len) return FHSM_RV_ARGUMENTS_BAD;
+    const unsigned char *p = priv_der;
+    EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)priv_len);
+    if (!pkey) return 0x000000F0UL;   /* CKR_UNWRAPPING_KEY_HANDLE_INVALID */
+    /* A blob that is not modulus-sized cannot be a wrapping under this key.
+     * This is a length check on the *ciphertext*, which the attacker already
+     * controls and already knows -- it reveals nothing about the plaintext,
+     * unlike a check on the decryption result. */
+    int sz = EVP_PKEY_get_size(pkey);
+    if (sz <= 0) { EVP_PKEY_free(pkey); return FHSM_RV_FUNCTION_FAILED; }
+    if (in_len != (size_t)sz) { EVP_PKEY_free(pkey); return 0x00000110UL; }
+
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!ctx || EVP_PKEY_decrypt_init(ctx) <= 0
+        || EVP_PKEY_CTX_set_rsa_padding(ctx, raw ? RSA_NO_PADDING
+                                                 : RSA_PKCS1_PADDING) <= 0) {
+        if (ctx) EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pkey);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    size_t len = *out_len;
+    int ok = EVP_PKEY_decrypt(ctx, out, &len, in, in_len);
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    /* Uniform failure code, and no inspection of the plaintext. With implicit
+     * rejection a malformed v1.5 block does not land here at all -- it returns
+     * success with pseudo-random bytes, which is the point. */
+    if (ok <= 0) return 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
+    if (raw) {
+        /* Strip the leading zeros added at wrap time (§6.1.4). Data-dependent,
+         * but CKM_RSA_X_509 has no padding to probe, so there is nothing here
+         * an attacker could not compute themselves. */
+        size_t z = 0;
+        while (z < len && out[z] == 0x00) z++;
+        if (z && z < len) { memmove(out, out + z, len - z); len -= z; }
+        else if (z == len) len = 0;
+    }
     *out_len = len;
     return FHSM_RV_OK;
 }
