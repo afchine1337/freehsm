@@ -630,9 +630,32 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE hSession, CK_VOID_PTR pInfo) {
     return FHSM_RV_OK;
 }
 
+/* 1 if any operation (encrypt/decrypt/sign/digest/verify) is in progress on
+ * this session, 0 if none, -1 if the handle is out of range. Defined below,
+ * next to the per-session operation slots; C_Login appears before them. */
+static int fhsm_session_has_active_op(CK_SESSION_HANDLE h);
+
 CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
                CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
+    /* CKU_CONTEXT_SPECIFIC (2) re-authenticates the user for one active
+     * operation on a key whose CKA_ALWAYS_AUTHENTICATE is set (§5.6). Calling
+     * it with no operation in progress is meaningless, and the precise
+     * diagnosis is CKR_OPERATION_NOT_INITIALIZED -- not CKR_ARGUMENTS_BAD,
+     * which is what fell out of the role mapping before (#125
+     * TestAlwaysAuthenticateEnforcement).
+     *
+     * When an operation IS active we return CKR_FUNCTION_NOT_SUPPORTED: the
+     * module stores CKA_ALWAYS_AUTHENTICATE but does not yet gate operations
+     * on it, so accepting a re-authentication would claim a control that
+     * nothing enforces. Refusing what we cannot enforce, as elsewhere. */
+    if (userType == 2 /*CKU_CONTEXT_SPECIFIC*/) {
+        int act = fhsm_session_has_active_op(hSession);
+        if (act < 0) return FHSM_RV_SESSION_HANDLE_INVALID;
+        return act ? 0x00000054UL   /* CKR_FUNCTION_NOT_SUPPORTED */
+                   : FHSM_RV_OPERATION_NOT_INITIALIZED;
+    }
+
     fhsm_role_t role = (userType == 0 /*CKU_SO*/) ? FHSM_ROLE_SO :
                        (userType == 1 /*CKU_USER*/) ? FHSM_ROLE_USER :
                        FHSM_ROLE_NONE;
@@ -1439,6 +1462,14 @@ static void fhsm_reset_after_fork(void) {
 static fhsm_op_t g_op_sig[256];
 static fhsm_op_t g_op_dig[256];
 static fhsm_op_t g_op_ver[256];
+
+/* Declared far above, next to C_Login. Bounds-checked: the caller supplies the
+ * session handle and these are fixed-size arrays. */
+static int fhsm_session_has_active_op(CK_SESSION_HANDLE h) {
+    if (h == 0 || h >= sizeof(g_op_sig)/sizeof(g_op_sig[0])) return -1;
+    return (g_op_enc[h].active || g_op_dec[h].active || g_op_sig[h].active
+            || g_op_dig[h].active || g_op_ver[h].active) ? 1 : 0;
+}
 
 static fhsm_op_t *op_slot(fhsm_op_t *table, CK_SESSION_HANDLE h) {
     if (h == 0 || h >= 256) return NULL;
