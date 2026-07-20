@@ -5604,6 +5604,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : interop only */
+        case CKM_RSA_X_509:     /* raw RSA, no padding : interop only */
             if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
             break;
         default:
@@ -5701,6 +5702,19 @@ static const char *mech_hash_name(uint32_t m) {
         case CKM_SHA512_RSA_PKCS_PSS:                            return "SHA512";
         default:                                                   return NULL;
     }
+}
+
+/* CKM_RSA_X_509 is textbook RSA: the caller's bytes go through the modular
+ * exponentiation untouched, with no padding and no structure. mech_hash_name
+ * already returns NULL for it, so it lands on the raw sign/verify path next to
+ * bare CKM_RSA_PKCS -- but that path leaves EVP at its default padding, which
+ * for RSA is PKCS#1 v1.5. Without this the module would have applied v1.5
+ * padding under a mechanism whose entire definition is "no padding", and the
+ * signature would have verified against itself while failing against every
+ * other implementation. That is the CKM_ECDSA raw-vs-default-digest bug of
+ * v1.2.2 in a different costume. */
+static int mech_is_raw_rsa(uint32_t m) {
+    return m == CKM_RSA_X_509;
 }
 
 static int mech_is_pss(uint32_t m) {
@@ -5839,6 +5853,10 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
         pkctx_raw = EVP_PKEY_CTX_new(pkey, NULL);
         if (!pkctx_raw) goto cleanup;
         if (EVP_PKEY_sign_init(pkctx_raw) <= 0) goto cleanup;
+        if (mech_is_raw_rsa(op->mechanism)) {
+            if (EVP_PKEY_CTX_set_rsa_padding(pkctx_raw, RSA_NO_PADDING) <= 0)
+                goto cleanup;
+        }
         if (mech_is_pss(op->mechanism)) {
             if (EVP_PKEY_CTX_set_rsa_padding(pkctx_raw,
                                               RSA_PKCS1_PSS_PADDING) <= 0)
@@ -6028,6 +6046,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : interop only */
+        case CKM_RSA_X_509:     /* raw RSA, no padding : interop only */
             if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
             break;
         default: return FHSM_RV_MECHANISM_INVALID;
@@ -6211,6 +6230,10 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
         pkctx_raw = EVP_PKEY_CTX_new(pkey, NULL);
         if (!pkctx_raw) goto vcleanup;
         if (EVP_PKEY_verify_init(pkctx_raw) <= 0) goto vcleanup;
+        if (mech_is_raw_rsa(op->mechanism)) {
+            if (EVP_PKEY_CTX_set_rsa_padding(pkctx_raw, RSA_NO_PADDING) <= 0)
+                goto vcleanup;
+        }
         if (mech_is_pss(op->mechanism)) {
             if (EVP_PKEY_CTX_set_rsa_padding(pkctx_raw,
                                               RSA_PKCS1_PSS_PADDING) <= 0)
