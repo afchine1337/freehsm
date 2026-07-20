@@ -3740,6 +3740,43 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
             case CKA_VALUE:
                 /* Immutable after object creation. */
                 return 0x00000010UL;                 /* CKR_ATTRIBUTE_READ_ONLY */
+
+            /* Attributes this module knows and stores but will not mutate
+             * in place. These used to fall through to the default arm and
+             * come back as CKR_ATTRIBUTE_TYPE_INVALID, which says "I have
+             * never heard of this attribute" about attributes we populate
+             * on every object -- the wrong diagnosis, and one a caller
+             * cannot act on. CKR_ATTRIBUTE_READ_ONLY says what is true:
+             * the attribute exists, its value is not settable here.
+             *
+             * CKA_TOKEN is the one that matters. Promotion of a session
+             * object to a token object means writing it through to the
+             * store; we do not implement that, and returning TYPE_INVALID
+             * let a caller conclude the attribute was unsupported rather
+             * than that the promotion had not happened
+             * (#125 TestTokenAttributePromotion). Demotion has the mirror
+             * problem: the object would have to be removed from the store.
+             * Both stay refused until the store path exists.
+             *
+             * CKA_LOCAL / CKA_ALWAYS_SENSITIVE / CKA_NEVER_EXTRACTABLE /
+             * CKA_KEY_GEN_MECHANISM are read-only by spec (§4.9) -- they
+             * record provenance, and a settable provenance attribute is
+             * exactly the CKA_LOCAL lie fixed earlier in this series.
+             *
+             * CKA_MODIFIABLE / CKA_DESTROYABLE / CKA_COPYABLE are settable
+             * TRUE->FALSE per spec; we do not implement the transition, so
+             * READ_ONLY is a stated limitation rather than a false claim
+             * about the attribute's existence. */
+            case CKA_TOKEN:
+            case CKA_PRIVATE:
+            case CKA_LOCAL_ATTR:
+            case CKA_ALWAYS_SENSITIVE_ATTR:
+            case CKA_NEVER_EXTRACTABLE_ATTR:
+            case CKA_MODIFIABLE_ATTR:
+            case CKA_COPYABLE_ATTR:
+            case CKA_DESTROYABLE_ATTR:
+            case CKA_ALWAYS_AUTH_ATTR:
+                return 0x00000010UL;                 /* CKR_ATTRIBUTE_READ_ONLY */
             default:
                 return 0x00000012UL;                 /* CKR_ATTRIBUTE_TYPE_INVALID */
         }
