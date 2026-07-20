@@ -5928,6 +5928,45 @@ static int mech_is_pss(uint32_t m) {
 /* Sign with an asymmetric private key. Loads the PKCS#8 DER blob from
  * the token's object store, builds an EVP_PKEY, and uses EVP_DigestSign
  * (or EVP_PKEY_sign for prehash mechanisms). */
+/* Exact signature length for the key an operation is bound to.
+ *
+ * The size query used to answer with a per-family upper bound: 512 for
+ * anything RSA or EC, being RSA-4096. An RSA-2048 key signs in 256, so a
+ * caller that asked, allocated 512, called again and got 256 back was told two
+ * different numbers for the same operation. The size query is a contract --
+ * the same argument made for AES-KW earlier in this series, and the same
+ * failure mode: whoever sizes a record from the first answer and does not
+ * re-read the second stores 256 bytes of signature followed by 256 bytes of
+ * whatever the buffer held.
+ *
+ * EVP_PKEY_get_size is exact for RSA and for the PQC schemes. For EC it
+ * reports the DER-encoded maximum, but PKCS#11 mandates raw r||s, so that
+ * family is computed from the field size instead.
+ *
+ * Returns 0 if the length cannot be determined, in which case the caller keeps
+ * its conservative bound -- reporting a too-small length would be worse than
+ * reporting a too-large one. */
+static size_t fhsm_exact_sig_len(fhsm_token_t *t, fhsm_op_t *op) {
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    if (fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt) != FHSM_RV_OK)
+        return 0;
+    if (cl != CKO_PRIVATE_KEY) return 0;
+    const uint8_t *p = kv;
+    EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+    if (!pkey) return 0;
+    size_t out = 0;
+    if (fhsm_mech_is_ecdsa(op->mechanism)) {
+        /* Raw r||s : two field elements, each ceil(order_bits / 8). */
+        int bits = EVP_PKEY_get_bits(pkey);
+        if (bits > 0) out = 2u * (size_t)((bits + 7) / 8);
+    } else {
+        int sz = EVP_PKEY_get_size(pkey);
+        if (sz > 0) out = (size_t)sz;
+    }
+    EVP_PKEY_free(pkey);
+    return out;
+}
+
 static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
                                   const uint8_t *data, size_t data_len,
                                   uint8_t *sig, size_t *sig_len) {
@@ -6171,6 +6210,11 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
      * The 64KB worst-case is allocated once by the caller and is
      * negligible memory-wise. */
     if (pSignature == NULL) {
+        size_t exact = fhsm_exact_sig_len(t, op);
+        if (exact) { *pulSignatureLen = (CK_ULONG)exact; return FHSM_RV_OK; }
+        /* Key unreadable or an unrecognised family : fall back to the family
+         * bound. Over-reporting is a contract wart; under-reporting would
+         * overflow the caller's buffer. */
         if (op->mechanism == CKM_SLH_DSA_OP)        *pulSignatureLen = 65536;
         else if (op->mechanism == CKM_ML_DSA_OP)    *pulSignatureLen = 8192;
         else                                          *pulSignatureLen = 512;
