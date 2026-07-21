@@ -149,8 +149,8 @@ Implemented with `CKO_CERTIFICATE` support. The 317-byte file header is
 unchanged; the **blob plaintext** is now self-versioned:
 
 ```
-u32  magic = 0xF5B20002        (cannot collide with a v1 count <= 64)
-u32  object_count              (<= 64)
+u32  magic = 0xF5B20002        (cannot collide with a v1 count <= FHSM_MAX_OBJECTS)
+u32  object_count              (<= FHSM_MAX_OBJECTS)
 u32  next_handle
 object_count x records:
     u32  rec_len               (bytes after this field = 120 + value_len)
@@ -158,8 +158,8 @@ object_count x records:
     u8   label[64]
     u8   id[32]
     u32  id_len
-    u8   flags ; u8 pad[3]
-    u8   value[value_len]      (<= FHSM_OBJ_VALUE_MAX = 16 384)
+    u8   flags ; u8 usage_flags ; u8 pad[2]
+    u8   value[value_len]      (<= FHSM_OBJ_VALUE_MAX)
 ```
 
 Properties:
@@ -168,20 +168,78 @@ Properties:
   (<= 64 => legacy v1 fixed records; magic => v2). Any write
   re-serializes as v2, so tokens migrate transparently on first
   mutation.
-* `FHSM_OBJ_VALUE_MAX` = 16 384 accommodates X.509 certificates carrying
+* `FHSM_OBJ_VALUE_MAX` = 2 MiB accommodates X.509 certificates carrying
   PQC / composite keys and signatures (ML-DSA-87 cert ~ 8-10 KB).
   `FHSM_OBJ_VALUE_LEN` = 5 500 is frozen as the *legacy v1 field size*.
 * Small objects no longer pay the fixed 5 500-byte value field — a
   32-byte AES key record shrinks from 5 620 to 156 bytes on disk.
-* Loader bound: `FHSM_OBJ_BLOB_MAX` = 12 + 64 x (4 + 120 + 16 384)
-  = **1 056 524 bytes** (also covers the v1 bound).
+* Loader bound: see the v3 section — `FHSM_OBJ_BLOB_MAX` is derived from
+  the *current* record size and covers the v1 and v2 bounds too.
 * Every v2 record is bounds-checked before any copy; `value_len` must
   equal `rec_len - 120` and `id_len <= 32`, else the whole blob is
   rejected (GCM already authenticates it — a mismatch is a logic bug,
   not an attacker).
-* Downgrade behavior: a <= v1.4.x binary reading a v2 blob sees
-  `count = 0xF5B20002 > 64` and fails **loudly**
+* Downgrade behavior: an older binary reading a v2 blob sees
+  `count = 0xF5B20002 > FHSM_MAX_OBJECTS` and fails **loudly**
   (`FHSM_RV_FUNCTION_FAILED`), never silently.
+
+## Objects blob v3 (#125 — object metadata)
+
+`CKA_START_DATE`, `CKA_END_DATE` and `CKA_APPLICATION` had nowhere to live:
+they were accepted at creation and read back empty. v3 is v2 with an 84-byte
+metadata block inserted between the fixed fields and the value.
+
+```
+u32  magic = 0xF5B30003
+u32  object_count              (<= FHSM_MAX_OBJECTS)
+u32  next_handle
+object_count x records:
+    u32  rec_len               (bytes after this field = 204 + value_len)
+    u32  handle | class | key_type | value_len     (16 bytes)
+    u8   label[64]
+    u8   id[32]
+    u32  id_len
+    u8   flags ; u8 usage_flags ; u8 pad[2]        (-- end of v2 layout, 120 --)
+    u8   start_date[8]  ; u8 start_date_len
+    u8   end_date[8]    ; u8 end_date_len
+    u8   application[64]; u8 application_len
+    u8   pad
+    u8   value[value_len]
+```
+
+Properties:
+
+* **Explicit length bytes, not NUL termination.** A stored value of length 0
+  means "the caller set this to empty"; a length of 0 with nothing ever set
+  means "absent". Those are different answers to `C_GetAttributeValue`, and
+  the payload alone cannot distinguish them.
+* **Fixed extension rather than a TLV blob.** The TLV alternative's only real
+  advantage was avoiding a v4 for the next attribute. With no installed base a
+  v4 is cheap; a third bounds-checked parser in this module is not — the first
+  two each shipped with a bounds bug. `CKA_APPLICATION` is bounded at 64, the
+  same as `CKA_LABEL`, which makes the fixed layout trivial.
+* **Read v1 / read v2 / write v3.** `parse_objects()` dispatches on the leading
+  `u32`: v3 magic, else v2 magic, else a v1 count. Those readers are kept
+  because they already exist and are exercised — the failure mode of deleting
+  them is not a red test, it is a key nobody can reach. Every write emits v3,
+  so conversion is one-way, as v1 → v2 already was.
+* Loader bound: `FHSM_OBJ_BLOB_MAX` = 12 + 256 x (4 + 204 + 2 097 152)
+  = **536 924 172 bytes**. It is derived from `FHSM_OBJ_REC_V3_FIXED`;
+  forgetting to update it is what broke loading past 11 objects in v1.4.0
+  (see the regression note above).
+* A 32-byte AES key record is 240 bytes on disk (4 + 204 + 32), against 156
+  under v2 — the 84 bytes are paid whether or not any metadata is set. That
+  cost was accepted; see the TLV note above.
+* Every v3 record is bounds-checked before any copy, including the three
+  metadata lengths (`<= 8`, `<= 8`, `<= 64`), else the whole blob is rejected.
+
+### Not persisted
+
+The metadata is **not** consulted by anything. PKCS#11 v3.2 calls the dates
+informational and states that Cryptoki does not enforce them; the module
+stores them and stops there. Enforcing an expiry would be the mirror of the bug
+this record fixes — claiming a control nobody asked for is no better than
+dropping one that was.
 
 ### Certificate objects
 
@@ -195,13 +253,14 @@ DER. The module never parses X.509 — validation is the PKI layer's job.
 
 Header `Version` (offset 4) is bumped on any *header* layout change;
 the objects blob is self-versioned by its leading magic. Loaders must
-reject unknown versions/magics rather than guess. Future extensions
-(variable `extras` CBOR attribute blob) will be additive and documented
-here.
+reject unknown versions/magics rather than guess. Future extensions are additive and documented here. The v3 record chose a
+fixed layout over a CBOR/TLV `extras` blob deliberately (see above): with no
+installed base, bumping the magic again is cheaper than carrying another
+hand-written parser.
 
 ## Build-time configuration
 
-`FHSM_MAX_OBJECTS` (default 64) is overridable via `-DFHSM_MAX_OBJECTS=N`
+`FHSM_MAX_OBJECTS` (default 256) is overridable via `-DFHSM_MAX_OBJECTS=N`
 for general-purpose deployments needing a larger per-token store. It
 bounds both the in-memory object array and the on-disk blob
 (`FHSM_OBJ_BLOB_MAX` scales with it). A token that reaches the limit
