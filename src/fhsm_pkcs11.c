@@ -4275,7 +4275,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
     }
     /* First-pass : ask the token store for class+label matches, then
      * filter by id ourselves (the store API doesn't take an id filter). */
-    uint32_t prelim[64];
+    uint32_t prelim[FHSM_MAX_OBJECTS];
     size_t got = 0;
     fhsm_rv_t rv = fhsm_token_object_find(t,
                                            has_class ? &filter_class : NULL,
@@ -4291,7 +4291,19 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
      * visible in public / post-logout session). */
     int authed_user = (fhsm_token_current_role(t) == FHSM_ROLE_USER);
     size_t k = 0;
-    for (size_t j = 0; j < got && k < sizeof(f->handles)/sizeof(f->handles[0]); ++j) {
+    /* `got` is the number of objects that MATCHED, not the number written into
+     * prelim: fhsm_token_object_find bounds its writes with `k < cap` but
+     * reports the full match count. Iterating to `got` therefore read past the
+     * buffer as soon as a token held more matches than prelim has slots, and
+     * handed the stack garbage back to the caller as object handles. prelim was
+     * 64 while the store holds FHSM_MAX_OBJECTS = 256, so 65 matching objects
+     * were enough. Sizing prelim correctly is not on its own a fix -- it only
+     * moves the threshold -- so the read is clamped to the buffer as well.
+     * A bound enforced on the write and not on the read is not a bound. */
+    size_t scanned = got;
+    if (scanned > sizeof(prelim)/sizeof(prelim[0]))
+        scanned = sizeof(prelim)/sizeof(prelim[0]);
+    for (size_t j = 0; j < scanned && k < sizeof(f->handles)/sizeof(f->handles[0]); ++j) {
         if (!authed_user) {
             const uint8_t *pv = NULL; size_t pl = 0; uint32_t ocl = 0, okt = 0;
             if (fhsm_token_object_get(t, prelim[j], &pv, &pl, &ocl, &okt) == FHSM_RV_OK
