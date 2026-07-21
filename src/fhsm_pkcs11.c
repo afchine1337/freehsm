@@ -1648,12 +1648,10 @@ static CK_RV fhsm_check_private_login(CK_SESSION_HANDLE hSession,
  * would be the mirror image of the bug this fixes: claiming a control nobody
  * asked for is no better than dropping one that was.
  *
- * Storage is in-memory only -- serialize_objects() has no field for these. A
- * TOKEN object carrying any of the three is therefore refused with
- * CKR_TEMPLATE_INCONSISTENT rather than accepted and silently dropped at the
- * next load. Nobody sets CKA_END_DATE on a key they expect to lose. The v3
- * record that persists them is the follow-up; refusing until then is the same
- * line taken for CKA_UNWRAP_TEMPLATE and CKU_CONTEXT_SPECIFIC.
+ * Persisted since the v3 object record. The interim behaviour -- refusing these
+ * attributes on a TOKEN object with CKR_TEMPLATE_INCONSISTENT, because the v2
+ * record had nowhere to put them and accepting would have meant dropping them
+ * at the next load -- is gone with the reason for it.
  *
  * Length 0 is a legal value and is distinct from absent: a caller that sets an
  * empty date gets an empty date back, and one that sets nothing gets nothing.
@@ -1677,10 +1675,6 @@ static CK_RV fhsm_apply_obj_meta(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     long ei = find_attr(pTemplate, ulCount, CKA_END_DATE_ATTR);
     long ai = find_attr(pTemplate, ulCount, CKA_APPLICATION_ATTR);
     if (si < 0 && ei < 0 && ai < 0) return FHSM_RV_OK;
-
-    int is_tok = 0;
-    if (fhsm_token_object_is_token(t, handle, &is_tok) == FHSM_RV_OK && is_tok)
-        return 0x000000D1UL;   /* CKR_TEMPLATE_INCONSISTENT : cannot persist */
 
     const uint8_t *sd = NULL, *ed = NULL, *ap = NULL;
     size_t sl = 0, el = 0, al = 0;
