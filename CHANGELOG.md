@@ -7,6 +7,110 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Security
+* **#125 — `C_FindObjectsInit` read past its buffer and returned stack bytes as
+  object handles.** `fhsm_token_object_find` bounds its writes
+  (`if (handles_out && k < cap)`) but reports the number of objects that
+  *matched*, not the number it wrote. The caller iterated to that count.
+  With `FHSM_MAX_OBJECTS` raised to 256 and the caller's `prelim` array left at
+  64, a token holding 65 matching objects read past it; at 256 it read 192
+  entries — 768 bytes — of adjacent stack and handed them back through
+  `C_FindObjects` as handles.
+
+  Not caught by the harness, which creates 100+ keys and enumerates them, and
+  passed: adjacent stack usually yields values that are not valid handles and
+  are dropped downstream. Found by running the store round-trip under UBSan.
+  `prelim` is now sized `FHSM_MAX_OBJECTS`, but the fix is the clamp on the
+  *read* — sizing alone only moves the threshold to 257. A bound enforced on
+  the write and not on the read is not a bound; this is the fifth occurrence of
+  that shape in the #125 series.
+
+* **#125 — a `size_t → int` cast in the DRBG killed the module and blamed the
+  entropy source.** `fhsm_drbg_bytes` produced its output with a single
+  `RAND_bytes(out, (int)n)`. `C_GenerateRandom` passes `ulRandomLen` straight
+  through, so any length above `INT_MAX` was reinterpreted. Both outcomes
+  latched `FHSM_STATE_ERROR`, after which every entry point — including
+  `C_OpenSession` — returns `CKR_FUNCTION_FAILED` for the life of the process.
+  One call, whole module dead.
+
+  At 4 GiB + 8 the cast yields 8: `RAND_bytes` writes eight bytes and succeeds,
+  then the health test reads all four gibibytes, of which eight were ours, and
+  six identical bytes from the untouched buffer trip the RCT cutoff — so the
+  module latched **“DRBG RCT alarm”**. That is the FIPS 140-3 continuous health
+  test firing: an operator reading it must assume the entropy source failed and
+  treat every recent key as suspect. Nothing had happened to the entropy
+  source. The module reported an entropy failure because it read memory it had
+  never written, and the honest report of its own bug was the most alarming
+  sentence it can emit.
+
+  Output is now generated in chunks bounded by `FHSM_DRBG_MAX_REQUEST` (65 536
+  bytes, the SP 800-90A CTR_DRBG per-request maximum), the health tests only
+  see bytes the DRBG actually produced, and the periodic reseed is evaluated
+  per chunk rather than once per call — a single request larger than
+  `FHSM_RESEED_BYTES_MAX` used to emit all of it without reseeding. Oversized
+  requests are served, not refused: PKCS#11 defines no maximum, and inventing
+  one to dodge a bug of ours would be a limit the caller cannot discover.
+
+### Added
+* **#125 — `CKM_RSA_PKCS` and `CKM_RSA_X_509` key transport (interop only).**
+  `C_WrapKey`/`C_UnwrapKey` handled AES-KW/KWP and RSA-OAEP only. The v1.5
+  unwrap deliberately does **not** inspect its result: PKCS#1 v1.5 decryption
+  is the Bleichenbacher target, OpenSSL 3.2+ closes the primary channel with
+  implicit rejection (measured here: corrupted ciphertext → `CKR_OK` with
+  pseudo-random output, timing ratio 1.12), and manufacturing an unpad failure
+  would rebuild the oracle. The residual — that what the caller does with the
+  bytes can still reveal a clean unpad — is inherent to v1.5 key transport and
+  is why the mechanism is deprecated and confined to the interop profile.
+* **#125 — `CKM_RSA_X_509` sign/verify (interop only).** `mech_is_raw_rsa()`
+  selects `RSA_NO_PADDING`; without it the raw path would have applied v1.5
+  padding under a mechanism defined as unpadded, and `C_Verify` would have
+  accepted its own signatures while every other implementation rejected them.
+  Verified against an independent `EVP_PKEY_verify_recover`, not against
+  ourselves.
+* **#125 — `CKA_START_DATE`, `CKA_END_DATE`, `CKA_APPLICATION`**, stored and
+  read back, persisted by the v3 object record (see
+  `docs/TOKEN_STORE_FORMAT.md`). Nothing consults the dates: the spec calls
+  them informational and says Cryptoki does not enforce them.
+* **`make SANITIZE=1`** — ASan + UBSan build. Added for the store-format work,
+  where a bounds bug surfaces months later as an unreadable token rather than
+  as a failing test. Turned 10 of 13 unit tests red immediately: they passed a
+  short string literal as `C_InitToken`'s `pLabel`, which §C.6.4.1 defines as a
+  fixed 32-byte field. The module was right; the tests were wrong. Never ship a
+  SANITIZE build.
+
+### Fixed
+* **#125 — size queries reported lengths the operation did not produce.**
+  `C_WrapKey` computed `kvl + 16` for both AES-KW and AES-KWP — neither
+  formula; `C_Sign` answered with a per-family upper bound, 512 for anything
+  RSA or EC, where RSA-2048 signs in 256 and P-256 raw `r||s` is 64. Neither
+  overflows, which is why nothing caught them, but the size query is a
+  contract: a caller that sizes a record from the first answer and does not
+  re-read the second stores the signature followed by whatever the buffer held.
+  Both now compute the exact length.
+* **#125 — `hedgeVariant` was parsed and discarded.** All three variants
+  produced randomized ML-DSA/SLH-DSA signatures; a caller asking for
+  `CKH_DETERMINISTIC_REQUIRED` got a fresh signature every call with no
+  indication it had been overruled. Deterministic ML-DSA is what lets an
+  auditor holding the key and the message recompute the signature.
+* **#125 — `C_SetAttributeValue` returned `CKR_ATTRIBUTE_TYPE_INVALID` for
+  attributes the module sets on every object.** `CKA_TOKEN` is the one with
+  teeth: promotion is not implemented, and “I have never heard of this
+  attribute” let a caller conclude it was unsupported rather than that the
+  promotion had not happened. Now `CKR_ATTRIBUTE_READ_ONLY`.
+* **#125 — `CKU_CONTEXT_SPECIFIC` fell through to `CKR_ARGUMENTS_BAD`** in
+  `C_Login`. Returns `CKR_OPERATION_NOT_INITIALIZED` with no operation active,
+  and `CKR_FUNCTION_NOT_SUPPORTED` with one — the module stores
+  `CKA_ALWAYS_AUTHENTICATE` but does not gate operations on it, and accepting a
+  re-authentication would claim a control nothing enforces.
+* **`make PROFILE=interop` silently built fips-strict.** The generated sources
+  depended only on the generator script, so an existing set satisfied the rule
+  whatever profile it was produced for. The dangerous direction is the other
+  one: a tree last generated for interop and rebuilt without `PROFILE` keeps
+  the non-FIPS mechanisms live while every visible sign says fips-strict.
+  `src/gen/.profile.stamp` now records the profile and the generated artifacts
+  depend on it; `make show-profile` prints the three facts that should agree.
+
+
 ## [1.5.0] --- 2026-07-18
 
 ### Changed
