@@ -410,3 +410,139 @@ The AES-CCM online C_Encrypt/C_Decrypt path is now wired (CK_CCM_PARAMS parsing,
 two-pass EVP, NIST SP 800-38C Example 1 byte-exact). CCM is re-advertised
 fips=approved; the flag<->behaviour inconsistency that motivated the earlier
 de-advertisement is gone. The KAT handler dispatch_aes_ccm is back in the table.
+
+---
+
+# Closing triage — 2026-07-21 : 361 → 5
+
+Final run against `main` (`ac52ec7`) :
+
+```
+failed 5 · passed 1689 · skipped 2099 · crashed 0
+```
+
+The campaign opened at **517 failed / 7 crashed** on 2026-07-10 and, after the
+harness's own re-classification of capability gaps, tracked **361 → 5** on the
+failure count. Crashes reached 0 and stayed there.
+
+**The five remaining are positions, not backlog.** Each is listed with what
+would have to change for it to move. Anyone reading this in six months should
+be able to disagree with a decision, not discover an oversight.
+
+## R1 — `TestTookanUnwrapAttrs::test_unwrapped_key_cannot_unset_sensitive`
+
+An unwrap template carrying `CKA_SENSITIVE=False` produces a readable copy of a
+key that was sensitive before it was wrapped (Tookan §3.3). Reproduced during
+the campaign: a `SENSITIVE=True` AES key came back as
+`8a6257b04169cf7d5fe9e4d97484d71f` in the clear.
+
+**Position: hardening is opt-in, via `CKA_UNWRAP_TEMPLATE` on the unwrapping
+key.** A blanket refusal was implemented, measured, and reverted: it blocked
+this attack and broke seven legitimate round-trips, including the module's own
+`test_wrap_unwrap_oaep`. PKCS#11 has no way to say "this key was sensitive
+before it was wrapped" — the wrapped blob carries no attributes — so the choice
+is between refusing all attribute downgrades on unwrap or letting the operator
+state the policy. The spec provides `CKA_UNWRAP_TEMPLATE` for exactly that, and
+it is honoured on every unwrap path including the RSA v1.5 and raw-RSA ones
+added later.
+
+**What would move it:** deciding that the default should be restrictive and
+accepting that callers must set `CKA_UNWRAP_TEMPLATE` to permit downgrades —
+the inverse default. Defensible; it was not chosen because it breaks
+conforming callers silently at their next unwrap.
+
+## R2 — `TestAESPaddingOracle::test_cbc_pad_all_last_block_positions`
+
+`CKM_AES_CBC_PAD` decryption distinguishes a valid PKCS#7 pad from an invalid
+one, which is a padding oracle.
+
+**Position: inherent to the mechanism.** CBC-PAD without an authentication tag
+cannot report "this ciphertext did not decrypt" without revealing why, and
+`C_Decrypt` must return something. Suppressing the distinction would return
+garbage plaintext on corruption, which is worse for every honest caller.
+
+**What would move it:** nothing, short of removing `CKM_AES_CBC_PAD`. Callers
+who need integrity want `CKM_AES_GCM` or `CKM_AES_KEY_WRAP`. This is worth
+saying in user-facing documentation rather than only here.
+
+## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
+
+The module does not detect an IV reused with the same GCM key across
+operations — a catastrophic failure mode for GCM.
+
+**Position: not implemented, because doing it honestly requires state we do not
+keep.** Detecting reuse means remembering every IV ever used per key, across
+sessions and across restarts, or constraining IV construction (deterministic
+counter per SP 800-38D §8.2.1). A partial check — remembering only recent IVs,
+or only within a session — would report "no reuse" while missing the case that
+matters, which is the pattern this whole campaign exists to remove.
+
+**What would move it:** implementing SP 800-38D §8.2.1 deterministic IV
+construction, where the module owns the counter and the caller cannot supply a
+colliding IV. That is a feature, and the right one; it is not a bug fix.
+
+## R4 / R5 — `test_rsa_encrypt_boundary`, `test_rsa_decrypt_timing_sanity`
+
+Both exercise `CKM_RSA_PKCS` encryption/decryption without first checking that
+the module advertises it. Under `fips-strict` it does not:
+
+```
+CKM_RSA_PKCS   in C_GetMechanismList : no
+               C_GetMechanismInfo    : 0x70 (CKR_MECHANISM_INVALID)
+CKM_RSA_X_509  in C_GetMechanismList : no
+               C_GetMechanismInfo    : 0x70
+```
+
+RSA PKCS#1 v1.5 *encryption* is not FIPS-approved, so a module claiming
+FIPS 140-3 candidacy must not offer it in that profile. (v1.5 *signature* is
+approved and remains available in both profiles; the two gates are separate.)
+Both mechanisms are implemented and advertised in the `interop` profile, where
+these tests would exercise real code.
+
+**Position: harness gap, reported upstream.** The tests need a `has_mechanism`
+guard like their siblings. Verified by direct probe rather than asserted — see
+`probes/rsa_mech_advertised.c`.
+
+**What would move it:** a guard upstream, or running the harness against the
+interop build.
+
+## What the campaign found that no counter measured
+
+Seven defects that a passing test suite had not surfaced, listed because the
+pattern matters more than the individual bugs:
+
+* a wrong MAC algorithm served under a standardised mechanism ID;
+* PQC parameter sets unselectable — `ML-DSA-87` silently produced `ML-DSA-65`;
+* a function-list off-by-one that segfaulted every v3.0 caller;
+* `CKA_LOCAL` reporting false provenance;
+* Tookan §3.3 key extraction, reproduced in the clear;
+* no fork isolation — a child inherited session objects **and** logged-in state;
+* the FIPS §7.10.2 integrity self-test comparing a digest against itself, so it
+  had never verified anything;
+* a `size_t → int` cast in the DRBG that killed the module on one oversized
+  `C_GenerateRandom` and reported it as **"DRBG RCT alarm"** — an entropy-source
+  failure that had not happened;
+* `C_FindObjectsInit` reading past its buffer and returning stack bytes as
+  object handles, invisible until the store round-trip was run under UBSan.
+
+**The recurring shape is one guard wired to some of the paths that reach a
+shared state.** `CKA_TRUSTED` covered 1 of 3 creation paths; `CKA_UNWRAP_TEMPLATE`
+2 of 3; `fhsm_check_ro_token` 3 of 6; `fhsm_apply_token_scope` 5 of 6; the
+metadata attributes 6 of 8 on the first attempt; and the `prelim` bound was
+enforced on the write and not on the read. Counting insertion sites against
+creation paths, rather than trusting a search-and-replace, is what caught the
+last two.
+
+## Method
+
+Every fix in this batch was measured one change at a time against the harness,
+with the count recorded before and after. Two regressions were introduced and
+caught this way — a blanket unwrap refusal that broke seven legitimate paths,
+and a `CKA_TRUSTED` guard that added an unbounded template scan. Neither was
+visible to the unit suite.
+
+`make SANITIZE=1` (ASan + UBSan) was added during the store-format work. It
+turned 10 of 13 unit tests red on first use: they had been passing a short
+string literal as `C_InitToken`'s 32-byte `pLabel` field. The module was right
+and the tests were wrong, and a suite green for months went red the moment
+something was watching.
