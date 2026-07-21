@@ -33,6 +33,16 @@ static int rt(CK_SESSION_HANDLE s,CK_ULONG mech,CK_OBJECT_HANDLE pub,CK_OBJECT_H
   if(pl==mlen&&memcmp(pt,msg,mlen)==0){printf("  %s round-trip : OK\n",name);return 0;}
   fprintf(stderr,"  FAIL %s mismatch (pl=%lu)\n",name,pl);return 1;
 }
+/* PKCS#11 v3.2 C.6.4.1 : pLabel is a fixed 32-byte field, blank-padded and
+ * NOT NUL-terminated. Passing a short string literal made C_InitToken read
+ * past it -- harmless in practice, which is why it survived until the suite
+ * was first run under ASan (#125). */
+static CK_BYTE *fhsm_pad_label(CK_BYTE buf[32], const char *s) {
+    size_t n = strlen(s); if (n > 32) n = 32;
+    memset(buf, ' ', 32); memcpy(buf, s, n);
+    return buf;
+}
+
 int main(void){
   H=dlopen("./libfreehsm-fips.so",RTLD_NOW);if(!H){fprintf(stderr,"%s\n",dlerror());return 2;}
   CK_RV(*I)(void*);SY(I,"C_Initialize");
@@ -47,7 +57,7 @@ int main(void){
   CK_RV(*SG)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);SY(SG,"C_Sign");
   CK_RV(*VI)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);SY(VI,"C_VerifyInit");
   CK_RV(*VE)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG);SY(VE,"C_Verify");
-  I(0);CK_BYTE so[]="00000000",us[]="user0000";IT(0,so,8,(CK_BYTE*)"t");
+  I(0);CK_BYTE so[]="00000000",us[]="user0000";IT(0,so,8,fhsm_pad_label((CK_BYTE[32]){0}, "t"));
   CK_SESSION_HANDLE s;OS(0,4|2,0,0,&s);LI(s,0,so,8);IP(s,us,8);LI(s,1,us,8);
   CK_ULONG mn=0;GML(0,0,&mn);CK_ULONG*ml=calloc(mn,sizeof(CK_ULONG));GML(0,ml,&mn);
   int strict=1;for(CK_ULONG i=0;i<mn;i++)if(ml[i]==0x1){strict=0;break;}free(ml);

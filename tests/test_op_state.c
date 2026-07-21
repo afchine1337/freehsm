@@ -46,6 +46,16 @@ static int fails = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); fails++; } \
                               else printf("  %s : OK\n", msg); } while (0)
 
+/* PKCS#11 v3.2 C.6.4.1 : pLabel is a fixed 32-byte field, blank-padded and
+ * NOT NUL-terminated. Passing a short string literal made C_InitToken read
+ * past it -- harmless in practice, which is why it survived until the suite
+ * was first run under ASan (#125). */
+static CK_BYTE *fhsm_pad_label(CK_BYTE buf[32], const char *s) {
+    size_t n = strlen(s); if (n > 32) n = 32;
+    memset(buf, ' ', 32); memcpy(buf, s, n);
+    return buf;
+}
+
 int main(void) {
     void *h = dlopen("./libfreehsm-fips.so", RTLD_NOW);
     if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
@@ -67,7 +77,7 @@ int main(void) {
 
     C_Initialize(NULL);
     CK_BYTE so[] = "00000000", up[] = "user0000";
-    C_InitToken(0, so, 8, (CK_BYTE*)"opstate");
+    C_InitToken(0, so, 8, fhsm_pad_label((CK_BYTE[32]){0}, "opstate"));
     CK_SESSION_HANDLE s = 0;
     C_OpenSession(0, CKF_RW, NULL, NULL, &s);
     C_Login(s, 0, so, 8); C_InitPIN(s, up, 8); (void)C_Login(s, 1, up, 8);

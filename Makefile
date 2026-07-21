@@ -73,7 +73,24 @@ FHSM_VERSION_STRING := $(shell awk -F'"' '/FHSM_VERSION_STRING/{print $$2; exit}
 
 DEBUG_FLAGS ?= -g3 -O2
 
-CFLAGS  = $(WARN_FLAGS) $(HARDEN_FLAGS) $(REPRO_FLAGS) $(DEBUG_FLAGS) \
+# SANITIZE=1 builds with AddressSanitizer + UBSan. Off by default; the hardening
+# flags and the sanitizers do not coexist well (ASan replaces the allocator that
+# _FORTIFY_SOURCE instruments) so the hardening set is dropped for this build.
+# Never ship a SANITIZE build -- it is for the store-format and parser work,
+# where a bounds bug does not show up as a failing test but as an unreadable
+# token months later.
+#   make SANITIZE=1 && make SANITIZE=1 tests/test_token
+ifeq ($(SANITIZE),1)
+SAN_FLAGS   = -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all
+# _FORTIFY_SOURCE instruments the allocator ASan replaces, so the hardening set
+# is dropped -- but -fPIC and -fvisibility are structural, not hardening, and
+# the shared object does not link without them.
+HARDEN_FLAGS = -fPIC -fvisibility=hidden -fno-strict-aliasing \
+               -DOPENSSL_API_COMPAT=0x30000000L
+DEBUG_FLAGS  = -g3 -O1
+endif
+
+CFLAGS  = $(WARN_FLAGS) $(HARDEN_FLAGS) $(SAN_FLAGS) $(REPRO_FLAGS) $(DEBUG_FLAGS) \
           -std=c11 -D_GNU_SOURCE \
           -Iinclude $(OPENSSL_CFLAGS)
 
@@ -82,7 +99,7 @@ CFLAGS  = $(WARN_FLAGS) $(HARDEN_FLAGS) $(REPRO_FLAGS) $(DEBUG_FLAGS) \
 #   --hash-style=gnu       deterministic hash table layout
 #   --sort-common          stable .bss/.common ordering
 #   --reproducible         ld >= 2.38 honors the bundle (binutils 2.38+)
-LDFLAGS = -Wl,-z,relro,-z,now,-z,noexecstack,-z,defs \
+LDFLAGS = $(SAN_FLAGS) -Wl,-z,relro,-z,now,-z,noexecstack,-z,defs \
           -Wl,--no-undefined \
           -Wl,--build-id=none \
           -Wl,--hash-style=gnu \

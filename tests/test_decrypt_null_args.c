@@ -41,6 +41,16 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKM_AES_CBC 0x1082UL
 #define CKR_ARGUMENTS_BAD 7UL
 
+/* PKCS#11 v3.2 C.6.4.1 : pLabel is a fixed 32-byte field, blank-padded and
+ * NOT NUL-terminated. Passing a short string literal made C_InitToken read
+ * past it -- harmless in practice, which is why it survived until the suite
+ * was first run under ASan (#125). */
+static CK_BYTE *fhsm_pad_label(CK_BYTE buf[32], const char *s) {
+    size_t n = strlen(s); if (n > 32) n = 32;
+    memset(buf, ' ', 32); memcpy(buf, s, n);
+    return buf;
+}
+
 int main(void) {
     void *h = dlopen("./libfreehsm-fips.so", RTLD_NOW);
     if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
@@ -72,7 +82,7 @@ int main(void) {
     CK_RV rv = C_Initialize(NULL);
     if (rv) { fprintf(stderr, "C_Initialize 0x%lx\n", rv); return 2; }
     char so[] = "00000000", user[] = "user0000";
-    if ((rv = C_InitToken(0,(CK_BYTE*)so,8,(CK_BYTE*)"tok")))      { fprintf(stderr,"InitToken 0x%lx\n",rv); return 2; }
+    if ((rv = C_InitToken(0,(CK_BYTE*)so,8,fhsm_pad_label((CK_BYTE[32]){0}, "tok"))))      { fprintf(stderr,"InitToken 0x%lx\n",rv); return 2; }
     CK_SESSION_HANDLE s;
     if ((rv = C_OpenSession(0,CKF_SERIAL_SESSION|CKF_RW_SESSION,NULL,NULL,&s))) { fprintf(stderr,"Open 0x%lx\n",rv); return 2; }
     if ((rv = C_Login(s,CKU_SO,(CK_BYTE*)so,8)))                  { fprintf(stderr,"LoginSO 0x%lx\n",rv); return 2; }

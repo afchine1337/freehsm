@@ -51,6 +51,16 @@ static void hmac_rt(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE k, CK_ULONG m, const c
     else printf("  %-14s HMAC roundtrip : OK\n", name);
 }
 
+/* PKCS#11 v3.2 C.6.4.1 : pLabel is a fixed 32-byte field, blank-padded and
+ * NOT NUL-terminated. Passing a short string literal made C_InitToken read
+ * past it -- harmless in practice, which is why it survived until the suite
+ * was first run under ASan (#125). */
+static CK_BYTE *fhsm_pad_label(CK_BYTE buf[32], const char *s) {
+    size_t n = strlen(s); if (n > 32) n = 32;
+    memset(buf, ' ', 32); memcpy(buf, s, n);
+    return buf;
+}
+
 int main(void) {
     H = dlopen("./libfreehsm-fips.so", RTLD_NOW);
     if (!H) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
@@ -64,7 +74,7 @@ int main(void) {
     S(SI,"C_SignInit"); S(SG,"C_Sign"); S(VI,"C_VerifyInit"); S(V,"C_Verify");
 
     I(NULL); CK_BYTE so[]="00000000", up[]="user0000";
-    IT(0, so, 8, (CK_BYTE*)"fips"); CK_SESSION_HANDLE s = 0; OS(0, 6, NULL, NULL, &s);
+    IT(0, so, 8, fhsm_pad_label((CK_BYTE[32]){0}, "fips")); CK_SESSION_HANDLE s = 0; OS(0, 6, NULL, NULL, &s);
     L(s, 0, so, 8); IP(s, up, 8); (void)L(s, 1, up, 8);
 
     /* Digest KATs for "abc" (FIPS 180-4 / 202 published values). */

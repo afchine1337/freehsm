@@ -8,6 +8,7 @@
  * creating a token object on a read-only session is CKR_SESSION_READ_ONLY.
  * ========================================================================= */
 #include <stdio.h>
+#include <string.h>
 #include <dlfcn.h>
 
 typedef unsigned long CK_ULONG; typedef unsigned char CK_BYTE;
@@ -38,6 +39,16 @@ static void mkaes(CK_SESSION_HANDLE s, int token) {
     CK_OBJECT_HANDLE k; GK(s, &(CK_MECHANISM){0x1080,0,0}, a, token ? 4 : 3, &k);
 }
 
+/* PKCS#11 v3.2 C.6.4.1 : pLabel is a fixed 32-byte field, blank-padded and
+ * NOT NUL-terminated. Passing a short string literal made C_InitToken read
+ * past it -- harmless in practice, which is why it survived until the suite
+ * was first run under ASan (#125). */
+static CK_BYTE *fhsm_pad_label(CK_BYTE buf[32], const char *s) {
+    size_t n = strlen(s); if (n > 32) n = 32;
+    memset(buf, ' ', 32); memcpy(buf, s, n);
+    return buf;
+}
+
 int main(void) {
     H = dlopen("./libfreehsm-fips.so", RTLD_NOW);
     if (!H) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
@@ -48,7 +59,7 @@ int main(void) {
     S(FO,"C_FindObjects"); S(FF,"C_FindObjectsFinal"); S(CO,"C_CreateObject");
 
     I(NULL); CK_BYTE so[] = "00000000";
-    IT(0, so, 8, (CK_BYTE*)"sess"); CK_SESSION_HANDLE s1; OS(0,6,NULL,NULL,&s1);
+    IT(0, so, 8, fhsm_pad_label((CK_BYTE[32]){0}, "sess")); CK_SESSION_HANDLE s1; OS(0,6,NULL,NULL,&s1);
     L(s1,0,so,8); IP(s1,up,8); (void)L(s1,1,up,8);
 
     mkaes(s1, 0);   /* session object (CKA_TOKEN=FALSE default) */

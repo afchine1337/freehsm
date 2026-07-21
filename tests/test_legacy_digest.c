@@ -50,6 +50,16 @@ static int check_digest(void *h, CK_SESSION_HANDLE s, unsigned long mech,
     return 0;
 }
 
+/* PKCS#11 v3.2 C.6.4.1 : pLabel is a fixed 32-byte field, blank-padded and
+ * NOT NUL-terminated. Passing a short string literal made C_InitToken read
+ * past it -- harmless in practice, which is why it survived until the suite
+ * was first run under ASan (#125). */
+static CK_BYTE *fhsm_pad_label(CK_BYTE buf[32], const char *s) {
+    size_t n = strlen(s); if (n > 32) n = 32;
+    memset(buf, ' ', 32); memcpy(buf, s, n);
+    return buf;
+}
+
 int main(void) {
     void *h = dlopen("./libfreehsm-fips.so", RTLD_NOW);
     if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
@@ -57,7 +67,7 @@ int main(void) {
     CK_RV (*IT)(CK_SLOT_ID,CK_BYTE*,CK_ULONG,CK_BYTE*); *(void**)&IT = dlsym(h,"C_InitToken");
     CK_RV (*OS)(CK_SLOT_ID,CK_FLAGS,void*,void*,CK_SESSION_HANDLE*); *(void**)&OS = dlsym(h,"C_OpenSession");
     CK_RV (*GML)(CK_SLOT_ID,CK_ULONG*,CK_ULONG*); *(void**)&GML = dlsym(h,"C_GetMechanismList");
-    I(NULL); CK_BYTE so[] = "00000000"; IT(0, so, 8, (CK_BYTE*)"t");
+    I(NULL); CK_BYTE so[] = "00000000"; IT(0, so, 8, fhsm_pad_label((CK_BYTE[32]){0}, "t"));
     CK_SESSION_HANDLE s; OS(0, 4|2, NULL, NULL, &s);
 
     int interop = advertised(GML, 0x220);   /* SHA-1 advertised iff interop */
