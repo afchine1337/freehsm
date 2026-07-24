@@ -92,7 +92,7 @@ during the #125 close-out while auditing private-object storage.
 
 | # | Task | Cadence | Status |
 |---|---|---|---|
-| #116 | PQC watch (NIST + ANSSI + IETF + industry) → `docs/PQC_VEILLE.md` | quarterly ~1h | ♻ (create the doc) |
+| #116 | PQC watch (NIST + ANSSI + IETF + industry) → `docs/PQC_VEILLE.md` | quarterly ~1h | ♻ doc created 2026-07-24 (first entry: Wycheproof SLH-DSA absent, ML-DSA present) |
 | #126 | PR to Denis's pkcs11-check README mentioning FreeHSM | after #125 | ⏳ **actionable now** (#125 done) — relationship + SEO backlink |
 
 ## Deferred — post-v2.0 stable
