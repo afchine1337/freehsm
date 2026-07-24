@@ -53,6 +53,33 @@ domains — content is already rebranded), and two small threads (#126, #116).
 |---|---|---|---|
 | #107 | Session keys (`CKA_TOKEN=FALSE`) vs token keys | ~4h | ✅ session-object lifecycle implemented during #125 |
 | #109 | TPM 2.0 sealing backend (machine-bound vault) | ~8h | 🟡 code present (`src/fhsm_tpm.c`, `src/fhsm_token_tpm.c`) — verify/finish + document |
+| #127 | Private-key values in the secure heap, not plain `malloc` | ~6h | ⏳ **swap-exposure gap** — see note below |
+
+### #127 — secure storage of decrypted private-key material (noted 2026-07-21)
+
+At rest the object blob is AES-256-GCM under a DEK that is PBKDF2-wrapped
+(200 000 iters) by the PIN, and the live DEK sits in the OpenSSL secure heap
+(`mmap`+`mlock`, swap-excluded, zeroized on logout — `src/fhsm_memory.c`).
+
+The gap: once a token is loaded, each object's decrypted value (`o->value` in
+`src/fhsm_token.c`, lines ~390/435/487/1165) is a plain `malloc`. It is
+zeroized on free, but while live it is **pageable** — the DEK is protected from
+swap, the key material it protects is not. A module that `mlock`s the vault key
+and leaves the private keys it guards in swappable memory is protecting the safe
+and setting the jewels beside it.
+
+Fix options:
+1. Route `o->value` for `FHSM_OBJF_SENSITIVE` objects through
+   `fhsm_secure_malloc`. Clean, but the secure-heap arena is fixed size
+   (`FHSM_SECURE_HEAP_BYTES`); with `FHSM_MAX_OBJECTS=256` x
+   `FHSM_OBJ_VALUE_MAX=2 MiB` the arena must be sized or the per-object value
+   capped. Needs a little sizing design, not a one-line swap.
+2. Minimum: document the limitation in `SECURITY.md` so nobody discovers it in
+   an audit -- what the module keeps out of swap and what it does not.
+
+Not a correctness bug (encrypt/decrypt round-trips are exact); it is a gap
+between what the module protects and what it implies it protects. Surfaced
+during the #125 close-out while auditing private-object storage.
 
 ## Phase 4 — v2.0.0-beta (target 2026-09-01) — **the MVP focus now**
 
