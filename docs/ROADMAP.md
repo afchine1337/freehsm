@@ -100,7 +100,45 @@ during the #125 close-out while auditing private-object storage.
 | # | Task | When | Notes |
 |---|---|---|---|
 | #106 | Exhaustive CC ATE_FUN test book | v2.0 stable +6mo | ANSSI EAL4+ submission → Tier-3 evidence |
-| #111 | Network HSM via REST API | v2.5+ | The big architectural leap — wait for MVP validation |
+| #111-prep | **Thread-safety of the PKCS#11 layer (blocks #111)** | ~10h | ⏳ **hard prerequisite** — see note |
+| #111 | Network HSM via REST API | v2.5+ | The big architectural leap — wait for MVP validation **and #111-prep** |
+
+### #111-prep — the network boundary stresses things the single-process model hides (noted 2026-07-21)
+
+PKCS#11's model is one process per application, so today each client has its own
+copy of the module state and the absence of locking in `fhsm_pkcs11.c` is
+harmless. A REST server inverts that: **one process serves N concurrent
+clients**, and the module-level mutable state becomes shared. Do not start #111
+until this is done and proven under ThreadSanitizer — exposing a
+not-thread-safe core over a network is building the facade before the
+foundations.
+
+Consolidation points, in priority order:
+
+1. **Locking (structural, #1).** `fhsm_token.c` is mutexed per token, but
+   `fhsm_pkcs11.c` holds `g_op_enc[256]` / `g_op_dec[256]` / the per-session op
+   slots / `g_slots` / `g_finds` with **no `pthread_mutex` at all**. Two
+   concurrent requests are a data race, not a hypothesis. Build it under
+   `make TSAN=1` (add the target alongside `SANITIZE=1`); TSan is to concurrency
+   what ASan was to memory in #125 — it finds the races review does not.
+2. **Session binding.** `CK_SESSION_HANDLE` is a process-local integer. Over the
+   wire it must be bound to an authenticated client, or client A presents
+   handle 3 and reads client B's session. The REST layer owns a
+   client→sessions table, and the `C_CloseSession` teardown must also fire when
+   a network connection drops, not only on an explicit call.
+3. **Per-identity throttle.** The anti-brute-force throttle counts failures per
+   token and survives restart (good), but not per source. A distributed
+   attacker bypasses a global counter, and one noisy client can lock out a
+   legitimate one. Needs a per-identity throttle at the REST layer on top of the
+   token's.
+4. **#127 is promoted from nice-to-have to prerequisite.** Decrypted private-key
+   values in pageable `malloc` are a gap locally; on a server holding tokens
+   open for many clients the swap-exposure window grows enormously. Ship #127
+   before, or with, #111.
+5. **Audit gains an actor.** `fhsm_audit.c` logs events but not who requested
+   them. A network HSM needs client identity and request origin on every entry,
+   or the log says "a signature happened" without saying by whom — the one
+   question a network audit exists to answer.
 
 ---
 
