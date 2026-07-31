@@ -54,6 +54,7 @@ domains — content is already rebranded), and two small threads (#126, #116).
 | #107 | Session keys (`CKA_TOKEN=FALSE`) vs token keys | ~4h | ✅ session-object lifecycle implemented during #125 |
 | #109 | TPM 2.0 sealing backend (machine-bound vault) | ~8h | 🟡 code present (`src/fhsm_tpm.c`, `src/fhsm_token_tpm.c`) — verify/finish + document |
 | #127 | Private-key values in the secure heap, not plain `malloc` | ~6h | ⏳ **swap-exposure gap** — see note below |
+| #128 | **The shipped `freehsm.conf` is inert — and fails permissive** | ~4h | ⏳ **do before #127** — see note |
 
 ### #127 — secure storage of decrypted private-key material (noted 2026-07-21)
 
@@ -80,6 +81,60 @@ Fix options:
 Not a correctness bug (encrypt/decrypt round-trips are exact); it is a gap
 between what the module protects and what it implies it protects. Surfaced
 during the #125 close-out while auditing private-object storage.
+
+**Sizing measured 2026-07-24** (DER private keys, OpenSSL 3.5.6), against the
+current `FHSM_SECURE_HEAP_BYTES` = 256 KiB arena, for a full token of 256
+sensitive objects:
+
+| all 256 objects are | total | vs arena |
+|---|---|---|
+| AES-256 (32 B) | 8 KB | 0.03x |
+| EC P-521 (223 B) | 57 KB | 0.2x |
+| RSA-2048 (1 191 B) | 305 KB | 1.2x |
+| RSA-4096 (2 347 B) | 601 KB | 2.3x |
+| ML-KEM-1024 (3 266 B) | 836 KB | 3.2x |
+| ML-DSA-87 (4 962 B) | **1.21 MiB** | **4.8x** |
+
+So the clean option is viable but the arena must grow to ~2 MiB. The real design
+question is **what happens when the arena is exhausted** — falling back to
+`malloc` silently rebuilds exactly the lie this ticket exists to remove, while
+failing turns an over-full token into a denial of service. Decide that before
+writing code. Note that #128 must land first: the knob that would configure
+this (`secure_heap_kb`) is advertised in the shipped config and read by nothing.
+
+### #128 — the shipped config file is inert, and its failure direction is permissive (noted 2026-07-24)
+
+`make install` writes `/etc/freehsm/freehsm.conf` containing nine keys:
+
+```
+fips_strict, audit_mandatory, secure_heap_kb, pin_max_failed,
+pin_throttle_base_ms, pin_throttle_max_ms, pbkdf2_iterations,
+tokens_dir, audit_dir
+```
+
+**None of them is read by any code.** The only key any parser looks for is
+`mode` (`src/fhsm_mode.c`, `conf_says_fips()`), and `mode` is not in the file we
+ship.
+
+Two consequences, one benign and one not:
+
+* `secure_heap_kb` is exactly the knob #127 needs, advertised and inert.
+* An operator who writes `fips_strict = true` intending to harden the module
+  gets **legacy mode**: the parser wants `mode = fips`, does not find it, and
+  `compute_mode_locked()` falls through to `g_is_fips = 0`. The config file
+  promises a control nothing enforces, and it fails in the permissive
+  direction.
+
+**Impact not yet measured, and must be before this is written up as severe.**
+`fhsm_mode_is_fips()` gates `dispatch_reject_fips`, so in a `fips-strict`
+*build* the non-approved mechanisms are absent from the table regardless and
+the runtime mode changes little; the exposure looks confined to interop builds.
+Verify rather than assume.
+
+Fix shape: a real config parser reading the keys we actually ship, or a shipped
+file containing only keys that exist. Either is defensible; shipping nine dead
+keys and reading a tenth that is absent is not. Whichever is chosen, the
+`mode`/`fips_strict` naming has to converge on one spelling.
 
 ## Phase 4 — v2.0.0-beta (target 2026-09-01) — **the MVP focus now**
 
