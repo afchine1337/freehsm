@@ -184,14 +184,17 @@ void fhsm_state_latch_error(const char *reason);
  *  zeroizes before return. This is the *only* allocator the cryptographic
  *  module is allowed to use for sensitive data. See docs/FIPS_140_3.md §5.
  *
- *  The arena size is configured at build time (default 256 KiB) and
+ *  The arena size is configured at build time (default 8 MiB) and
  *  initialized in fhsm_secure_heap_init(). Subsequent allocations beyond
  *  the arena return NULL --- the caller MUST handle exhaustion gracefully.
  * ----------------------------------------------------------------------- */
 #ifndef FHSM_SECURE_HEAP_BYTES
 /* Secure-heap arena. Raised from 256 KiB for #127: sensitive object values now
- * live here, and 256 objects of ML-DSA-87 private key (4 962 B each) need
- * 1.21 MiB. 2 MiB leaves headroom for the DEKs and a margin. Operators with
+ * live here, and FHSM_MAX_OBJECTS (1024) private keys of the largest kind the
+ * module generates -- ML-DSA-87, 4 962 B measured -- need 4.85 MiB. 8 MiB is
+ * the next power of two (OpenSSL's arena asserts on anything else) and leaves
+ * headroom for the DEKs. This guarantees the worst case: a token filled
+ * entirely with PQC private keys still fits. Operators with
  * larger tokens raise `secure_heap_kb` in freehsm.conf (#128); exhaustion is a
  * hard CKR_DEVICE_MEMORY, never a silent fallback to pageable memory.
  *
@@ -200,7 +203,7 @@ void fhsm_state_latch_error(const char *reason);
  * returns 2 from CRYPTO_secure_malloc_init -- measured, not assumed -- and the
  * `== 1` test in fhsm_memory.c rejects the arena rather than accept one that is
  * not swap-excluded. */
-#define FHSM_SECURE_HEAP_BYTES   (2 * 1024 * 1024)
+#define FHSM_SECURE_HEAP_BYTES   (8 * 1024 * 1024)
 #endif
 
 #ifndef FHSM_SECURE_HEAP_MINSIZE

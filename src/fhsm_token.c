@@ -66,7 +66,7 @@
  * larger store ; the fixed in-memory array trades RAM for simplicity
  * (constant-time, no allocator on the object hot path). */
 #ifndef FHSM_MAX_OBJECTS
-#define FHSM_MAX_OBJECTS    256   /* #125 test_resource : >=100 keys coexist */
+#define FHSM_MAX_OBJECTS    1024
 #endif
 #define FHSM_OBJ_LABEL_LEN  64
 /* Value buffer sized to hold the largest supported key type :
@@ -89,10 +89,10 @@
 #define FHSM_OBJ_VALUE_MAX  (2u * 1024u * 1024u) /* v2 per-object value cap */
 
 /* The secure-heap arena must be able to hold a full token of sensitive values
- * (#127). That link was set by hand -- the 2 MiB default was computed for
- * FHSM_MAX_OBJECTS = 256 -- and lived only in a comment, so someone building
- * with -DFHSM_MAX_OBJECTS=512 would have got an arena half the size they need
- * and a run of unexplained CKR_DEVICE_MEMORY. Forgetting exactly this kind of
+ * (#127). That link is set by hand -- the 8 MiB default was computed for
+ * FHSM_MAX_OBJECTS = 1024 -- so someone building with a larger count would
+ * otherwise get an arena too small for it and a run of unexplained
+ * CKR_DEVICE_MEMORY. Forgetting exactly this kind of
  * derived bound is what broke loading past 11 objects in v1.4.0.
  *
  * 5 120 bytes per object is the working assumption: an ML-DSA-87 private key,

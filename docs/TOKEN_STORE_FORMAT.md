@@ -223,8 +223,8 @@ Properties:
   because they already exist and are exercised — the failure mode of deleting
   them is not a red test, it is a key nobody can reach. Every write emits v3,
   so conversion is one-way, as v1 → v2 already was.
-* Loader bound: `FHSM_OBJ_BLOB_MAX` = 12 + 256 x (4 + 204 + 2 097 152)
-  = **536 924 172 bytes**. It is derived from `FHSM_OBJ_REC_V3_FIXED`;
+* Loader bound: `FHSM_OBJ_BLOB_MAX` = 12 + 1024 x (4 + 204 + 2 097 152)
+  = **2 147 696 652 bytes**. It is a bound only -- nothing allocates it. It is derived from `FHSM_OBJ_REC_V3_FIXED`;
   forgetting to update it is what broke loading past 11 objects in v1.4.0
   (see the regression note above).
 * A 32-byte AES key record is 240 bytes on disk (4 + 204 + 32), against 156
@@ -260,7 +260,7 @@ hand-written parser.
 
 ## Build-time configuration
 
-`FHSM_MAX_OBJECTS` (default 256) is overridable via `-DFHSM_MAX_OBJECTS=N`
+`FHSM_MAX_OBJECTS` (default 1024) is overridable via `-DFHSM_MAX_OBJECTS=N`
 for general-purpose deployments needing a larger per-token store. It
 bounds both the in-memory object array and the on-disk blob
 (`FHSM_OBJ_BLOB_MAX` scales with it). A token that reaches the limit

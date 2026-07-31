@@ -111,7 +111,7 @@ void fhsm_token_logout(fhsm_token_t *t);
 /* Per-token object-store capacity. Overridable via -DFHSM_MAX_OBJECTS ;
  * kept in the public header so unit tests track the implementation (#125). */
 #ifndef FHSM_MAX_OBJECTS
-#define FHSM_MAX_OBJECTS 256
+#define FHSM_MAX_OBJECTS 1024
 #endif
 
 fhsm_role_t fhsm_token_current_role(const fhsm_token_t *t);

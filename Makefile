@@ -270,6 +270,11 @@ d[off+18]^=0x01; open(p,'wb').write(d)"
 # Sensitive values in the mlock'd arena (#127) : proves the routing, that
 # non-sensitive values stay out, and that exhaustion fails rather than
 # silently falling back to pageable memory.
+# Capacity micro-benchmark (not a test) : cost of creating N objects and of a
+# worst-case lookup, to answer "can FHSM_MAX_OBJECTS grow" with numbers.
+tests/bench_capacity: tests/bench_capacity.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
 tests/test_secure_heap: tests/test_secure_heap.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
@@ -438,7 +443,7 @@ install: $(LIB)
 	install -o root -g root -m 0755 $(LIB) $(LIBDIR)/$(LIB)
 	id -u $(SYSUSER) >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d $(STATEDIR) $(SYSUSER)
 	install -d -o $(SYSUSER) -g $(SYSUSER) -m 700 $(STATEDIR)/tokens $(STATEDIR)/audit $(STATEDIR)/kek
-	test -f $(ETCDIR)/freehsm.conf || printf '# freehsm.conf --- runtime configuration.\n#\n# Every key below is read by the module. Nothing else is: the rest of the\n# module is configured at compile time (FHSM_PIN_MAX_FAILED, the PBKDF2\n# iteration count, the throttle curve) or through the environment\n# (FHSM_TOKENS_DIR, FHSM_MODE). Until v1.6.0 this file listed nine keys and\n# no code read any of them -- a file that promises controls nothing enforces.\n\n# Runtime mode: fips | legacy. Overridden by the FHSM_MODE environment\n# variable. NOTE its narrow scope: this selects the KAT/dispatch behaviour\n# only. Which mechanisms the PKCS#11 API advertises and executes is fixed\n# when the module is built (make generate PROFILE=fips-strict|interop) and\n# cannot be changed here.\nmode = legacy\n\n# Size of the mlock(2)-ed secure heap holding key material, in KiB.\n# Range 64..65536; out-of-range or unparseable values fall back to the\n# compiled default. Raise this if the module reports CKR_DEVICE_MEMORY when\n# loading a token with many private keys.\nsecure_heap_kb = 256\n' > $(ETCDIR)/freehsm.conf
+	test -f $(ETCDIR)/freehsm.conf || printf '# freehsm.conf --- runtime configuration.\n#\n# Every key below is read by the module. Nothing else is: the rest of the\n# module is configured at compile time (FHSM_PIN_MAX_FAILED, the PBKDF2\n# iteration count, the throttle curve) or through the environment\n# (FHSM_TOKENS_DIR, FHSM_MODE). Until v1.6.0 this file listed nine keys and\n# no code read any of them -- a file that promises controls nothing enforces.\n\n# Runtime mode: fips | legacy. Overridden by the FHSM_MODE environment\n# variable. NOTE its narrow scope: this selects the KAT/dispatch behaviour\n# only. Which mechanisms the PKCS#11 API advertises and executes is fixed\n# when the module is built (make generate PROFILE=fips-strict|interop) and\n# cannot be changed here.\nmode = legacy\n\n# Size of the mlock(2)-ed secure heap holding key material, in KiB.\n# Range 64..65536, rounded UP to a power of two (the arena allocator requires\n# one). Out-of-range or unparseable values fall back to the compiled default.\n# Raise this if the module reports CKR_DEVICE_MEMORY when loading a token with\n# many private keys.\nsecure_heap_kb = 8192\n' > $(ETCDIR)/freehsm.conf
 	chmod 0644 $(ETCDIR)/freehsm.conf
 	-setcap 'cap_ipc_lock=+ep' $(LIBDIR)/$(LIB)
 	install -d -o root -g root -m 755 $(PREFIX)/share/kat
