@@ -209,6 +209,44 @@ fhsm_rv_t fhsm_token_object_get_meta(fhsm_token_t *t, uint32_t handle,
 fhsm_rv_t fhsm_token_object_get_id(fhsm_token_t *t, uint32_t handle,
                                     const uint8_t **out, size_t *out_len);
 
+/* Object flags stored on disk (1 byte). */
+#define FHSM_OBJF_SENSITIVE     0x01
+#define FHSM_OBJF_EXTRACTABLE   0x02
+#define FHSM_OBJF_UNMODIFIABLE  0x04   /* CKA_MODIFIABLE=FALSE persisted */
+#define FHSM_OBJF_UNDESTROYABLE 0x08   /* CKA_DESTROYABLE=FALSE persisted */
+/* CKA_LOCAL (PKCS#11 v3.2 §4.9) : TRUE only for a key generated on the token
+ * by C_GenerateKey / C_GenerateKeyPair. FALSE for anything created by
+ * C_CreateObject, C_UnwrapKey, C_DeriveKey or (de)encapsulation. This was
+ * previously hard-coded TRUE in C_GetAttributeValue, so an *imported* key
+ * claimed to have been generated on the token and never to have existed
+ * outside it -- a false statement about key provenance, which is exactly what
+ * CKA_LOCAL exists to attest (#125). */
+#define FHSM_OBJF_LOCAL         0x10
+/* CKA_ALWAYS_AUTHENTICATE : was hard-coded FALSE, so setting it at keygen
+ * silently did nothing (#125). */
+#define FHSM_OBJF_ALWAYS_AUTH   0x20
+/* CKA_TRUSTED (PKCS#11 v3.2 §4.6) : may only be set to TRUE by the SO. It
+ * gates CKA_WRAP_WITH_TRUSTED -- a key marked WRAP_WITH_TRUSTED may only be
+ * wrapped by a wrapping key that is CKA_TRUSTED. If an application could
+ * declare its own key trusted, that control would be worthless (the classic
+ * Tookan-style key-export escape). Previously the module accepted
+ * CKA_TRUSTED=TRUE from any session and then reported it back as a hard-coded
+ * FALSE, so the attribute was both unenforced and unreadable (#125). */
+#define FHSM_OBJF_TRUSTED       0x40
+/* CKA_UNWRAP_TEMPLATE (§4.9) present on this key and requiring that keys
+ * unwrapped with it be CKA_SENSITIVE. This is the spec's answer to Tookan
+ * §3.3: the module cannot tell an attacker's CKA_SENSITIVE=FALSE downgrade
+ * from a non-sensitive key being legitimately re-imported (RFC 3394 carries no
+ * attributes), but the *wrapping key's owner* knows what that key wraps and
+ * can say so up front. §4.9: the user template is applied "as if the object
+ * has already been created", so the one-way CKA_SENSITIVE rule (FALSE->TRUE
+ * only) makes a downgrade CKR_ATTRIBUTE_READ_ONLY.
+ *
+ * NOTE: this is the last bit of the flags byte. A further per-object boolean
+ * needs a wider field; the v3 record (#125) exists now, so that is a matter of
+ * spending a byte in it rather than a format change. */
+#define FHSM_OBJF_UNWRAP_SENS   0x80
+
 /* Read the object's flags byte (FHSM_OBJF_SENSITIVE | EXTRACTABLE).
  * Returns FHSM_RV_KEY_HANDLE_INVALID if the handle is unknown. */
 fhsm_rv_t fhsm_token_object_get_flags(fhsm_token_t *t, uint32_t handle,

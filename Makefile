@@ -267,6 +267,12 @@ d[off+18]^=0x01; open(p,'wb').write(d)"
 # Config reader (#128) : proves the two shipped keys are actually read, that
 # bad values fall back to the documented default, and that key matching is
 # exact. Links the objects because the reader is internal, not exported.
+# Sensitive values in the mlock'd arena (#127) : proves the routing, that
+# non-sensitive values stay out, and that exhaustion fails rather than
+# silently falling back to pageable memory.
+tests/test_secure_heap: tests/test_secure_heap.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
 tests/test_conf: tests/test_conf.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 

@@ -121,6 +121,11 @@ typedef struct fhsm_object_s {
     uint8_t  end_date_len;
     uint8_t  application[FHSM_OBJ_LABEL_LEN];
     uint8_t  application_len;
+    /* Which allocator owns `value` (#127). In-memory only. Needed because the
+     * choice is made from the SENSITIVE flag at allocation time, and that flag
+     * can later turn on -- freeing with the wrong allocator would corrupt one
+     * of the two heaps. */
+    uint8_t  value_secure;
 } fhsm_object_t;
 
 struct fhsm_token_s {
@@ -310,10 +315,41 @@ static uint64_t get_u64_le(const uint8_t *p) {
 static void obj_free_value(fhsm_object_t *o) {
     if (o && o->value) {
         if (o->value_len) fhsm_zeroize(o->value, o->value_len);
-        free(o->value);
+        if (o->value_secure) fhsm_secure_free(o->value);
+        else                 free(o->value);
         o->value = NULL;
         o->value_len = 0;
+        o->value_secure = 0;
     }
+}
+
+/* Allocate an object's value, in the mlock'd secure heap when the object is
+ * sensitive (#127).
+ *
+ * Before this, every decrypted value -- private keys included -- lived in a
+ * plain malloc block. It was zeroized on free, but pageable while live: the
+ * DEK was kept out of swap and the key material it protects was not. A module
+ * that mlocks the vault key and leaves the private keys beside it in swappable
+ * memory is protecting the safe and setting the jewels next to it.
+ *
+ * Arena exhaustion is a hard failure, never a quiet fallback to malloc. If the
+ * module cannot keep a private key out of swap it does not load the key and
+ * says so; CKR_DEVICE_MEMORY tells the operator to raise secure_heap_kb (#128
+ * made that knob real). A silent fallback would be a guarantee that holds
+ * until it quietly does not, which is the shape this whole series removes. */
+static fhsm_rv_t obj_alloc_value(fhsm_object_t *o, size_t len, int sensitive) {
+    o->value = NULL;
+    o->value_secure = 0;
+    if (len == 0) return FHSM_RV_OK;
+    if (sensitive) {
+        o->value = fhsm_secure_malloc(len);
+        if (!o->value) return FHSM_RV_DEVICE_MEMORY;   /* raise secure_heap_kb */
+        o->value_secure = 1;
+    } else {
+        o->value = malloc(len);
+        if (!o->value) return FHSM_RV_HOST_MEMORY;
+    }
+    return FHSM_RV_OK;
 }
 /* Free every object value slot (not just [0,object_count)) so partial
  * allocations from a failed load are also reclaimed, then reset count. */
@@ -386,15 +422,18 @@ static fhsm_rv_t parse_objects_v1(fhsm_token_t *t, const uint8_t *buf, size_t le
         o->value_len = get_u32_le(buf + off + 12);
         if (o->value_len > FHSM_OBJ_VALUE_LEN) return FHSM_RV_FUNCTION_FAILED;
         memcpy(o->label, buf + off + OFF_LABEL, FHSM_OBJ_LABEL_LEN);
-        if (o->value_len) {
-            o->value = malloc(o->value_len);
-            if (!o->value) return FHSM_RV_HOST_MEMORY;
-            memcpy(o->value, buf + off + OFF_VALUE, o->value_len);
-        }
         memcpy(o->id,    buf + off + OFF_ID,    32);
         o->id_len = get_u32_le(buf + off + OFF_IDLEN);
         if (o->id_len > 32) return FHSM_RV_FUNCTION_FAILED;
+        /* Flags before the value: obj_alloc_value needs to know whether this
+         * object is sensitive to pick the allocator (#127). */
         o->flags  = buf[off + OFF_FLAGS];
+        if (o->value_len) {
+            fhsm_rv_t ar = obj_alloc_value(o, o->value_len,
+                                            (o->flags & FHSM_OBJF_SENSITIVE) != 0);
+            if (ar != FHSM_RV_OK) return ar;
+            memcpy(o->value, buf + off + OFF_VALUE, o->value_len);
+        }
         off += FHSM_OBJ_REC_SZ;
     }
     t->object_count = count;
@@ -432,8 +471,9 @@ static fhsm_rv_t parse_objects_v2(fhsm_token_t *t, const uint8_t *buf, size_t le
         o->flags  = buf[off + 116];
         o->usage_flags = buf[off + 117];
         if (o->value_len) {
-            o->value = malloc(o->value_len);
-            if (!o->value) return FHSM_RV_HOST_MEMORY;
+            fhsm_rv_t ar = obj_alloc_value(o, o->value_len,
+                                            (o->flags & FHSM_OBJF_SENSITIVE) != 0);
+            if (ar != FHSM_RV_OK) return ar;
             memcpy(o->value, buf + off + FHSM_OBJ_REC_V2_FIXED, o->value_len);
         }
         off += rec_len;
@@ -484,8 +524,9 @@ static fhsm_rv_t parse_objects_v3(fhsm_token_t *t, const uint8_t *buf, size_t le
         o->application_len = buf[off + 202];
         if (o->application_len > FHSM_OBJ_APP_LEN) return FHSM_RV_FUNCTION_FAILED;
         if (o->value_len) {
-            o->value = malloc(o->value_len);
-            if (!o->value) return FHSM_RV_HOST_MEMORY;
+            fhsm_rv_t ar = obj_alloc_value(o, o->value_len,
+                                            (o->flags & FHSM_OBJF_SENSITIVE) != 0);
+            if (ar != FHSM_RV_OK) return ar;
             memcpy(o->value, buf + off + FHSM_OBJ_REC_V3_FIXED, o->value_len);
         }
         off += rec_len;
@@ -1162,8 +1203,9 @@ fhsm_rv_t fhsm_token_object_add(fhsm_token_t *t, uint32_t cko_class,
     o->value_len = (uint32_t)value_len;
     if (label) snprintf((char*)o->label, FHSM_OBJ_LABEL_LEN, "%s", label);
     if (value && value_len) {
-        o->value = malloc(value_len);
-        if (!o->value) { pthread_mutex_unlock(&t->mu); return FHSM_RV_HOST_MEMORY; }
+        fhsm_rv_t ar = obj_alloc_value(o, value_len,
+                                        (flags & FHSM_OBJF_SENSITIVE) != 0);
+        if (ar != FHSM_RV_OK) { pthread_mutex_unlock(&t->mu); return ar; }
         memcpy(o->value, value, value_len);
     }
     if (id && id_len)       { memcpy(o->id, id, id_len); o->id_len = (uint32_t)id_len; }
@@ -1511,7 +1553,23 @@ fhsm_rv_t fhsm_token_object_set_flags(fhsm_token_t *t, uint32_t handle,
     }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
-            t->objects[i].flags = flags;
+            fhsm_object_t *o = &t->objects[i];
+            /* CKA_SENSITIVE is one-way FALSE->TRUE, so a value allocated in
+             * plain malloc can become sensitive after the fact. Migrate it
+             * into the secure heap rather than leave the newly-sensitive key
+             * pageable -- the guarantee has to follow the attribute, not the
+             * moment of allocation (#127). */
+            if ((flags & FHSM_OBJF_SENSITIVE) && !o->value_secure
+                && o->value && o->value_len) {
+                uint8_t *sec = fhsm_secure_malloc(o->value_len);
+                if (!sec) { pthread_mutex_unlock(&t->mu); return FHSM_RV_DEVICE_MEMORY; }
+                memcpy(sec, o->value, o->value_len);
+                fhsm_zeroize(o->value, o->value_len);
+                free(o->value);
+                o->value = sec;
+                o->value_secure = 1;
+            }
+            o->flags = flags;
             t->objects_dirty = 1;
             fhsm_rv_t rv = write_atomic(t);
             pthread_mutex_unlock(&t->mu);

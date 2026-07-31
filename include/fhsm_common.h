@@ -189,7 +189,18 @@ void fhsm_state_latch_error(const char *reason);
  *  the arena return NULL --- the caller MUST handle exhaustion gracefully.
  * ----------------------------------------------------------------------- */
 #ifndef FHSM_SECURE_HEAP_BYTES
-#define FHSM_SECURE_HEAP_BYTES   (256 * 1024)
+/* Secure-heap arena. Raised from 256 KiB for #127: sensitive object values now
+ * live here, and 256 objects of ML-DSA-87 private key (4 962 B each) need
+ * 1.21 MiB. 2 MiB leaves headroom for the DEKs and a margin. Operators with
+ * larger tokens raise `secure_heap_kb` in freehsm.conf (#128); exhaustion is a
+ * hard CKR_DEVICE_MEMORY, never a silent fallback to pageable memory.
+ *
+ * The arena is mlock'd, so it is charged against RLIMIT_MEMLOCK. `make install`
+ * sets cap_ipc_lock on the library for that reason. Where mlock fails OpenSSL
+ * returns 2 from CRYPTO_secure_malloc_init -- measured, not assumed -- and the
+ * `== 1` test in fhsm_memory.c rejects the arena rather than accept one that is
+ * not swap-excluded. */
+#define FHSM_SECURE_HEAP_BYTES   (2 * 1024 * 1024)
 #endif
 
 #ifndef FHSM_SECURE_HEAP_MINSIZE
