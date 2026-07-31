@@ -80,6 +80,22 @@ DEBUG_FLAGS ?= -g3 -O2
 # where a bounds bug does not show up as a failing test but as an unreadable
 # token months later.
 #   make SANITIZE=1 && make SANITIZE=1 tests/test_token
+# TSAN=1 builds with ThreadSanitizer. Separate from SANITIZE=1 because ASan and
+# TSan cannot coexist in one binary.
+#
+# Added for #111-prep. PKCS#11's model is one process per application, so the
+# absence of locking in fhsm_pkcs11.c is harmless today; a REST server inverts
+# that and makes g_op_*, g_slots and g_finds shared mutable state. TSan is to
+# concurrency what SANITIZE=1 was to memory in #125 -- it finds what review does
+# not. Never ship a TSAN build.
+#   make TSAN=1 && make TSAN=1 tests/test_concurrency
+ifeq ($(TSAN),1)
+SAN_FLAGS    = -fsanitize=thread -fno-omit-frame-pointer
+HARDEN_FLAGS = -fPIC -fvisibility=hidden -fno-strict-aliasing \
+               -DOPENSSL_API_COMPAT=0x30000000L
+DEBUG_FLAGS  = -g3 -O1
+endif
+
 ifeq ($(SANITIZE),1)
 SAN_FLAGS   = -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all
 # _FORTIFY_SOURCE instruments the allocator ASan replaces, so the hardening set
@@ -272,6 +288,12 @@ d[off+18]^=0x01; open(p,'wb').write(d)"
 # silently falling back to pageable memory.
 # Capacity micro-benchmark (not a test) : cost of creating N objects and of a
 # worst-case lookup, to answer "can FHSM_MAX_OBJECTS grow" with numbers.
+# Concurrent PKCS#11 use (#111-prep). Links the shared object with -ldl so it
+# exercises the module exactly as a caller would. Meant to be run under
+# `make TSAN=1`; it is written to be able to fail.
+tests/test_concurrency: tests/test_concurrency.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl -lpthread
+
 tests/bench_capacity: tests/bench_capacity.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 

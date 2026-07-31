@@ -729,8 +729,29 @@ static const char *fhsm_tokens_dir(void) {
     return "/var/lib/freehsm/tokens";
 }
 
-static void fhsm_slot_table_init_once(void) {
-    if (g_slots_initialized) return;
+/* Slot-registry initialisation and lazy token load (#111-prep).
+ *
+ * Both used to be plain lazy initialisation: a bare `if (g_slots_initialized)`
+ * flag, and a test-load-assign on g_slots[slot].token, with no lock on either.
+ * Under PKCS#11's one-process-per-application model that is harmless, since a
+ * single thread reaches them first. It stops being harmless the moment two
+ * threads call C_OpenSession at once -- both see the flag clear, both walk the
+ * table, and on the token both call fhsm_token_load and both assign, leaking
+ * one token and leaving two fhsm_token_t objects for the same file with
+ * independent object stores and login state.
+ *
+ * ThreadSanitizer reported exactly these two reads, at what were lines 733 and
+ * 750, once the threads were released from a barrier. Without the barrier the
+ * window closed before the other threads were running and the run came back
+ * clean -- which is how this would have survived into production and then
+ * appeared under load.
+ *
+ * pthread_once for the table; a mutex for the token, because the load is not a
+ * one-shot (a slot can be re-loaded after C_Finalize). */
+static pthread_once_t   g_slots_once   = PTHREAD_ONCE_INIT;
+static pthread_mutex_t  g_slots_mu     = PTHREAD_MUTEX_INITIALIZER;
+
+static void fhsm_slot_table_build(void) {
     const char *dir = fhsm_tokens_dir();
     for (int i = 0; i < FHSM_MAX_SLOTS; ++i) {
         snprintf(g_slots[i].path, sizeof(g_slots[i].path),
@@ -742,17 +763,24 @@ static void fhsm_slot_table_init_once(void) {
     g_slots_initialized = 1;
 }
 
+static void fhsm_slot_table_init_once(void) {
+    pthread_once(&g_slots_once, fhsm_slot_table_build);
+}
+
 /* Lazily load the token for a slot. Returns NULL if absent or unreadable. */
 static fhsm_token_t *fhsm_slot_token(CK_SLOT_ID slot) {
     if (slot >= FHSM_MAX_SLOTS) return NULL;
     fhsm_slot_table_init_once();
-    if (!g_slots[slot].present) return NULL;
-    if (g_slots[slot].token) return g_slots[slot].token;
-    fhsm_token_t *t = NULL;
-    if (fhsm_token_load(g_slots[slot].path, &t) == FHSM_RV_OK) {
-        g_slots[slot].token = t;
+    pthread_mutex_lock(&g_slots_mu);
+    if (!g_slots[slot].present) { pthread_mutex_unlock(&g_slots_mu); return NULL; }
+    if (!g_slots[slot].token) {
+        fhsm_token_t *t = NULL;
+        if (fhsm_token_load(g_slots[slot].path, &t) == FHSM_RV_OK)
+            g_slots[slot].token = t;
     }
-    return g_slots[slot].token;
+    fhsm_token_t *out = g_slots[slot].token;
+    pthread_mutex_unlock(&g_slots_mu);
+    return out;
 }
 
 /* ---------------------------------------------------------------------------

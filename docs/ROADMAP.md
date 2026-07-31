@@ -197,12 +197,31 @@ foundations.
 
 Consolidation points, in priority order:
 
-1. **Locking (structural, #1).** `fhsm_token.c` is mutexed per token, but
-   `fhsm_pkcs11.c` holds `g_op_enc[256]` / `g_op_dec[256]` / the per-session op
-   slots / `g_slots` / `g_finds` with **no `pthread_mutex` at all**. Two
-   concurrent requests are a data race, not a hypothesis. Build it under
-   `make TSAN=1` (add the target alongside `SANITIZE=1`); TSan is to concurrency
-   what ASan was to memory in #125 — it finds the races review does not.
+1. **Locking — done 2026-07-24, and my reasoning here was wrong.** I had
+   written that because `fhsm_pkcs11.c` contains no `pthread_mutex`,
+   `g_op_*` / `g_slots` / `g_finds` were shared mutable state and "two
+   concurrent requests are a data race, not a hypothesis". Absence of a mutex
+   does not imply sharing: `op_slot()` returns `&table[hSession]` and `g_finds`
+   is indexed the same way, so that state is **partitioned by session handle**,
+   and handle allocation is serialised in `fhsm_session.c`. Eight threads x 40
+   loops of concurrent digest, encrypt and find operations run clean under TSan.
+
+   Two real races did exist, both lazy initialisation reached from
+   `C_OpenSession` outside any lock: `fhsm_slot_table_init_once()` guarded on a
+   bare flag instead of `pthread_once`, and `fhsm_slot_token()` did
+   test-load-assign on `g_slots[slot].token` — two threads could both call
+   `fhsm_token_load` and both assign, leaking one token and leaving two
+   `fhsm_token_t` objects for the same file with independent object stores and
+   login state. Fixed with `pthread_once` and a mutex; 12 runs clean afterwards
+   against 5 warnings on two of three runs before.
+
+   The method mattered more than the fix. The first test reported nothing,
+   because main had completed the lazy init before the threads started and the
+   window was already shut. Releasing them from a `pthread_barrier` made both
+   races appear, and even then only intermittently. A race TSan does not observe
+   is indistinguishable from no race — which is how this would have reached
+   production and surfaced under load. `make TSAN=1` and
+   `tests/test_concurrency` are in the tree.
 2. **Session binding.** `CK_SESSION_HANDLE` is a process-local integer. Over the
    wire it must be bound to an authenticated client, or client A presents
    handle 3 and reads client B's session. The REST layer owns a
