@@ -88,6 +88,26 @@
  * 2 MiB covers 1 MiB data objects (test_large_objects) with headroom. */
 #define FHSM_OBJ_VALUE_MAX  (2u * 1024u * 1024u) /* v2 per-object value cap */
 
+/* The secure-heap arena must be able to hold a full token of sensitive values
+ * (#127). That link was set by hand -- the 2 MiB default was computed for
+ * FHSM_MAX_OBJECTS = 256 -- and lived only in a comment, so someone building
+ * with -DFHSM_MAX_OBJECTS=512 would have got an arena half the size they need
+ * and a run of unexplained CKR_DEVICE_MEMORY. Forgetting exactly this kind of
+ * derived bound is what broke loading past 11 objects in v1.4.0.
+ *
+ * 5 120 bytes per object is the working assumption: an ML-DSA-87 private key,
+ * the largest sensitive value the module generates, measures 4 962 bytes.
+ * Public keys and certificates are not sensitive and never enter the arena.
+ * The assert deliberately does not compute the arena size from the object
+ * count -- it refuses an inconsistent pair rather than guess a good one. */
+#define FHSM_SENSITIVE_VALUE_TYPICAL  5120u
+_Static_assert(FHSM_SECURE_HEAP_BYTES
+                 >= (size_t)FHSM_MAX_OBJECTS * FHSM_SENSITIVE_VALUE_TYPICAL,
+               "FHSM_SECURE_HEAP_BYTES too small for FHSM_MAX_OBJECTS: a full "
+               "token of sensitive values will not fit in the mlock'd arena. "
+               "Raise FHSM_SECURE_HEAP_BYTES (include/fhsm_common.h) or lower "
+               "FHSM_MAX_OBJECTS.");
+
 typedef struct fhsm_object_s {
     uint32_t handle;        /* CK_OBJECT_HANDLE, opaque to PKCS#11 caller */
     uint32_t class;         /* CKO_SECRET_KEY, CKO_DATA, ... */
