@@ -95,11 +95,16 @@ sensitive objects:
 | ML-KEM-1024 (3 266 B) | 836 KB | 3.2x |
 | ML-DSA-87 (4 962 B) | **1.21 MiB** | **4.8x** |
 
-So the clean option is viable but the arena must grow to ~2 MiB. The real design
-question is **what happens when the arena is exhausted** — falling back to
-`malloc` silently rebuilds exactly the lie this ticket exists to remove, while
-failing turns an over-full token into a denial of service. Decide that before
-writing code. Note that #128 must land first: the knob that would configure
+So the clean option is viable but the arena must grow to ~2 MiB.
+
+**Decision taken 2026-07-24 — exhaustion is a hard failure.** When the arena is
+full, loading a sensitive object returns `CKR_DEVICE_MEMORY`; there is no
+silent fallback to `malloc`. If the module cannot keep a private key out of
+swap, it does not load it and says so. Falling back quietly would rebuild
+exactly the lie this ticket exists to remove — a guarantee that holds until it
+quietly does not. The cost is that an over-full token is unusable until the
+operator raises `secure_heap_kb`, which is a configuration error with a clear
+message, not a silent downgrade. Note that #128 must land first: the knob that would configure
 this (`secure_heap_kb`) is advertised in the shipped config and read by nothing.
 
 ### #128 — the shipped config file is inert, and its failure direction is permissive (noted 2026-07-24)
@@ -125,11 +130,33 @@ Two consequences, one benign and one not:
   promises a control nothing enforces, and it fails in the permissive
   direction.
 
-**Impact not yet measured, and must be before this is written up as severe.**
-`fhsm_mode_is_fips()` gates `dispatch_reject_fips`, so in a `fips-strict`
-*build* the non-approved mechanisms are absent from the table regardless and
-the runtime mode changes little; the exposure looks confined to interop builds.
-Verify rather than assume.
+**Impact measured 2026-07-24 — this is truth-in-advertising, not a bypass.**
+In an interop build, `FHSM_MODE` changes nothing on the PKCS#11 surface:
+
+| interop build | mechanisms | GetMechanismInfo(RSA_PKCS) | C_EncryptInit |
+|---|---|---|---|
+| `FHSM_MODE` absent | 71 | 0x0 | callable |
+| `FHSM_MODE=fips` | 71 | 0x0 | callable |
+| `FHSM_MODE=legacy` | 71 | 0x0 | callable |
+
+Because the enforcement that matters is compile-time on both paths:
+advertisement goes through `fhsm_mech_advertised()`, a pointer comparison
+against `dispatch_reject_fips` fixed when the table is generated; and the crypto
+API gates on `fhsm_build_fips_strict`. The runtime mode reaches only the
+KAT/dispatch path, which the PKCS#11 entry points do not use.
+
+So the FIPS enforcement is sound and no non-approved mechanism escapes through
+a misread config. What is broken is narrower and still worth fixing: the file we
+ship promises runtime controls that do not exist, and the one key a parser does
+read (`mode`) is absent from it and affects far less than its name suggests. It
+is the same claim-what-you-cannot-enforce shape as the rest of #125, moved down
+to the configuration layer.
+
+Every shipped key names a real concept, but all are compile-time constants or
+env vars: `secure_heap_kb` -> `FHSM_SECURE_HEAP_BYTES`, `pin_max_failed` ->
+`FHSM_PIN_MAX_FAILED`, `pbkdf2_iterations` -> a hardcoded 200 000,
+`tokens_dir` -> the `FHSM_TOKENS_DIR` env var, `audit_mandatory` -> a constant a
+comment describes as aspirational, `audit_dir` -> nothing at all.
 
 Fix shape: a real config parser reading the keys we actually ship, or a shipped
 file containing only keys that exist. Either is defensible; shipping nine dead
