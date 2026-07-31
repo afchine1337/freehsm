@@ -126,6 +126,7 @@ LIB_SRC = \
     src/fhsm_tpm.c                    \
     src/fhsm_token_tpm.c              \
     src/fhsm_mode.c                   \
+    src/fhsm_conf.c                   \
     src/dispatch/fhsm_dispatch_legacy.c \
     src/gen/fhsm_dispatch.c           \
     src/dispatch/fhsm_dispatch_common.c \
@@ -262,6 +263,12 @@ d[off+18]^=0x01; open(p,'wb').write(d)"
 	@env -u FHSM_INTEGRITY_ALLOW_UNSIGNED ./tests/test_integrity.tampered tampered
 	@rm -f ./tests/test_integrity.tampered
 	@echo "test_integrity : PASS"
+
+# Config reader (#128) : proves the two shipped keys are actually read, that
+# bad values fall back to the documented default, and that key matching is
+# exact. Links the objects because the reader is internal, not exported.
+tests/test_conf: tests/test_conf.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
 tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
@@ -425,7 +432,7 @@ install: $(LIB)
 	install -o root -g root -m 0755 $(LIB) $(LIBDIR)/$(LIB)
 	id -u $(SYSUSER) >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d $(STATEDIR) $(SYSUSER)
 	install -d -o $(SYSUSER) -g $(SYSUSER) -m 700 $(STATEDIR)/tokens $(STATEDIR)/audit $(STATEDIR)/kek
-	test -f $(ETCDIR)/freehsm.conf || printf '[module]\nfips_strict      = true\naudit_mandatory  = true\nsecure_heap_kb   = 256\n\n[token]\npin_max_failed         = 5\npin_throttle_base_ms   = 500\npin_throttle_max_ms    = 60000\npbkdf2_iterations      = 200000\n\n[paths]\ntokens_dir = $(STATEDIR)/tokens\naudit_dir  = $(STATEDIR)/audit\n' > $(ETCDIR)/freehsm.conf
+	test -f $(ETCDIR)/freehsm.conf || printf '# freehsm.conf --- runtime configuration.\n#\n# Every key below is read by the module. Nothing else is: the rest of the\n# module is configured at compile time (FHSM_PIN_MAX_FAILED, the PBKDF2\n# iteration count, the throttle curve) or through the environment\n# (FHSM_TOKENS_DIR, FHSM_MODE). Until v1.6.0 this file listed nine keys and\n# no code read any of them -- a file that promises controls nothing enforces.\n\n# Runtime mode: fips | legacy. Overridden by the FHSM_MODE environment\n# variable. NOTE its narrow scope: this selects the KAT/dispatch behaviour\n# only. Which mechanisms the PKCS#11 API advertises and executes is fixed\n# when the module is built (make generate PROFILE=fips-strict|interop) and\n# cannot be changed here.\nmode = legacy\n\n# Size of the mlock(2)-ed secure heap holding key material, in KiB.\n# Range 64..65536; out-of-range or unparseable values fall back to the\n# compiled default. Raise this if the module reports CKR_DEVICE_MEMORY when\n# loading a token with many private keys.\nsecure_heap_kb = 256\n' > $(ETCDIR)/freehsm.conf
 	chmod 0644 $(ETCDIR)/freehsm.conf
 	-setcap 'cap_ipc_lock=+ep' $(LIBDIR)/$(LIB)
 	install -d -o root -g root -m 755 $(PREFIX)/share/kat

@@ -33,6 +33,7 @@
  * ========================================================================= */
 
 #include "fhsm_common.h"
+#include "fhsm_conf.h"
 
 #include <openssl/crypto.h>
 #include <pthread.h>
@@ -45,6 +46,7 @@ static void * (* const volatile g_memset_fn)(void *, int, size_t) = memset;
 
 static pthread_once_t g_heap_once = PTHREAD_ONCE_INIT;
 static int            g_heap_ok   = 0;
+static size_t         g_heap_bytes = (size_t)FHSM_SECURE_HEAP_BYTES;
 
 static void heap_init_once(void) {
     /* OPENSSL_secure_malloc_init: arg1 = arena size in bytes, arg2 = min
@@ -55,7 +57,13 @@ static void heap_init_once(void) {
      * returns 1 but secure-allocations are *not* swap-excluded. We re-
      * check the result and reject the init in strict mode.
      */
-    if (CRYPTO_secure_malloc_init(FHSM_SECURE_HEAP_BYTES,
+    /* Arena size is operator-configurable via `secure_heap_kb` (#128). It has
+     * to be: once sensitive key material lives in this arena (#127) and
+     * exhaustion is a hard failure rather than a silent fallback, an operator
+     * with a large token needs a way to raise the ceiling. A compile-time
+     * constant would make that a rebuild. */
+    g_heap_bytes = fhsm_conf_secure_heap_bytes();
+    if (CRYPTO_secure_malloc_init(g_heap_bytes,
                                    FHSM_SECURE_HEAP_MINSIZE) == 1) {
         g_heap_ok = 1;
     }
@@ -104,7 +112,11 @@ size_t fhsm_secure_heap_used(void) {
 }
 
 size_t fhsm_secure_heap_total(void) {
-    return FHSM_SECURE_HEAP_BYTES;
+    /* Report what was actually requested, not the compiled default -- a
+     * caller checking headroom against a number the arena does not have is
+     * exactly the kind of quiet disagreement this series exists to remove. */
+    if (!g_heap_ok) (void)fhsm_secure_heap_init();
+    return g_heap_bytes;
 }
 
 void fhsm_zeroize(void *p, size_t n) {

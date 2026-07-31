@@ -24,6 +24,7 @@
 
 #include "fhsm_common.h"
 #include "fhsm_mode.h"
+#include "fhsm_conf.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,25 +48,20 @@ static int env_says_fips(void) {
     return -1;
 }
 
+/* Reads `mode` through the shared reader (#128). The previous inline version
+ * matched the key with strncmp on a 4-byte prefix, so a line such as
+ * `modem = x` would have been accepted as the mode; fhsm_conf_lookup matches
+ * the whole key. */
 static int conf_says_fips(void) {
-    FILE *f = fopen("/etc/freehsm/freehsm.conf", "r");
-    if (!f) return -1;
-    char line[256];
-    int verdict = -1;
-    while (fgets(line, sizeof(line), f)) {
-        char *p = line;
-        while (*p && isspace((unsigned char)*p)) p++;
-        if (*p == '#' || *p == '\0') continue;
-        if (strncmp(p, "mode", 4) != 0) continue;
-        p += 4;
-        while (*p && (*p == ' ' || *p == '\t' || *p == '=')) p++;
-        if (strncasecmp(p, "fips", 4) == 0)   { verdict = 1; break; }
-        if (strncasecmp(p, "strict", 6) == 0) { verdict = 1; break; }
-        if (strncasecmp(p, "legacy", 6) == 0) { verdict = 0; break; }
-        if (strncasecmp(p, "interop", 7) == 0) { verdict = 0; break; }
-    }
-    fclose(f);
-    return verdict;
+    char v[32];
+    if (!fhsm_conf_lookup("mode", v, sizeof(v))) return -1;
+    if (strcasecmp(v, "fips") == 0
+        || strcasecmp(v, "strict") == 0
+        || strcasecmp(v, "fips-strict") == 0) return 1;
+    if (strcasecmp(v, "legacy") == 0
+        || strcasecmp(v, "interop") == 0
+        || strcasecmp(v, "default") == 0) return 0;
+    return -1;
 }
 
 static void compute_mode_locked(void) {
