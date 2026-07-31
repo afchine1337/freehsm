@@ -70,6 +70,17 @@ int main(void) {
     write_conf("secure_heap_kb =\n");
     ck("empty value -> default", (long)fhsm_conf_secure_heap_bytes(), (long)DEF);
 
+    /* Power-of-two rounding. OpenSSL's arena asserts on anything else, so
+     * `secure_heap_kb = 100` used to abort the process inside
+     * CRYPTO_secure_malloc_init -- a config typo crashing an HSM. */
+    write_conf("secure_heap_kb = 100\n");
+    ck("100 KiB rounds up to 128 KiB (power of two)",
+       (long)fhsm_conf_secure_heap_bytes(), 128L * 1024);
+    write_conf("secure_heap_kb = 3000\n");
+    ck("3000 KiB rounds up to 4096 KiB", (long)fhsm_conf_secure_heap_bytes(), 4096L * 1024);
+    write_conf("secure_heap_kb = 2048\n");
+    ck("an exact power of two is left alone", (long)fhsm_conf_secure_heap_bytes(), 2048L * 1024);
+
     /* Comments, section headers and inline comments must not confuse it. */
     write_conf("# a comment\n[module]\nsecure_heap_kb = 1024   # inline\nmode=strict\n");
     ck("comments/sections/inline value", (long)fhsm_conf_secure_heap_bytes(), 1024L * 1024);

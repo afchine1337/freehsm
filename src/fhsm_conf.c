@@ -77,5 +77,17 @@ size_t fhsm_conf_secure_heap_bytes(void) {
     if (kb < FHSM_CONF_HEAP_MIN_KB || kb > FHSM_CONF_HEAP_MAX_KB)
         return (size_t)FHSM_SECURE_HEAP_BYTES;
 
-    return (size_t)kb * 1024u;
+    /* OpenSSL's secure arena requires a power-of-two size and asserts on
+     * anything else -- `secure_heap_kb = 100` aborted the process inside
+     * CRYPTO_secure_malloc_init. A config typo must not crash an HSM, so round
+     * UP to the next power of two.
+     *
+     * Rounding up rather than rejecting: the operator asked for at least this
+     * much arena and gets at least that much. That is not the silent clamping
+     * refused above -- clamping down would hand back less than was asked for
+     * while reporting success. */
+    size_t bytes = (size_t)kb * 1024u;
+    size_t pow2  = 1;
+    while (pow2 < bytes) pow2 <<= 1;
+    return pow2;
 }
