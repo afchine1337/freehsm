@@ -7,6 +7,79 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.6.0] --- 2026-08-01
+### Security
+
+* **#127 — decrypted private keys lived in pageable memory.** At rest the object
+  blob is AES-256-GCM under a PBKDF2-wrapped DEK, and the live DEK sits in the
+  `mlock`-ed OpenSSL secure heap. But every decrypted object value — private
+  keys included — was a plain `malloc` block: zeroized on free, pageable while
+  live. The module kept the vault key out of swap and left the keys it protects
+  beside it.
+
+  Sensitive values now allocate in the arena. Exhaustion is
+  `CKR_DEVICE_MEMORY`, never a silent fallback: if the module cannot keep a
+  private key out of swap it does not load the key and says so. `CKA_SENSITIVE`
+  is one-way FALSE→TRUE, so a value that becomes sensitive later is migrated
+  into the arena — the guarantee follows the attribute, not the moment of
+  allocation.
+
+* **#111-prep — two lazy-initialisation races reachable from `C_OpenSession`.**
+  `fhsm_slot_table_init_once()` guarded on a bare flag instead of
+  `pthread_once`, and `fhsm_slot_token()` did test-load-assign on
+  `g_slots[slot].token`. Two threads could both call `fhsm_token_load` and both
+  assign, leaking one token and leaving two `fhsm_token_t` objects for the same
+  file with independent object stores and login state. Unreachable under
+  PKCS#11's one-process-per-application model; routine behind a network front
+  end. Found with `make TSAN=1` once the threads were released from a barrier —
+  without it the window closed before the other threads ran and the run came
+  back clean.
+
+* **#125 — unbounded input length on sign, verify and digest.** `C_Encrypt`
+  and `C_Decrypt` have rejected lengths above 2 GiB with `CKR_DATA_LEN_RANGE`
+  since the input-validation tranche; `C_Sign`, `C_Verify`, `C_Digest` and
+  their three `*Update` variants never received the same guard — 6 of 8 entry
+  points. A caller passing `ulDataLen = ISIZE_MAX` made the module hash until
+  it was killed: a denial of service reachable from a single argument. Now
+  `CKR_DATA_LEN_RANGE` in 0.0 ms.
+
+* **#128 — `secure_heap_kb = 100` aborted the process.** OpenSSL's arena
+  requires a power-of-two size and asserts otherwise; the config reader passed
+  any in-range value straight through. A configuration typo must not crash an
+  HSM. Values now round **up** to the next power of two.
+
+### Added
+
+* **`make TSAN=1`** — ThreadSanitizer build, alongside `SANITIZE=1` (separate
+  targets: ASan and TSan cannot share a binary), plus `tests/test_concurrency`.
+  Never ship either.
+* **Real configuration.** `/etc/freehsm/freehsm.conf` previously shipped nine
+  keys that no code read, while the only key a parser looked for (`mode`) was
+  absent from it. The file now carries exactly what is read — `mode` and
+  `secure_heap_kb` — and states plainly that the rest is compile-time or
+  environment-driven, and that `mode` does **not** change which mechanisms the
+  PKCS#11 API offers.
+
+### Changed
+
+* **Capacity: `FHSM_MAX_OBJECTS` 256 → 1024**, secure-heap arena 256 KiB → 8
+  MiB. 256 was never derived from a requirement — v1.1.0 shipped 64 and #125
+  raised it because a test needed 100 keys. Measured before changing: at 1024 a
+  worst-case lookup costs 0.6 µs and per-key creation 7.25 ms, against 0.2 µs
+  and 6.22 ms at 256. Neither the linear scans nor the whole-store rewrite binds
+  at this size; both would have to be addressed to go much further. The arena is
+  sized for the worst case — 1024 ML-DSA-87 private keys (4 962 B measured) need
+  4.85 MiB — so a token filled entirely with PQC keys still fits. A
+  `_Static_assert` now refuses an inconsistent pair at compile time instead of
+  leaving the coupling in a comment.
+
+### ⚠ Upgrade note
+
+The **v3 object record** introduced in this release is a one-way conversion, as
+v1→v2 was. A token written by v1.6.0 cannot be read by v1.5.0 or earlier. Back
+up token files before upgrading if you may need to roll back.
+
+
 ### Security
 * **#125 — `C_FindObjectsInit` read past its buffer and returned stack bytes as
   object handles.** `fhsm_token_object_find` bounds its writes
