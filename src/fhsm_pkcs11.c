@@ -1775,6 +1775,18 @@ CK_RV C_Digest(CK_SESSION_HANDLE hSession, unsigned char *pData,
     if (!pulDigestLen) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* Reject an absurd input length before touching the data (#125 isize).
+     * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
+     * input-validation tranche -- it was simply never wired to the sign,
+     * verify and digest entry points, the sixth time in this series a guard
+     * covered some of the paths reaching a problem and not the rest.
+     *
+     * Without it the harness maps a terabyte of demand-zero memory, passes
+     * ulDataLen = ISIZE_MAX, and the module dutifully starts hashing: not a
+     * wrong answer but a denial of service, and one any caller can trigger
+     * with a miscomputed length. No real buffer is 8 exabytes, so this
+     * detects a nonsensical argument rather than inventing a policy. */
+    if (ulDataLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     /* Reject a NULL data pointer paired with a non-zero length before any
      * dereference (pkcs11-check security/test_ffi_null_pointer, #125). A
      * NULL buffer of length 0 is legal (empty message). Errors terminate
@@ -6302,6 +6314,18 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
               unsigned char *pSignature, CK_ULONG *pulSignatureLen) {
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* Reject an absurd input length before touching the data (#125 isize).
+     * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
+     * input-validation tranche -- it was simply never wired to the sign,
+     * verify and digest entry points, the sixth time in this series a guard
+     * covered some of the paths reaching a problem and not the rest.
+     *
+     * Without it the harness maps a terabyte of demand-zero memory, passes
+     * ulDataLen = ISIZE_MAX, and the module dutifully starts hashing: not a
+     * wrong answer but a denial of service, and one any caller can trigger
+     * with a miscomputed length. No real buffer is 8 exabytes, so this
+     * detects a nonsensical argument rather than inventing a policy. */
+    if (ulDataLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     if (!pulSignatureLen) return FHSM_RV_ARGUMENTS_BAD;
     /* Reject a NULL data pointer paired with a non-zero length before any
      * dereference (pkcs11-check security/test_ffi_null_pointer, #125). A
@@ -6454,6 +6478,18 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
                CK_ULONG ulDataLen, unsigned char *pSig, CK_ULONG ulSigLen) {
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* Reject an absurd input length before touching the data (#125 isize).
+     * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
+     * input-validation tranche -- it was simply never wired to the sign,
+     * verify and digest entry points, the sixth time in this series a guard
+     * covered some of the paths reaching a problem and not the rest.
+     *
+     * Without it the harness maps a terabyte of demand-zero memory, passes
+     * ulDataLen = ISIZE_MAX, and the module dutifully starts hashing: not a
+     * wrong answer but a denial of service, and one any caller can trigger
+     * with a miscomputed length. No real buffer is 8 exabytes, so this
+     * detects a nonsensical argument rather than inventing a policy. */
+    if (ulDataLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     /* Reject a NULL data pointer paired with a non-zero length before any
      * dereference (pkcs11-check security/test_ffi_null_pointer, #125). A
      * NULL buffer of length 0 is legal (empty message). Errors terminate
@@ -6703,6 +6739,18 @@ CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                      CK_ULONG ulPartLen) {
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* Reject an absurd input length before touching the data (#125 isize).
+     * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
+     * input-validation tranche -- it was simply never wired to the sign,
+     * verify and digest entry points, the sixth time in this series a guard
+     * covered some of the paths reaching a problem and not the rest.
+     *
+     * Without it the harness maps a terabyte of demand-zero memory, passes
+     * ulDataLen = ISIZE_MAX, and the module dutifully starts hashing: not a
+     * wrong answer but a denial of service, and one any caller can trigger
+     * with a miscomputed length. No real buffer is 8 exabytes, so this
+     * detects a nonsensical argument rather than inventing a policy. */
+    if (ulPartLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     /* NULL part + non-zero length would deref NULL in the EVP update
      * (pkcs11-check security/test_ffi_null_pointer, #125). */
     if (pPart == NULL && ulPartLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
@@ -6817,6 +6865,18 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                    CK_ULONG ulPartLen) {
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* Reject an absurd input length before touching the data (#125 isize).
+     * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
+     * input-validation tranche -- it was simply never wired to the sign,
+     * verify and digest entry points, the sixth time in this series a guard
+     * covered some of the paths reaching a problem and not the rest.
+     *
+     * Without it the harness maps a terabyte of demand-zero memory, passes
+     * ulDataLen = ISIZE_MAX, and the module dutifully starts hashing: not a
+     * wrong answer but a denial of service, and one any caller can trigger
+     * with a miscomputed length. No real buffer is 8 exabytes, so this
+     * detects a nonsensical argument rather than inventing a policy. */
+    if (ulPartLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     /* NULL part + non-zero length would deref NULL in the EVP update
      * (pkcs11-check security/test_ffi_null_pointer, #125). */
     if (pPart == NULL && ulPartLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
@@ -6904,6 +6964,18 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                      CK_ULONG ulPartLen) {
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* Reject an absurd input length before touching the data (#125 isize).
+     * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
+     * input-validation tranche -- it was simply never wired to the sign,
+     * verify and digest entry points, the sixth time in this series a guard
+     * covered some of the paths reaching a problem and not the rest.
+     *
+     * Without it the harness maps a terabyte of demand-zero memory, passes
+     * ulDataLen = ISIZE_MAX, and the module dutifully starts hashing: not a
+     * wrong answer but a denial of service, and one any caller can trigger
+     * with a miscomputed length. No real buffer is 8 exabytes, so this
+     * detects a nonsensical argument rather than inventing a policy. */
+    if (ulPartLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     /* NULL part + non-zero length would deref NULL in the EVP update
      * (pkcs11-check security/test_ffi_null_pointer, #125). */
     if (pPart == NULL && ulPartLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
