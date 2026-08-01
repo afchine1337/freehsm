@@ -16,6 +16,11 @@
 # binary in a repo that advertises reproducible builds is a supply-chain
 # smell: it bloats clones, can be run by accident, and nobody can tell what
 # it was built from. `make` regenerates all of them.
+# Compiled test and benchmark binaries. Shape-based: a rule that lists names
+# stops covering the next file someone adds. tests/bench_capacity was committed
+# as a 1.7 MB binary because the earlier rule only matched tests/test_*.
+tests/bench_*
+!tests/bench_*.c
 tests/test_*
 !tests/test_*.c
 !tests/test_*.h

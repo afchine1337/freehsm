@@ -1,3 +1,19 @@
+/* ===========================================================================
+ * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+ * SPDX-License-Identifier: Apache-2.0
+ * ========================================================================= */
+/* ===========================================================================
+ * tests/bench_capacity.c --- capacity micro-benchmark, not a test.
+ *
+ *  Answers "can FHSM_MAX_OBJECTS grow" with numbers instead of hope: cost of
+ *  creating N objects, and cost of a worst-case (last-entry) lookup, which is
+ *  the linear scan over object_count. Used to size 256 -> 1024.
+ *
+ *  Not run by the release pre-flight or the CI suite -- it takes seconds per
+ *  run and measures rather than asserts.
+ *
+ *      make tests/bench_capacity && ./tests/bench_capacity 1024
+ * ========================================================================= */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
