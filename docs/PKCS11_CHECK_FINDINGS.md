@@ -413,7 +413,7 @@ de-advertisement is gone. The KAT handler dispatch_aes_ccm is back in the table.
 
 ---
 
-# Closing triage — 2026-07-21 : 361 → 5
+# Closing triage — 2026-07-21 : 361 → 5 (updated 2026-08-01 : → 4)
 
 Final run against `main` (`ac52ec7`) :
 
@@ -428,6 +428,33 @@ failure count. Crashes reached 0 and stayed there.
 **The five remaining are positions, not backlog.** Each is listed with what
 would have to change for it to move. Anyone reading this in six months should
 be able to disagree with a decision, not discover an oversight.
+
+## Update 2026-08-01 — 4 failures, and two that stopped reproducing
+
+A later run on the v1.6.0 candidate reports **4 failed, 1689 passed, 0 crashed**:
+R1 (Tookan), R3 (GcmIvReuse), R4 and R5 (the two RSA harness gaps). R2 — the
+CBC-PAD padding oracle — did not reproduce, and neither did
+`TestTimingBasic::test_aes_cbc_pad_decrypt_timing_sanity`, which had appeared
+in an intermediate run at a 22.5x valid/invalid ratio.
+
+**This is recorded as a measurement problem, not as a fix.** Nothing in the
+v1.6.0 work touched the AES-CBC-PAD decrypt path. R2 is not a timing test, so
+machine load does not obviously explain it. The oracle is inherent to CBC-PAD
+without authentication — the reasoning in R2 below still holds — and a security
+finding that appears in some runs and not others has to be treated as present
+until something explains its absence. Do not quietly drop R2 from this list on
+the strength of one green run.
+
+Also fixed in the same window, and worth noting because it was not on any list:
+`C_Sign`, `C_Verify`, `C_Digest` and their three `*Update` variants had no
+upper bound on the input length, while `C_Encrypt` and `C_Decrypt` had carried
+one since the input-validation tranche. The harness maps a terabyte of
+demand-zero memory, passes `ulDataLen = ISIZE_MAX`, and the module started
+hashing until pytest killed it at 180 s — a denial of service reachable from a
+single argument, on 6 of 8 entry points. It surfaced only when three `isize`
+tests began timing out rather than being skipped; whether they had been
+silently skipped before (the honeypot `mmap` can fail, which the test treats as
+an xfail) was not established.
 
 ## R1 — `TestTookanUnwrapAttrs::test_unwrapped_key_cannot_unset_sensitive`
 
