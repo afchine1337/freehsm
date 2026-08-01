@@ -170,6 +170,24 @@ keys and reading a tenth that is absent is not. Whichever is chosen, the
 | #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h | ⏳ **core of the v2.0 MVP** |
 | #123 | Signing tool `fhsm-sign` L1+L2 (raw + CMS/PKCS#7), PQC-ready | ~10h | ⏳ **MVP multiplier** |
 
+## Release process
+
+`scripts/release.sh <version>` runs the pre-flight checks and refuses to
+proceed until they pass. It performs **no git write operations** -- it checks,
+prints the commands, and stops.
+
+Written after v1.6.0, which took two retags for three uninteresting and
+mechanically detectable reasons: a `sed` that did not match so the version
+string stayed at the previous release (v1.5.0 had shipped identifying itself as
+`1.4.0-FIPS` for two weeks for the same reason); the CHANGELOG step, a comment
+in a copy-pasted block, skipped three times running; and
+`git push --follow-tags` silently declining to overwrite a tag that already
+existed on the remote, leaving the published tag on the wrong commit.
+
+The check that cannot be recovered afterwards is the build profile: an interop
+build ships the non-approved mechanisms live while every visible sign says
+fips-strict.
+
 ## Continuous / parallel
 
 | # | Task | Cadence | Status |
