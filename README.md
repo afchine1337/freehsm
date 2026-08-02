@@ -8,7 +8,7 @@
 
 > French version: see [`README.fr.md`](README.fr.md). Documentation index: [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
 >
-> **FreeHSM** is the open-source PKCS#11 library. **[Simorgh PKI](https://simorgh.io)** is the product built on it — *the first open-source software HSM with built-in PKI and signing toolkit, PQC composite signatures out-of-the-box*. Both are stewarded by **Simorgh Labs**. *(Repository renamed from `freehsm-c` to `freehsm` in July 2026; old URLs redirect.)*
+> **FreeHSM** is the open-source PKCS#11 library, stewarded by **[Simorgh Labs](https://simorgh.io)**. PKI and signing tooling on top of it is planned, not built. *(Repository renamed from `freehsm-c` to `freehsm` in July 2026; old URLs redirect.)*
 
 Native **C11** re-implementation of the FreeHSM PKCS#11 v3.2 Soft HSM, designed to pass a FIPS 140-3 Level 1 evaluation and an augmented Common Criteria EAL4+ certification (ALC_FLR.2 + AVA_VAN.5).
 

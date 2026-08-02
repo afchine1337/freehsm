@@ -1,6 +1,6 @@
 # Design Notes from Commercial HSM Experience
 
-*Captured 2026-07-04 by Afchine Madjlessi (Simorgh Labs) based on hands-on experience with commercial HSM products. This document informs the design decisions for FreeHSM library + Simorgh PKI product (v1.5.0 onwards).*
+*Captured 2026-07-04 by Afchine Madjlessi (Simorgh Labs) based on hands-on experience with commercial HSM products. It informs design decisions for the FreeHSM library, and for the PKI tooling planned as #112 — which is not built yet. Nothing here should be read as describing shipped functionality.*
 
 **Scope of this study** :
 
@@ -212,9 +212,15 @@ Adopt a "**sovereignty means freedom to migrate**" narrative. Practical implemen
 * Document the token store format transparently in `docs/TOKEN_STORE_FORMAT.md` (roadmap #108)
 * Ship an OSS `fhsm-export` / `fhsm-import` tool that produces a portable encrypted blob when given the install secret + destination public key
 * Cross-installation migration works if the destination admin has authorization from the original install secret holders (via signed re-encryption command)
-* Document a "migrate FROM Proteccio TO Simorgh PKI" guide (for extractable keys ; sensitive keys remain locked but at least the story is honest)
+* Document a "migrate FROM Proteccio TO FreeHSM" guide (for extractable keys ; sensitive keys remain locked but at least the story is honest). Scoped to the library, which exists — not to the PKI tooling, which does not.
 
-**Marketing angle** : *"Sovereignty means the freedom to change vendor. Simorgh PKI is the only sovereign crypto stack that documents its migration paths openly."*
+**Positioning note (unverified, do not publish as-is)** : documenting migration
+paths openly is a differentiator worth claiming *if* someone checks whether
+comparable projects already do it. The earlier draft of this line said Simorgh
+was "the only sovereign crypto stack" to do so — an exclusivity claim of exactly
+the kind scrubbed from the repo in the "first OSS PKI" cleanup, about a product
+that does not exist yet (#112). Any published version needs a survey behind it
+and has to describe what is built, not what is planned.
 
 ### Release cadence : one version every 2 years, no CVE patches
 
@@ -253,8 +259,8 @@ FreeHSM already ships :
 
 **Nuance on PQC narrative** : Proteccio has ML-KEM / ML-DSA / SLH-DSA support (good !). So our "first OSS with PQC" claim needs qualification. What we still hold uniquely :
 
-* **First OSS PKI + signing toolkit with PQC composite signatures OOTB** (composite = classical+PQ hybrid per draft-ietf-lamps-pq-composite-sigs). Proteccio has raw PQC primitives but no PKI/signing tool exposing composite mechanisms.
-* **First OSS PKI + signing toolkit period, integrated with HSM + CA + signing**
+* PQC composite signatures (classical+PQ hybrid per draft-ietf-lamps-pq-composite-sigs) exposed through PKI/signing tooling. Proteccio has raw PQC primitives but no tool exposing composite mechanisms. **Unbuilt (#112) and the primacy is unverified** — see docs/PRIMACY_AUDIT_PQC_COMPOSITE.md before any "first" wording is used anywhere.
+* Integrated HSM + CA + signing in one open-source stack. **Unbuilt (#112); no primacy claim without a survey.**
 * Public audit primacy claim (#118) must include "PKI + signing" qualifier consistently to survive audit against Proteccio's HSM-only PQC support.
 
 ---
@@ -297,7 +303,7 @@ Proteccio is **just a hardware HSM box** with a PKCS#11 interface. Zero PKI serv
 * **Entropy** : /dev/urandom (Linux kernel DRBG) + jitter entropy (Stephan Muller's jitterentropy-rngd) + optional TPM 2.0 RNG interface + optional external hardware RNG (Yubikey, OpenTitan) --- multi-source pooled to defeat single-source failures
 * **Tamper resistance** : TPM 2.0 measured boot (PCR-sealed keys) + system integrity attestation + audit logs signed with append-only hash chain + optional integration with intrusion detection at OS level
 
-**Marketing angle** : *"Proteccio has hardware tamper resistance in one non-portable box for 20-60 k€. Simorgh PKI provides tamper resistance via TPM 2.0 measured boot on any modern hardware (server, workstation, RPi) at zero cost. Different tradeoffs, same security posture at 100× lower total cost of ownership."*
+**Marketing angle** : *"Proteccio has hardware tamper resistance in one non-portable box for 20-60 k€. FreeHSM aims to provide tamper resistance via TPM 2.0 measured boot on any modern hardware (server, workstation, RPi) at zero cost. Different tradeoffs, same security posture at 100× lower total cost of ownership."*
 
 ### Observability : just varlog text files
 
@@ -392,7 +398,7 @@ Direct, defensible framings for landing pages, blog posts, keynotes :
 
 3. > *"Sovereignty means the freedom to change vendor. Simorgh PKI documents its token store format openly and ships an OSS migration tool. The incumbent doesn't."*
 
-4. > *"Proteccio has hardware tamper resistance in one non-portable box for 20-60 k€. Simorgh PKI provides tamper resistance via TPM 2.0 on any modern hardware at zero cost. Different tradeoffs, same security posture, 100× lower total cost of ownership."*
+4. > *"Proteccio has hardware tamper resistance in one non-portable box for 20-60 k€. FreeHSM aims to provide tamper resistance via TPM 2.0 on any modern hardware at zero cost. Different tradeoffs, same security posture, 100× lower total cost of ownership."*
 
 5. > *"One year of Proteccio maintenance ≈ one full ANSSI EAL4+ evidence package with Simorgh PKI. Choose sovereignty that scales."*
 

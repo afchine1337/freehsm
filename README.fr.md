@@ -10,7 +10,7 @@
 > Version anglaise : voir [`README.md`](README.md). Index documentation : [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
 > English version: see [`README.md`](README.md). Documentation index: [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
 >
-> **FreeHSM** est la bibliothèque PKCS#11 open source. **[Simorgh PKI](https://simorgh.io)** est le produit construit dessus — *le premier HSM logiciel open source avec PKI et outil de signature intégrés, signatures composites PQC prêtes à l'emploi*. Les deux sont portés par **Simorgh Labs**. *(Dépôt renommé de `freehsm-c` en `freehsm` en juillet 2026 ; les anciennes URLs redirigent.)*
+> **FreeHSM** est la bibliothèque PKCS#11 open source, portée par **[Simorgh Labs](https://simorgh.io)**. Les outils PKI et de signature qui viendront par-dessus sont prévus, pas encore développés. *(Dépôt renommé de `freehsm-c` en `freehsm` en juillet 2026 ; les anciennes URLs redirigent.)*
 
 > **Note sur le badge OpenSSF/CII** : le projet est enregistré sur `bestpractices.dev` (ID 13190). `bestpractices.dev` (OpenSSF Best Practices) est le successeur officiel du programme CII Best Practices : un seul badge couvre les deux.
 
