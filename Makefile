@@ -405,13 +405,15 @@ tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args t
 # Run against an UNSIGNED dev build ; CI runs the signed module.
 .PHONY: pkcs11-check
 pkcs11-check:
-	# Rebuild the module under test with a large object store so the
-	# harness's object churn does not fill the default 64-slot token and
-	# mask real findings behind CKR_DEVICE_MEMORY (FINDINGS I1 / F5). The
-	# deeper fix is destroying session objects on C_CloseSession.
+	# Built at the default FHSM_MAX_OBJECTS. The 4096 override that used to
+	# be here was a workaround from when the default was 64: the harness's
+	# object churn filled the store and masked findings behind
+	# CKR_DEVICE_MEMORY (FINDINGS I1 / F5). The deeper fix that comment
+	# asked for -- destroying session objects on C_CloseSession -- landed in
+	# #125, and the default is now 1024.
 	$(MAKE) clean
-	$(MAKE) FHSM_MAX_OBJECTS=4096
-	$(MAKE) FHSM_MAX_OBJECTS=4096 integrity
+	$(MAKE)
+	$(MAKE) integrity
 	FHSM_ALLOW_UNSIGNED=1 bash scripts/run_pkcs11_check.sh ./$(LIB) ./reports/pkcs11-check
 
 # ---------------------------------------------------------------------------

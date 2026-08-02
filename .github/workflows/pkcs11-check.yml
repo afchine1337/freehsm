@@ -42,11 +42,19 @@ jobs:
       - name: Build + sign module
         run: |
           make clean
-          # Large object store so the harness's object churn does not fill
-          # the default 64-slot token and cascade CKR_DEVICE_MEMORY across
-          # unrelated tests (FINDINGS I1 / F5).
-          make FHSM_MAX_OBJECTS=4096
-          make FHSM_MAX_OBJECTS=4096 integrity
+          # Built at the default FHSM_MAX_OBJECTS. The -DFHSM_MAX_OBJECTS=4096
+          # override that used to be here dated from when the default was 64
+          # and the harness's object churn filled the store, cascading
+          # CKR_DEVICE_MEMORY across unrelated tests (FINDINGS I1 / F5). Both
+          # reasons are gone: session objects are destroyed on C_CloseSession
+          # since #125 -- the deeper fix the old comment asked for -- and the
+          # default is now 1024. Runs at the default show no cascade.
+          #
+          # It also has to go: since #127 the mlock'd arena must hold a full
+          # token of sensitive values, and 4096 of them would demand a 32 MiB
+          # locked arena, more than the usual RLIMIT_MEMLOCK allows.
+          make
+          make integrity
           test -f libfreehsm-fips.so
 
       - name: Install harness (opensc + pkcs11-check)
