@@ -153,7 +153,7 @@ The TOE is delivered as a signed `.tar.xz` source archive (`make dist`) and a bi
 
 ## 9. TSF list — v1.1.0 additions
 
-The CST pre-submission refresh adds 4 transverse TSFs that complement the EAL4+ functional family coverage:
+The CST-evidence work batch adds 4 transverse TSFs that complement the EAL4+ functional family coverage:
 
 | TSF identifier | Family | Description | Source |
 |---|---|---|---|

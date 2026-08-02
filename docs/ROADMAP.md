@@ -6,7 +6,16 @@ design study (`docs/DESIGN_NOTES_COMMERCIAL_HSM.md`), the rebrand plan
 (`../REBRAND_CHECKLIST.md`), the brand reference
 (`docs/SIMORGH_LABS_BRAND_REFERENCE.md`), the pkcs11-check campaign
 (`docs/PKCS11_CHECK_CAMPAIGN.md` + `PKCS11_CHECK_FINDINGS.md`), and the
-certification checklist (`docs/CST_LAB_SUBMISSION_CHECKLIST.md`).
+the CC/CMVP evidence checklist (`docs/CST_LAB_SUBMISSION_CHECKLIST.md`, kept
+as a methodological reference — no submission is planned).
+
+**Mission.** FreeHSM exists to put auditable cryptography within reach of public
+bodies, universities and countries that cannot buy a certified module. It is
+built to FIPS 140-3 Level 1 and CC EAL4+ requirements and documented with their
+methodologies; it holds no certificate and will not pursue one. A certificate
+costs more than this project will ever have, and that cost is precisely the
+barrier this project exists to route around. Nothing on this roadmap should read
+as working towards a submission.
 
 Legend: ✅ done · 🟡 partial · ⏳ pending · ♻ continuous
 
@@ -14,10 +23,11 @@ Legend: ✅ done · 🟡 partial · ⏳ pending · ♻ continuous
 
 ## Layering (keep these categories clean)
 
-* **FreeHSM** — the HSM *library* (`libfreehsm-fips.so`), PKCS#11 v3.2,
-  FIPS 140-3 / CC EAL4+ evidence target. Apache-2.0.
-* **Simorgh PKI** — the *product*: FreeHSM + CA + signing tool + operator +
-  IaC modules. The integrated crypto-engineering stack.
+* **FreeHSM** — the HSM *library* (`libfreehsm-fips.so`), PKCS#11 v3.2, built
+  to FIPS 140-3 / CC EAL4+ requirements and documented with their evidence
+  methodologies. Not certified. Apache-2.0.
+* **Simorgh PKI** — planned tooling on top: CA + signing tool + operator + IaC
+  modules (#112). **Not built.** Do not describe it as existing.
 * Anti-pattern to avoid (study): do **not** blur HSM and KMS. KMS-like features
   (policy engine, cross-cloud key sync, FPE) are a **post-v2.0** tier.
 
@@ -199,7 +209,7 @@ fips-strict.
 
 | # | Task | When | Notes |
 |---|---|---|---|
-| #106 | Exhaustive CC ATE_FUN test book | v2.0 stable +6mo | ANSSI EAL4+ submission → Tier-3 evidence |
+| #106 | Exhaustive CC ATE_FUN test book | v2.0 stable +6mo | Worth doing for its own sake: a functional test book to CC ATE_FUN structure is both a real assurance gain and a teaching artefact. **Not for a submission** — there will not be one. |
 | #111-prep | **Thread-safety of the PKCS#11 layer (blocks #111)** | ~10h | ⏳ **hard prerequisite** — see note |
 | #111 | Network HSM via REST API | v2.5+ | The big architectural leap — wait for MVP validation **and #111-prep** |
 
@@ -305,9 +315,9 @@ they start searching. Entry window 2026–2027 (see GTM phasing).
 | Phase | Timing | Action |
 |---|---|---|
 | 1 | v2.0-beta (2026-09) | Public announce, positioning vs Proteccio (claims C1–C6) |
-| 2 | v2.0 stable (2026-12) | French OIV + defence procurement; Tier-3 evidence package |
+| 2 | v2.0 stable (2026-12) | Reach the users this is for: public bodies, universities, teaching, and administrations without a certification budget |
 | 3 | 2027-Q1 | Present at FIC 2027 (Lille) |
-| 4 | 2027-Q2 | ANSSI CC EAL4+ QR evaluation kickoff |
+| 4 | 2027-Q2 | *(removed — an ANSSI CC EAL4+ evaluation is not affordable and is not the objective; see Mission above)* |
 | 5 | 2027-Q3/Q4 | MENA / Africa (GISEC, Black Hat MEA, Africa Cyber Defense Forum) |
 
 ## Honest scope boundary (study Category E)

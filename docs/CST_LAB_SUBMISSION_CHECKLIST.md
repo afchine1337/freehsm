@@ -1,6 +1,13 @@
 # FreeHSM C --- NIST CST Lab Submission Checklist
 
-Pre-submission checklist for a NIST-accredited Cryptographic and Security Testing (CST) lab seeking FIPS 140-3 Level 1 certification.
+> **No submission is planned.** This checklist enumerates what a CST lab or CC
+> evaluator asks for. It is kept because knowing what the evidence looks like is
+> how you build to it — and because that list is difficult to find outside a
+> paid engagement. FreeHSM is not certified and will not be: the cost is the
+> barrier this project exists to route around. Read this as a specification of
+> rigour, not as a plan.
+
+What a NIST-accredited Cryptographic and Security Testing (CST) lab asks for when evaluating a module against FIPS 140-3 Level 1. Used here as a specification of the evidence to produce, not as a submission plan.
 
 **Status :** This is the developer-side artifact list. The actual CST lab will issue their own Statement of Work and ask for additional items.
 

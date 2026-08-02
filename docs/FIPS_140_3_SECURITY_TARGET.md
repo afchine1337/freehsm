@@ -1,6 +1,9 @@
 # FreeHSM C --- FIPS 140-3 Security Target (Draft v0.10)
 
-**Status :** Pre-submission draft. Not yet evaluated by a NIST CST lab.
+**Status :** Written to the FIPS 140-3 Security Policy structure, never
+submitted. FreeHSM is not evaluated by a CST lab and will not be — see the
+mission note in `ROADMAP.md`. Published as a worked example of what a Security
+Policy for a software cryptographic module contains.
 
 **Standard :** NIST FIPS 140-3 *Security Requirements for Cryptographic Modules*, issued March 2019, effective September 2020.
 

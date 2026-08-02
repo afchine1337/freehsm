@@ -153,7 +153,7 @@ This is enforced by `tests/test_token_interop.c`, which generates a token under 
 
 ## 11. v1.1.0 layered additions
 
-The CST pre-submission refresh adds 4 transverse modules. They sit at the same architectural layer as the existing crypto primitives but are wired into different lifecycle stages:
+The CST-evidence work batch adds 4 transverse modules. They sit at the same architectural layer as the existing crypto primitives but are wired into different lifecycle stages:
 
 ### 11.1 Hardened DRBG (`src/fhsm_drbg.c`)
 

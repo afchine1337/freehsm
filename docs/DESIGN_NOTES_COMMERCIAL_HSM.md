@@ -423,7 +423,7 @@ Bull/Atos Trustway is a weakening incumbent :
 | 1 | v2.0-beta (2026-09) | Announce publicly with clean positioning vs Proteccio (marketing claims C1-C6 above) |
 | 2 | v2.0 stable (2026-12) | Reach out to French OIV + défense procurement contacts ; offer Tier 3 evidence package |
 | 3 | 2027-Q1 | Present at FIC 2027 (Lille, January) --- French cyber premier event |
-| 4 | 2027-Q2 | Approach ANSSI directly for CC EAL4+ QR evaluation kickoff |
+| 4 | — | *(dropped: a CC EAL4+ evaluation is not affordable and is not the objective — see the mission note in ROADMAP.md)* |
 | 5 | 2027-Q3-Q4 | Broaden to MENA / Afrique via GISEC + Black Hat MEA + Africa Cyber Defense Forum |
 
 ### Category E --- Honest limitations (things Proteccio does that we can't replicate)
