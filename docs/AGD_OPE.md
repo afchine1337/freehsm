@@ -1,6 +1,20 @@
 # FreeHSM C --- Operational User Guidance (CC EAL4+ AGD_OPE.1)
 
-**TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
+> **Not certified, and not seeking certification.** FreeHSM is built to the
+> requirements of FIPS 140-3 Level 1 and Common Criteria EAL4+, and documented
+> with their methodologies. It holds no certificate and will not pursue one: a
+> certificate costs more than this project will ever have, and that cost is
+> exactly the barrier that keeps public bodies, universities and developing
+> countries away from auditable cryptography. What a certificate attests,
+> discipline can make verifiable — by anyone, at no cost.
+>
+> This document is an evaluation deliverable and is written, as the methodology
+> requires, as though a certificate existed. Read "certified" throughout as
+> "the configuration this module is built to". It is published as a worked
+> example, not as part of a submission.
+
+**TOE :** FreeHSM Cryptographic Module (the version you built ; `v1.0.0-FIPS`
+in earlier drafts was a placeholder and never existed as a release)
 **Audience :** Security Officer (SO) and User operators of an installed TOE
 **Prerequisites :** the TOE has been installed and brought to the secure operational state per `docs/AGD_PRE.md`
 

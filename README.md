@@ -1,4 +1,4 @@
-# FreeHSM --- FIPS 140-3 / CC EAL4+ candidate
+# FreeHSM --- FIPS 140-3 / CC EAL4+ discipline, without the certificate
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![REUSE status](https://api.reuse.software/badge/github.com/afchine1337/freehsm)](https://api.reuse.software/info/github.com/afchine1337/freehsm)
@@ -148,9 +148,9 @@ The module supports **66 FIPS-approved** mechanisms and **12 legacy** ones (reje
 | **Reproducible build** (pinned Dockerfile)    | ✅     | `Dockerfile.build` + `make dist-verify` |
 | **Complete CC EAL4+ docs** (ATE/AVA/ALC/AGD)  | ✅     | 10 documents in `docs/` |
 | Fuzzing tests + coverage ≥ 95 %               | ⏳     | infra to wire (AFL++ + lcov) |
-| Validated OpenSSL FIPS provider               | ⏳     | target-dependent (CMVP cert) |
+| Validated OpenSSL FIPS provider               | n/a    | deployment choice; the module runs against whichever provider the operator installs |
 | Third-party code audit (CC lab)               | ⏳     | commercial step |
-| CMVP / CC lab submission                      | ⏳     | final commercial step |
+| CMVP / CC lab submission                      | n/a    | not planned — see the note on certification below |
 
 Legend : ✅ implemented · 🟡 partial/scaffold · ⏳ to do
 
@@ -162,9 +162,9 @@ Legend : ✅ implemented · 🟡 partial/scaffold · ⏳ to do
 - **Boot self-test FIPS 140-3 §7.10.2** : `.fhsm_digest` ELF section patched post-build, SHA-256 of the .so (digest area zeroized) verified before the FIPS provider loads.
 - **Reproducible build** : `Dockerfile.build` pinned by digest. `make dist-verify` builds twice and asserts identical SHA-256.
 - **CAVP `.rsp` parser** + **83 sample vectors** Python cross-validated.
-- **10 evaluation documents** covering the full CC EAL4+ + FIPS 140-3 submission dossier (Security Policy, TOE, Architecture, Mechanisms, Reproducible Build, ATE_FUN, AVA_VAN, ALC_CMC, AGD_PRE, AGD_OPE).
+- **10 evaluation documents** covering what a full CC EAL4+ / FIPS 140-3 dossier contains (Security Policy, TOE, Architecture, Mechanisms, Reproducible Build, ATE_FUN, AVA_VAN, ALC_CMC, AGD_PRE, AGD_OPE) — written to the methodologies and published as worked examples, not submitted anywhere.
 - **~ 8 000 lines** of C + Python + Markdown across 40+ files.
-- **Remaining roadmap** : third-party code audit (accredited lab), CMVP submission, CC EAL4+ submission (commercial 12-24 month steps).
+- **Certification.** FreeHSM holds no certificate and is not seeking one. A CMVP or CC submission costs more than this project will ever have, and that cost is exactly the barrier that keeps public bodies, universities and developing countries away from auditable cryptography. The ten evaluation documents are published as worked examples of how such a module is specified and tested — material that is otherwise hard to find outside a paid engagement. What a certificate attests, discipline can make verifiable: by anyone, at no cost.
 
 ---
 

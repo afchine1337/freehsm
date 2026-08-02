@@ -1,6 +1,17 @@
 # FreeHSM C — Guide d'utilisation opérationnelle (CC EAL4+ AGD_OPE.1)
 
-> English version: [`AGD_OPE.md`](AGD_OPE.md). In case of discrepancy, the English version prevails.
+> **Non certifié, et sans intention de l'être.** FreeHSM est construit selon les
+> exigences FIPS 140-3 niveau 1 et Critères Communs EAL4+, et documenté selon
+> leurs méthodologies. Il ne détient aucun certificat et n'en cherchera pas : un
+> certificat coûte plus que ce projet n'aura jamais, et ce coût est précisément
+> la barrière qui écarte les organismes publics, les universités et les pays en
+> développement d'une cryptographie auditable. Ce qu'un certificat atteste, la
+> discipline peut le rendre vérifiable — par quiconque, gratuitement.
+>
+> Ce document est un livrable d'évaluation, rédigé comme la méthodologie
+> l'exige, comme si un certificat existait. Lire « certifié » partout comme
+> « la configuration selon laquelle ce module est construit ». Il est publié
+> comme exemple travaillé, non dans le cadre d'une soumission.
 
 **TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
 **Audience :** opérateurs Security Officer (SO) et User d'une TOE installée

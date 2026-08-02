@@ -456,7 +456,13 @@ lint:
 # ---------------------------------------------------------------------------
 PREFIX     ?= /opt/freehsm
 LIBDIR     ?= $(PREFIX)/lib
-ETCDIR     ?= $(PREFIX)/etc
+# The module reads /etc/freehsm/freehsm.conf (FHSM_CONF_PATH_DEFAULT in
+# src/fhsm_conf.c), not $(PREFIX)/etc. Installing under PREFIX put the file
+# somewhere nothing would ever open it -- a configuration that cannot take
+# effect, which is the same defect #128 removed from the file's contents.
+# Override FHSM_CONFDIR only if you also change FHSM_CONF_PATH_DEFAULT.
+FHSM_CONFDIR ?= /etc/freehsm
+ETCDIR     ?= $(FHSM_CONFDIR)
 STATEDIR   ?= /var/lib/freehsm
 SYSUSER    ?= freehsm
 

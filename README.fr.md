@@ -1,4 +1,4 @@
-# FreeHSM --- FIPS 140-3 / CC EAL4+ candidate
+# FreeHSM --- la discipline FIPS 140-3 / CC EAL4+, sans le certificat
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![REUSE status](https://api.reuse.software/badge/github.com/afchine1337/freehsm)](https://api.reuse.software/info/github.com/afchine1337/freehsm)
@@ -11,6 +11,8 @@
 > English version: see [`README.md`](README.md). Documentation index: [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
 >
 > **FreeHSM** est la bibliothèque PKCS#11 open source, portée par **[Simorgh Labs](https://simorgh.io)**. Les outils PKI et de signature qui viendront par-dessus sont prévus, pas encore développés. *(Dépôt renommé de `freehsm-c` en `freehsm` en juillet 2026 ; les anciennes URLs redirigent.)*
+>
+> **Non certifié, et sans intention de l'être.** Un certificat CMVP ou CC coûte plus que ce projet n'aura jamais, et ce coût est précisément la barrière qui écarte les organismes publics, les universités et les pays en développement d'une cryptographie auditable. Les dix documents d'évaluation sont publiés comme exemples travaillés — une matière difficile à trouver hors d'une prestation payante. Ce qu'un certificat atteste, la discipline peut le rendre vérifiable : par quiconque, gratuitement.
 
 > **Note sur le badge OpenSSF/CII** : le projet est enregistré sur `bestpractices.dev` (ID 13190). `bestpractices.dev` (OpenSSF Best Practices) est le successeur officiel du programme CII Best Practices : un seul badge couvre les deux.
 

@@ -1,6 +1,20 @@
 # FreeHSM C --- Preparative Procedures (CC EAL4+ AGD_PRE.1)
 
-**TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
+> **Not certified, and not seeking certification.** FreeHSM is built to the
+> requirements of FIPS 140-3 Level 1 and Common Criteria EAL4+, and documented
+> with their methodologies. It holds no certificate and will not pursue one: a
+> certificate costs more than this project will ever have, and that cost is
+> exactly the barrier that keeps public bodies, universities and developing
+> countries away from auditable cryptography. What a certificate attests,
+> discipline can make verifiable — by anyone, at no cost.
+>
+> This document is an evaluation deliverable and is written, as the methodology
+> requires, as though a certificate existed. Read "certified" throughout as
+> "the configuration this module is built to". It is published as a worked
+> example, not as part of a submission.
+
+**TOE :** FreeHSM Cryptographic Module (the version you built ; `v1.0.0-FIPS`
+in earlier drafts was a placeholder and never existed as a release)
 **Audience :** system administrator deploying the TOE for the first time
 **Prerequisites :** root access on the target host ; familiarity with PKCS#11
 
@@ -25,7 +39,7 @@ If any verification fails, **do not proceed** : the TOE will not enter its claim
 
 ## 2. Delivery verification
 
-The TOE is delivered as four files on the distribution server (`https://dist.freehsm.example/v1.0.0/`) :
+The TOE is delivered as four files, published on the source forges with the signed release tag :
 
 ```
 libfreehsm-fips.so              # the cryptographic module
@@ -91,7 +105,7 @@ sudo install -d -o freehsm -g freehsm -m 700 \
 | Path                          | Owner       | Mode | Purpose                                |
 |-------------------------------|-------------|------|----------------------------------------|
 | `/opt/freehsm/lib/libfreehsm-fips.so` | root       | 0755 | The cryptographic module             |
-| `/opt/freehsm/etc/freehsm.conf`        | root       | 0644 | Module-level config (read-only)      |
+| `/etc/freehsm/freehsm.conf`            | root       | 0644 | Module config, the only path read     |
 | `/var/lib/freehsm/tokens/slot*.tok`     | freehsm    | 0600 | Encrypted token files                |
 | `/var/lib/freehsm/audit/slot*.audit.log` | freehsm   | 0600 | HMAC-chained audit logs              |
 | `/var/lib/freehsm/kek/*.kek`            | freehsm    | 0600 | Local KMS KEK material (if used)     |
@@ -149,26 +163,47 @@ xxd -s 0x2000 -l 32 /opt/freehsm/lib/libfreehsm-fips.so
 
 ### 4.1 Module configuration
 
-Create `/opt/freehsm/etc/freehsm.conf` :
+`make install` writes `/etc/freehsm/freehsm.conf`. That is the path the module
+reads ; nothing else is consulted.
 
 ```
-[module]
-fips_strict      = true
-audit_mandatory  = true
-secure_heap_kb   = 256
+# Runtime mode: fips | legacy. Overridden by FHSM_MODE.
+mode = fips
 
-[token]
-pin_max_failed         = 5
-pin_throttle_base_ms   = 500
-pin_throttle_max_ms    = 60000
-pbkdf2_iterations      = 200000
-
-[paths]
-tokens_dir = /var/lib/freehsm/tokens
-audit_dir  = /var/lib/freehsm/audit
+# mlock(2)-ed secure heap holding key material, in KiB.
+# Range 64..65536, rounded up to a power of two.
+secure_heap_kb = 8192
 ```
 
-These values match the FIPS-validated defaults compiled into the module. Changing any of them invalidates the FIPS validation ; bumping `pbkdf2_iterations` upwards is the only safe override.
+**Only these two keys are read.** Earlier revisions of this guide listed nine —
+`fips_strict`, `audit_mandatory`, `pin_max_failed`, `pin_throttle_base_ms`,
+`pin_throttle_max_ms`, `pbkdf2_iterations`, `tokens_dir`, `audit_dir` — at a
+path the module never opened. None of them had any effect. An operator who
+hardened the module by editing that file changed nothing (#128).
+
+The remaining parameters are set at build time or through the environment :
+
+| Parameter | Where it is set |
+|---|---|
+| PIN failure limit, throttle curve | compile-time (`FHSM_PIN_MAX_FAILED` and the throttle constants) |
+| PBKDF2 iteration count | compile-time, 200 000 |
+| token directory | `FHSM_TOKENS_DIR` environment variable |
+| approved-mechanism set | build profile, `make generate PROFILE=fips-strict` |
+
+Note the scope of `mode` : it selects KAT/dispatch behaviour. **Which mechanisms
+the PKCS#11 API advertises and executes is fixed when the module is built** and
+cannot be changed from this file. A deployment that must refuse non-approved
+mechanisms has to be built with `PROFILE=fips-strict` — verify with
+`make show-profile`, which prints the requested profile, the profile the
+generated sources were produced for, and the `fhsm_build_fips_strict` value read
+back out of the binary.
+
+These values are the defaults the module is intended to be validated with.
+**FreeHSM is not currently FIPS 140-3 validated**; this guide is written for the
+configuration submitted for validation, and changing these values would place a
+deployment outside that configuration once validation is obtained. Raising
+`pbkdf2_iterations` is the only change that is conservative in the meantime, and
+it requires a rebuild.
 
 ### 4.2 First-boot integrity verification
 
@@ -185,7 +220,7 @@ Expected output excerpt :
 ```
 Cryptoki version 3.2
 Manufacturer     FreeHSM C (FIPS 140-3 candidate)
-Library          libfreehsm-fips.so v1.0.0-FIPS
+Library          libfreehsm-fips.so <version>-FIPS
 Using slot 0 with a present token (0x0)
 ```
 
@@ -236,7 +271,7 @@ The TOE is in its secure operational state when **all** of the following hold si
 3. `fhsm_integrity_is_signed()` returns 1.
 4. The module state (introspected via vendor helper `fhsm_state_get()`) is `INITIALIZED` or `AUTHENTICATED`.
 5. `/var/lib/freehsm/audit/slot0.audit.log` contains a `module_init` event with `result=OK`.
-6. `fips_strict=true` is set in `freehsm.conf`.
+6. `mode = fips` is set in `/etc/freehsm/freehsm.conf`, **and** the module was built with `PROFILE=fips-strict` — the file alone does not restrict the mechanism set (`make show-profile` confirms both).
 
 If any of these is false, the system is **not** in the certified state and must be re-installed before exposing it to users.
 
@@ -367,7 +402,7 @@ sudo shred -uvz /var/lib/freehsm/audit/*.audit.log
 sudo shred -uvz /var/lib/freehsm/kek/*.kek
 
 # Remove the module
-sudo rm /opt/freehsm/lib/libfreehsm-fips.so /opt/freehsm/etc/freehsm.conf
+sudo rm /opt/freehsm/lib/libfreehsm-fips.so /etc/freehsm/freehsm.conf
 sudo rmdir /opt/freehsm/{lib,etc,bin}
 sudo userdel freehsm
 sudo rm -rf /var/lib/freehsm
