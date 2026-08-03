@@ -87,7 +87,13 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_AES_CBC_PAD",        0x00001085, "AES",  "encrypt", "dispatch_aes_cbc_pad",
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
-         refs=("FIPS 197", "SP 800-38A", "RFC 5652 (PKCS#7 padding)")),
+         refs=("FIPS 197", "SP 800-38A", "RFC 5652 (PKCS#7 padding)"),
+         notes="No integrity: decryption reports whether the PKCS#7 padding was "
+               "valid, which is a padding oracle (Vaudenay 2002, POODLE). "
+               "Inherent to the mechanism and not fixable in the module -- "
+               "C_Decrypt has to return something. Prefer CKM_AES_GCM or "
+               "CKM_AES_KEY_WRAP where an attacker can submit chosen "
+               "ciphertexts. See R2 in docs/PKCS11_CHECK_FINDINGS.md."),
     Mech("CKM_AES_GCM",            0x00001087, "AES",  "encrypt", "dispatch_aes_gcm",
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,

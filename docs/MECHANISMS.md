@@ -24,6 +24,7 @@
 | `CKM_AES_KEY_GEN` | `0x00001080` | keygen | ✅ | `dispatch_aes_keygen` | FIPS 197 |
 | `CKM_AES_CBC` | `0x00001082` | encrypt | ✅ | `dispatch_aes_cbc` | FIPS 197, SP 800-38A |
 | `CKM_AES_CBC_PAD` | `0x00001085` | encrypt | ✅ | `dispatch_aes_cbc_pad` | FIPS 197, SP 800-38A, RFC 5652 (PKCS#7 padding) |
+| | | | | | _No integrity: decryption reports whether the PKCS#7 padding was valid, which is a padding oracle (Vaudenay 2002, POODLE). Inherent to the mechanism and not fixable in the module -- C_Decrypt has to return something. Prefer CKM_AES_GCM or CKM_AES_KEY_WRAP where an attacker can submit chosen ciphertexts. See R2 in docs/PKCS11_CHECK_FINDINGS.md._ |
 | `CKM_AES_GCM` | `0x00001087` | encrypt | ✅ | `dispatch_aes_gcm` | FIPS 197, SP 800-38D |
 | | | | | | _IV length fixed at 96 bits; tag length fixed at 128 bits in approved mode._ |
 | `CKM_AES_CCM` | `0x00001088` | encrypt | ✅ | `dispatch_aes_ccm` | FIPS 197, SP 800-38C |

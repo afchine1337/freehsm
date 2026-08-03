@@ -64,7 +64,7 @@ Après `C_Finalize`, le processus ne doit appeler aucun autre `C_*` avant un nou
 
 | Cas d'usage                              | Mécanisme recommandé                       |
 |------------------------------------------|--------------------------------------------|
-| Chiffrement symétrique au repos          | `CKM_AES_GCM` (IV 96 bits, tag 128 bits)   |
+| Chiffrement symétrique au repos          | `CKM_AES_GCM` (IV 96 bits, tag 128 bits) — **pas** `CKM_AES_CBC_PAD`, cf. §3.1 |
 | Authentification symétrique              | `CKM_SHA256_HMAC` ou `CKM_AES_CMAC`        |
 | MAC streaming (gros messages)            | `CKM_KMAC128` / `CKM_KMAC256`              |
 | Signature asymétrique (classique)        | `CKM_SHA384_RSA_PKCS_PSS` ou `CKM_ECDSA_SHA384` |
@@ -77,6 +77,43 @@ Après `C_Finalize`, le processus ne doit appeler aucun autre `C_*` avant un nou
 | Dérivation de clé protocole              | `CKM_HKDF_DERIVE` (SHA-256+)               |
 
 Tout mécanisme hors liste approuvée (`CKM_MD5`, `CKM_DES3_CBC`, `CKM_RSA_PKCS`...) est **rejeté au dispatch** et retourne `FHSM_RV_FIPS_NOT_APPROVED (0x80000003)`.
+
+### 3.1 Approuvé ne veut pas dire adapté à votre usage
+
+Deux mécanismes de la liste approuvée portent une réserve que l'approbation FIPS
+n'exprime pas, parce que l'approbation porte sur l'algorithme et la réserve porte
+sur le protocole que vous construisez avec. Les deux sont utilisables et aucun
+n'est un défaut du module ; le choix vous revient.
+
+**`CKM_AES_CBC_PAD` est un oracle de padding.** Le déchiffrement indique à
+l'appelant si le padding PKCS#7 était bien formé — `CKR_OK` quand oui,
+`CKR_ENCRYPTED_DATA_INVALID` quand non. Ce seul bit, répété sur des chiffrés
+choisis, permet de reconstituer le clair octet par octet (Vaudenay 2002 ;
+POODLE, CVE-2014-3566). C'est inhérent : CBC-PAD ne porte aucun tag
+d'authentification, donc `C_Decrypt` ne peut pas distinguer « corrompu » de
+« pas pour vous » sans dire lequel, et renvoyer du clair aléatoire à la place
+serait pire pour tout appelant honnête.
+
+Mesuré sur ce module : 99,6 % des chiffrés corrompus sont refusés, et les 0,4 %
+qui déchiffrent sont ceux dont le dernier bloc aléatoire porte par hasard un
+padding valide — c'est le taux théorique de toute implémentation correcte. Le
+module se comporte comme spécifié. L'exposition est dans le protocole.
+
+> **Utilisez `CKM_AES_GCM` ou `CKM_AES_KEY_WRAP` partout où un attaquant peut
+> soumettre des chiffrés de son choix et observer si le déchiffrement a
+> réussi.** `CKM_AES_CBC_PAD` convient aux données que vous déchiffrez pour
+> vous-même — un fichier au repos, une sauvegarde — sans adversaire aux
+> commandes du déchiffrement.
+
+**`CKM_AES_CBC` et `CKM_AES_CTR` n'offrent aucune intégrité.** Pas d'oracle,
+puisqu'il n'y a pas de padding à vérifier, mais aucune détection d'altération
+non plus : sous CTR, un bit retourné dans le chiffré retourne le bit
+correspondant du clair, silencieusement. Associez-les à un `CKM_SHA256_HMAC` sur
+le chiffré (encrypt-then-MAC, RFC 7366), ou prenez `CKM_AES_GCM` qui fait les
+deux en une passe.
+
+Voir R2 dans `docs/PKCS11_CHECK_FINDINGS.md` pour la mesure, et
+`tests/test_cbc_pad_oracle.c` pour le garde-fou de non-régression.
 
 ## 4. Conseils de sécurité (actionnables par opérateur)
 

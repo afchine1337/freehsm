@@ -72,7 +72,7 @@ Pick mechanisms from the **approved set** listed in `docs/MECHANISMS.md` and `do
 
 | Use case                              | Recommended mechanism                  |
 |---------------------------------------|----------------------------------------|
-| Symmetric encryption at rest          | `CKM_AES_GCM` (96-bit IV, 128-bit tag) |
+| Symmetric encryption at rest          | `CKM_AES_GCM` (96-bit IV, 128-bit tag) — **not** `CKM_AES_CBC_PAD`, see §3.1 |
 | Symmetric encryption in transit       | `CKM_AES_GCM` or `CKM_AES_CCM`         |
 | Symmetric authentication              | `CKM_SHA256_HMAC` or `CKM_AES_CMAC`    |
 | Streaming MAC (large messages)        | `CKM_KMAC128` / `CKM_KMAC256`          |
@@ -86,6 +86,40 @@ Pick mechanisms from the **approved set** listed in `docs/MECHANISMS.md` and `do
 | Key derivation in a protocol          | `CKM_HKDF_DERIVE` (SHA-256+)           |
 
 Any mechanism not in the approved list (e.g. `CKM_MD5`, `CKM_DES3_CBC`, `CKM_RSA_PKCS`) is **rejected at dispatch** in approved mode and returns `FHSM_RV_FIPS_NOT_APPROVED (0x80000003)`.
+
+### 3.1 Approved is not the same as safe for your use case
+
+Two mechanisms in the approved set carry a caveat that FIPS approval does not
+express, because approval is about the algorithm and the caveat is about the
+protocol you build with it. Both are usable and neither is a defect in the
+module; the choice belongs to you.
+
+**`CKM_AES_CBC_PAD` is a padding oracle.** Decryption tells the caller whether
+the PKCS#7 padding was well-formed — `CKR_OK` when it was, `CKR_ENCRYPTED_DATA_INVALID`
+when it was not. That single bit, repeated over chosen ciphertexts, recovers
+plaintext byte by byte (Vaudenay 2002; POODLE, CVE-2014-3566). It is inherent:
+CBC-PAD carries no authentication tag, so there is no way for `C_Decrypt` to
+distinguish "corrupted" from "not for you" without saying which, and returning
+garbage plaintext instead would be worse for every honest caller.
+
+Measured on this module: 99.6% of corrupted ciphertexts are refused, and the
+0.4% that decrypt are the ones whose random final block happens to carry valid
+padding — the theoretical rate for any correct implementation. The module is
+behaving as specified. The exposure is in the protocol.
+
+> **Use `CKM_AES_GCM` or `CKM_AES_KEY_WRAP` wherever an attacker can submit
+> ciphertexts of their choosing and observe whether decryption succeeded.**
+> `CKM_AES_CBC_PAD` is appropriate for data you decrypt for yourself — a
+> file at rest, a backup — where no adversary drives the decryption.
+
+**`CKM_AES_CBC` and `CKM_AES_CTR` provide no integrity at all.** No oracle,
+because there is no padding to check, but also no detection of tampering: a
+flipped ciphertext bit becomes a flipped plaintext bit under CTR, silently.
+Pair them with `CKM_SHA256_HMAC` over the ciphertext (encrypt-then-MAC,
+RFC 7366) or use `CKM_AES_GCM`, which does both in one pass.
+
+See R2 in `docs/PKCS11_CHECK_FINDINGS.md` for the measurement, and
+`tests/test_cbc_pad_oracle.c` for the regression guard.
 
 ## 4. Security advice (operator-actionable)
 

@@ -46,6 +46,27 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
   Reported upstream (`issue_pkcs11check_padding_oracle_flaky.md`).
 
+### Documentation
+* **`CKM_AES_CBC_PAD` was advertised with no caveat at all.** R2 has said since
+  July that the oracle is "worth saying in user-facing documentation rather than
+  only here". It never was: `docs/MECHANISMS.md` and the README listed the
+  mechanism plainly, and `docs/AGD_OPE.md` recommended it by omission — its
+  mechanism-selection table said "approved set" and stopped there.
+
+  The generator already had a `notes` field for exactly this, populated for
+  `CKM_RSA_PKCS` ("padding-oracle risk") and empty for CBC-PAD. It is filled in
+  now, so the note travels with the generated table instead of having to be
+  remembered. `docs/AGD_OPE.md` (and `.fr`) gain §3.1, which states the caveat,
+  says plainly that the module is behaving correctly and the exposure is in the
+  protocol, and gives the condition that decides it: use GCM or KEY_WRAP
+  wherever an attacker can submit chosen ciphertexts and observe whether
+  decryption succeeded.
+
+  The same section covers `CKM_AES_CBC` and `CKM_AES_CTR`, which have no oracle
+  but no integrity either — a flipped ciphertext bit is a flipped plaintext bit
+  under CTR, silently. Approval is about the algorithm; these caveats are about
+  the protocol built with it, and the approved list cannot express them.
+
 * **#109 — the TPM sealing backend wrote the DEK to disk in the clear, and a
   broken TPM locked the token permanently.** Three defects, all in code that
   had never been exercised because CI has no TPM.
