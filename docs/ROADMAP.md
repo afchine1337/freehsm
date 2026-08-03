@@ -63,8 +63,8 @@ domains — content is already rebranded), and two small threads (#126, #116).
 |---|---|---|---|
 | #107 | Session keys (`CKA_TOKEN=FALSE`) vs token keys | ~4h | ✅ session-object lifecycle implemented during #125 |
 | #109 | TPM 2.0 sealing backend (machine-bound vault) | ~8h | ✅ three defects fixed (DEK on disk, `getpid()` filename collisions, lockout DoS), `tests/test_tpm` + `tests/tpm2-stub.sh`, operator guidance in AGD_OPE. **Never validated against real hardware — see below** |
-| #127 | Private-key values in the secure heap, not plain `malloc` | ~6h | ⏳ **swap-exposure gap** — see note below |
-| #128 | **The shipped `freehsm.conf` is inert — and fails permissive** | ~4h | ⏳ **do before #127** — see note |
+| #127 | Private-key values in the secure heap, not plain `malloc` | ~6h | ✅ v1.6.0 — arena 8 MiB, exhaustion is a hard `CKR_DEVICE_MEMORY`, `tests/test_secure_heap` |
+| #128 | The shipped `freehsm.conf` was read by nothing | ~4h | ✅ v1.6.0 — real parser (`src/fhsm_conf.c`), two live keys, `tests/test_conf`; the install path bug (`$(PREFIX)/etc` vs `/etc/freehsm`) fixed after. **It did not "fail permissive"** — that claim was wrong and is retracted in the note below |
 
 ### #109 — what is fixed, and what is still untested (2026-08-03)
 
@@ -150,7 +150,7 @@ operator raises `secure_heap_kb`, which is a configuration error with a clear
 message, not a silent downgrade. Note that #128 must land first: the knob that would configure
 this (`secure_heap_kb`) is advertised in the shipped config and read by nothing.
 
-### #128 — the shipped config file is inert, and its failure direction is permissive (noted 2026-07-24)
+### #128 — the shipped config file is inert (noted 2026-07-24, heading corrected 2026-08-03)
 
 `make install` writes `/etc/freehsm/freehsm.conf` containing nine keys:
 
@@ -243,7 +243,7 @@ fips-strict.
 | # | Task | When | Notes |
 |---|---|---|---|
 | #106 | Exhaustive CC ATE_FUN test book | v2.0 stable +6mo | Worth doing for its own sake: a functional test book to CC ATE_FUN structure is both a real assurance gain and a teaching artefact. **Not for a submission** — there will not be one. |
-| #111-prep | **Thread-safety of the PKCS#11 layer (blocks #111)** | ~10h | ⏳ **hard prerequisite** — see note |
+| #111-prep | Thread-safety of the PKCS#11 layer (blocks #111) | ~10h | 🟡 v1.6.0 — the two lazy-init races fixed, `make TSAN=1` + `tests/test_concurrency` in tree. Points 2–5 of the note (session binding, per-identity throttle, audit actor) are REST-layer work and stay with #111 |
 | #111 | Network HSM via REST API | v2.5+ | The big architectural leap — wait for MVP validation **and #111-prep** |
 
 ### #111-prep — the network boundary stresses things the single-process model hides (noted 2026-07-21)
