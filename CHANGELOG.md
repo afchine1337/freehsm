@@ -8,6 +8,44 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Security
+* **R2 — the CBC-PAD padding oracle never went away; the harness test is a coin
+  flip.** `pkcs11-check`'s `test_cbc_pad_all_last_block_positions` reported the
+  Vaudenay channel during the #125 campaign and then stopped reporting it on a
+  build that had not touched that path. `PKCS11_CHECK_FINDINGS.md` carried an
+  instruction not to drop the finding on the strength of one green run. It was
+  right to.
+
+  The test corrupts one byte of the last ciphertext block, which randomises the
+  whole final plaintext block, and asks whether the module ever returns
+  `CKR_OK`. A uniformly random 16-byte block carries valid PKCS#7 padding with
+  probability `sum_{n=1..16} 256^-n = 1/255`, so over its 320 probes it finds
+  nothing about 28% of the time. Its docstring claims 0.05% — the figure you get
+  from assuming 6/256 per probe, six times the true rate.
+
+  Measured against the module over 105 600 corruption probes: 433
+  accidentally-valid paddings, a rate of one in 244, 95% CI [one in 271, one in
+  222], which contains the theoretical 1/255. Nothing changed; one run in three
+  or four simply misses.
+
+  The finding stands and the position is unchanged — the oracle is inherent to
+  CBC-PAD without authentication and the remedy is at the application layer. But
+  the same numbers show the implementation is correct: 99.6% of corruptions are
+  refused with the one code the spec defines, no corrupted ciphertext ever
+  decrypted back to the original plaintext, and the residual matches theory. Had
+  padding validation been missing the rate would sit near 100%, which is the
+  worse finding — unchecked malleability rather than a one-bit leak.
+
+  `tests/test_cbc_pad_oracle` now guards exactly that distinction, asserting a
+  band rather than an absence, sized so it cannot itself become the coin flip
+  this whole entry is about.
+
+  Timing, while we were there: `test_aes_cbc_pad_decrypt_timing_sanity` had once
+  reported a 22.5x valid/invalid ratio. Measured over 48 000 decryptions, 986 ns
+  against 1014 ns — 1.03x. That rules out a 22x difference; at one microsecond
+  per operation it does not rule out a few percent.
+
+  Reported upstream (`issue_pkcs11check_padding_oracle_flaky.md`).
+
 * **#109 — the TPM sealing backend wrote the DEK to disk in the clear, and a
   broken TPM locked the token permanently.** Three defects, all in code that
   had never been exercised because CI has no TPM.

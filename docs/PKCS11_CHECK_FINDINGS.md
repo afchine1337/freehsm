@@ -445,6 +445,14 @@ finding that appears in some runs and not others has to be treated as present
 until something explains its absence. Do not quietly drop R2 from this list on
 the strength of one green run.
 
+**Explained 2026-08-03 — the test is a coin flip, and R2 never went away.**
+See the measurement under R2 below. The short version: that test detects the
+oracle with probability 1/255 per probe, runs 320 probes, and therefore finds
+nothing about 28% of the time. Its docstring claims 0.05%, a figure that only
+follows if the per-probe rate were 6/256 — six times the true value. The module
+never changed; one run in three or four simply misses. Measured over 105 600
+probes here, with `tests/test_cbc_pad_oracle` added as our own guard.
+
 Also fixed in the same window, and worth noting because it was not on any list:
 `C_Sign`, `C_Verify`, `C_Digest` and their three `*Update` variants had no
 upper bound on the input length, while `C_Encrypt` and `C_Decrypt` had carried
@@ -491,6 +499,59 @@ garbage plaintext on corruption, which is worse for every honest caller.
 **What would move it:** nothing, short of removing `CKM_AES_CBC_PAD`. Callers
 who need integrity want `CKM_AES_GCM` or `CKM_AES_KEY_WRAP`. This is worth
 saying in user-facing documentation rather than only here.
+
+### Why it stopped reproducing — measured 2026-08-03
+
+The harness corrupts one byte of the *last* ciphertext block, which randomises
+the entire final plaintext block, then asks whether the module ever returns
+`CKR_OK`. A uniformly random 16-byte block carries valid PKCS#7 padding with
+probability
+
+    sum_{n=1..16} 256^-n  =  1/255  ~=  0.392%
+
+so over its 320 probes, P(not one lands on valid padding) = (1 - 1/255)^320
+~= **28%**. The test misses roughly one run in three or four. Its docstring
+asserts 0.05%, which is what you get from assuming 6/256 per probe — six times
+too high. Nothing about the module changed between the two runs.
+
+Measured directly against the module (`tests/test_cbc_pad_oracle.c`,
+three independent runs, 105 600 corruption probes):
+
+| | |
+|---|---|
+| accidentally-valid paddings | 433 |
+| probes | 105 600 |
+| rate | 0.0041 — one in 244 |
+| 95% CI | one in 271 … one in 222 — contains the theoretical 1/255 |
+| `CKR_OK` with plaintext matching the original | 0 |
+| rejections that were not `CKR_ENCRYPTED_DATA_INVALID` | 0 |
+| P(a 320-probe harness run finds nothing) | 28–31% |
+
+Two things follow, and they point in opposite directions.
+
+The finding is confirmed, not dismissed: the oracle is present, always was, and
+the position above is unchanged — it is inherent to CBC-PAD without
+authentication and the remedy is at the application layer.
+
+But the same numbers say the implementation is behaving correctly. 99.6% of
+corrupted ciphertexts are refused with the single code the spec defines, the
+residual matches theory to within sampling error, and no corrupted ciphertext
+ever decrypted back to the original plaintext. Had padding validation been
+missing, the rate would have been near 100%, which is the *worse* finding —
+unchecked malleability rather than a one-bit leak. That distinction is why
+`tests/test_cbc_pad_oracle` asserts a band rather than an absence.
+
+**Timing.** `test_aes_cbc_pad_decrypt_timing_sanity` had once reported a 22.5x
+valid/invalid ratio. Measured here over 48 000 decryptions: 986 ns for a valid
+padding against 1014 ns for an invalid one, a ratio of **1.03x**. No timing
+channel is detectable at this resolution — which is a statement about the
+resolution as much as about the module: `clock_gettime` overhead is tens of
+nanoseconds against a one-microsecond operation, single-threaded, with no
+control for cache state. It rules out a 22x difference. It does not rule out a
+few percent.
+
+**Reported upstream** — a `CRITICAL`-severity test that passes silently 30% of
+the time is worth more to Denis than it is to us.
 
 ## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
 
