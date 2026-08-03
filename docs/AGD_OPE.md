@@ -266,6 +266,49 @@ For FIPS 140-3 evaluation runs the operator MUST set `FHSM_MODE=fips` (or write 
 | `FHSM_TPM_SEALING=1` | At token init, the DEK is sealed to the host TPM 2.0 (PCRs 0-7). A companion `{slot}.tok.tpm` file is written next to the token. At login, the PBKDF2-unwrapped DEK is compared to the TPM-unsealed DEK. A mismatch, or an unseal that fails, refuses the login with `CKR_DEVICE_ERROR` — **read the note below before enabling this**. |
 | `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` | **DEV-ONLY** : bypasses every integrity-failure path (see §8 below) — this variable IS FORBIDDEN in production. |
 
+#### Before enabling: the module's process needs TPM access
+
+`FHSM_TPM_SEALING=1` makes the module shell out to `tpm2`, which opens
+`/dev/tpmrm0`. On Debian and Ubuntu that node is `crw-rw---- root tss`, so the
+account running the PKCS#11 application must be in the `tss` group:
+
+```
+id -Gn | tr ' ' '\n' | grep -qx tss || sudo usermod -aG tss "$(id -un)"
+```
+
+Group membership is established at login, so an existing session will not pick
+it up; `newgrp tss` gives the current shell the new group without logging out.
+
+Do not work around this by running the application as root. The token files
+would be created root-owned and the service would then need root for every
+subsequent operation, which is a larger concession than the one being avoided.
+
+Without the group, every TPM call fails with a TCTI permission error and the
+module reports `CKR_DEVICE_ERROR` with `tpm-unseal-failed` in the audit log --
+the same signal as moved PCRs, so check the group before suspecting the PCRs.
+
+#### Before enabling: the TPM must have a persistent primary key
+
+Sealing binds to a persistent primary key at handle `0x81010001`. **The module
+does not create it**, and if it is missing every seal fails. Nothing said so
+until the sealing path was first exercised against real hardware; this is that
+omission being corrected.
+
+```
+tpm2 readpublic -c 0x81010001            # present?  if not:
+tpm2 createprimary -C o -g sha256 -G ecc -c /tmp/primary.ctx
+tpm2 evictcontrol  -C o -c /tmp/primary.ctx 0x81010001
+```
+
+The handle is compile-time (`TPM_PARENT_HANDLE` in `src/fhsm_tpm.c`). An
+operator whose TPM already uses `0x81010001` for something else currently has no
+way to say so — that belongs in `freehsm.conf` and is not there yet.
+
+`scripts/validate_tpm_sealing.sh` checks for the handle and offers to provision
+it, and exercises the whole sealing lifecycle against a real TPM including the
+PCR-change scenario below. Run it before trusting `FHSM_TPM_SEALING` with
+anything.
+
 #### What a PCR change means for you (#109)
 
 Sealing binds the DEK to PCRs 0 through 7. Those registers measure firmware and

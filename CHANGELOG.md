@@ -8,6 +8,34 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Testing
+* **#109 validated against a real TPM 2.0.** Until today the sealing backend had
+  only ever run against `tests/tpm2-stub.sh`, which performs no cryptography;
+  the ROADMAP said in as many words that a green `test_tpm` was not evidence
+  that TPM sealing works. `scripts/validate_tpm_sealing.sh` closes that gap:
+  nine phases against a real TPM, all passed.
+
+  The sealed companion is a genuine 252-byte `TPM2B_PUBLIC`/`TPM2B_PRIVATE`
+  pair. `/var/lib/freehsm/tpm` does not exist after sealing, confirming on real
+  hardware that the DEK no longer reaches a filesystem. Eight logins with the
+  **correct** PIN against a TPM whose PCRs had moved returned `CKR_DEVICE_ERROR`
+  every time; after a reboot restored the PCRs the token reopened with
+  `CKR_OK`, and a wrong PIN still returned `CKR_PIN_INCORRECT`. Under the old
+  code the fifth of those eight attempts would have hit `FHSM_PIN_MAX_FAILED`
+  and killed the token, for a PCR extension.
+
+  Running it for real surfaced two operator-facing gaps that no amount of
+  stub-testing would have: the persistent primary key at `0x81010001` must exist
+  and the module does not create it, and the process must be in the `tss` group
+  to open `/dev/tpmrm0`. Both are now documented in `docs/AGD_OPE.md` and its
+  French version, and the script checks and offers to fix the first.
+
+* **`.gitignore` for `tests/` is shape-based now, on the third attempt.** The
+  two before it enumerated prefixes — `tests/test_*`, then `tests/bench_*` — and
+  each stopped covering the next binary added: `bench_capacity` went in as a
+  1.7 MB blob, and `tpm_hw_probe` was about to. A list of names cannot cover a
+  file that does not exist yet. The invariant that holds is that every source in
+  `tests/` has an extension and every compiled binary has none.
+
 * **Harness re-measured against pkcs11-check v0.1.8: 4 failed, 1697 passed,
   0 crashed — the same count as v0.1.6 and none of the same reasons.** R4 and R5,
   the two RSA harness gaps, are fixed upstream. R2 is no longer a failure at all,

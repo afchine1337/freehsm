@@ -62,42 +62,61 @@ domains — content is already rebranded), and two small threads (#126, #116).
 | # | Task | Effort | Status |
 |---|---|---|---|
 | #107 | Session keys (`CKA_TOKEN=FALSE`) vs token keys | ~4h | ✅ session-object lifecycle implemented during #125 |
-| #109 | TPM 2.0 sealing backend (machine-bound vault) | ~8h | ✅ three defects fixed (DEK on disk, `getpid()` filename collisions, lockout DoS), `tests/test_tpm` + `tests/tpm2-stub.sh`, operator guidance in AGD_OPE. **Never validated against real hardware — see below** |
+| #109 | TPM 2.0 sealing backend (machine-bound vault) | ~8h | ✅ three defects fixed, and **validated end-to-end against a real TPM 2.0** on 2026-08-03 — `scripts/validate_tpm_sealing.sh`, 9/9 phases including the PCR-change and reboot cycle. See below |
 | #127 | Private-key values in the secure heap, not plain `malloc` | ~6h | ✅ v1.6.0 — arena 8 MiB, exhaustion is a hard `CKR_DEVICE_MEMORY`, `tests/test_secure_heap` |
 | #128 | The shipped `freehsm.conf` was read by nothing | ~4h | ✅ v1.6.0 — real parser (`src/fhsm_conf.c`), two live keys, `tests/test_conf`; the install path bug (`$(PREFIX)/etc` vs `/etc/freehsm`) fixed after. **It did not "fail permissive"** — that claim was wrong and is retracted in the note below |
 
-### #109 — what is fixed, and what is still untested (2026-08-03)
+### #109 — validated against a real TPM 2.0 (2026-08-03)
 
-The three defects are fixed and covered by regression tests that were checked
-against the old code and fail on it. The honest caveat is what those tests run
-against.
+The three defects are fixed, covered by regression tests that were checked
+against the old code and fail on it, and the whole sealing lifecycle has now
+been exercised against a real TPM 2.0 — a software-emulated one in a VM, which
+is adequate here and in one respect better than discrete hardware: the
+PCR-change scenario needs PCRs 0-7 to move and then return, which in a VM is an
+extend plus a reboot rather than a firmware update on a machine you depend on.
+What an emulated TPM cannot speak to is the hardware root of trust, which is not
+what #109 is about.
 
-There is no TPM in this sandbox and none in CI, so `tests/test_tpm` drives the
-module through a compile-time seam at `tests/tpm2-stub.sh`, a shell script
-standing in for the `tpm2` CLI. It performs no cryptography. It proves the code
-on our side of the subprocess boundary — which paths we hand over, whether the
-blob packs and unpacks, what happens when a subcommand fails, that eight
-threads do not collide, that a failed unseal does not consume a PIN attempt.
+`scripts/validate_tpm_sealing.sh`, nine phases, all passed:
 
-It proves nothing about PCR binding, the sealing crypto, or tamper detection,
-because those live inside a TPM and there is no TPM behind the stub. **A green
-`test_tpm` is not evidence that TPM sealing works.** Before anyone relies on
-`FHSM_TPM_SEALING` in production, the same scenarios need running against real
-hardware, including a deliberate PCR change to confirm the failure is the
-`CKR_DEVICE_ERROR` the docs promise. That validation has not happened and I do
-not have the hardware to do it here.
+| | |
+|---|---|
+| sealed companion written | 252 bytes — a real `TPM2B_PUBLIC` + `TPM2B_PRIVATE` |
+| `/var/lib/freehsm/tpm` after sealing | **does not exist** — the DEK never reached a filesystem (#109.1) |
+| login, healthy TPM | `CKR_OK`, unseal and constant-time DEK compare both real |
+| PCR 7 extended, 8 logins with the **correct** PIN | `CKR_DEVICE_ERROR` ×8 (#109.3) |
+| after reboot, correct PIN | `CKR_OK` — **the token reopens, no lockout** |
+| after reboot, wrong PIN | `CKR_PIN_INCORRECT` — the counter still works |
 
-Two smaller things left standing, deliberately:
+The lockout row is the one that matters. `FHSM_PIN_MAX_FAILED` is 5: under the
+old code the fifth of those eight attempts would have returned `CKR_PIN_LOCKED`
+and the token would have been dead, killed by a PCR extension — the moral
+equivalent of a BIOS update nobody would have connected to their HSM. The
+exponential throttle would have made it unusable well before the fifth.
 
-* The module still shells out to the `tpm2` CLI rather than linking libtss2.
-  The reasons in the file header still hold (the tss2 API has broken across
-  versions; tpm2-tools is a stable, packaged CLI) and ~50 ms per operation is
-  noise next to 200 000 PBKDF2 iterations. Worth revisiting only if the CLI
-  dependency becomes a packaging problem.
-* `TPM_PARENT_HANDLE` is hard-coded to `0x81010001`. That is the conventional
-  persistent primary handle, but an operator whose TPM uses a different one has
-  no way to say so. It should join `secure_heap_kb` and `mode` in
-  `freehsm.conf` — small, and not done.
+Two operator-facing gaps surfaced only because this was run for real, and both
+are now in `docs/AGD_OPE.md`:
+
+* **The persistent primary key at `0x81010001` must exist and the module does
+  not create it.** The test TPM had no persistent handles at all, so every seal
+  would have failed. Nothing in the documentation said to provision it.
+* **The process running the module must be in the `tss` group.** `/dev/tpmrm0`
+  is `crw-rw---- root tss` on Debian; without membership every TPM call fails
+  with a TCTI permission error, which surfaces as `CKR_DEVICE_ERROR` with
+  `tpm-unseal-failed` — the same signal as moved PCRs. Check the group before
+  suspecting the PCRs.
+
+`tests/test_tpm` and `tests/tpm2-stub.sh` remain what they were and are still
+worth having: CI has no TPM, and the stub keeps the plumbing, the blob packing,
+the thread-collision guard and the lockout policy under test on every commit. It
+still proves nothing about PCR binding or the sealing crypto. That part is now
+covered by the script above, run by hand, and the ROADMAP no longer claims
+otherwise.
+
+One thing left standing, deliberately: `TPM_PARENT_HANDLE` is hard-coded to
+`0x81010001`. An operator whose TPM already uses that handle has no way to say
+so. It belongs in `freehsm.conf` next to `secure_heap_kb` and `mode`, and is not
+there yet.
 
 ### #127 — secure storage of decrypted private-key material (noted 2026-07-21)
 

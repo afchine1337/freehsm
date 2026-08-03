@@ -308,6 +308,12 @@ tests/test_conf: tests/test_conf.c $(LIB_OBJ)
 tests/test_cbc_pad_oracle: tests/test_cbc_pad_oracle.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Single-action driver for the real-TPM validation (#109). NOT part of `make
+# tests`: it needs a TPM, a provisioned parent handle, and a reboot between
+# phases -- see scripts/validate_tpm_sealing.sh.
+tests/tpm_hw_probe: tests/tpm_hw_probe.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
 # TPM 2.0 sealing (#109). fhsm_tpm.c is recompiled here with
 # -DFHSM_TPM_TEST_HOOKS, which is what lets FHSM_TPM_DEVICE / FHSM_TPM_CMD
 # redirect the module at tests/tpm2-stub.sh. That macro is set by this rule

@@ -19,16 +19,23 @@
 # Compiled test and benchmark binaries. Shape-based: a rule that lists names
 # stops covering the next file someone adds. tests/bench_capacity was committed
 # as a 1.7 MB binary because the earlier rule only matched tests/test_*.
-tests/bench_*
-!tests/bench_*.c
-tests/test_*
-!tests/test_*.c
-!tests/test_*.h
-!tests/test_*.sh
-!tests/test_*.py
-tests/mlkem_e2e
-tests/mldsa_e2e
-tests/slhdsa_e2e
+# Shape-based, third attempt. The two before it enumerated prefixes --
+# tests/test_*, then tests/bench_* -- and each stopped covering the next binary
+# someone added: tests/bench_capacity went in as a 1.7 MB blob because the rule
+# only knew about test_*, and tests/tpm_hw_probe went in because the rule only
+# knew about test_* and bench_*. A list of names cannot cover a file that does
+# not exist yet.
+#
+# The invariant that actually holds: every source in tests/ has an extension
+# (.c .h .sh .py .json ...), and every compiled binary has none. So ignore
+# everything in tests/ and re-admit anything with a dot. The one tracked
+# extensionless file, tests/wycheproof/VECTORS_SHA, is re-admitted by name --
+# and subdirectories must be re-admitted explicitly or their contents are
+# unreachable.
+tests/*
+!tests/*.*
+!tests/*/
+!tests/wycheproof/VECTORS_SHA
 tests/fuzz/
 fuzz/fuzz_*
 !fuzz/fuzz_*.c

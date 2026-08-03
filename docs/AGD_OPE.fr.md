@@ -246,6 +246,52 @@ Pour une éval FIPS 140-3, l'opérateur DOIT poser `FHSM_MODE=fips` AVANT tout `
 | `FHSM_TPM_SEALING=1` | À l'init du token, DEK scellée au TPM 2.0 (PCR 0-7). Fichier compagnon `{slot}.tok.tpm`. Au login : PBKDF2-unwrap + TPM-unseal doivent matcher. Un écart, ou un unseal en échec, refuse le login avec `CKR_DEVICE_ERROR` — **lire la note ci-dessous avant d'activer**. |
 | `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` | **DEV-ONLY** : bypass de la vérif d'intégrité — INTERDIT en production. |
 
+#### Avant d'activer : le processus du module doit accéder au TPM
+
+`FHSM_TPM_SEALING=1` fait appeler `tpm2` par le module, qui ouvre
+`/dev/tpmrm0`. Sur Debian et Ubuntu ce nœud est `crw-rw---- root tss` : le
+compte qui exécute l'application PKCS#11 doit donc appartenir au groupe `tss` :
+
+```
+id -Gn | tr ' ' '\n' | grep -qx tss || sudo usermod -aG tss "$(id -un)"
+```
+
+L'appartenance aux groupes est fixée à l'ouverture de session : une session déjà
+ouverte ne la verra pas. `newgrp tss` donne le groupe au shell courant sans
+déconnexion.
+
+Ne pas contourner en lançant l'application en root. Les fichiers de token
+seraient créés au nom de root et le service aurait ensuite besoin de root pour
+chaque opération — une concession plus grande que celle qu'on évite.
+
+Sans le groupe, tout appel TPM échoue sur une erreur de permission TCTI et le
+module renvoie `CKR_DEVICE_ERROR` avec `tpm-unseal-failed` dans le journal
+d'audit — le même signal que des PCR déplacés. Vérifier le groupe avant de
+soupçonner les PCR.
+
+#### Avant d'activer : le TPM doit avoir une cle primaire persistante
+
+Le scellement s'appuie sur une cle primaire persistante au handle `0x81010001`.
+**Le module ne la cree pas**, et si elle manque, tout scellement echoue. Rien ne
+le disait jusqu'a ce que le chemin de scellement soit exerce pour la premiere
+fois sur du vrai materiel ; c'est cet oubli qu'on corrige ici.
+
+```
+tpm2 readpublic -c 0x81010001            # presente ? sinon :
+tpm2 createprimary -C o -g sha256 -G ecc -c /tmp/primary.ctx
+tpm2 evictcontrol  -C o -c /tmp/primary.ctx 0x81010001
+```
+
+Le handle est fixe a la compilation (`TPM_PARENT_HANDLE` dans `src/fhsm_tpm.c`).
+Un operateur dont le TPM utilise deja `0x81010001` pour autre chose n'a aucun
+moyen de le signaler — cela a sa place dans `freehsm.conf`, ou ca n'est pas
+encore.
+
+`scripts/validate_tpm_sealing.sh` verifie la presence du handle, propose de le
+provisionner, et exerce tout le cycle de scellement sur un TPM reel, y compris
+le scenario de changement de PCR decrit ci-dessous. A lancer avant de confier
+quoi que ce soit a `FHSM_TPM_SEALING`.
+
 #### Ce qu'un changement de PCR implique pour vous (#109)
 
 Le scellement lie la DEK aux PCR 0 à 7, qui mesurent le firmware et le début du
