@@ -44,7 +44,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
   against 1014 ns — 1.03x. That rules out a 22x difference; at one microsecond
   per operation it does not rule out a few percent.
 
-  Reported upstream (`issue_pkcs11check_padding_oracle_flaky.md`).
+  Not reported upstream: Denis had already found and fixed it on 2026-07-30
+  (`ad93ff9`, released in v0.1.8), four days before we wrote the report. Our
+  checkout was at v0.1.6 and we read it as current. He reached the same 1/256
+  and the same ~29%, with a provider pool behind him rather than one module, and
+  went further — `classify_padding_outcomes` now returns `inherent_channel` for
+  the valid-and-invalid mix, which is not a failure, since it is what every
+  conforming implementation does. **R2 is therefore no longer an open failure
+  against us**; his classification and our position agree. The draft report is
+  withdrawn.
 
 ### Documentation
 * **`CKM_AES_CBC_PAD` was advertised with no caveat at all.** R2 has said since

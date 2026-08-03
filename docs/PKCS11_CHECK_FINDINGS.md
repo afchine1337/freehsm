@@ -431,6 +431,10 @@ be able to disagree with a decision, not discover an oversight.
 
 ## Update 2026-08-01 — 4 failures, and two that stopped reproducing
 
+> **Stale as of 2026-08-03.** These counts are against harness v0.1.6. v0.1.8
+> reclassifies the CBC-PAD channel as not-a-failure (see R2) and adds a
+> substantial number of tests. The numbers below have not been re-measured.
+
 A later run on the v1.6.0 candidate reports **4 failed, 1689 passed, 0 crashed**:
 R1 (Tookan), R3 (GcmIvReuse), R4 and R5 (the two RSA harness gaps). R2 — the
 CBC-PAD padding oracle — did not reproduce, and neither did
@@ -550,8 +554,45 @@ nanoseconds against a one-microsecond operation, single-threaded, with no
 control for cache state. It rules out a 22x difference. It does not rule out a
 few percent.
 
-**Reported upstream** — a `CRITICAL`-severity test that passes silently 30% of
-the time is worth more to Denis than it is to us.
+### Not reported upstream — Denis had already fixed it (2026-08-03)
+
+We drafted a report and did not send it. Checking his repository first would have
+saved the trouble: `ad93ff9 fix(security): sound measurement in the
+padding-oracle suite`, dated **2026-07-30** and released in **v0.1.8**, four days
+before we wrote ours. Our local checkout was at v0.1.6 and we read it as current.
+
+He reached the same conclusion, in his own words:
+
+> about 1/256 per probe, not the 6/256 originally assumed. Over 320 probes
+> P(no such probe) = (1 - 1/256)\*\*320 ~= 29%
+
+and went further than we did. Where we had one module, he had a provider pool
+and the evidence to match: three rounds recording fail counts 10 → 17 → 14,
+flipping in both directions on the same provider across five commits. He then did
+the thing we had not thought to propose — reclassified the outcome rather than
+just widening the sample. `classify_padding_outcomes` now returns
+`inherent_channel` for the valid-and-invalid mix, which is **not a failure**,
+because it is what every conforming CBC-PAD implementation does; the CRITICAL
+compliance note is still recorded so the channel is reported. Only
+`unchecked_malleability` — the module that validates nothing — remains a fail.
+
+**So R2 is no longer an open failure against us.** Our position and his
+classification now say the same thing, arrived at independently. That is a better
+outcome than a report would have been.
+
+What survives from our side, and is worth keeping: the 105 600-probe measurement
+of *our* module's behaviour, and `tests/test_cbc_pad_oracle.c`. Neither depends
+on the harness. The one residue upstream is cosmetic — the docstring of
+`test_cbc_pad_all_last_block_positions` still carries the old
+"~6/256 ≈ 2.3% … about 0.05%. Effectively-deterministic detection" text, which
+the corrected `classify_padding_outcomes` sitting above it now contradicts. A
+file that contradicts itself, which is precisely what we fixed in this repo the
+same week (#128's heading). Worth a three-line PR, not a report.
+
+**The lesson is ours to keep.** Three times in one day a conclusion was drawn
+from a stale copy — a sandbox working tree, stale remote-tracking refs, and this
+checkout. The first two cost nothing. This one was addressed to a person. Refresh
+before reading, and check the upstream fix before writing the upstream report.
 
 ## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
 
