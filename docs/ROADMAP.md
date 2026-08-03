@@ -255,7 +255,7 @@ fips-strict.
 | # | Task | Cadence | Status |
 |---|---|---|---|
 | #116 | PQC watch (NIST + ANSSI + IETF + industry) → `docs/PQC_VEILLE.md` | quarterly ~1h | ♻ doc created 2026-07-24 (first entry: Wycheproof SLH-DSA absent, ML-DSA present) |
-| #126 | PR to Denis's pkcs11-check README mentioning FreeHSM | after #125 | ⏳ **actionable now** (#125 done) — relationship + SEO backlink |
+| #126 | PR to Denis's pkcs11-check README mentioning FreeHSM | after #125 | ✅ **already done, by him** — FreeHSM has been in `docs/providers.md` since `91f6853`. He also vendor-neutralized the README, so the task as written no longer applies. What remains is a courtesy PR: our repo was renamed `freehsm-c` → `freehsm` (`pr_pkcs11check_freehsm_url.md`) |
 
 ## Deferred — post-v2.0 stable
 
