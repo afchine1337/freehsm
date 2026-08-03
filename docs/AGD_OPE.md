@@ -229,8 +229,50 @@ For FIPS 140-3 evaluation runs the operator MUST set `FHSM_MODE=fips` (or write 
 
 | Variable | Effect |
 |---|---|
-| `FHSM_TPM_SEALING=1` | At token init, the DEK is sealed to the host TPM 2.0 (PCRs 0-7). A companion `{slot}.tok.tpm` file is written next to the token. At login, the PBKDF2-unwrapped DEK is compared to the TPM-unsealed DEK ; mismatch is silently returned as wrong PIN. |
+| `FHSM_TPM_SEALING=1` | At token init, the DEK is sealed to the host TPM 2.0 (PCRs 0-7). A companion `{slot}.tok.tpm` file is written next to the token. At login, the PBKDF2-unwrapped DEK is compared to the TPM-unsealed DEK. A mismatch, or an unseal that fails, refuses the login with `CKR_DEVICE_ERROR` — **read the note below before enabling this**. |
 | `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` | **DEV-ONLY** : bypasses every integrity-failure path (see §8 below) — this variable IS FORBIDDEN in production. |
+
+#### What a PCR change means for you (#109)
+
+Sealing binds the DEK to PCRs 0 through 7. Those registers measure firmware and
+early boot: a BIOS/UEFI update, a Secure Boot key rotation, a bootloader or
+kernel change will move at least one of them. When that happens the TPM refuses
+to release the sealed DEK, and **every login on that token fails until you act**,
+even with the correct PIN.
+
+This is the intended behaviour of measured boot, not a fault. What you get back
+is `CKR_DEVICE_ERROR`, deliberately distinct from `CKR_PIN_INCORRECT`:
+
+| Return | Meaning | What to do |
+|---|---|---|
+| `CKR_PIN_INCORRECT` / `CKR_PIN_LOCKED` | The PIN was wrong. | Normal PIN handling. |
+| `CKR_DEVICE_ERROR` | The PIN was right; the TPM side failed. | See below. |
+
+Three causes produce `CKR_DEVICE_ERROR`, and the audit log distinguishes them:
+
+* `tpm-unseal-failed` — the TPM could not release the key. Almost always moved
+  PCRs after a firmware or kernel update; also seen when the TPM is absent or
+  the resource manager is not running.
+* `tpm-dek-mismatch` — the TPM released a key, but it is not the key the token
+  store holds. The two are supposed to be the same. **Treat this as a possible
+  substituted token file or sealed blob and investigate before proceeding.**
+* `tpm-required-but-missing` — `FHSM_TPM_SEALING=1` but this token has no
+  `.tpm` companion. It was created without sealing.
+
+**Recovery from a firmware update.** The DEK is still recoverable from the token
+file with the PIN — sealing is a second factor, not the only copy. Take a backup
+of `{slot}.tok` and `{slot}.tok.tpm`, then either roll the firmware change back
+so the PCRs return to their sealed values, or re-seal the token under the new
+measurements. Losing the `.tpm` file alone does not lose the token; losing the
+token file does.
+
+**A failed unseal does not consume a PIN attempt.** Before v1.7.0 it did, and
+the throttle escalated with it, so a routine firmware update locked the token
+permanently for an operator who had done nothing wrong. That was a denial of
+service and it is fixed. A genuinely wrong PIN still counts, throttles and
+locks exactly as documented in §5.
+
+**Take a backup before enabling `FHSM_TPM_SEALING` on a token that matters.**
 
 ### Hardened DRBG
 

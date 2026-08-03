@@ -206,8 +206,52 @@ Pour une éval FIPS 140-3, l'opérateur DOIT poser `FHSM_MODE=fips` AVANT tout `
 
 | Variable | Effet |
 |---|---|
-| `FHSM_TPM_SEALING=1` | À l'init du token, DEK scellée au TPM 2.0 (PCR 0-7). Fichier compagnon `{slot}.tok.tpm`. Au login : PBKDF2-unwrap + TPM-unseal doivent matcher (mismatch silencieux = PIN incorrect). |
+| `FHSM_TPM_SEALING=1` | À l'init du token, DEK scellée au TPM 2.0 (PCR 0-7). Fichier compagnon `{slot}.tok.tpm`. Au login : PBKDF2-unwrap + TPM-unseal doivent matcher. Un écart, ou un unseal en échec, refuse le login avec `CKR_DEVICE_ERROR` — **lire la note ci-dessous avant d'activer**. |
 | `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` | **DEV-ONLY** : bypass de la vérif d'intégrité — INTERDIT en production. |
+
+#### Ce qu'un changement de PCR implique pour vous (#109)
+
+Le scellement lie la DEK aux PCR 0 à 7, qui mesurent le firmware et le début du
+boot. Une mise à jour BIOS/UEFI, une rotation de clés Secure Boot, un changement
+de bootloader ou de noyau en déplace au moins un. Le TPM refuse alors de rendre
+la DEK scellée, et **tous les logins sur ce token échouent tant que vous n'agissez
+pas**, même avec le bon PIN.
+
+C'est le comportement attendu du boot mesuré, pas une panne. Le code retourné est
+`CKR_DEVICE_ERROR`, volontairement distinct de `CKR_PIN_INCORRECT` :
+
+| Retour | Signification | Que faire |
+|---|---|---|
+| `CKR_PIN_INCORRECT` / `CKR_PIN_LOCKED` | Le PIN était faux. | Gestion normale du PIN. |
+| `CKR_DEVICE_ERROR` | Le PIN était bon ; c'est le côté TPM qui a échoué. | Voir ci-dessous. |
+
+Trois causes produisent `CKR_DEVICE_ERROR`, que le journal d'audit distingue :
+
+* `tpm-unseal-failed` — le TPM n'a pas pu libérer la clé. Presque toujours des PCR
+  déplacés après une mise à jour de firmware ou de noyau ; aussi observé quand le
+  TPM est absent ou que le resource manager ne tourne pas.
+* `tpm-dek-mismatch` — le TPM a libéré une clé, mais ce n'est pas celle que
+  contient le fichier token. Les deux devraient être identiques. **Traiter comme
+  une substitution possible du fichier token ou du blob scellé, et enquêter
+  avant d'aller plus loin.**
+* `tpm-required-but-missing` — `FHSM_TPM_SEALING=1` mais ce token n'a pas de
+  compagnon `.tpm`. Il a été créé sans scellement.
+
+**Récupération après une mise à jour de firmware.** La DEK reste récupérable
+depuis le fichier token avec le PIN : le scellement est un second facteur, pas
+l'unique copie. Sauvegardez `{slot}.tok` et `{slot}.tok.tpm`, puis soit vous
+revenez en arrière sur le firmware pour retrouver les valeurs de PCR scellées,
+soit vous re-scellez le token sous les nouvelles mesures. Perdre le seul fichier
+`.tpm` ne fait pas perdre le token ; perdre le fichier token, si.
+
+**Un unseal en échec ne consomme plus de tentative de PIN.** Avant la v1.7.0 il en
+consommait une, et le throttle s'aggravait avec, si bien qu'une simple mise à jour
+de firmware verrouillait définitivement le token d'un opérateur qui n'avait rien
+fait de mal. C'était un déni de service, il est corrigé. Un PIN réellement faux
+compte, throttle et verrouille toujours comme documenté au §5.
+
+**Faites une sauvegarde avant d'activer `FHSM_TPM_SEALING` sur un token qui
+compte.**
 
 ### DRBG durci
 

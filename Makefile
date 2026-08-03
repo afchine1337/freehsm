@@ -303,6 +303,19 @@ tests/test_secure_heap: tests/test_secure_heap.c $(LIB_OBJ)
 tests/test_conf: tests/test_conf.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+# TPM 2.0 sealing (#109). fhsm_tpm.c is recompiled here with
+# -DFHSM_TPM_TEST_HOOKS, which is what lets FHSM_TPM_DEVICE / FHSM_TPM_CMD
+# redirect the module at tests/tpm2-stub.sh. That macro is set by this rule
+# and by nothing else: the shipped library has no way to be pointed at a fake
+# TPM, which is the whole reason the seam is compile-time and not an
+# environment variable the module always reads.
+tests/fhsm_tpm_testhooks.o: src/fhsm_tpm.c
+	$(CC) $(CFLAGS) -DFHSM_TPM_TEST_HOOKS -c -o $@ $<
+
+tests/test_tpm: tests/test_tpm.c tests/fhsm_tpm_testhooks.o $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< tests/fhsm_tpm_testhooks.o \
+	    $(filter-out src/fhsm_tpm.o,$(LIB_OBJ)) $(LDFLAGS) -lpthread
+
 tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
@@ -372,8 +385,9 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
 .PHONY: tests
-tests: tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects
+tests: tests/test_tpm tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_smoke
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_tpm
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_token_capacity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_decrypt_null_args

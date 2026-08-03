@@ -925,9 +925,9 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role, const char *pin) {
         /* ---- Optional TPM 2.0 cross-check ------------------------
          * If a {path}.tpm companion file exists, unseal it and verify
          * that the TPM-sealed DEK matches the PBKDF2-unwrapped one.
-         * Mismatch is silently treated as wrong PIN so an attacker
-         * cannot probe whether the TPM is online. Missing TPM with
-         * companion present is also a hard failure. */
+         * A failure here refuses the login but never touches the PIN
+         * failure counter --- see the long comment below for why the
+         * previous behaviour was a denial of service (#109). */
         if (fhsm_token_tpm_blob_exists(t->path)) {
             uint8_t tpm_dek[32];
             fhsm_rv_t tpm_rv = fhsm_token_tpm_unseal(t->path, tpm_dek);
@@ -935,15 +935,51 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role, const char *pin) {
                            fhsm_token_tpm_dek_match(t->dek, tpm_dek);
             fhsm_zeroize(tpm_dek, sizeof(tpm_dek));
             if (!matched) {
-                (void)fhsm_audit_event(FHSM_EV_UNSEAL_FAILURE, -1, -1,
-                                        role, tpm_rv, "tpm-check-login", NULL);
+                /* This used to bump the PIN failure counter, on the theory
+                 * that reporting CKR_PIN_INCORRECT stopped an attacker from
+                 * probing whether the TPM was online. That theory does not
+                 * survive looking at where we are: dec_rv == FHSM_RV_OK and
+                 * pt_len == DEK_LEN mean the GCM tag over the wrapped DEK
+                 * already verified, so the caller has *proved* they know the
+                 * PIN before reaching this branch. An attacker who does not
+                 * know the PIN never gets here and therefore never learns
+                 * anything about the TPM either way. Nothing was being
+                 * concealed.
+                 *
+                 * What it did cost was a denial of service, and not a
+                 * hypothetical one. The seal is bound to PCR 0-7, which cover
+                 * firmware and boot components. A BIOS update, a kernel
+                 * upgrade, a Secure Boot key rotation -- any of these moves a
+                 * PCR and makes every subsequent unseal fail. The legitimate
+                 * operator, holding the correct PIN, would then have burned
+                 * one attempt per login until the counter hit
+                 * FHSM_PIN_MAX_FAILED and the token locked permanently. A
+                 * routine firmware update would have destroyed the token.
+                 *
+                 * So: refuse the login, leave the counter alone. Neither
+                 * incremented (no DoS) nor reset (the login did not succeed).
+                 * The two causes are reported distinctly because they call for
+                 * different operator responses -- one is a TPM/PCR problem to
+                 * investigate, the other is evidence the store and the sealed
+                 * blob disagree, i.e. tampering. */
                 fhsm_zeroize(t->dek, DEK_LEN);
-                (*fails)++;
-                *until = now + throttle_delay_ms(*fails);
-                write_atomic(t);
                 pthread_mutex_unlock(&t->mu);
-                return (*fails >= FHSM_PIN_MAX_FAILED) ? FHSM_RV_PIN_LOCKED
-                                                          : FHSM_RV_PIN_INCORRECT;
+                if (tpm_rv != FHSM_RV_OK) {
+                    /* Could not unseal at all: TPM absent, blob corrupt, or
+                     * PCRs have moved since sealing. Not the operator's
+                     * fault, and recoverable without losing the token. */
+                    (void)fhsm_audit_event(FHSM_EV_UNSEAL_FAILURE, -1, -1,
+                                            role, tpm_rv,
+                                            "tpm-unseal-failed", NULL);
+                    return FHSM_RV_DEVICE_ERROR;
+                }
+                /* Unsealed cleanly but the DEK does not match the one the
+                 * store just unwrapped. The two are supposed to be the same
+                 * key. Someone substituted a store file, or a sealed blob. */
+                (void)fhsm_audit_event(FHSM_EV_UNSEAL_FAILURE, -1, -1,
+                                        role, FHSM_RV_DEVICE_ERROR,
+                                        "tpm-dek-mismatch", NULL);
+                return FHSM_RV_DEVICE_ERROR;
             }
             (void)fhsm_audit_event(FHSM_EV_UNSEAL_SUCCESS, -1, -1, role,
                                     FHSM_RV_OK, "tpm-check-login", NULL);
@@ -956,7 +992,9 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role, const char *pin) {
                                     "tpm-required-but-missing", NULL);
             fhsm_zeroize(t->dek, DEK_LEN);
             pthread_mutex_unlock(&t->mu);
-            return FHSM_RV_FUNCTION_FAILED;
+            /* Configuration problem, not an authentication problem -- and
+             * likewise it does not touch the PIN counter. */
+            return FHSM_RV_DEVICE_ERROR;
         }
         *fails = 0;
         *until = 0;

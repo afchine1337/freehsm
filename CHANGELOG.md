@@ -7,6 +7,65 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Security
+* **#109 — the TPM sealing backend wrote the DEK to disk in the clear, and a
+  broken TPM locked the token permanently.** Three defects, all in code that
+  had never been exercised because CI has no TPM.
+
+  *The key on disk.* `fhsm_tpm_seal` wrote the 32-byte DEK to a `mkstemp` file
+  under `/var/lib/freehsm/tpm/` so the `tpm2` CLI could read it, and
+  `tpm2 unseal -o` wrote it back out the same way. Mode 0600 and an `unlink`
+  afterwards do not undo that — on a journalling filesystem or an SSD with wear
+  levelling the bytes outlive the file. v1.6.0 had just moved that same DEK
+  into an `mlock`'d arena so it could not reach swap (#127); writing it to a
+  disk on the sealing path was strictly worse than the paging we had gone to
+  trouble to prevent. Every file handed to `tpm2` is now an anonymous
+  `memfd_create` object passed as `/proc/self/fd/N`: the child reads and writes
+  exactly as before, and nothing touches a filesystem.
+
+  *The colliding filenames.* Temp files were named from `getpid()`, identical
+  for every thread in the process. Two threads sealing two different tokens
+  wrote the same `seal-pub-<pid>` and could hand back each other's DEK. The
+  comment claimed the per-token mutex covered it; it does not, different tokens
+  hold different mutexes. Anonymous descriptors have no shared name, so the
+  collision is gone by construction rather than by locking.
+
+  *The denial of service.* A failed unseal bumped the PIN failure counter and
+  the throttle. The seal is bound to PCR 0-7, which measure firmware and early
+  boot — so a BIOS update, a kernel upgrade or a Secure Boot key rotation makes
+  every unseal fail, and the legitimate operator, holding the correct PIN,
+  burned one attempt per login until the token locked for good. A routine
+  firmware update destroyed the token.
+
+  The stated rationale was that returning `CKR_PIN_INCORRECT` stopped an
+  attacker probing whether the TPM was online. That does not survive looking at
+  where the code sits: the AES-GCM tag over the wrapped DEK has already
+  verified by that point, so the caller has *proved* they know the PIN. An
+  attacker who does not know it never reaches the branch and never learns
+  anything about the TPM either way. Nothing was being concealed, and a real
+  denial of service was being paid for it.
+
+  A TPM failure now refuses the login with `CKR_DEVICE_ERROR` and leaves the
+  PIN counter untouched — neither incremented nor reset. The audit log
+  distinguishes `tpm-unseal-failed` (PCRs moved, TPM absent) from
+  `tpm-dek-mismatch` (the store and the sealed blob disagree, i.e. possible
+  tampering), because they call for different operator responses. A genuinely
+  wrong PIN still counts, throttles and locks exactly as before. Operator
+  guidance and the recovery procedure are in `docs/AGD_OPE.md`.
+
+  `fhsm_tpm_unseal` also now zeroes the caller's buffer on entry rather than on
+  the single failure path that remembered to: there are five ways out that are
+  not success, and clearing once at the top cannot be forgotten when a sixth is
+  added.
+
+  Tested by `tests/test_tpm`, driven against `tests/tpm2-stub.sh` — a stand-in
+  for the CLI, not a TPM simulator. It proves the plumbing on our side of the
+  subprocess boundary and nothing about the TPM's own guarantees. Both
+  regression tests were checked against the old code and fail on it: the
+  concurrency test reports threads receiving another token's DEK, and the
+  lockout test reports `CKR_PIN_THROTTLED` still being returned after the TPM
+  recovers.
+
 ## [1.6.0] --- 2026-08-01
 ### Security
 
