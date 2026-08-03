@@ -7,6 +7,35 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Testing
+* **Harness re-measured against pkcs11-check v0.1.8: 4 failed, 1697 passed,
+  0 crashed — the same count as v0.1.6 and none of the same reasons.** R4 and R5,
+  the two RSA harness gaps, are fixed upstream. R2 is no longer a failure at all,
+  reclassified upstream as an inherent channel. R1 and R3 remain, unchanged, as
+  the documented positions they have been since July.
+
+  The two new failures are in `TestEncryptOutputLengthTruncation` /
+  `TestDecryptOutputLengthTruncation`, and they are a defect in the probe rather
+  than in the module. The probe drives `C_Encrypt` with `ulDataLen = 2**32 + 8`
+  over 4 GiB demand-zero mappings, prints our answer —
+  `TARGET_RV:0x00000021`, `CKR_DATA_LEN_RANGE`, which its own
+  `_OUTPUT_LENGTH_REJECT_RVS` accepts — and then raises `BufferError` closing its
+  mmaps, exiting 1 before the verdict runs. `ctypes.cast` on a `from_buffer`
+  array leaves the buffer export outstanding and `del` does not clear it.
+
+  Verified two ways. In isolation with no PKCS#11 module: same stdout, same
+  exception, same exit code. And on our side, in C, with the same two 4 GiB
+  `MAP_NORESERVE` mappings and the same counter block: `CKR_DATA_LEN_RANGE`. The
+  guard is `src/fhsm_pkcs11.c:5267`; its comment already named this test, having
+  been added in July in response to the earlier output-length report.
+
+  Reported upstream as `issue_pkcs11check_output_length_bufferror.md` — this one
+  checked against current `main` (`413222e`) before writing, which the withdrawn
+  R2 report was not.
+
+  **No new defect in the module.** Details and the full v0.1.6/v0.1.8 comparison
+  in `docs/PKCS11_CHECK_FINDINGS.md`.
+
 ### Security
 * **R2 — the CBC-PAD padding oracle never went away; the harness test is a coin
   flip.** `pkcs11-check`'s `test_cbc_pad_all_last_block_positions` reported the

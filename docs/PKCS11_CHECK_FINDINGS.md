@@ -431,9 +431,8 @@ be able to disagree with a decision, not discover an oversight.
 
 ## Update 2026-08-01 — 4 failures, and two that stopped reproducing
 
-> **Stale as of 2026-08-03.** These counts are against harness v0.1.6. v0.1.8
-> reclassifies the CBC-PAD channel as not-a-failure (see R2) and adds a
-> substantial number of tests. The numbers below have not been re-measured.
+> **Superseded 2026-08-03 — re-measured against v0.1.8.** See the section
+> immediately below. The counts here were against v0.1.6.
 
 A later run on the v1.6.0 candidate reports **4 failed, 1689 passed, 0 crashed**:
 R1 (Tookan), R3 (GcmIvReuse), R4 and R5 (the two RSA harness gaps). R2 — the
@@ -467,6 +466,69 @@ single argument, on 6 of 8 entry points. It surfaced only when three `isize`
 tests began timing out rather than being skipped; whether they had been
 silently skipped before (the honeypot `mmap` can fail, which the test treats as
 an xfail) was not established.
+
+## Re-measured against harness v0.1.8 (2026-08-03)
+
+**4 failed, 1697 passed, 2103 skipped, 0 crashed.** The same count as the v0.1.6
+run, and none of the same reasons — worth spelling out, because an unchanged
+number invites the assumption that nothing moved.
+
+| | v0.1.6 | v0.1.8 |
+|---|---|---|
+| R1 Tookan unwrap | fail | fail — unchanged, documented position below |
+| R2 CBC-PAD oracle | intermittent | **no longer a failure** — reclassified upstream as `inherent_channel` |
+| R3 GCM IV reuse | fail | fail — unchanged, documented position below |
+| R4/R5 RSA harness gaps | fail | **gone** — fixed upstream in v0.1.8 |
+| `TestEncryptOutputLengthTruncation` | (test did not exist) | **fail — harness defect, not ours** |
+| `TestDecryptOutputLengthTruncation` | (test did not exist) | **fail — harness defect, not ours** |
+
+**No new defect in the module.** Two of the four failures are our two standing
+positions; the other two are a bug in the probe's own teardown.
+
+### The two output-length failures
+
+These tests are new in v0.1.8 and descend from the output-length report we sent
+in July, so they were the first place to look for a real regression. They are not
+one.
+
+The probe drives `C_Encrypt`/`C_Decrypt` with `ulDataLen = 2**32 + 8` over two
+4 GiB demand-zero mappings, to catch a provider that casts the length to 32 bits
+and silently under-fills. It prints the module's answer, then raises in its own
+`finally`:
+
+```
+stdout: TARGET_RV:0x00000021
+        TARGET_RV_NAME:CKR_DATA_LEN_RANGE
+        subprocess failed with exit code 1
+```
+
+`CKR_DATA_LEN_RANGE` is in the harness's own `_OUTPUT_LENGTH_REJECT_RVS`, so the
+verdict would have been *pass*. It never ran: `ctypes.cast` on a `from_buffer`
+array leaves the mmap's buffer export outstanding, `del in_view` does not clear
+it, and `in_mm.close()` raises `BufferError: cannot close exported pointers
+exist`. Reproduced in isolation with no PKCS#11 module involved — same stdout,
+same exception, same exit code. Measured: `ctypes.byref` in place of
+`ctypes.cast` fixes it; `gc.collect()` before the close does not.
+
+The consequence upstream is worse than a red line in our report: a provider that
+*does* truncate would print `TARGET_RV:0x0`, `UNDERFILL:1`, and then die at the
+same place, so the finding would be reported as "subprocess failed" rather than
+`accepted_invalid`. The probe cannot currently deliver its verdict in either
+direction. Reported as `issue_pkcs11check_output_length_bufferror.md`.
+
+**Our side is correct and was verified without the harness.** A C program doing
+exactly what the probe does — same two 4 GiB `MAP_NORESERVE` mappings, same
+counter block, `ulDataLen = 0x100000008` — gets `CKR_DATA_LEN_RANGE` from
+`C_Encrypt`. The guard is `src/fhsm_pkcs11.c:5267` and its comment already named
+this test: it was added in July in response to the earlier report. The test did
+its job. It just cannot say so.
+
+### On the skip count
+
+2103 skipped is most of the suite, and capability gating explains most of it. It
+has not been audited. Worth remembering that a test which skips itself reports
+nothing — that is how the `isize` input-length bound stayed invisible until three
+of those tests started timing out instead of being skipped.
 
 ## R1 — `TestTookanUnwrapAttrs::test_unwrapped_key_cannot_unset_sensitive`
 
