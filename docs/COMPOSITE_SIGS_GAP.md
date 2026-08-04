@@ -121,6 +121,41 @@ The work is well-bounded, because the draft is finished and generous:
   of them. `MLDSA65-Ed25519` is the natural first target since both primitives
   are already in the module.
 
+## Inputs already gathered for task zero
+
+From `Composite-MLDSA-2025.asn` in the working group's repository
+(`github.com/lamps-wg/draft-composite-sigs`), read 2026-08-03:
+
+**Our target combination is `id-MLDSA65-Ed25519-SHA512`, OID `1.3.6.1.5.5.7.6.48`**
+(`{ pkix(7) alg(6) 48 }`). Both primitives are already in the module, so this is
+the natural first — and for the MVP, possibly only — composite to implement.
+§10.4 of the draft shortlists recommended combinations rather than requiring all
+eighteen.
+
+Two useful details from the ASN.1 module:
+
+* The public key and the signature value both carry **no ASN.1 wrapping**
+  (`-- KEY no ASN.1 wrapping --`, `-- VALUE no ASN.1 wrapping --`), consistent
+  with §4, which serializes by simple concatenation of the component encodings.
+  So the concatenation itself is not the error — the order is
+  (`mldsaSig || tradSig`), and the real error is upstream, in what gets signed.
+* `CERT-KEY-USAGE { digitalSignature, nonRepudiation, keyCertSign, cRLSign }` —
+  the composite is allowed to sign certificates and CRLs, which is what #112
+  needs it for.
+
+The pre-hash is SHA-512, as the combination name states.
+
+**Still to collect before implementing:**
+
+* the `Label` value for this combination (§6). The draft states labels are fully
+  specified per algorithm and runtime-variable labels are forbidden.
+* the Appendix E test vectors for `MLDSA65-Ed25519-SHA512`, which are what make
+  this implementable with confidence rather than hopefully.
+
+Both are in the draft text; neither was reachable in a single fetch because the
+document is 233 pages. Collect them at the start of the implementation session,
+from `https://www.ietf.org/archive/id/draft-ietf-lamps-pq-composite-sigs-19.txt`.
+
 ## Claims to review before the v2.0 announcements
 
 `PRIMACY_AUDIT_PQC_COMPOSITE.md` §5 rests on "PQC composite signatures
