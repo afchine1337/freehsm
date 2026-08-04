@@ -122,6 +122,9 @@ extern "C" {
 /* --- Hybrid-KEM --- */
 #define CKM_HYBRID_X25519_ML_KEM_768         0x80004200u
 
+/* --- Composite-Sig --- */
+#define CKM_COMPOSITE_MLDSA65_ED25519        0x80004202u
+
 /* --- Hybrid-Sig --- */
 #define CKM_HYBRID_ED25519_ML_DSA_65         0x80004201u
 
@@ -236,6 +239,7 @@ extern fhsm_rv_t dispatch_xor_base_and_data(unsigned long, unsigned long, const 
 extern fhsm_rv_t dispatch_kmac128(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_kmac256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_hybrid_x25519_ml_kem_768(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_composite_mldsa65_ed25519(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_hybrid_ed25519_ml_dsa_65(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_md5(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha1(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);

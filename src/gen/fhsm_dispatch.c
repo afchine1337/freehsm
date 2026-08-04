@@ -146,6 +146,16 @@ __attribute__((weak)) fhsm_rv_t dispatch_aes_kwp(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
+__attribute__((weak)) fhsm_rv_t dispatch_composite_mldsa65_ed25519(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
 __attribute__((weak)) fhsm_rv_t dispatch_concat_base_and_data(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
@@ -834,6 +844,7 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00004081u, "CKM_KMAC256", "KMAC", "sign", 1, dispatch_kmac256 },
     { 0x80004200u, "CKM_HYBRID_X25519_ML_KEM_768", "Hybrid-KEM", "encap", 1, dispatch_hybrid_x25519_ml_kem_768 },
     { 0x80004201u, "CKM_HYBRID_ED25519_ML_DSA_65", "Hybrid-Sig", "sign", 1, dispatch_hybrid_ed25519_ml_dsa_65 },
+    { 0x80004202u, "CKM_COMPOSITE_MLDSA65_ED25519", "Composite-Sig", "sign", 0, dispatch_reject_fips },
 };
 
 const size_t fhsm_mechanism_count =

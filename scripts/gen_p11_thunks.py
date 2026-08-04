@@ -336,6 +336,37 @@ MECHANISMS: tuple[Mech, ...] = (
                 "draft-ietf-tls-hybrid-design"),
          notes="ss = SHA3-256(ss_x25519 || ss_ml_kem_768 || ct_pqkem || ct_x25519)"),
 
+    # === Composite ML-DSA (draft-ietf-lamps-pq-composite-sigs) =========
+    #
+    # Non-approved on purpose, and the reasoning belongs here rather than in a
+    # commit message. Section 10.2 of the draft states the design goal that a
+    # composite "be able to be considered FIPS-approved even when one of the
+    # component algorithms is not" -- and, two lines earlier, that the guidance
+    # "is not authoritative and has not been endorsed by US NIST". Announcing
+    # it as approved would assert a status the specification itself declines to
+    # assert, which is the habit this project spent 2026-08-03 removing from
+    # its own documentation. Both components are individually approved
+    # (FIPS 204, FIPS 186-5); the construction's standing is what is open.
+    #
+    # Section 10.2 also requires, for certification, that the ML-DSA seed be
+    # the direct output of an approved DRBG. Ours comes from OpenSSL's RAND
+    # via EVP_PKEY_keygen, not from fhsm_drbg. That gap is recorded in
+    # docs/COMPOSITE_SIGS_GAP.md and would have to close before the profile
+    # question could be revisited.
+    Mech("CKM_COMPOSITE_MLDSA65_ED25519", 0x80004202, "Composite-Sig",
+         "sign", "dispatch_composite_mldsa65_ed25519",
+         fips="non-approved",
+         refs=("draft-ietf-lamps-pq-composite-sigs-19",
+               "id-MLDSA65-Ed25519-SHA512, OID 1.3.6.1.5.5.7.6.48"),
+         notes="Composite ML-DSA as specified: both components sign the message "
+               "representative M' = Prefix || Label || len(ctx) || ctx || "
+               "SHA-512(M), the ML-DSA component receives the Label as its "
+               "FIPS 204 context, and the output is mldsaSig || tradSig. "
+               "Unlike CKM_HYBRID_ED25519_ML_DSA_65 the components are NOT "
+               "separable: neither half verifies against the bare message. "
+               "Interop-only -- see the comment in gen_p11_thunks.py for why "
+               "it is not announced as approved."),
+
     # === Hybrid signature (concatenated) ==============================
     Mech("CKM_HYBRID_ED25519_ML_DSA_65", 0x80004201, "Hybrid-Sig",
          "sign", "dispatch_hybrid_ed25519_ml_dsa_65",

@@ -66,7 +66,32 @@ project adheres to [Semantic Versioning](https://semver.org/).
   signatures differed, which proves nothing: ML-DSA is randomised, so they
   differ anyway.
 
-  Still not wired to a PKCS#11 mechanism; that is the next step.
+* **`CKM_COMPOSITE_MLDSA65_ED25519` (`0x80004202`), interop only.** The
+  mechanism is registered and dispatches to the combiner;
+  `src/dispatch/fhsm_dispatch_composite.c` carries the TLV unpacking and
+  nothing else. Verified in both profiles: `dispatch_reject_fips` in
+  fips-strict, the real handler in interop, 64 mechanisms advertised against
+  72.
+
+  **Not announced as FIPS-approved, on the specification's own authority.**
+  §10.2 states the design goal that a composite "be able to be considered
+  FIPS-approved even when one of the component algorithms is not" — and, two
+  lines earlier, that the guidance "is not authoritative and has not been
+  endorsed by US NIST". Announcing it as approved would assert a status the
+  draft declines to assert, which is the habit this repository spent the day
+  removing from its own documentation. Both components are individually
+  approved (FIPS 204, FIPS 186-5); it is the construction whose standing is
+  open.
+
+  §10.2 also requires, for certification, that the ML-DSA seed be the direct
+  output of an approved DRBG. Ours comes from OpenSSL's RAND through
+  `EVP_PKEY_keygen`, not from `fhsm_drbg`. That gap is recorded rather than
+  glossed, and would have to close before the profile question could be
+  reopened.
+
+  The key reaches the handler as one opaque blob in a vendor TLV, never as two.
+  There is nothing to check and nothing to refuse, because there is no
+  interface through which two component keys could be offered.
 
 ### Security
 * **`CKM_HYBRID_ED25519_ML_DSA_65` is not Composite ML-DSA, and three places
