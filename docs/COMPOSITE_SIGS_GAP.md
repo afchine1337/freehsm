@@ -121,40 +121,62 @@ The work is well-bounded, because the draft is finished and generous:
   of them. `MLDSA65-Ed25519` is the natural first target since both primitives
   are already in the module.
 
-## Inputs already gathered for task zero
+## Everything needed to implement `MLDSA65-Ed25519-SHA512`
 
-From `Composite-MLDSA-2025.asn` in the working group's repository
-(`github.com/lamps-wg/draft-composite-sigs`), read 2026-08-03:
+Collected 2026-08-03 from the working group's repository — `Composite-MLDSA-2025.asn`
+and `src/algParams.md`, the file `{::include}`-ed into §6, which is why the labels
+are not in the draft's own markdown.
 
-**Our target combination is `id-MLDSA65-Ed25519-SHA512`, OID `1.3.6.1.5.5.7.6.48`**
-(`{ pkix(7) alg(6) 48 }`). Both primitives are already in the module, so this is
-the natural first — and for the MVP, possibly only — composite to implement.
-§10.4 of the draft shortlists recommended combinations rather than requiring all
-eighteen.
+**The target combination**, and it is the draft's own recommendation: §10.4 says
+that for applications requiring the signature primitive to provide SUF-CMA,
+`id-MLDSA65-Ed25519-SHA512` is the one to focus implementation effort on. Both
+primitives are already in this module.
 
-Two useful details from the ASN.1 module:
+| | |
+|---|---|
+| OID | `1.3.6.1.5.5.7.6.48` — `{ pkix(7) alg(6) 48 }` |
+| Label | `COMPSIG-MLDSA65-Ed25519-SHA512` (ASCII, 30 bytes) |
+| Pre-hash `PH` | SHA-512 |
+| ML-DSA variant | ML-DSA-65 |
+| Traditional | Ed25519 (`id-Ed25519`) |
+| Key usage permitted | `digitalSignature, nonRepudiation, keyCertSign, cRLSign` |
 
-* The public key and the signature value both carry **no ASN.1 wrapping**
-  (`-- KEY no ASN.1 wrapping --`, `-- VALUE no ASN.1 wrapping --`), consistent
-  with §4, which serializes by simple concatenation of the component encodings.
-  So the concatenation itself is not the error — the order is
-  (`mldsaSig || tradSig`), and the real error is upstream, in what gets signed.
-* `CERT-KEY-USAGE { digitalSignature, nonRepudiation, keyCertSign, cRLSign }` —
-  the composite is allowed to sign certificates and CRLs, which is what #112
-  needs it for.
+§6 is explicit that labels are written as ASCII in the document and
+implementations MUST convert them to their ASCII byte values before
+concatenation.
 
-The pre-hash is SHA-512, as the combination name states.
+### The construction, fully resolved
 
-**Still to collect before implementing:**
+```
+Prefix = "CompositeAlgorithmSignatures2025"                        (32 bytes)
+         436F6D706F73697465416C676F726974686D5369676E61747572657332303235
+Label  = "COMPSIG-MLDSA65-Ed25519-SHA512"                          (30 bytes)
+         434F4D505349472D4D4C44534136352D456432353531392D534841353132
 
-* the `Label` value for this combination (§6). The draft states labels are fully
-  specified per algorithm and runtime-variable labels are forbidden.
-* the Appendix E test vectors for `MLDSA65-Ed25519-SHA512`, which are what make
-  this implementable with confidence rather than hopefully.
+M' = Prefix || Label || len(ctx) || ctx || SHA-512(M)
 
-Both are in the draft text; neither was reachable in a single fetch because the
-document is 233 pages. Collect them at the start of the implementation session,
-from `https://www.ietf.org/archive/id/draft-ietf-lamps-pq-composite-sigs-19.txt`.
+     with an empty ctx: 32 + 30 + 1 + 0 + 64 = 127 bytes
+
+mldsaSig = ML-DSA-65.Sign( mldsaSK, M', mldsa_ctx = Label )
+edSig    = Ed25519.Sign( edSK, M' )
+
+sig      = mldsaSig || edSig          /* that order; no ASN.1 wrapping */
+```
+
+Note the Label appears twice and in two roles: inside `M'`, and as the FIPS 204
+context string handed to the ML-DSA primitive. Both are required.
+
+Neither the public key nor the signature value carries ASN.1 wrapping
+(`-- KEY no ASN.1 wrapping --`, `-- VALUE no ASN.1 wrapping --` in the module),
+consistent with §4 serializing by plain concatenation of the component encodings.
+So concatenating was never the error — the order was, and everything upstream of
+it.
+
+### Still to collect
+
+The Appendix E test vectors for this combination, for cross-validation against
+someone else's numbers rather than our own. Everything else above is enough to
+write the code.
 
 ## Claims to review before the v2.0 announcements
 

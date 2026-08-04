@@ -250,9 +250,13 @@ are corrected.
 certificates on top of a non-conforming primitive, and a CA whose certificates
 nothing else can verify is worth less than no CA. So the order is:
 
-0. Composite ML-DSA proper — the combiner, the `MLDSA65-Ed25519` OID and Label
-   from §6, the serialization from §4, validated against the test vectors in
-   Appendix E. Roughly 8 hours. This is the first thing that gets built.
+0. Composite ML-DSA proper. **The specification inputs are now all collected**
+   (`COMPOSITE_SIGS_GAP.md`): OID `1.3.6.1.5.5.7.6.48`, Label
+   `COMPSIG-MLDSA65-Ed25519-SHA512`, pre-hash SHA-512, and the exact `M'`
+   construction. §10.4 recommends this very combination for applications that
+   need SUF-CMA, and both its primitives are already in the module. Only the
+   Appendix E test vectors remain to fetch. Roughly 8 hours, and it is the first
+   thing that gets built.
 1. `fhsm-csr` and certificate issuance on top of it.
 2. Revocation, then OCSP — OCSP is a network service and #111 is deliberately
    after the MVP, so CRL first.
