@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: 2026 IETF Trust and the persons identified as authors
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Message-representative (M') construction vectors for Composite ML-DSA.
+#
+# Source: draft-ietf-lamps-pq-composite-sigs-19, Appendix D, via
+#   github.com/lamps-wg/draft-composite-sigs
+#   src/messageFormatSample_noctx.md and src/messageFormatSample_ctx.md
+# Retrieved 2026-08-03. The draft is in the RFC Editor queue.
+#
+# These are EXTERNAL vectors: numbers produced by someone else. That is the
+# whole point of them being here. The reason CKM_HYBRID_ED25519_ML_DSA_65 could
+# sit in the tree for months signing the wrong thing is that its KATs were
+# self-generated -- they proved our verify accepted our sign, which is true of
+# any self-consistent construction, a wrong one included. See
+# docs/COMPOSITE_SIGS_GAP.md.
+#
+# They cover the combiner only:
+#
+#   M' = Prefix || Label || len(ctx) || ctx || PH(M)
+#
+# The vectors below use id-MLDSA65-ECDSA-P256-SHA512 because that is the
+# combination the draft chose to work through. Our target is
+# id-MLDSA65-Ed25519-SHA512 (OID 1.3.6.1.5.5.7.6.48, label
+# COMPSIG-MLDSA65-Ed25519-SHA512, PH SHA-512). The combiner is identical apart
+# from the label, so these validate the construction our implementation must
+# share. Signature-level vectors for our own combination come from Appendix E
+# (src/testvectors_wrapped.json), not yet imported.
+#
+# Format: one key = value per line, blank line between vectors.
+# Verified 2026-08-03: both reproduce byte for byte.
+
+vector = appendix-d-no-context
+label = COMPSIG-MLDSA65-ECDSA-P256-SHA512
+prefix_hex = 436f6d706f73697465416c676f726974686d5369676e61747572657332303235
+message_hex = 00010203040506070809
+ctx_hex =
+ph = SHA-512
+ph_hex = 0f89ee1fcb7b0a4f7809d1267a029719004c5a5e5ec323a7c3523a20974f9a3f202f56fadba4cd9e8d654ab9f2e96dc5c795ea176fa20ede8d854c342f903533
+mprime_len = 130
+mprime_hex = 436f6d706f73697465416c676f726974686d5369676e61747572657332303235434f4d505349472d4d4c44534136352d45434453412d503235362d534841353132000f89ee1fcb7b0a4f7809d1267a029719004c5a5e5ec323a7c3523a20974f9a3f202f56fadba4cd9e8d654ab9f2e96dc5c795ea176fa20ede8d854c342f903533
+
+vector = appendix-d-with-context
+label = COMPSIG-MLDSA65-ECDSA-P256-SHA512
+prefix_hex = 436f6d706f73697465416c676f726974686d5369676e61747572657332303235
+message_hex = 00010203040506070809
+ctx_hex = 0813061205162623
+ph = SHA-512
+ph_hex = 0f89ee1fcb7b0a4f7809d1267a029719004c5a5e5ec323a7c3523a20974f9a3f202f56fadba4cd9e8d654ab9f2e96dc5c795ea176fa20ede8d854c342f903533
+mprime_len = 138
+mprime_hex = 436f6d706f73697465416c676f726974686d5369676e61747572657332303235434f4d505349472d4d4c44534136352d45434453412d503235362d5348413531320808130612051626230f89ee1fcb7b0a4f7809d1267a029719004c5a5e5ec323a7c3523a20974f9a3f202f56fadba4cd9e8d654ab9f2e96dc5c795ea176fa20ede8d854c342f903533

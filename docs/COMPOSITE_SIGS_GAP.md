@@ -172,11 +172,34 @@ consistent with §4 serializing by plain concatenation of the component encoding
 So concatenating was never the error — the order was, and everything upstream of
 it.
 
+### The combiner is verified against the draft's own worked examples
+
+Appendix D publishes two fully worked `M'` constructions. Both were reproduced
+byte for byte before any code was written, and both are now in the repository as
+`kat/composite/mprime_appendix_d.txt`:
+
+| | `M'` length | reproduced |
+|---|---|---|
+| empty ctx | 130 bytes | yes |
+| 8-byte ctx | 138 bytes | yes |
+
+They use `id-MLDSA65-ECDSA-P256-SHA512`, because that is the combination the
+draft chose to work through, but the combiner is identical apart from the label,
+so they validate the construction our implementation has to share. The 130 and
+138 differ from our 127 only because that label is 33 bytes against our 30.
+
+These vectors are in the tree **before** the implementation on purpose. The
+reason the existing hybrid could sign the wrong thing for months is that its KATs
+were self-generated: they establish that our verify accepts our sign, which is
+true of any self-consistent construction, a wrong one included. This time the
+check exists first and it is somebody else's arithmetic.
+
 ### Still to collect
 
-The Appendix E test vectors for this combination, for cross-validation against
-someone else's numbers rather than our own. Everything else above is enough to
-write the code.
+Signature-level vectors for our own combination, from Appendix E — in the
+working group's repository as `src/testvectors_wrapped.json`. Those exercise the
+component signatures and the serialization; the combiner is already covered
+above. Everything needed to start writing the code is now in hand.
 
 ## Claims to review before the v2.0 announcements
 
