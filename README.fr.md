@@ -10,7 +10,7 @@
 > Version anglaise : voir [`README.md`](README.md). Index documentation : [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
 > English version: see [`README.md`](README.md). Documentation index: [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
 >
-> **FreeHSM** est la bibliothèque PKCS#11 open source, portée par **[Simorgh Labs](https://simorgh.io)**. Les outils PKI et de signature qui viendront par-dessus sont prévus, pas encore développés. *(Dépôt renommé de `freehsm-c` en `freehsm` en juillet 2026 ; les anciennes URLs redirigent.)*
+> **FreeHSM** est la bibliothèque PKCS#11 open source, portée par **[Simorgh Labs](https://chaharsou.com)**. Les outils PKI et de signature qui viendront par-dessus sont prévus, pas encore développés. *(Dépôt renommé de `freehsm-c` en `freehsm` en juillet 2026 ; les anciennes URLs redirigent.)*
 >
 > **Non certifié, et sans intention de l'être.** Un certificat CMVP ou CC coûte plus que ce projet n'aura jamais, et ce coût est précisément la barrière qui écarte les organismes publics, les universités et les pays en développement d'une cryptographie auditable. Les dix documents d'évaluation sont publiés comme exemples travaillés — une matière difficile à trouver hors d'une prestation payante. Ce qu'un certificat atteste, la discipline peut le rendre vérifiable : par quiconque, gratuitement.
 

@@ -46,7 +46,7 @@ domains — content is already rebranded), and two small threads (#126, #116).
 | # | Task | Effort | Status |
 |---|---|---|---|
 | #118 | Audit primacy claim "first OSS PKI + PQC composite" | ~4h | ✅ `docs/PRIMACY_AUDIT_PQC_COMPOSITE.md` — claim revised (pivoted to "PKI + signing + composite") |
-| — | Rebrand migration (repo `freehsm-c`→`freehsm`, buy domains, brand everywhere) | ~10–12h | 🟡 Content rebrand ✅ (README, TRADEMARK, blog, brand ref, checklist). **Pending: repo rename on the 3 remotes + `freehsm.org`/`simorgh.io` domains** (see `REBRAND_CHECKLIST.md` phases 1–2) |
+| — | Rebrand migration (repo `freehsm-c`→`freehsm`, brand everywhere) | ~10–12h | ✅ Content rebrand ✅, and the **repo rename is done on all three forges** — verified 2026-08-03 by `scripts/post_rename.sh --check`: mirror URLs, all three remotes, and a live 200 on `github.com/afchine1337/freehsm`. The domain purchases are **cancelled** (2026-08-03): the project uses `chaharsou.com`, already owned and already linking to the repository. Nothing pending. |
 
 ## Phase 2 — v1.5.0 (target 2026-07-20)
 

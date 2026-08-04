@@ -9,36 +9,40 @@ committed (or staged) — the weekend is mostly clicking, not writing.
   `Remove-Item freehsm_c\.git\index.lock`). Sans ça, aucun git ne passe.
 - [ ] `git log --oneline -3` doit montrer `c443ada` (audit #118) + le commit rebrand.
 
-## Phase 1 — Achats & vérifications (toi uniquement, ~1h30)
+## Phase 1 — Domaines — ABANDONNÉ (2026-08-03)
 
-- [ ] Acheter **freehsm.org** (~$12/an) — registrar au choix (Gandi/OVH pour
-  facturation FR, ou Cloudflare prix coûtant)
-- [ ] Acheter **simorgh.io** (~$35/an) — vérifier dispo ; plan B : simorgh-labs.io,
-  simorghpki.io, simorgh.dev
+Les achats de `freehsm.org` et `simorgh.io` sont annulés. Le projet s'appuie sur
+**chaharsou.com**, déjà détenu, déjà en ligne, et qui porte déjà le simorgh
+comme emblème et un lien vers le dépôt FreeHSM.
+
+Ce n'est pas un renoncement mais une cohérence avec la mission : l'objectif est
+l'éducation et la mise à disposition, pas l'image de marque. Quarante-sept
+dollars par an de domaines pour une identité que personne ne cherche encore, ce
+sont quarante-sept dollars qui ne servent à personne.
+
+Conséquence assumée : un visiteur venu chercher une bibliothèque PKCS#11 arrive
+sur un site culturel bilingue français-persan. Le lien inverse existe déjà
+depuis chaharsou.com vers le dépôt, donc le chemin se fait dans les deux sens.
+
 - [ ] Recherche marque rapide : **INPI** (data.inpi.fr) pour FR, **EUIPO eSearch**
   pour l'UE — chercher "Simorgh" et "FreeHSM" classes 9 et 42. But : absence de
   conflit bloquant, pas un dépôt (le dépôt INPI ~190€ peut attendre la v2.0).
+  Toujours utile : sans domaine, le nom reste.
 
-## Phase 2 — Renames (30 min) — ⚠ BLOQUANT
+## Phase 2 — Renames — ✅ FAIT (vérifié 2026-08-03)
 
-> La Phase 3 a été commitée AVANT celle-ci : le README annonce déjà
-> `github.com/afchine1337/freehsm`, qui renvoie **404** aujourd'hui, donc
-> les cinq badges sont cassés pour tout visiteur. Ce n'est plus « l'étape
-> suivante » mais une réparation.
+> Le 404 décrit ici n'existe plus. `bash scripts/post_rename.sh --check` sort
+> tout en vert : URLs du miroir, les trois remotes, et un **200** sur
+> `github.com/afchine1337/freehsm`. Les cinq badges du README sont vivants.
 >
-> Juste après les renames : `bash scripts/post_rename.sh`. Il met à jour
-> `mirror.yml` (qui code en dur les URLs GitLab/Codeberg — GitLab ne
-> redirige pas les remotes git, le miroir casserait) et les remotes locaux.
-> `bash scripts/post_rename.sh --check` vérifie sans rien modifier et sort
-> en erreur tant qu'il reste du travail, y compris le 404 ci-dessus.
+> Relancer cette commande plutôt que de faire confiance à ces cases : elle
+> interroge le réseau, une case cochée n'interroge rien.
 
-- [ ] GitHub : Settings → rename `freehsm-c` → `freehsm` (redirects auto)
-- [ ] GitLab : Settings → General → rename path `freehsm-c` → `freehsm`
-      ⚠ GitLab ne redirige PAS le git remote → mettre à jour le mirror workflow
-- [ ] Codeberg : Settings → rename → `freehsm`
-- [ ] Local : `git remote set-url origin git@github.com:afchine1337/freehsm.git`
-      (+ gitlab, codeberg)
-- [ ] Vérifier que le workflow `mirror.yml` passe après renames
+- [x] GitHub : renommé, redirections automatiques actives
+- [x] GitLab : chemin renommé
+- [x] Codeberg : renommé
+- [x] Local : les trois remotes pointent sur `freehsm.git`
+- [x] `mirror.yml` : URLs à jour, et les trois forges ont répondu le 2026-08-03
 
 ## Phase 3 — Contenu repo (✅ PRÉPARÉ — juste vérifier + pousser)
 
@@ -61,14 +65,14 @@ committed (or staged) — the weekend is mostly clicking, not writing.
 
 - [ ] GitHub Pages : re-vérifier la config après rename (Settings → Pages) ;
       l'URL devient `afchine1337.github.io/freehsm/` (ancienne redirigée)
-- [ ] Landing simorgh.io : draft prêt dans `simorgh_landing/index.html`
-      (single-file, palette lapis+or du brand reference, tableau "category of
-      one", roadmap). Options : servir tel quel (repo `simorgh-labs/site` +
-      Pages + CNAME), ou le porter en Jekyll plus tard
+- [x] ~~Landing simorgh.io~~ — sans objet depuis l'abandon du domaine, et le
+      draft `simorgh_landing/index.html` n'est de toute façon plus dans l'arbre.
+      Si une page vitrine devient utile, ce sera sur chaharsou.com ou sur GitHub
+      Pages.
 - [ ] Ajouter le logo final (fichier chez toi — non disponible dans la session)
       à la landing + au repo (`docs/assets/`) — remplacer le wordmark texte
-- [ ] DNS : CNAME simorgh.io → Pages ; freehsm.org → redirect vers simorgh.io
-      ou vers le repo (décision à prendre, 5 min)
+- [x] ~~DNS~~ — sans objet : pas de domaine dédié. GitHub Pages sert sur
+      `afchine1337.github.io/freehsm/`, et chaharsou.com renvoie vers le dépôt.
 
 ## Phase 5 — Annonces (~1h, APRÈS que tout est live)
 
@@ -82,8 +86,10 @@ committed (or staged) — the weekend is mostly clicking, not writing.
 
 ## Phase 6 — Optionnel / peut glisser
 
-- [ ] GPG : ajouter un UID `Simorgh Labs <contact@simorgh.io>` à la clé
-      existante (PAS de rotation — le fingerprint ne change jamais)
+- [ ] GPG : si un UID « Simorgh Labs » est ajouté, l'adresse ne peut plus être
+      `contact@simorgh.io` (domaine abandonné). Utiliser une adresse qui existe
+      réellement, sinon ne rien ajouter — un UID qui pointe vers un domaine mort
+      est pire qu'aucun UID. (PAS de rotation : le fingerprint ne change jamais.)
 - [ ] `LICENSE-BRAND.md` vs `TRADEMARK.md` : TRADEMARK.md créé ; décider si le
       logo est ajouté au repo avec mention "all rights reserved" dans REUSE.toml
 - [ ] Mettre à jour le profil bestpractices.dev (nom du repo)

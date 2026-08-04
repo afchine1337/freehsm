@@ -7,7 +7,7 @@ title: FreeHSM
 
 An open-source PKCS#11 v3.2 cryptographic module, built to FIPS 140-3 Level 1 and CC EAL4+ requirements and documented with their methodologies. Not certified, and not seeking certification — the evaluation documents are published as worked examples.
 
-**FreeHSM** is the PKCS#11 library, stewarded by **[Simorgh Labs](https://simorgh.io)**. PKI and signing tooling on top of it is planned, not built.
+**FreeHSM** is the PKCS#11 library, stewarded by **[Simorgh Labs](https://chaharsou.com)**. PKI and signing tooling on top of it is planned, not built.
 
 - **Source** : <https://github.com/afchine1337/freehsm>
 - **Latest release** : [v1.4.0](https://github.com/afchine1337/freehsm/releases/tag/v1.4.0)
