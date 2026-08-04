@@ -94,6 +94,68 @@ fhsm_rv_t fhsm_composite_mprime(fhsm_composite_alg_t alg,
                                  const uint8_t *ctx, size_t ctx_len,
                                  uint8_t *out, size_t *out_len);
 
+/* ---------------------------------------------------------------------------
+ * Keys.
+ *
+ * A composite key is ONE object holding both components. They are never
+ * separately addressable, and there is deliberately no way to assemble a
+ * composite from two existing key handles.
+ *
+ * That is not ergonomics, it is how §3.1's requirement is met. The draft says
+ * an invocation of KeyGen "MUST perform, or otherwise guarantee, fresh
+ * generation of the key material for both underlying algorithms and MUST NOT
+ * reuse existing key material" (§9.3 explains what reuse costs). A rule like
+ * that, enforced by a check, has to be wired to every path that can create an
+ * object -- there are ten such call sites in fhsm_pkcs11.c, and this project
+ * has already found seven defects of exactly the form "a control wired to some
+ * of the paths that reach a state and not the rest". So the rule is made
+ * structurally true instead: if the only way a composite key can come into
+ * existence is fhsm_composite_keygen(), which generates both halves itself,
+ * reuse is not prevented, it is unrepresentable.
+ *
+ * The serialization below is local, not the interoperable §4.2 format. §3.1.1
+ * permits that explicitly where private keys need not leave the module. It can
+ * be upgraded later without changing the design above.
+ * ----------------------------------------------------------------------- */
+
+/* Local key blob: "FCMP" | ver(1) | alg(1) | len_pq(2 LE) | pq | len_trad(2 LE) | trad
+ * Components are DER (PKCS#8 for private, SubjectPublicKeyInfo for public). */
+#define FHSM_COMPOSITE_BLOB_MAGIC   "FCMP"
+#define FHSM_COMPOSITE_BLOB_VERSION 1u
+
+/* Comfortable ceilings for ML-DSA-65 + Ed25519. */
+#define FHSM_COMPOSITE_PRIV_MAX  8192u
+#define FHSM_COMPOSITE_PUB_MAX   4096u
+#define FHSM_COMPOSITE_SIG_MAX   4096u   /* 3309 (ML-DSA-65) + 64 (Ed25519) */
+
+/* Generate a fresh composite key pair. Both components are generated here and
+ * nowhere else -- see the note above. */
+fhsm_rv_t fhsm_composite_keygen(fhsm_composite_alg_t alg,
+                                 uint8_t *priv, size_t *priv_len,
+                                 uint8_t *pub,  size_t *pub_len);
+
+/* Composite-ML-DSA.Sign (§3.2). Builds M', signs it with both components --
+ * the ML-DSA one receiving the Label as its FIPS 204 context -- and emits
+ * mldsaSig || tradSig, in that order. */
+fhsm_rv_t fhsm_composite_sign(fhsm_composite_alg_t alg,
+                               const uint8_t *priv, size_t priv_len,
+                               const uint8_t *msg,  size_t msg_len,
+                               const uint8_t *ctx,  size_t ctx_len,
+                               uint8_t *sig, size_t *sig_len);
+
+/* Composite-ML-DSA.Verify (§3.3). True only if BOTH components verify. */
+fhsm_rv_t fhsm_composite_verify(fhsm_composite_alg_t alg,
+                                 const uint8_t *pub, size_t pub_len,
+                                 const uint8_t *msg, size_t msg_len,
+                                 const uint8_t *ctx, size_t ctx_len,
+                                 const uint8_t *sig, size_t sig_len);
+
+/* Length of the ML-DSA component within a composite signature, so a caller
+ * that needs to split one knows where the boundary is. */
+fhsm_rv_t fhsm_composite_split(fhsm_composite_alg_t alg,
+                                const uint8_t *sig, size_t sig_len,
+                                size_t *pq_len, size_t *trad_len);
+
 #ifdef __cplusplus
 }
 #endif

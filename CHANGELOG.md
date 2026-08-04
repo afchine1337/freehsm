@@ -30,10 +30,43 @@ project adheres to [Semantic Versioning](https://semver.org/).
   that a short buffer reports the size needed, and that the field layout is
   where the specification says.
 
-  Clean under ASan/UBSan. Not yet wired to a mechanism: `C_Sign` still has no
-  composite algorithm, and exposing one also requires passing the label down as
-  the FIPS 204 context to the ML-DSA component — the second of its two roles,
-  and the one an implementer is most likely to drop.
+  Clean under ASan/UBSan.
+
+* **Composite ML-DSA keygen, sign and verify (#112).** `fhsm_composite_keygen`,
+  `_sign` and `_verify` complete the crypto layer: fresh generation of both
+  components in one call, `M'` signed by each, the ML-DSA one receiving the
+  Label as its FIPS 204 context, output as `mldsaSig || tradSig` — 3373 bytes
+  for `MLDSA65-Ed25519`. Verification succeeds only if both components do
+  (§3.3).
+
+  A composite key is one object holding both components, and there is
+  deliberately no way to build one from two existing handles. §3.1 forbids
+  reusing key material between a composite and a non-composite or between two
+  composites; enforcing that with a check would mean wiring it to the ten
+  object-creation call sites in `fhsm_pkcs11.c`, which is the exact shape of
+  the seven defects this project has already found in itself. Instead the rule
+  is structural: if the only origin of a composite key is a function that
+  generates both halves itself, reuse is not prevented, it is unrepresentable.
+
+  `tests/test_composite_sign` demonstrates non-separability rather than
+  asserting it. It lifts the Ed25519 component out of a composite signature and
+  shows it is *not* a valid standalone Ed25519 signature over the message —
+  with a positive control proving it fails for the right reason, since it does
+  verify against `M'`. Under `CKM_HYBRID_ED25519_ML_DSA_65` that same extraction
+  yields a perfectly valid standalone signature. The difference between the two
+  mechanisms is now visible in a test rather than argued in a document.
+
+  Also covered: the application context is bound in (a signature made under an
+  8-byte context does not verify under an empty one), and corrupting either
+  half invalidates the whole.
+
+  Verified separately that OpenSSL 3.5.6 honours the FIPS 204 context string —
+  a signature made with the Label verifies under that Label and under no other,
+  and not under none. The first version of that check merely observed that two
+  signatures differed, which proves nothing: ML-DSA is randomised, so they
+  differ anyway.
+
+  Still not wired to a PKCS#11 mechanism; that is the next step.
 
 ### Security
 * **`CKM_HYBRID_ED25519_ML_DSA_65` is not Composite ML-DSA, and three places
