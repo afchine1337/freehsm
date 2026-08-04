@@ -229,8 +229,44 @@ keys and reading a tenth that is absent is not. Whichever is chosen, the
 
 | # | Task | Effort | Status |
 |---|---|---|---|
-| #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h | ⏳ **core of the v2.0 MVP** |
+| #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h **+ ~8h** | ⏳ **core of the v2.0 MVP** — scope grew on 2026-08-03: conforming Composite ML-DSA is now **task zero**, see the note below |
 | #123 | Signing tool `fhsm-sign` L1+L2 (raw + CMS/PKCS#7), PQC-ready | ~10h | ⏳ **MVP multiplier** |
+
+### #112 — the composite signatures have to be built before the CA (2026-08-03)
+
+Scoping #112 started by reading `draft-ietf-lamps-pq-composite-sigs-19` (IESG
+state: RFC Editor Queue) against what the module actually does. They do not
+match. `CKM_HYBRID_ED25519_ML_DSA_65` signs the bare message with both keys and
+concatenates; the draft signs a message representative
+`M' = Prefix || Label || len(ctx) || ctx || PH(M)`, passes the per-algorithm
+Label down as the ML-DSA ctx, and serializes `(mldsaSig, tradSig)` under a
+registered composite OID. Full analysis in `docs/COMPOSITE_SIGS_GAP.md`.
+
+The mechanism itself is fine as a locally-designed PQ/T hybrid and keeps its
+place. What was wrong was three citations claiming it followed the draft; those
+are corrected.
+
+**Consequence for this task.** A CA cannot issue draft-conforming composite
+certificates on top of a non-conforming primitive, and a CA whose certificates
+nothing else can verify is worth less than no CA. So the order is:
+
+0. Composite ML-DSA proper — the combiner, the `MLDSA65-Ed25519` OID and Label
+   from §6, the serialization from §4, validated against the test vectors in
+   Appendix E. Roughly 8 hours. This is the first thing that gets built.
+1. `fhsm-csr` and certificate issuance on top of it.
+2. Revocation, then OCSP — OCSP is a network service and #111 is deliberately
+   after the MVP, so CRL first.
+
+The upside of finding this now: Appendix E is 150 pages of test vectors, so for
+once the implementation can be checked against someone else's numbers instead of
+our own. The existing KATs never caught this because they are self-generated —
+they prove our verify accepts our sign, which any self-consistent construction
+satisfies, including a wrong one.
+
+**Claim discipline until then.** `PRIMACY_AUDIT_PQC_COMPOSITE.md` §5 rests on
+"PQC composite signatures out-of-the-box". That describes a future release. No
+README, announcement or landing text may say this module implements composite
+signatures until the conforming one ships.
 
 ## Release process
 

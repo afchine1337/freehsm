@@ -7,6 +7,47 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Security
+* **`CKM_HYBRID_ED25519_ML_DSA_65` is not Composite ML-DSA, and three places
+  said it was.** Found while scoping #112, by reading
+  `draft-ietf-lamps-pq-composite-sigs-19` (IESG state: RFC Editor Queue) against
+  the code instead of trusting the citation.
+
+  The draft signs a message representative built by a signature combiner:
+  `M' = Prefix || Label || len(ctx) || ctx || PH(M)`, with the per-algorithm
+  Label also passed down as the ML-DSA context, serialized as
+  `(mldsaSig, tradSig)` under a registered composite OID. The module signs the
+  bare message with both keys and concatenates them in the other order.
+
+  The consequence is a missing security property, not a formatting difference.
+  Because both components sign the message itself, the Ed25519 half is a valid
+  *standalone* Ed25519 signature over that message and can be lifted straight
+  out of the concatenation — precisely the separability the draft's Label exists
+  to prevent (§2.2, §9.2.3). And with no composite OID the signature cannot
+  appear in an X.509 certificate, a CSR or a CMS structure at all.
+
+  The mechanism keeps its place: as a locally-designed PQ/T hybrid, two
+  independent signatures both required to verify, it is a reasonable thing to
+  offer, and its name says `HYBRID`, not `COMPOSITE`. What is corrected is the
+  claim. `scripts/gen_p11_thunks.py`, the `fhsm_dispatch_hybrid.c` header and
+  the generated `docs/MECHANISMS.md` now describe what it does and state plainly
+  that it is not the draft.
+
+  Worth recording how it survived. The KEM combiner fifty lines above in the
+  same file *does* bind a domain-separation label into its hash
+  (`"HYBRID-X25519-ML-KEM-768"`); the technique was understood and applied on
+  one path and not the other. That is the same defect shape this project has now
+  found seven times in its own code, sitting in its flagship differentiator. It
+  went unnoticed because the KATs are self-generated: they prove our verify
+  accepts our sign, which is true of any self-consistent construction, including
+  a wrong one.
+
+  Analysis in `docs/COMPOSITE_SIGS_GAP.md`. Conforming Composite ML-DSA becomes
+  task zero of #112 — Appendix E of the draft is 150 pages of test vectors, so
+  this time it can be checked against someone else's numbers. Until it ships, no
+  README, announcement or landing text may describe this module as implementing
+  composite signatures.
+
 ### Testing
 * **#109 validated against a real TPM 2.0.** Until today the sealing backend had
   only ever run against `tests/tpm2-stub.sh`, which performs no cryptography;

@@ -34,14 +34,35 @@
  *     The output layout is :
  *         [ ct_x25519 (32) || ct_pqkem (1088) || ss (32) ]
  *
- *  2. CKM_HYBRID_ED25519_ML_DSA_65  --- a concatenated signature
- *     (per draft-ietf-lamps-pq-composite-sigs §5) :
+ *  2. CKM_HYBRID_ED25519_ML_DSA_65  --- a concatenated signature of
+ *     local design :
  *
- *         sig = sig_ed25519 || sig_ml_dsa_65
+ *         sig = sig_ed25519(M) || sig_ml_dsa_65(M)
  *
  *     Verify requires *both* component signatures to validate. This
  *     yields a security level equal to the stronger of the two
  *     primitives (transitional defense in depth).
+ *
+ *     This is NOT Composite ML-DSA. Earlier revisions of this comment
+ *     cited draft-ietf-lamps-pq-composite-sigs §5, which they do not
+ *     implement: that specification signs a message representative
+ *     M' = Prefix || Label || len(ctx) || ctx || PH(M), passes the
+ *     per-algorithm Label down as the ML-DSA ctx, and serializes
+ *     (mldsaSig, tradSig) in that order under a registered composite
+ *     OID. None of that happens here.
+ *
+ *     The practical consequence is not cosmetic. Because both
+ *     components sign the bare message, the Ed25519 half is a valid
+ *     *standalone* Ed25519 signature over that message and can simply
+ *     be lifted out of the concatenation -- the separability the draft's
+ *     Label exists to prevent (§2.2, §9.2.3). Note that the KEM
+ *     combiner fifty lines above does bind a domain-separation label
+ *     into its hash; the technique was applied on one path and not the
+ *     other.
+ *
+ *     See docs/COMPOSITE_SIGS_GAP.md. Conforming Composite ML-DSA is
+ *     task zero of #112, and until it ships nothing may describe this
+ *     module as implementing composite signatures.
  *
  *  All operations require BOTH a classical and a PQ key, supplied via
  *  the params blob :

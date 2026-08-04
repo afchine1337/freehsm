@@ -340,8 +340,18 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_HYBRID_ED25519_ML_DSA_65", 0x80004201, "Hybrid-Sig",
          "sign", "dispatch_hybrid_ed25519_ml_dsa_65",
          fips="approved",
-         refs=("draft-ietf-lamps-pq-composite-sigs",),
-         notes="signature = sig_ed25519 || sig_ml_dsa_65 ; verify requires both to validate."),
+         refs=("RFC 9794 (PQ/T hybrid terminology)",),
+         notes="A PQ/T hybrid of local design: Ed25519 and ML-DSA-65 each sign "
+               "the message and the two signatures are concatenated; verify "
+               "requires both. It is NOT Composite ML-DSA "
+               "(draft-ietf-lamps-pq-composite-sigs): there is no signature "
+               "combiner, so no Prefix/Label/ctx binding and no "
+               "non-separability -- the Ed25519 half is a valid standalone "
+               "signature over the same message. Not usable in X.509 or CMS, "
+               "which need a registered composite OID. See "
+               "docs/COMPOSITE_SIGS_GAP.md; conforming Composite ML-DSA is "
+               "task zero of #112.",
+         ),
 
     # === Legacy / non-approved (rejected in fips-strict) ==============
     Mech("CKM_MD5",                0x00000210, "MD5",  "digest",  "dispatch_md5",
