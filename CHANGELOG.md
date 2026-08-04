@@ -7,6 +7,34 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+* **The Composite ML-DSA signature combiner (#112, task zero).**
+  `fhsm_composite_mprime()` builds the message representative
+  `M' = Prefix || Label || len(ctx) || ctx || PH(M)` of
+  draft-ietf-lamps-pq-composite-sigs-19, for `id-MLDSA65-Ed25519-SHA512` —
+  OID `1.3.6.1.5.5.7.6.48`, label `COMPSIG-MLDSA65-Ed25519-SHA512`, pre-hash
+  SHA-512, 127 bytes with an empty context.
+
+  This is the piece `CKM_HYBRID_ED25519_ML_DSA_65` lacks entirely, and the
+  reason its Ed25519 half is a valid standalone signature that can be lifted
+  out of the concatenation.
+
+  **The vectors went in before the code.** `tests/test_composite_mprime` reads
+  `kat/composite/mprime_appendix_d.txt` — the draft's own two worked examples,
+  which the combiner reproduces byte for byte, empty context and 8-byte context
+  alike. The test parses the file rather than embedding hex, because copying
+  130 bytes of it into a C literal is the transcription risk the file exists to
+  remove. Alongside them it checks what published vectors cannot: that a
+  256-byte context is refused rather than truncated (a single length byte
+  cannot encode it, and silently shortening it would change what is signed),
+  that a short buffer reports the size needed, and that the field layout is
+  where the specification says.
+
+  Clean under ASan/UBSan. Not yet wired to a mechanism: `C_Sign` still has no
+  composite algorithm, and exposing one also requires passing the label down as
+  the FIPS 204 context to the ML-DSA component — the second of its two roles,
+  and the one an implementer is most likely to drop.
+
 ### Security
 * **`CKM_HYBRID_ED25519_ML_DSA_65` is not Composite ML-DSA, and three places
   said it was.** Found while scoping #112, by reading
