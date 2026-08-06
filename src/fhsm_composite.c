@@ -487,3 +487,162 @@ fhsm_rv_t fhsm_composite_spki(fhsm_composite_alg_t alg,
     *out_len = (size_t)(c - out);
     return (*out_len == total) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
+
+/* ===========================================================================
+ * PKCS#10.
+ * ========================================================================= */
+
+fhsm_rv_t fhsm_composite_algid(fhsm_composite_alg_t alg,
+                                const uint8_t **der, size_t *der_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512 || !der || !der_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    *der = ALGID_MLDSA65_ED25519;
+    *der_len = sizeof ALGID_MLDSA65_ED25519;
+    return FHSM_RV_OK;
+}
+
+/* Parse "/C=FR/O=Simorgh Labs/CN=example" into an X509_NAME. Deliberately
+ * strict: an unknown attribute type or an empty value is refused rather than
+ * skipped, because a CSR that silently drops half the subject it was asked
+ * for is worse than one that fails. */
+static X509_NAME *name_from_oneline(const char *s) {
+    if (!s || *s != '/') return NULL;
+    X509_NAME *n = X509_NAME_new();
+    if (!n) return NULL;
+    const char *p = s + 1;
+    while (*p) {
+        const char *eq = strchr(p, '=');
+        if (!eq) goto bad;
+        char field[32];
+        size_t fl = (size_t)(eq - p);
+        if (fl == 0 || fl >= sizeof field) goto bad;
+        memcpy(field, p, fl); field[fl] = '\0';
+        const char *val = eq + 1;
+        const char *end = strchr(val, '/');
+        size_t vl = end ? (size_t)(end - val) : strlen(val);
+        if (vl == 0) goto bad;
+        if (X509_NAME_add_entry_by_txt(n, field, MBSTRING_UTF8,
+                                        (const unsigned char *)val,
+                                        (int)vl, -1, 0) != 1) goto bad;
+        if (!end) break;
+        p = end + 1;
+    }
+    if (X509_NAME_entry_count(n) == 0) goto bad;
+    return n;
+bad:
+    X509_NAME_free(n);
+    return NULL;
+}
+
+fhsm_rv_t fhsm_composite_csr(fhsm_composite_alg_t alg,
+                              const char *subject,
+                              const uint8_t *pub, size_t pub_len,
+                              fhsm_composite_sign_cb sign, void *sign_ctx,
+                              uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+        || !subject || !pub || !sign || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    X509_REQ  *req  = X509_REQ_new();
+    X509_NAME *name = name_from_oneline(subject);
+    X509_ALGOR *sa  = NULL;
+    ASN1_BIT_STRING *bs = NULL;
+    uint8_t *tbs = NULL, *sig = NULL;
+    uint8_t spki[8192];
+
+    if (!req || !name) { rv = FHSM_RV_ARGUMENTS_BAD; goto out; }
+    if (X509_REQ_set_version(req, 0) != 1) goto out;      /* v1 == INTEGER 0 */
+    if (X509_REQ_set_subject_name(req, name) != 1) goto out;
+
+    /* Public key. X509_REQ_set_pubkey wants an EVP_PKEY and a composite key is
+     * not one -- that is the whole reason this path exists -- and there is no
+     * X509_REQ_set_X509_PUBKEY. So the request's own X509_PUBKEY is filled in
+     * place with X509_PUBKEY_set0_param, which is the documented way to carry
+     * an algorithm OpenSSL has no provider for.
+     *
+     * ptype is V_ASN1_UNDEF: parameters absent, per the ASN.1 module. Passing
+     * V_ASN1_NULL here would compile, encode, and interoperate with roughly
+     * half of everything. */
+    size_t sl = sizeof spki;
+    rv = fhsm_composite_spki(alg, pub, pub_len, spki, &sl);
+    if (rv != FHSM_RV_OK) goto out;
+    {
+        uint8_t raw[FHSM_COMPOSITE_RAW_PUB];
+        size_t rl = sizeof raw;
+        rv = fhsm_composite_raw_pub(alg, pub, pub_len, raw, &rl);
+        if (rv != FHSM_RV_OK) goto out;
+
+        X509_PUBKEY *slot = X509_REQ_get_X509_PUBKEY(req);
+        if (!slot) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
+
+        ASN1_OBJECT *oid = OBJ_txt2obj(FHSM_COMPOSITE_OID_MLDSA65_ED25519, 1);
+        uint8_t *penc = OPENSSL_memdup(raw, rl);
+        if (!oid || !penc) {
+            ASN1_OBJECT_free(oid); OPENSSL_free(penc);
+            rv = FHSM_RV_HOST_MEMORY; goto out;
+        }
+        /* Takes ownership of oid and penc on success. */
+        if (X509_PUBKEY_set0_param(slot, oid, V_ASN1_UNDEF, NULL,
+                                    penc, (int)rl) != 1) {
+            ASN1_OBJECT_free(oid); OPENSSL_free(penc);
+            rv = FHSM_RV_FUNCTION_FAILED; goto out;
+        }
+    }
+
+    /* signatureAlgorithm: same OID as the key, parameters absent. §6 registers
+     * a single OID that serves both roles. */
+    {
+        const uint8_t *ad; size_t adl;
+        rv = fhsm_composite_algid(alg, &ad, &adl);
+        if (rv != FHSM_RV_OK) goto out;
+        const uint8_t *p = ad;
+        sa = d2i_X509_ALGOR(NULL, &p, (long)adl);
+        if (!sa) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
+        if (X509_REQ_set1_signature_algo(req, sa) != 1) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
+    }
+
+    /* The signature covers the DER of CertificationRequestInfo, and nothing
+     * else. i2d_re_X509_REQ_tbs re-encodes it rather than returning a cached
+     * copy, so what is signed is what will be emitted. */
+    int tbs_len = i2d_re_X509_REQ_tbs(req, &tbs);
+    if (tbs_len <= 0) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
+
+    sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
+    if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    size_t sig_len = FHSM_COMPOSITE_SIG_MAX;
+    rv = sign(sign_ctx, tbs, (size_t)tbs_len, sig, &sig_len);
+    if (rv != FHSM_RV_OK) goto out;
+
+    bs = ASN1_BIT_STRING_new();
+    if (!bs) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    if (ASN1_BIT_STRING_set(bs, sig, (int)sig_len) != 1) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
+    /* A signature is an integral number of octets: no unused bits, and the
+     * DER encoder must not try to strip trailing zeros. */
+    bs->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
+    bs->flags |= ASN1_STRING_FLAG_BITS_LEFT;
+    X509_REQ_set0_signature(req, bs);
+    bs = NULL;                              /* owned by req now */
+
+    {
+        uint8_t *der = NULL;
+        int n = i2d_X509_REQ(req, &der);
+        if (n <= 0) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
+        if (*out_len < (size_t)n) { *out_len = (size_t)n; OPENSSL_free(der);
+                                     rv = FHSM_RV_BUFFER_TOO_SMALL; goto out; }
+        memcpy(out, der, (size_t)n);
+        *out_len = (size_t)n;
+        OPENSSL_free(der);
+        rv = FHSM_RV_OK;
+    }
+out:
+    if (tbs) OPENSSL_free(tbs);
+    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
+    ASN1_BIT_STRING_free(bs);
+    X509_ALGOR_free(sa);
+    X509_NAME_free(name);
+    X509_REQ_free(req);
+    return rv;
+}

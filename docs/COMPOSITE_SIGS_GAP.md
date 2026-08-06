@@ -201,6 +201,56 @@ working group's repository as `src/testvectors_wrapped.json`. Those exercise the
 component signatures and the serialization; the combiner is already covered
 above. Everything needed to start writing the code is now in hand.
 
+## What a composite CSR can and cannot do today (measured 2026-08-06)
+
+`fhsm_composite_csr` produces a PKCS#10 request carrying a composite key.
+Handed to the `openssl` command-line tool — a program sharing no code with this
+project — the result splits cleanly in two, and the distinction matters more
+than either half.
+
+**The structure is interoperable.** `openssl asn1parse` walks the whole request:
+24 elements, zero errors. `openssl req -text` reports the version, the subject
+`C=FR, O=Simorgh Labs, CN=composite.example`, both algorithm identifiers, and
+the signature value. The `subjectPublicKey` BIT STRING is 1985 bytes (one
+unused-bits octet plus the 1984-byte composite key) and the signature BIT STRING
+is 3374. This is the "protocol backwards compatibility" the draft claims in
+§1.3 — a composite fits existing PKIX structures without the parser needing to
+be hybrid-aware — and it now has a measurement behind it rather than a citation.
+
+**The signature cannot be verified by OpenSSL**, and this is not a defect in the
+request. `openssl req -text` reports:
+
+```
+Warning: error while verifying CSR self-signature
+    Public Key Algorithm: 1.3.6.1.5.5.7.6.48
+    Unable to load Public Key
+    ...X509_PUBKEY_get0:decode error
+    ...int_ctx_new:unsupported algorithm
+```
+
+OpenSSL 3.5.6 has no implementation of Composite ML-DSA — it prints the OID in
+dotted form rather than by name, which is the same thing said another way: no
+NID, no decoder, no provider. It cannot verify a signature for an algorithm it
+does not have. A CA that implements composite would; nothing shipping today
+does, because the RFC has not published.
+
+**The signature is nevertheless over the right bytes**, established
+independently. `tests/test_composite_csr` re-derives the to-be-signed region
+from OpenSSL's *own parse* of the finished request with `i2d_re_X509_REQ_tbs`
+— 2080 bytes, matching what the signing callback was handed — and verifies
+against that rather than against our own idea of what was signed. It also
+checks the negative: the same signature must not verify over the whole request.
+Without that control, a verifier that accepted anything would pass the first
+check.
+
+**The practical consequence, stated plainly.** A composite CSR can be produced,
+transported, parsed and archived today. It cannot be *validated* by any
+generally available tool. Anyone told otherwise will discover it the first time
+they submit one. That is a limitation of the ecosystem rather than of this
+code, and it will lift when the RFC publishes and implementations follow — but
+until then it belongs in any documentation that mentions composite CSRs, and
+in any answer given to a user who asks whether they can use one.
+
 ## Claims to review before the v2.0 announcements
 
 `PRIMACY_AUDIT_PQC_COMPOSITE.md` §5 rests on "PQC composite signatures

@@ -177,6 +177,9 @@ fhsm_rv_t fhsm_composite_split(fhsm_composite_alg_t alg,
  * ----------------------------------------------------------------------- */
 
 /* Raw component public key sizes for MLDSA65-Ed25519. */
+/* Dotted form of the composite OID, for OBJ_txt2obj. */
+#define FHSM_COMPOSITE_OID_MLDSA65_ED25519 "1.3.6.1.5.5.7.6.48"
+
 #define FHSM_COMPOSITE_RAW_PQ_PUB    1952u
 #define FHSM_COMPOSITE_RAW_TRAD_PUB    32u
 #define FHSM_COMPOSITE_RAW_PUB       (FHSM_COMPOSITE_RAW_PQ_PUB + \
@@ -193,6 +196,46 @@ fhsm_rv_t fhsm_composite_raw_pub(fhsm_composite_alg_t alg,
 fhsm_rv_t fhsm_composite_spki(fhsm_composite_alg_t alg,
                                const uint8_t *pub, size_t pub_len,
                                uint8_t *out, size_t *out_len);
+
+/* ---------------------------------------------------------------------------
+ * PKCS#10 (#112).
+ *
+ * The structure is built by OpenSSL -- the Name, the attribute set, the outer
+ * SEQUENCE -- and this module supplies only the two composite-specific parts:
+ * the SubjectPublicKeyInfo, and the signature over the DER of
+ * CertificationRequestInfo.
+ *
+ * That division is deliberate. Hand-encoding a whole PKCS#10 means
+ * hand-encoding a distinguished name, and the AlgorithmIdentifier attempt
+ * above already got its lengths wrong on the first try. Letting a widely-used
+ * DER writer produce everything it can also means the result is far likelier
+ * to be readable by the CA the request is going to, which is the only thing a
+ * CSR is for.
+ * ----------------------------------------------------------------------- */
+
+/* The AlgorithmIdentifier for the composite, as DER. Same OID as the key,
+ * parameters absent (§6 registers one OID used in both roles). Exposed
+ * because the CSR builder needs it for signatureAlgorithm. */
+fhsm_rv_t fhsm_composite_algid(fhsm_composite_alg_t alg,
+                                const uint8_t **der, size_t *der_len);
+
+/* Build a PKCS#10 CertificationRequest.
+ *
+ * `subject` is an OpenSSL-style one-line DN, e.g. "/C=FR/O=Simorgh Labs/CN=x".
+ * `sign` is called once, with the DER of CertificationRequestInfo, and must
+ * produce a composite signature over it; the caller decides whether that runs
+ * through PKCS#11, through fhsm_composite_sign, or somewhere else entirely.
+ * That indirection is what lets fhsm-csr drive a key it cannot read.
+ */
+typedef fhsm_rv_t (*fhsm_composite_sign_cb)(void *ctx,
+                                             const uint8_t *tbs, size_t tbs_len,
+                                             uint8_t *sig, size_t *sig_len);
+
+fhsm_rv_t fhsm_composite_csr(fhsm_composite_alg_t alg,
+                              const char *subject,
+                              const uint8_t *pub, size_t pub_len,
+                              fhsm_composite_sign_cb sign, void *sign_ctx,
+                              uint8_t *out, size_t *out_len);
 
 #ifdef __cplusplus
 }

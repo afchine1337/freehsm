@@ -8,6 +8,39 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **PKCS#10 certification requests with a composite key (#112).**
+  `fhsm_composite_csr` builds a `CertificationRequest`: OpenSSL encodes the
+  Name, the attribute set and the outer structure; this module supplies the
+  `SubjectPublicKeyInfo` and the signature over `CertificationRequestInfo`.
+  Signing goes through a callback, so the builder never sees a key — that is
+  what will let `fhsm-csr` drive a key it cannot read, through `C_Sign`.
+
+  **Measured against the `openssl` command-line tool, which shares no code with
+  this project.** The structure is interoperable: `asn1parse` walks all 24
+  elements with zero errors, `req -text` recovers the version, the subject and
+  both algorithm identifiers. That is the draft's "protocol backwards
+  compatibility" claim, now with a measurement behind it.
+
+  **OpenSSL cannot verify the signature, and that is not a defect in the
+  request.** It has no implementation of Composite ML-DSA — it prints the OID
+  in dotted form because there is no NID, hence no decoder and no provider — so
+  it cannot verify an algorithm it does not have. Recorded in
+  `docs/COMPOSITE_SIGS_GAP.md` alongside the practical consequence: a composite
+  CSR can be produced, transported and parsed today, but validated by nothing
+  generally available until the RFC publishes and implementations follow.
+  Anyone told otherwise finds out when they submit one.
+
+  The signature is over the right bytes all the same, established
+  independently: `tests/test_composite_csr` re-derives the to-be-signed region
+  from OpenSSL's *own parse* of the finished request — 2080 bytes, matching
+  what the callback was handed — and verifies against that, with a negative
+  control confirming the same signature does not verify over the whole
+  request.
+
+  A malformed subject is refused rather than silently truncated: no leading
+  slash, or an empty attribute value, returns `CKR_ARGUMENTS_BAD`. A request
+  that quietly drops half the subject it was asked for is worse than one that
+  fails.
 * **Composite `SubjectPublicKeyInfo` (#112).** `fhsm_composite_raw_pub` and
   `fhsm_composite_spki` produce the X.509 encoding a CSR, a certificate and a
   CMS `SignerInfo` all need: §4.1's `mldsaPK || tradPK` — 1952 + 32 = 1984 raw
