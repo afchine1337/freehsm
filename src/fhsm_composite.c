@@ -818,3 +818,261 @@ out:
     X509_free(x);
     return rv;
 }
+
+/* ===========================================================================
+ * Certificate issuance.
+ * ========================================================================= */
+
+#include <openssl/rand.h>
+
+fhsm_rv_t fhsm_composite_pub_from_raw(fhsm_composite_alg_t alg,
+                                       const uint8_t *raw, size_t raw_len,
+                                       uint8_t *pub, size_t *pub_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512 || !raw || !pub || !pub_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    /* Length is checked, not assumed: a short or long value here would produce
+     * component keys built from the wrong bytes, and the failure would surface
+     * much later as a signature that simply never verifies. */
+    if (raw_len != FHSM_COMPOSITE_RAW_PUB) return FHSM_RV_ARGUMENTS_BAD;
+
+    EVP_PKEY *kq = EVP_PKEY_new_raw_public_key_ex(NULL, "ML-DSA-65", NULL,
+                                                   raw, FHSM_COMPOSITE_RAW_PQ_PUB);
+    EVP_PKEY *kt = EVP_PKEY_new_raw_public_key_ex(NULL, "ED25519", NULL,
+                                                   raw + FHSM_COMPOSITE_RAW_PQ_PUB,
+                                                   FHSM_COMPOSITE_RAW_TRAD_PUB);
+    uint8_t *dq = NULL, *dt = NULL;
+    int lq = 0, lt = 0;
+    fhsm_rv_t rv = FHSM_RV_KEY_HANDLE_INVALID;
+    if (!kq || !kt) goto out;
+    lq = i2d_PUBKEY(kq, &dq);
+    lt = i2d_PUBKEY(kt, &dt);
+    rv = FHSM_RV_FUNCTION_FAILED;
+    if (lq <= 0 || lt <= 0) goto out;
+    rv = blob_pack(alg, dq, (size_t)lq, dt, (size_t)lt, pub, pub_len);
+out:
+    OPENSSL_free(dq); OPENSSL_free(dt);
+    EVP_PKEY_free(kq); EVP_PKEY_free(kt);
+    return rv;
+}
+
+/* Pull the composite public key out of an X509_PUBKEY slot, checking that it
+ * really is one rather than trusting the caller's context. */
+static fhsm_rv_t pub_from_slot(fhsm_composite_alg_t alg, X509_PUBKEY *xp,
+                                uint8_t *pub, size_t *pub_len,
+                                const uint8_t **raw_out, size_t *raw_len_out)
+{
+    const unsigned char *pk = NULL; int pkl = 0;
+    X509_ALGOR *a = NULL;
+    if (!xp || X509_PUBKEY_get0_param(NULL, &pk, &pkl, &a, xp) != 1)
+        return FHSM_RV_ARGUMENTS_BAD;
+
+    const ASN1_OBJECT *o = NULL; int ptype = 0; const void *pval = NULL;
+    X509_ALGOR_get0(&o, &ptype, &pval, a);
+    char buf[128] = "";
+    OBJ_obj2txt(buf, sizeof buf, o, 1);
+    if (strcmp(buf, FHSM_COMPOSITE_OID_MLDSA65_ED25519) != 0)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+
+    fhsm_rv_t rv = fhsm_composite_pub_from_raw(alg, pk, (size_t)pkl, pub, pub_len);
+    if (rv != FHSM_RV_OK) return rv;
+    if (raw_out) *raw_out = pk;
+    if (raw_len_out) *raw_len_out = (size_t)pkl;
+    return FHSM_RV_OK;
+}
+
+/* SHA-1 over the raw key: RFC 5280 §4.2.1.2 method (1). */
+static int key_id(const uint8_t *raw, size_t n, uint8_t md[20]) {
+    unsigned int l = 0;
+    EVP_MD *h = EVP_MD_fetch(NULL, "SHA1", NULL);
+    EVP_MD_CTX *c = EVP_MD_CTX_new();
+    int ok = h && c && EVP_DigestInit_ex(c, h, NULL) == 1
+          && EVP_DigestUpdate(c, raw, n) == 1
+          && EVP_DigestFinal_ex(c, md, &l) == 1 && l == 20;
+    EVP_MD_CTX_free(c); EVP_MD_free(h);
+    return ok;
+}
+
+fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
+                                const uint8_t *ca_cert, size_t ca_cert_len,
+                                const uint8_t *csr, size_t csr_len,
+                                const char *subject_override,
+                                int days,
+                                fhsm_composite_sign_cb sign, void *sign_ctx,
+                                uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+        || !ca_cert || !csr || !sign || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (days <= 0) return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    X509     *ca  = NULL, *x = NULL;
+    X509_REQ *req = NULL;
+    X509_NAME *subj = NULL;
+    uint8_t *tbs = NULL, *sig = NULL, *der = NULL, *req_tbs = NULL;
+    static uint8_t reqpub[FHSM_COMPOSITE_PUB_MAX];
+
+    {
+        const uint8_t *p = ca_cert;  ca  = d2i_X509(NULL, &p, (long)ca_cert_len);
+        const uint8_t *q = csr;      req = d2i_X509_REQ(NULL, &q, (long)csr_len);
+    }
+    if (!ca || !req) { rv = FHSM_RV_ARGUMENTS_BAD; goto out; }
+
+    /* ---- Proof of possession, before anything else -------------------
+     * The request's signature, checked against the key the request carries.
+     * Without this the CA certifies a key the applicant may not hold: anyone
+     * could lift a public key from an existing certificate and obtain a new
+     * one for it. This is the difference between a CA and a rubber stamp, and
+     * it is the reason issuance has a single entry point. */
+    {
+        size_t rl = sizeof reqpub;
+        const uint8_t *raw = NULL; size_t rawl = 0;
+        rv = pub_from_slot(alg, X509_REQ_get_X509_PUBKEY(req), reqpub, &rl,
+                            &raw, &rawl);
+        if (rv != FHSM_RV_OK) goto out;
+
+        const ASN1_BIT_STRING *rsig = NULL; const X509_ALGOR *ralg = NULL;
+        X509_REQ_get0_signature(req, &rsig, &ralg);
+        const ASN1_OBJECT *o = NULL; int pt = 0; const void *pv = NULL;
+        X509_ALGOR_get0(&o, &pt, &pv, ralg);
+        char b[128] = ""; OBJ_obj2txt(b, sizeof b, o, 1);
+        if (strcmp(b, FHSM_COMPOSITE_OID_MLDSA65_ED25519) != 0) {
+            rv = FHSM_RV_MECHANISM_INVALID; goto out;
+        }
+        int rtl = i2d_re_X509_REQ_tbs(req, &req_tbs);
+        if (rtl <= 0) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
+        rv = fhsm_composite_verify(alg, reqpub, rl, req_tbs, (size_t)rtl, NULL, 0,
+                                    ASN1_STRING_get0_data((const ASN1_STRING *)rsig),
+                                    (size_t)ASN1_STRING_length((const ASN1_STRING *)rsig));
+        if (rv != FHSM_RV_OK) { rv = FHSM_RV_SIGNATURE_INVALID; goto out; }
+    }
+
+    x = X509_new();
+    if (!x) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    if (X509_set_version(x, 2) != 1) goto out;
+
+    /* ---- Serial: 20 random octets, top bit cleared ------------------- */
+    {
+        uint8_t sn[20];
+        if (RAND_bytes(sn, (int)sizeof sn) != 1) goto out;
+        sn[0] &= 0x7F;                 /* positive INTEGER (RFC 5280 §4.1.2.2) */
+        if (sn[0] == 0) sn[0] = 1;     /* and never a leading zero octet */
+        BIGNUM *bn = BN_bin2bn(sn, (int)sizeof sn, NULL);
+        if (!bn) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        ASN1_INTEGER *ai = BN_to_ASN1_INTEGER(bn, NULL);
+        BN_free(bn);
+        if (!ai) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        int ok = X509_set_serialNumber(x, ai) == 1;
+        ASN1_INTEGER_free(ai);
+        if (!ok) goto out;
+    }
+
+    if (!X509_gmtime_adj(X509_getm_notBefore(x), 0)) goto out;
+    if (!X509_gmtime_adj(X509_getm_notAfter(x), (long)days * 86400L)) goto out;
+
+    /* Issuer is the CA's subject. Subject is the request's, unless the
+     * operator replaced it. */
+    if (X509_set_issuer_name(x, X509_get_subject_name(ca)) != 1) goto out;
+    if (subject_override) {
+        subj = name_from_oneline(subject_override);
+        if (!subj) { rv = FHSM_RV_ARGUMENTS_BAD; goto out; }
+        if (X509_set_subject_name(x, subj) != 1) goto out;
+    } else {
+        if (X509_set_subject_name(x, X509_REQ_get_subject_name(req)) != 1) goto out;
+    }
+
+    /* The requester's key, copied across verbatim. */
+    {
+        const unsigned char *pk = NULL; int pkl = 0;
+        X509_PUBKEY_get0_param(NULL, &pk, &pkl, NULL, X509_REQ_get_X509_PUBKEY(req));
+        ASN1_OBJECT *oid = OBJ_txt2obj(FHSM_COMPOSITE_OID_MLDSA65_ED25519, 1);
+        uint8_t *penc = OPENSSL_memdup(pk, (size_t)pkl);
+        if (!oid || !penc) { ASN1_OBJECT_free(oid); OPENSSL_free(penc);
+                              rv = FHSM_RV_HOST_MEMORY; goto out; }
+        if (X509_PUBKEY_set0_param(X509_get_X509_PUBKEY(x), oid, V_ASN1_UNDEF,
+                                    NULL, penc, pkl) != 1) {
+            ASN1_OBJECT_free(oid); OPENSSL_free(penc); goto out;
+        }
+    }
+
+    /* ---- Extensions: the CA's, not the applicant's -------------------
+     * Whatever the request asked for is not read. CA:FALSE is the one that
+     * matters: an applicant that could obtain CA:TRUE could issue for any
+     * name in the world under this root. */
+    {
+        X509_EXTENSION *bc = X509V3_EXT_conf_nid(NULL, NULL,
+                                NID_basic_constraints, "critical,CA:FALSE");
+        X509_EXTENSION *ku = X509V3_EXT_conf_nid(NULL, NULL, NID_key_usage,
+                                "critical,digitalSignature,nonRepudiation");
+        int ok = bc && ku && X509_add_ext(x, bc, -1) == 1
+                        && X509_add_ext(x, ku, -1) == 1;
+        X509_EXTENSION_free(bc); X509_EXTENSION_free(ku);
+        if (!ok) goto out;
+    }
+    /* subjectKeyIdentifier over the applicant's key; authorityKeyIdentifier
+     * from the CA's own, so a verifier can find the issuer without guessing. */
+    {
+        const unsigned char *pk = NULL; int pkl = 0;
+        X509_PUBKEY_get0_param(NULL, &pk, &pkl, NULL, X509_REQ_get_X509_PUBKEY(req));
+        uint8_t md[20];
+        if (!key_id(pk, (size_t)pkl, md)) goto out;
+        ASN1_OCTET_STRING *os = ASN1_OCTET_STRING_new();
+        if (!os) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        int ok = ASN1_OCTET_STRING_set(os, md, 20) == 1;
+        X509_EXTENSION *e = ok ? X509V3_EXT_i2d(NID_subject_key_identifier, 0, os)
+                               : NULL;
+        ok = e && X509_add_ext(x, e, -1) == 1;
+        X509_EXTENSION_free(e); ASN1_OCTET_STRING_free(os);
+        if (!ok) goto out;
+
+        const ASN1_OCTET_STRING *caskid = X509_get0_subject_key_id(ca);
+        if (caskid) {
+            AUTHORITY_KEYID *akid = AUTHORITY_KEYID_new();
+            if (!akid) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+            akid->keyid = ASN1_OCTET_STRING_dup(caskid);
+            X509_EXTENSION *ae = akid->keyid
+                ? X509V3_EXT_i2d(NID_authority_key_identifier, 0, akid) : NULL;
+            ok = ae && X509_add_ext(x, ae, -1) == 1;
+            X509_EXTENSION_free(ae); AUTHORITY_KEYID_free(akid);
+            if (!ok) goto out;
+        }
+    }
+
+    if (!set_composite_algor((X509_ALGOR *)X509_get0_tbs_sigalg(x))) goto out;
+    {
+        const ASN1_BIT_STRING *cs = NULL; const X509_ALGOR *cala = NULL;
+        X509_get0_signature(&cs, &cala, x);
+        if (!cs || !cala) goto out;
+        if (!set_composite_algor((X509_ALGOR *)cala)) goto out;
+
+        int tl = i2d_re_X509_tbs(x, &tbs);
+        if (tl <= 0) goto out;
+        sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
+        if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        size_t sl = FHSM_COMPOSITE_SIG_MAX;
+        rv = sign(sign_ctx, tbs, (size_t)tl, sig, &sl);
+        if (rv != FHSM_RV_OK) goto out;
+        rv = FHSM_RV_FUNCTION_FAILED;
+        ASN1_BIT_STRING *bs = (ASN1_BIT_STRING *)cs;
+        if (ASN1_BIT_STRING_set(bs, sig, (int)sl) != 1) goto out;
+        bs->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
+        bs->flags |= ASN1_STRING_FLAG_BITS_LEFT;
+    }
+
+    {
+        int n = i2d_X509(x, &der);
+        if (n <= 0) goto out;
+        if (*out_len < (size_t)n) { *out_len = (size_t)n;
+                                     rv = FHSM_RV_BUFFER_TOO_SMALL; goto out; }
+        memcpy(out, der, (size_t)n);
+        *out_len = (size_t)n;
+        rv = FHSM_RV_OK;
+    }
+out:
+    OPENSSL_free(der); OPENSSL_free(tbs); OPENSSL_free(req_tbs);
+    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
+    X509_NAME_free(subj);
+    X509_free(x); X509_free(ca); X509_REQ_free(req);
+    return rv;
+}

@@ -266,6 +266,54 @@ fhsm_rv_t fhsm_composite_selfsigned(fhsm_composite_alg_t alg,
                                      fhsm_composite_sign_cb sign, void *sign_ctx,
                                      uint8_t *out, size_t *out_len);
 
+/* Rebuild a public-key blob from the §4.1 raw form.
+ *
+ * A CSR or a certificate carries `mldsaPK || tradPK` -- 1984 raw bytes -- while
+ * fhsm_composite_verify takes this module's own blob. Without this bridge a CA
+ * cannot check the proof of possession on a request it received, which is the
+ * one thing a CA must not skip. */
+fhsm_rv_t fhsm_composite_pub_from_raw(fhsm_composite_alg_t alg,
+                                       const uint8_t *raw, size_t raw_len,
+                                       uint8_t *pub, size_t *pub_len);
+
+/* ---------------------------------------------------------------------------
+ * Certificate issuance (#112).
+ *
+ * Issues a certificate from somebody else's certification request.
+ *
+ * The proof of possession is verified before anything else: the request's own
+ * signature, checked against the public key the request carries. A CA that
+ * signs without it will certify a key the requester does not hold, which is
+ * the difference between a CA and a rubber stamp. There is one entry point and
+ * the check is inside it, so there is no second path that could reach issuance
+ * without passing through it.
+ *
+ * Policy, matching `openssl ca` and for the same reason:
+ *
+ *   - the subject is taken from the request, or replaced wholesale by
+ *     `subject_override` when the operator supplies one;
+ *   - extensions requested by the applicant are IGNORED. The CA sets its own:
+ *     basicConstraints CA:FALSE, keyUsage, authorityKeyIdentifier,
+ *     subjectKeyIdentifier. A request must never be able to talk a CA into
+ *     issuing it a CA certificate;
+ *   - the serial is 20 random octets with the top bit cleared. Random rather
+ *     than sequential keeps the CA stateless and makes the to-be-signed bytes
+ *     unpredictable, which is what defeats chosen-prefix attacks on the
+ *     signature hash. Sequential serials also leak issuance volume.
+ *
+ * subjectAltName is deliberately not honoured yet. Doing it properly means
+ * deciding which name types are accepted, refusing private addresses, and
+ * reconciling it with the CN -- worth its own change rather than a rushed
+ * addition here.
+ * ----------------------------------------------------------------------- */
+fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
+                                const uint8_t *ca_cert, size_t ca_cert_len,
+                                const uint8_t *csr, size_t csr_len,
+                                const char *subject_override,
+                                int days,
+                                fhsm_composite_sign_cb sign, void *sign_ctx,
+                                uint8_t *out, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif

@@ -178,9 +178,22 @@ in short, the draft states the design goal that a composite be *considered*
 approved and, two lines earlier, that this guidance is not authoritative and has
 no NIST endorsement.
 
-**No certificate issuance yet.** `root` signs its own certificate. Issuing a
-certificate from a request produced by someone else is not implemented; that is
-the next part of #112, along with revocation and OCSP.
+**Issuance lives in `fhsm-ca`.** `fhsm-csr root` signs the CA's own
+certificate; signing somebody else's request is `fhsm-ca issue`:
+
+```bash
+fhsm-ca issue --label root-ca --ca-cert root.crt --csr web01.csr \
+              --days 365 --out web01.crt
+```
+
+The request's own signature is verified against the key it carries before
+anything is issued — a request whose signature does not match is refused with
+exit code 4 and nothing is written. Extensions asked for by the applicant are
+ignored; the CA sets `basicConstraints CA:FALSE`, `keyUsage`, and both key
+identifiers itself, so a request cannot talk the CA into issuing it a CA
+certificate. Serials are 20 random octets.
+
+Revocation and OCSP are not implemented.
 
 ---
 

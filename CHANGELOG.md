@@ -8,6 +8,39 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **`fhsm-ca issue` — certificates from someone else's request (#112).** The
+  chain now closes end to end: a root, a request from a separate key, and a
+  certificate binding them, all signed through the module.
+
+  **Proof of possession is verified before anything is signed.** The request's
+  own signature is checked against the public key the request carries. Without
+  it a CA certifies keys the applicant may not hold — anyone could lift a
+  public key out of an existing certificate and be issued a fresh one for it.
+  `tests/test_composite_issue` builds exactly that forgery (one key, another's
+  signature) and asserts it is refused: a check nobody has watched fail is a
+  check nobody knows is wired up.
+
+  **Extensions requested by the applicant are ignored.** The CA sets
+  `basicConstraints CA:FALSE`, `keyUsage`, `subjectKeyIdentifier` and
+  `authorityKeyIdentifier` itself. An applicant that could obtain `CA:TRUE`
+  could issue for any name in the world under that root.
+
+  Serials are 20 random octets with the top bit cleared. Random rather than
+  sequential keeps the CA stateless, makes the signed bytes unpredictable
+  against chosen-prefix attacks, and stops the serial leaking issuance volume.
+
+  `subjectAltName` is deliberately not honoured yet: doing it properly means
+  deciding which name types are accepted and refusing private addresses, which
+  deserves its own change rather than a rushed addition.
+
+  Verified from the command line, not only from a harness: root → request →
+  issuance, with the leaf's `authorityKeyIdentifier` matching the root's
+  `subjectKeyIdentifier` byte for byte and the issuer name matching the root's
+  subject.
+
+  The PKCS#11 plumbing moved to `tools/p11_util.h`, shared rather than copied:
+  a second copy is a second place for the "exactly one key with that label"
+  rule or the PIN policy to be relaxed, and only one would get fixed.
 * **`fhsm-csr` — the first piece of PKI tooling (#112).** Three commands:
   `keygen` creates a composite key pair in the token, `csr` produces a PKCS#10
   request, `root` produces a self-signed v3 CA certificate. Every signature
