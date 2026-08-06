@@ -64,6 +64,7 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
+    p11_progname = "fhsm-csr";
     if (argc < 2) usage();
     const char *cmd = argv[1];
     const char *module = "./libfreehsm-fips.so", *label = NULL, *subject = NULL;

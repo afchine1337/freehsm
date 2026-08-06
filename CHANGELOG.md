@@ -8,6 +8,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **`subjectAltName` on issued certificates (#112).** `fhsm-ca issue --san`
+  takes the syntax operators already know — `DNS:`, `IP:`, `email:`, `URI:`,
+  comma-separated. Without it nothing issued here is usable for TLS, since
+  browsers stopped looking at the CN years ago.
+
+  **The list comes from the operator, never from the request**, which follows
+  the policy already set: the applicant does not choose what the CA asserts
+  about them.
+
+  **Malformed input fails the command rather than dropping the entry.** Six
+  shapes are tested and refused: no type prefix, empty value, an address that
+  is not one, an unsupported type, an empty element, an empty list. A name
+  silently missing from a certificate is a name the operator believes is
+  covered.
+
+  **Private and loopback addresses are accepted, deliberately.** A public CA
+  must refuse them; this one exists for the internal networks of universities
+  and public bodies, where `10.0.0.0/8` is the whole point. Applying a rule
+  written for public issuance would break the intended use and protect nobody.
+
+### Fixed
+* **`fhsm-ca` reported its errors as `fhsm-csr:`.** Extracting the shared
+  PKCS#11 plumbing into `tools/p11_util.h` left the program name hard-coded, so
+  the newer tool announced itself under the older one's name and sent the
+  operator to the wrong manual page. The name is now set by each tool.
 * **`fhsm-ca issue` — certificates from someone else's request (#112).** The
   chain now closes end to end: a root, a request from a separate key, and a
   certificate binding them, all signed through the module.

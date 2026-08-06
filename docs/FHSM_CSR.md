@@ -186,6 +186,27 @@ fhsm-ca issue --label root-ca --ca-cert root.crt --csr web01.csr \
               --days 365 --out web01.crt
 ```
 
+Alternative names come from `--san`, in the syntax you already know:
+
+```bash
+fhsm-ca issue --label root-ca --ca-cert root.crt --csr web01.csr \
+              --san "DNS:web01.exemple.fr,DNS:www.exemple.fr,IP:10.0.0.7" \
+              --out web01.crt
+```
+
+`DNS:`, `IP:`, `email:` and `URI:` are accepted. Anything malformed — a missing
+type prefix, an empty value, an address that is not one — makes the whole
+command fail rather than dropping that entry, because a name silently missing
+from a certificate is a name you believe is covered and is not.
+
+**Private and loopback addresses are accepted.** A public CA must refuse them;
+this one exists for the internal networks of universities and public bodies,
+where `10.0.0.0/8` is the entire point. Applying a rule written for public
+issuance would break the intended use and protect nobody.
+
+The list comes from you, never from the request: the applicant does not choose
+what the CA asserts about them.
+
 The request's own signature is verified against the key it carries before
 anything is issued — a request whose signature does not match is refused with
 exit code 4 and nothing is written. Extensions asked for by the applicant are

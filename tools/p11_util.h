@@ -56,17 +56,23 @@ static struct {
     CK_RV (*Sign)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
 } p11;
 
+/* Set by each tool before anything can fail. Extracting this header from
+ * fhsm-csr left the name hard-coded, so fhsm-ca reported its errors as
+ * "fhsm-csr:" -- a tool announcing itself under another tool's name sends the
+ * operator to the wrong manual page. */
+static const char *p11_progname = "fhsm";
+
 static void die(const char *what, CK_RV rv) {
-    if (rv) fprintf(stderr, "fhsm-csr: %s failed (0x%lx)\n", what, (unsigned long)rv);
-    else    fprintf(stderr, "fhsm-csr: %s\n", what);
+    if (rv) fprintf(stderr, "%s: %s failed (0x%lx)\n", p11_progname, what, (unsigned long)rv);
+    else    fprintf(stderr, "%s: %s\n", p11_progname, what);
     exit(2);
 }
 
 static void load_module(const char *path) {
     p11.h = dlopen(path, RTLD_NOW);
-    if (!p11.h) { fprintf(stderr, "fhsm-csr: cannot load %s: %s\n", path, dlerror()); exit(2); }
+    if (!p11.h) { fprintf(stderr, "%s: cannot load %s: %s\n", p11_progname, path, dlerror()); exit(2); }
     #define S(f,n) do { *(void**)&p11.f = dlsym(p11.h, n); \
-        if (!p11.f) { fprintf(stderr,"fhsm-csr: %s missing from module\n", n); exit(2); } } while (0)
+        if (!p11.f) { fprintf(stderr,"%s: %s missing from module\n", p11_progname, n); exit(2); } } while (0)
     S(Initialize,"C_Initialize"); S(Finalize,"C_Finalize");
     S(OpenSession,"C_OpenSession"); S(CloseSession,"C_CloseSession");
     S(Login,"C_Login"); S(GenerateKeyPair,"C_GenerateKeyPair");
@@ -89,10 +95,10 @@ static CK_OBJECT_HANDLE find_one(CK_SESSION_HANDLE s, CK_ULONG cls, const char *
     CK_RV rv = p11.FindObjects(s, h, 4, &n);
     p11.FindObjectsFinal(s);
     if (rv != CKR_OK) die("C_FindObjects", rv);
-    if (n == 0) { fprintf(stderr, "fhsm-csr: no %s key labelled \"%s\"\n",
+    if (n == 0) { fprintf(stderr, "%s: no %s key labelled \"%s\"\n", p11_progname,
                           cls == CKO_PUBLIC_KEY ? "public" : "private", label); exit(3); }
-    if (n > 1)  { fprintf(stderr, "fhsm-csr: %lu keys labelled \"%s\" -- ambiguous, "
-                          "refusing to guess\n", (unsigned long)n, label); exit(3); }
+    if (n > 1)  { fprintf(stderr, "%s: %lu keys labelled \"%s\" -- ambiguous, "
+                          "refusing to guess\n", p11_progname, (unsigned long)n, label); exit(3); }
     return h[0];
 }
 

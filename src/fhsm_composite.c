@@ -893,10 +893,79 @@ static int key_id(const uint8_t *raw, size_t n, uint8_t md[20]) {
     return ok;
 }
 
+/* Parse one "TYPE:value" item into a GENERAL_NAME. Returns NULL on anything
+ * it does not recognise or cannot encode -- the caller turns that into a
+ * refusal rather than skipping the entry. Dropping a name the operator asked
+ * for is worse than failing: they would ship a certificate believing it covers
+ * a host it does not. */
+static GENERAL_NAME *san_one(const char *item, size_t len) {
+    char buf[512];
+    if (len == 0 || len >= sizeof buf) return NULL;
+    memcpy(buf, item, len); buf[len] = '\0';
+    char *colon = strchr(buf, ':');
+    if (!colon || colon == buf || colon[1] == '\0') return NULL;
+    *colon = '\0';
+    const char *type = buf, *val = colon + 1;
+
+    GENERAL_NAME *gn = GENERAL_NAME_new();
+    if (!gn) return NULL;
+
+    if (!strcmp(type, "DNS") || !strcmp(type, "email") || !strcmp(type, "URI")) {
+        ASN1_IA5STRING *ia5 = ASN1_IA5STRING_new();
+        if (!ia5 || ASN1_STRING_set(ia5, val, -1) != 1) {
+            ASN1_IA5STRING_free(ia5); GENERAL_NAME_free(gn); return NULL;
+        }
+        GENERAL_NAME_set0_value(gn, !strcmp(type,"DNS")   ? GEN_DNS
+                                   : !strcmp(type,"email") ? GEN_EMAIL
+                                                           : GEN_URI, ia5);
+        return gn;
+    }
+    if (!strcmp(type, "IP")) {
+        /* a2i_IPADDRESS handles v4 and v6 and returns NULL on anything that is
+         * not an address, which is exactly the validation wanted here. Private
+         * and loopback ranges are deliberately not filtered -- see the header. */
+        ASN1_OCTET_STRING *ip = a2i_IPADDRESS(val);
+        if (!ip) { GENERAL_NAME_free(gn); return NULL; }
+        GENERAL_NAME_set0_value(gn, GEN_IPADD, ip);
+        return gn;
+    }
+    GENERAL_NAME_free(gn);
+    return NULL;
+}
+
+/* Build the subjectAltName extension from the operator's list. */
+static fhsm_rv_t san_extension(const char *san, X509_EXTENSION **out_ext) {
+    GENERAL_NAMES *gens = GENERAL_NAMES_new();
+    if (!gens) return FHSM_RV_HOST_MEMORY;
+    fhsm_rv_t rv = FHSM_RV_ARGUMENTS_BAD;
+    const char *p = san;
+    int n = 0;
+    while (*p) {
+        const char *comma = strchr(p, ',');
+        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        while (len && (*p == ' ' || *p == '\t')) { ++p; --len; }
+        while (len && (p[len-1] == ' ' || p[len-1] == '\t')) --len;
+        GENERAL_NAME *gn = san_one(p, len);
+        if (!gn) goto out;                    /* refuse, do not skip */
+        if (!sk_GENERAL_NAME_push(gens, gn)) { GENERAL_NAME_free(gn);
+                                                rv = FHSM_RV_HOST_MEMORY; goto out; }
+        ++n;
+        if (!comma) break;
+        p = comma + 1;
+    }
+    if (n == 0) goto out;                     /* an empty SAN is malformed */
+    *out_ext = X509V3_EXT_i2d(NID_subject_alt_name, 0, gens);
+    rv = *out_ext ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+out:
+    GENERAL_NAMES_free(gens);
+    return rv;
+}
+
 fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
                                 const uint8_t *ca_cert, size_t ca_cert_len,
                                 const uint8_t *csr, size_t csr_len,
                                 const char *subject_override,
+                                const char *san,
                                 int days,
                                 fhsm_composite_sign_cb sign, void *sign_ctx,
                                 uint8_t *out, size_t *out_len)
@@ -1037,6 +1106,19 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
             X509_EXTENSION_free(ae); AUTHORITY_KEYID_free(akid);
             if (!ok) goto out;
         }
+    }
+
+    /* subjectAltName, from the operator's list. Non-critical: the subject is
+     * always present here, and RFC 5280 §4.2.1.6 only requires criticality
+     * when it is empty. */
+    if (san) {
+        X509_EXTENSION *e = NULL;
+        rv = san_extension(san, &e);
+        if (rv != FHSM_RV_OK) goto out;
+        int ok = X509_add_ext(x, e, -1) == 1;
+        X509_EXTENSION_free(e);
+        if (!ok) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
+        rv = FHSM_RV_FUNCTION_FAILED;
     }
 
     if (!set_composite_algor((X509_ALGOR *)X509_get0_tbs_sigalg(x))) goto out;

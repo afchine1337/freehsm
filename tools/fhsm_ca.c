@@ -72,9 +72,11 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
+    p11_progname = "fhsm-ca";
     if (argc < 2 || strcmp(argv[1], "issue") != 0) usage();
     const char *module = "./libfreehsm-fips.so", *label = NULL;
     const char *cacert_p = NULL, *csr_p = NULL, *subject = NULL, *out = NULL;
+    const char *san = NULL;
     int pem = 0, slot = 0, days = 365;
 
     for (int i = 2; i < argc; ++i) {
@@ -83,6 +85,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--ca-cert") && i+1<argc) cacert_p = argv[++i];
         else if (!strcmp(argv[i],"--csr")     && i+1<argc) csr_p    = argv[++i];
         else if (!strcmp(argv[i],"--subject") && i+1<argc) subject  = argv[++i];
+        else if (!strcmp(argv[i],"--san")     && i+1<argc) san      = argv[++i];
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
         else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = atoi(argv[++i]);
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]);
@@ -119,7 +122,7 @@ int main(int argc, char **argv) {
     static uint8_t der[32768]; size_t n = sizeof der;
     fhsm_rv_t r = fhsm_composite_issue(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
                                         cabuf, calen, csrbuf, csrlen,
-                                        subject, days, p11_sign, &sg, der, &n);
+                                        subject, san, days, p11_sign, &sg, der, &n);
     if (r == FHSM_RV_SIGNATURE_INVALID) {
         fprintf(stderr,
           "fhsm-ca: the request's signature does not match the key it carries.\n"

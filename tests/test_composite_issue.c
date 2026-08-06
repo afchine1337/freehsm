@@ -67,7 +67,7 @@ int main(void) {
 
     printf("\n[B] issuance\n");
     static uint8_t leaf[16384]; size_t ll = sizeof leaf;
-    rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, 365,
+    rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, 365,
                                sg, &ca_s, leaf, &ll);
     snprintf(d, sizeof d, "%zu bytes", ll);
     ck("a certificate is issued", rv == FHSM_RV_OK, d);
@@ -130,7 +130,7 @@ int main(void) {
         ck("the forged request was built (it is well-formed)", fr == FHSM_RV_OK, "");
 
         static uint8_t bad[16384]; size_t bl = sizeof bad;
-        fhsm_rv_t ir = fhsm_composite_issue(ALG, cacert, cl, forged, fl, NULL, 365,
+        fhsm_rv_t ir = fhsm_composite_issue(ALG, cacert, cl, forged, fl, NULL, NULL, 365,
                                              sg, &ca_s, bad, &bl);
         ck("issuance REFUSES it (CKR_SIGNATURE_INVALID)",
            ir == FHSM_RV_SIGNATURE_INVALID,
@@ -143,7 +143,7 @@ int main(void) {
         /* flip a byte inside the subject region, well before the signature */
         tampered[40] ^= 0x01;
         bl = sizeof bad;
-        fhsm_rv_t tr = fhsm_composite_issue(ALG, cacert, cl, tampered, rl, NULL, 365,
+        fhsm_rv_t tr = fhsm_composite_issue(ALG, cacert, cl, tampered, rl, NULL, NULL, 365,
                                              sg, &ca_s, bad, &bl);
         ck("a request altered after signing is refused", tr != FHSM_RV_OK, "");
     }
@@ -153,7 +153,7 @@ int main(void) {
         static uint8_t o[16384]; size_t ol = sizeof o;
         rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl,
                                    "/C=FR/O=Universite Exemple/CN=imposed.example",
-                                   365, sg, &ca_s, o, &ol);
+                                   NULL, 365, sg, &ca_s, o, &ol);
         ck("--subject replaces the requested subject", rv == FHSM_RV_OK, "");
         if (rv == FHSM_RV_OK) {
             const uint8_t *q = o; X509 *y = d2i_X509(NULL, &q, (long)ol);
@@ -164,13 +164,66 @@ int main(void) {
         }
         ol = sizeof o;
         ck("a zero validity is refused",
-           fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, 0, sg, &ca_s, o, &ol)
+           fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, 0, sg, &ca_s, o, &ol)
                == FHSM_RV_ARGUMENTS_BAD, "");
         ol = sizeof o;
         ck("garbage in place of a request is refused",
            fhsm_composite_issue(ALG, cacert, cl, (const uint8_t*)"not a csr", 9,
-                                 NULL, 365, sg, &ca_s, o, &ol)
+                                 NULL, NULL, 365, sg, &ca_s, o, &ol)
                == FHSM_RV_ARGUMENTS_BAD, "");
+    }
+
+    printf("\n[E] subjectAltName, from the operator and not from the request\n");
+    {
+        static uint8_t o[16384]; size_t ol = sizeof o;
+        rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL,
+                 "DNS:web01.exemple.fr,DNS:www.exemple.fr,IP:10.0.0.7,email:ca@exemple.fr",
+                 365, sg, &ca_s, o, &ol);
+        ck("a certificate with four alternative names is issued",
+           rv == FHSM_RV_OK, "");
+        if (rv == FHSM_RV_OK) {
+            const uint8_t *q = o; X509 *y = d2i_X509(NULL, &q, (long)ol);
+            GENERAL_NAMES *gs = y ? X509_get_ext_d2i(y, NID_subject_alt_name,
+                                                      NULL, NULL) : NULL;
+            snprintf(d, sizeof d, "%d names", gs ? sk_GENERAL_NAME_num(gs) : -1);
+            ck("OpenSSL reads back all four", gs && sk_GENERAL_NAME_num(gs) == 4, d);
+            if (gs) {
+                int dns = 0, ip = 0, mail = 0;
+                for (int i = 0; i < sk_GENERAL_NAME_num(gs); ++i) {
+                    int t = 0; GENERAL_NAME_get0_value(sk_GENERAL_NAME_value(gs,i), &t);
+                    if (t == GEN_DNS) dns++;
+                    else if (t == GEN_IPADD) ip++;
+                    else if (t == GEN_EMAIL) mail++;
+                }
+                snprintf(d, sizeof d, "DNS=%d IP=%d email=%d", dns, ip, mail);
+                ck("the types survive: two DNS, one IP, one email",
+                   dns == 2 && ip == 1 && mail == 1, d);
+                GENERAL_NAMES_free(gs);
+            }
+            X509_free(y);
+        }
+
+        /* A private address is accepted on purpose: this is not a public CA,
+         * and 10.0.0.0/8 is the intended use. Proven above by IP:10.0.0.7
+         * being one of the four. */
+
+        /* Anything malformed is REFUSED, not dropped. A name silently missing
+         * from a certificate is a name the operator believes is covered. */
+        struct { const char *san; const char *why; } bad[] = {
+            { "web01.exemple.fr",        "no type prefix" },
+            { "DNS:",                    "empty value" },
+            { "IP:not.an.address",       "malformed address" },
+            { "OTHER:x",                 "unsupported type" },
+            { "DNS:a,,DNS:b",            "empty element" },
+            { "",                        "empty list" },
+        };
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
+            ol = sizeof o;
+            fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL,
+                                                 bad[i].san, 365, sg, &ca_s, o, &ol);
+            snprintf(d, sizeof d, "\"%s\" -- %s", bad[i].san, bad[i].why);
+            ck("refused rather than silently dropped", br != FHSM_RV_OK, d);
+        }
     }
 
     printf("\n%s : %d failure(s)\n", fails ? "FAIL" : "PASS", fails);

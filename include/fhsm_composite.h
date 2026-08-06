@@ -306,10 +306,28 @@ fhsm_rv_t fhsm_composite_pub_from_raw(fhsm_composite_alg_t alg,
  * reconciling it with the CN -- worth its own change rather than a rushed
  * addition here.
  * ----------------------------------------------------------------------- */
+/* `san`, when non-NULL, is a comma-separated list in the syntax operators
+ * already know from OpenSSL:
+ *
+ *     "DNS:web01.example.fr,DNS:www.example.fr,IP:10.0.0.7,email:ca@example.fr"
+ *
+ * Accepted prefixes: DNS, IP, email, URI. Anything else, or a malformed value,
+ * is refused -- a name silently dropped from a certificate is a name the
+ * operator believes is covered and is not.
+ *
+ * Private and loopback addresses are ACCEPTED. A public CA must refuse them;
+ * this one is built for the internal networks of universities and public
+ * bodies, where 10.0.0.0/8 is the whole point. Applying a rule written for
+ * public issuance would break the intended use and protect nobody.
+ *
+ * The list comes from the operator, never from the request, which follows the
+ * policy above: the applicant does not choose what the CA asserts about them.
+ */
 fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
                                 const uint8_t *ca_cert, size_t ca_cert_len,
                                 const uint8_t *csr, size_t csr_len,
                                 const char *subject_override,
+                                const char *san,
                                 int days,
                                 fhsm_composite_sign_cb sign, void *sign_ctx,
                                 uint8_t *out, size_t *out_len);
