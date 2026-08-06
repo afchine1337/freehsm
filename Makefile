@@ -186,6 +186,12 @@ all: generate $(LIB) tests/test_smoke tools/freehsm-audit
 tools/freehsm-audit: tools/freehsm_audit.c
 	cc -O2 -Wall -Wextra -o $@ $< -lcrypto
 
+# fhsm-csr links only the composite encoder -- src/fhsm_composite.o stands
+# alone against libcrypto -- and loads the PKCS#11 module at runtime, so it
+# drives any module implementing the mechanism, not only this one.
+tools/fhsm-csr: tools/fhsm_csr.c src/fhsm_composite.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -ldl
+
 # ---------------------------------------------------------------------------
 # Code generation --- runs scripts/gen_p11_thunks.py to regenerate
 # include/fhsm_pkcs11_mechanisms.h, src/gen/fhsm_dispatch.c, docs/MECHANISMS.md.

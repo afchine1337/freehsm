@@ -8,6 +8,32 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **`fhsm-csr` — the first piece of PKI tooling (#112).** Three commands:
+  `keygen` creates a composite key pair in the token, `csr` produces a PKCS#10
+  request, `root` produces a self-signed v3 CA certificate. Every signature
+  goes through `C_Sign` in the module; the private key is never seen by the
+  tool.
+
+  **It drives any PKCS#11 module, not only this one.** The module is loaded at
+  runtime and used only through the standard interface, while the composite DER
+  encoding travels with the tool — `src/fhsm_composite.o` links standalone
+  against libcrypto. A university that already owns a hardware HSM should be
+  able to use these tools with it, which is also the one thing a PKI that
+  *talks to* HSMs cannot claim.
+
+  **The PIN comes from `FHSM_PIN` and nowhere else.** There is no `--pin`
+  option: an argument is visible in `ps` to every user on the machine. Passing
+  `--pin` prints that reason and exits non-zero rather than being ignored, so
+  the refusal teaches instead of merely blocking.
+
+  Two keys sharing a label is refused rather than resolved by taking the first:
+  signing with a key the operator did not mean is worse than failing.
+
+  Verified end to end from the command line: a certificate produced by
+  `fhsm-csr root` verifies against the public key **extracted from that
+  certificate**, over the TBS re-derived by OpenSSL's own parser — 2271 bytes,
+  3373-byte signature. `openssl x509 -text` reads the whole thing, extensions
+  included.
 * **Self-signed composite root certificates (#112).**
   `fhsm_composite_selfsigned` produces a v3 CA certificate with a composite
   key: `basicConstraints CA:TRUE` and `keyUsage keyCertSign,cRLSign` both

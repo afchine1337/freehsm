@@ -229,7 +229,7 @@ keys and reading a tenth that is absent is not. Whichever is chosen, the
 
 | # | Task | Effort | Status |
 |---|---|---|---|
-| #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h **+ ~8h** | ⏳ **core of the v2.0 MVP** — scope grew on 2026-08-03: conforming Composite ML-DSA is now **task zero**, see the note below |
+| #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h **+ ~8h** | 🟡 **task zero done** (conforming Composite ML-DSA, PKCS#11-reachable) and `fhsm-csr` ships: keygen, PKCS#10, self-signed root, all through the module. **Remaining: issuing certificates from someone else's CSR, revocation, OCSP** |
 | #123 | Signing tool `fhsm-sign` L1+L2 (raw + CMS/PKCS#7), PQC-ready | ~10h | ⏳ **MVP multiplier** |
 
 ### #112 — the composite signatures have to be built before the CA (2026-08-03)
