@@ -377,3 +377,113 @@ out:
     EVP_PKEY_free(kpq); EVP_PKEY_free(ktr);
     return rv;
 }
+
+/* ===========================================================================
+ * X.509 encoding.
+ * ========================================================================= */
+
+/* DER of the AlgorithmIdentifier for id-MLDSA65-Ed25519-SHA512:
+ *
+ *   SEQUENCE (0x30) len 0x0B
+ *     OBJECT IDENTIFIER (0x06) len 0x09  1.3.6.1.5.5.7.6.48
+ *
+ * Parameters are ABSENT, not NULL. The ASN.1 module says `PARAMS ARE absent`;
+ * emitting a NULL instead is a different encoding, accepted by some parsers
+ * and rejected by others, and it is a routine way to produce a structure that
+ * looks right and interoperates with nothing. Hand-encoded rather than built
+ * through OBJ_txt2obj because the OID has no NID in OpenSSL 3.5 -- the draft
+ * is still in the RFC Editor queue. */
+static const uint8_t ALGID_MLDSA65_ED25519[] = {
+    0x30, 0x0A,                                     /* SEQUENCE, 10 bytes   */
+    0x06, 0x08,                                     /* OID, 8 bytes         */
+    0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x30  /* 1.3.6.1.5.5.7.6.48   */
+};
+/* The lengths above were wrong on the first attempt -- 0x0B and 0x09, one too
+ * many each -- and eyeballing did not catch it. tests/test_composite_x509
+ * recomputes the whole encoding from the dotted OID and compares, so a
+ * hand-written constant cannot drift from the OID it claims to be. */
+
+/* Write a DER length. Returns bytes written, 0 if it does not fit. */
+static size_t der_len(size_t n, uint8_t *out, size_t cap) {
+    if (n < 0x80)      { if (cap < 1) return 0; out[0] = (uint8_t)n; return 1; }
+    if (n <= 0xFF)     { if (cap < 2) return 0; out[0] = 0x81; out[1] = (uint8_t)n; return 2; }
+    if (n <= 0xFFFF)   { if (cap < 3) return 0; out[0] = 0x82;
+                         out[1] = (uint8_t)(n >> 8); out[2] = (uint8_t)n; return 3; }
+    return 0;   /* nothing here is larger than 64 KiB */
+}
+
+fhsm_rv_t fhsm_composite_raw_pub(fhsm_composite_alg_t alg,
+                                  const uint8_t *pub, size_t pub_len,
+                                  uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512 || !pub || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+
+    const uint8_t *dpq, *dtr; size_t lpq, ltr;
+    fhsm_rv_t rv = blob_unpack(alg, pub, pub_len, &dpq, &lpq, &dtr, &ltr);
+    if (rv != FHSM_RV_OK) return rv;
+
+    if (*out_len < FHSM_COMPOSITE_RAW_PUB) {
+        *out_len = FHSM_COMPOSITE_RAW_PUB;
+        return FHSM_RV_BUFFER_TOO_SMALL;
+    }
+
+    const uint8_t *q = dpq; EVP_PKEY *kpq = d2i_PUBKEY(NULL, &q, (long)lpq);
+    const uint8_t *t = dtr; EVP_PKEY *ktr = d2i_PUBKEY(NULL, &t, (long)ltr);
+    rv = FHSM_RV_KEY_HANDLE_INVALID;
+    if (!kpq || !ktr) goto out;
+
+    /* §4.1: output mldsaPK || tradPK. The sizes are fixed for this
+     * combination and checked rather than trusted -- a component of the wrong
+     * length would otherwise produce a structure of the right shape carrying
+     * the wrong key. */
+    size_t n1 = FHSM_COMPOSITE_RAW_PQ_PUB, n2 = FHSM_COMPOSITE_RAW_TRAD_PUB;
+    rv = FHSM_RV_FUNCTION_FAILED;
+    if (EVP_PKEY_get_raw_public_key(kpq, out, &n1) != 1
+        || n1 != FHSM_COMPOSITE_RAW_PQ_PUB) goto out;
+    if (EVP_PKEY_get_raw_public_key(ktr, out + n1, &n2) != 1
+        || n2 != FHSM_COMPOSITE_RAW_TRAD_PUB) goto out;
+
+    *out_len = n1 + n2;
+    rv = FHSM_RV_OK;
+out:
+    EVP_PKEY_free(kpq); EVP_PKEY_free(ktr);
+    return rv;
+}
+
+fhsm_rv_t fhsm_composite_spki(fhsm_composite_alg_t alg,
+                               const uint8_t *pub, size_t pub_len,
+                               uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512 || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+
+    uint8_t raw[FHSM_COMPOSITE_RAW_PUB];
+    size_t rawlen = sizeof raw;
+    fhsm_rv_t rv = fhsm_composite_raw_pub(alg, pub, pub_len, raw, &rawlen);
+    if (rv != FHSM_RV_OK) return rv;
+
+    /* BIT STRING content is one leading "unused bits" octet, then the value. */
+    const size_t bs_content = 1 + rawlen;
+    uint8_t bs_len[4]; size_t bs_len_n = der_len(bs_content, bs_len, sizeof bs_len);
+    if (!bs_len_n) return FHSM_RV_FUNCTION_FAILED;
+
+    const size_t seq_content = sizeof(ALGID_MLDSA65_ED25519)
+                              + 1 + bs_len_n + bs_content;
+    uint8_t sq_len[4]; size_t sq_len_n = der_len(seq_content, sq_len, sizeof sq_len);
+    if (!sq_len_n) return FHSM_RV_FUNCTION_FAILED;
+
+    const size_t total = 1 + sq_len_n + seq_content;
+    if (*out_len < total) { *out_len = total; return FHSM_RV_BUFFER_TOO_SMALL; }
+
+    uint8_t *c = out;
+    *c++ = 0x30; memcpy(c, sq_len, sq_len_n); c += sq_len_n;
+    memcpy(c, ALGID_MLDSA65_ED25519, sizeof ALGID_MLDSA65_ED25519);
+    c += sizeof ALGID_MLDSA65_ED25519;
+    *c++ = 0x03; memcpy(c, bs_len, bs_len_n); c += bs_len_n;
+    *c++ = 0x00;                       /* unused bits */
+    memcpy(c, raw, rawlen); c += rawlen;
+
+    *out_len = (size_t)(c - out);
+    return (*out_len == total) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}

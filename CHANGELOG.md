@@ -8,6 +8,29 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **Composite `SubjectPublicKeyInfo` (#112).** `fhsm_composite_raw_pub` and
+  `fhsm_composite_spki` produce the X.509 encoding a CSR, a certificate and a
+  CMS `SignerInfo` all need: §4.1's `mldsaPK || tradPK` — 1952 + 32 = 1984 raw
+  bytes, ML-DSA first — carried in a `BIT STRING` "without further encoding"
+  per §5.1, under `AlgorithmIdentifier { 1.3.6.1.5.5.7.6.48 }` with parameters
+  **absent, not NULL**. The ASN.1 module says `PARAMS ARE absent`; a NULL there
+  is a different encoding that some parsers take and others reject, and a
+  routine way to ship something that looks right and interoperates with
+  nothing.
+
+  The AlgorithmIdentifier is hand-encoded because the composite OID has no NID
+  in OpenSSL 3.5 — the draft is still in the RFC Editor queue. The first
+  version of that constant declared `0x0B` and `0x09` where it needed `0x0A`
+  and `0x08`, and reading it did not catch the error. `tests/test_composite_x509`
+  therefore rebuilds the encoding from the dotted OID string by the rules and
+  compares, rather than checking one hand-typed copy against another.
+
+  The same test parses the result with OpenSSL's own `d2i_X509_PUBKEY` and
+  confirms it recovers the 1984-byte key, the right OID, and absent
+  parameters. A structure only this module can read would be worth nothing to
+  a CA, so a third-party parser is the check that matters.
+
+  Clean under ASan/UBSan.
 * **Composite ML-DSA is reachable through PKCS#11 (#112).**
   `C_GenerateKeyPair`, `C_SignInit`, `C_Sign`, `C_VerifyInit` and `C_Verify`
   now handle `CKM_COMPOSITE_MLDSA65_ED25519`. A composite key pair is

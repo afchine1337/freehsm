@@ -156,6 +156,44 @@ fhsm_rv_t fhsm_composite_split(fhsm_composite_alg_t alg,
                                 const uint8_t *sig, size_t sig_len,
                                 size_t *pq_len, size_t *trad_len);
 
+/* ---------------------------------------------------------------------------
+ * X.509 encoding (#112).
+ *
+ * §4.1 serializes a composite public key as `mldsaPK || tradPK` -- the raw
+ * component public keys, ML-DSA first, concatenated. §5.1 then says that when
+ * such a value is carried in an X.509 `subjectPublicKey` BIT STRING it appears
+ * "without further encoding". So the SubjectPublicKeyInfo is:
+ *
+ *   SEQUENCE {
+ *     SEQUENCE { OBJECT IDENTIFIER 1.3.6.1.5.5.7.6.48 }   -- params ABSENT
+ *     BIT STRING (0 unused bits) { mldsaPK || tradPK }
+ *   }
+ *
+ * For MLDSA65-Ed25519 that inner value is 1952 + 32 = 1984 bytes. Note the
+ * absent parameters: the ASN.1 module says `PARAMS ARE absent`, so the
+ * AlgorithmIdentifier carries the OID and nothing else -- not NULL, which is
+ * a different encoding and a common way to produce something no one else
+ * parses.
+ * ----------------------------------------------------------------------- */
+
+/* Raw component public key sizes for MLDSA65-Ed25519. */
+#define FHSM_COMPOSITE_RAW_PQ_PUB    1952u
+#define FHSM_COMPOSITE_RAW_TRAD_PUB    32u
+#define FHSM_COMPOSITE_RAW_PUB       (FHSM_COMPOSITE_RAW_PQ_PUB + \
+                                       FHSM_COMPOSITE_RAW_TRAD_PUB)
+
+/* The §4.1 serialization: raw component public keys concatenated. Takes the
+ * module's own public key blob and produces the interoperable form. */
+fhsm_rv_t fhsm_composite_raw_pub(fhsm_composite_alg_t alg,
+                                  const uint8_t *pub, size_t pub_len,
+                                  uint8_t *out, size_t *out_len);
+
+/* A complete DER SubjectPublicKeyInfo for the composite key. This is what a
+ * CSR, a certificate and a CMS SignerInfo all need. */
+fhsm_rv_t fhsm_composite_spki(fhsm_composite_alg_t alg,
+                               const uint8_t *pub, size_t pub_len,
+                               uint8_t *out, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif
