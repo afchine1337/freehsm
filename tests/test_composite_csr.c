@@ -21,6 +21,7 @@
 
 #include <openssl/pem.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -158,6 +159,76 @@ int main(void) {
            == FHSM_RV_ARGUMENTS_BAD, "");
 
     X509_REQ_free(req);
+
+    printf("\n[E] a self-signed composite root\n");
+    {
+        static uint8_t cert[16384]; size_t xl = sizeof cert;
+        struct sctx rc = { priv, pl, 0, 0 };
+        fhsm_rv_t crv = fhsm_composite_selfsigned(
+                            FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                            "/C=FR/O=Simorgh Labs/CN=Simorgh Composite Root",
+                            1, 3650, pub, ql, do_sign, &rc, cert, &xl);
+        snprintf(d, sizeof d, "%zu bytes, TBS %zu", xl, rc.tbs_seen);
+        ck("fhsm_composite_selfsigned succeeds", crv == FHSM_RV_OK, d);
+
+        if (crv == FHSM_RV_OK) {
+            const uint8_t *q = cert;
+            X509 *x = d2i_X509(NULL, &q, (long)xl);
+            ck("OpenSSL's d2i_X509 accepts it", x != NULL, "");
+            if (x) {
+                ck("it is a v3 certificate", X509_get_version(x) == 2, "");
+                char sub[256] = "", iss[256] = "";
+                X509_NAME_oneline(X509_get_subject_name(x), sub, sizeof sub);
+                X509_NAME_oneline(X509_get_issuer_name(x), iss, sizeof iss);
+                ck("issuer and subject are the same name (self-signed)",
+                   strcmp(sub, iss) == 0, sub);
+                ck("it is marked as a CA",
+                   (X509_get_extension_flags(x) & EXFLAG_CA) != 0, "");
+                ck("keyUsage permits keyCertSign and cRLSign",
+                   (X509_get_key_usage(x) & (KU_KEY_CERT_SIGN | KU_CRL_SIGN))
+                       == (KU_KEY_CERT_SIGN | KU_CRL_SIGN), "");
+                ck("a subjectKeyIdentifier is present",
+                   X509_get0_subject_key_id(x) != NULL, "");
+
+                /* RFC 5280 §4.1.1.2: the outer signatureAlgorithm MUST equal
+                 * the signature field inside the TBS. Two separate fields,
+                 * set by two separate calls -- so this is checked, not
+                 * assumed. */
+                const X509_ALGOR *inner = X509_get0_tbs_sigalg(x);
+                const ASN1_BIT_STRING *s2 = NULL; const X509_ALGOR *outer = NULL;
+                X509_get0_signature(&s2, &outer, x);
+                ck("the two AlgorithmIdentifiers are equal (RFC 5280 4.1.1.2)",
+                   inner && outer && X509_ALGOR_cmp(inner, outer) == 0, "");
+
+                /* And the signature covers the TBS re-derived from the parse. */
+                uint8_t *tbs2 = NULL;
+                int tl2 = i2d_re_X509_tbs(x, &tbs2);
+                if (tl2 > 0) {
+                    fhsm_rv_t vr = fhsm_composite_verify(
+                        FHSM_COMPOSITE_MLDSA65_ED25519_SHA512, pub, ql,
+                        tbs2, (size_t)tl2, NULL, 0,
+                        ASN1_STRING_get0_data((const ASN1_STRING *)s2),
+                        (size_t)ASN1_STRING_length((const ASN1_STRING *)s2));
+                    ck("the self-signature verifies over the re-derived TBS",
+                       vr == FHSM_RV_OK, "");
+                    OPENSSL_free(tbs2);
+                }
+                X509_free(x);
+            }
+        }
+
+        size_t j = sizeof cert;
+        ck("serial 0 is refused",
+           fhsm_composite_selfsigned(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                "/CN=x", 0, 30, pub, ql, do_sign, &rc, cert, &j)
+               == FHSM_RV_ARGUMENTS_BAD, "");
+        j = sizeof cert;
+        ck("a zero validity is refused",
+           fhsm_composite_selfsigned(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                "/CN=x", 1, 0, pub, ql, do_sign, &rc, cert, &j)
+               == FHSM_RV_ARGUMENTS_BAD, "");
+    }
+
     printf("\n%s : %d failure(s)\n", fails ? "FAIL" : "PASS", fails);
     return fails ? 1 : 0;
 }

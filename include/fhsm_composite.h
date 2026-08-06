@@ -237,6 +237,35 @@ fhsm_rv_t fhsm_composite_csr(fhsm_composite_alg_t alg,
                               fhsm_composite_sign_cb sign, void *sign_ctx,
                               uint8_t *out, size_t *out_len);
 
+/* ---------------------------------------------------------------------------
+ * Self-signed root certificate (#112).
+ *
+ * Same division of labour as the CSR: OpenSSL encodes the Name, the validity,
+ * the extensions and the outer structure; this module supplies the composite
+ * SubjectPublicKeyInfo, the two AlgorithmIdentifiers, and the signature.
+ *
+ * Two AlgorithmIdentifiers, not one. RFC 5280 §4.1.1.2 requires the
+ * `signatureAlgorithm` field of the Certificate to contain the same value as
+ * the `signature` field inside the TBSCertificate. They are set separately
+ * here, which means they can be set inconsistently -- so the test checks that
+ * both are present and equal rather than assuming the code that wrote them
+ * agreed with itself.
+ * ----------------------------------------------------------------------- */
+
+/* Build a self-signed v3 CA certificate.
+ *
+ * `days` is the validity in days from now. `serial` must be positive; a
+ * certificate with serial 0 is malformed and some relying parties reject it.
+ * Extensions set: basicConstraints CA:TRUE (critical), keyUsage keyCertSign +
+ * cRLSign (critical), and subjectKeyIdentifier over the raw composite key.
+ */
+fhsm_rv_t fhsm_composite_selfsigned(fhsm_composite_alg_t alg,
+                                     const char *subject,
+                                     long serial, int days,
+                                     const uint8_t *pub, size_t pub_len,
+                                     fhsm_composite_sign_cb sign, void *sign_ctx,
+                                     uint8_t *out, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif

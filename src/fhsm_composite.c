@@ -646,3 +646,175 @@ out:
     X509_REQ_free(req);
     return rv;
 }
+
+/* ===========================================================================
+ * Self-signed root certificate.
+ * ========================================================================= */
+
+#include <openssl/x509v3.h>
+
+/* Put the composite SubjectPublicKeyInfo into an X509_PUBKEY slot. Shared by
+ * the CSR and the certificate: one place that knows the trick, so a change to
+ * it cannot apply to one and not the other. */
+static fhsm_rv_t fill_pubkey_slot(fhsm_composite_alg_t alg,
+                                   X509_PUBKEY *slot,
+                                   const uint8_t *pub, size_t pub_len)
+{
+    if (!slot) return FHSM_RV_ARGUMENTS_BAD;
+    uint8_t raw[FHSM_COMPOSITE_RAW_PUB]; size_t rl = sizeof raw;
+    fhsm_rv_t rv = fhsm_composite_raw_pub(alg, pub, pub_len, raw, &rl);
+    if (rv != FHSM_RV_OK) return rv;
+
+    ASN1_OBJECT *oid = OBJ_txt2obj(FHSM_COMPOSITE_OID_MLDSA65_ED25519, 1);
+    uint8_t *penc = OPENSSL_memdup(raw, rl);
+    if (!oid || !penc) { ASN1_OBJECT_free(oid); OPENSSL_free(penc);
+                          return FHSM_RV_HOST_MEMORY; }
+    /* ptype V_ASN1_UNDEF: parameters absent, per the ASN.1 module. */
+    if (X509_PUBKEY_set0_param(slot, oid, V_ASN1_UNDEF, NULL,
+                                penc, (int)rl) != 1) {
+        ASN1_OBJECT_free(oid); OPENSSL_free(penc);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    return FHSM_RV_OK;
+}
+
+/* Set an X509_ALGOR to the composite OID with absent parameters. */
+static int set_composite_algor(X509_ALGOR *a) {
+    ASN1_OBJECT *o = OBJ_txt2obj(FHSM_COMPOSITE_OID_MLDSA65_ED25519, 1);
+    if (!o) return 0;
+    if (X509_ALGOR_set0(a, o, V_ASN1_UNDEF, NULL) != 1) {
+        ASN1_OBJECT_free(o); return 0;
+    }
+    return 1;
+}
+
+fhsm_rv_t fhsm_composite_selfsigned(fhsm_composite_alg_t alg,
+                                     const char *subject,
+                                     long serial, int days,
+                                     const uint8_t *pub, size_t pub_len,
+                                     fhsm_composite_sign_cb sign, void *sign_ctx,
+                                     uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+        || !subject || !pub || !sign || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    /* Serial 0 is malformed and serial < 0 encodes as negative, which RFC 5280
+     * §4.1.2.2 forbids. Refuse rather than silently correct: a caller that
+     * asked for a specific serial and got a different one has a worse problem
+     * than one whose call failed. */
+    if (serial <= 0 || days <= 0) return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    X509      *x    = X509_new();
+    X509_NAME *name = name_from_oneline(subject);
+    ASN1_BIT_STRING *sigbs = NULL;
+    uint8_t *tbs = NULL, *sig = NULL, *der = NULL;
+
+    if (!x || !name) { rv = FHSM_RV_ARGUMENTS_BAD; goto out; }
+    if (X509_set_version(x, 2) != 1) goto out;          /* v3 == INTEGER 2 */
+    if (ASN1_INTEGER_set(X509_get_serialNumber(x), serial) != 1) goto out;
+    if (!X509_gmtime_adj(X509_getm_notBefore(x), 0)) goto out;
+    if (!X509_gmtime_adj(X509_getm_notAfter(x), (long)days * 86400L)) goto out;
+    /* Self-signed: issuer and subject are the same name. */
+    if (X509_set_subject_name(x, name) != 1) goto out;
+    if (X509_set_issuer_name(x, name) != 1) goto out;
+
+    rv = fill_pubkey_slot(alg, X509_get_X509_PUBKEY(x), pub, pub_len);
+    if (rv != FHSM_RV_OK) goto out;
+    rv = FHSM_RV_FUNCTION_FAILED;
+
+    /* Extensions. A root that does not say it is a CA is a root nothing will
+     * chain to, and the ASN.1 module permits exactly keyCertSign and cRLSign
+     * among the signing usages for a CA. */
+    {
+        X509_EXTENSION *bc = X509V3_EXT_conf_nid(NULL, NULL,
+                                NID_basic_constraints, "critical,CA:TRUE");
+        X509_EXTENSION *ku = X509V3_EXT_conf_nid(NULL, NULL,
+                                NID_key_usage, "critical,keyCertSign,cRLSign");
+        int ok = bc && ku
+              && X509_add_ext(x, bc, -1) == 1
+              && X509_add_ext(x, ku, -1) == 1;
+        X509_EXTENSION_free(bc); X509_EXTENSION_free(ku);
+        if (!ok) goto out;
+    }
+    /* subjectKeyIdentifier. X509V3_EXT_conf_nid with "hash" would ask OpenSSL
+     * to digest a public key it cannot load, so it is computed here: SHA-1 of
+     * the raw composite key, which is the RFC 5280 §4.2.1.2 method (1). */
+    {
+        uint8_t raw[FHSM_COMPOSITE_RAW_PUB]; size_t rl = sizeof raw;
+        if (fhsm_composite_raw_pub(alg, pub, pub_len, raw, &rl) != FHSM_RV_OK) goto out;
+        uint8_t md[20]; unsigned int mdlen = 0;
+        EVP_MD *sha1 = EVP_MD_fetch(NULL, "SHA1", NULL);
+        EVP_MD_CTX *c = EVP_MD_CTX_new();
+        int ok = sha1 && c && EVP_DigestInit_ex(c, sha1, NULL) == 1
+              && EVP_DigestUpdate(c, raw, rl) == 1
+              && EVP_DigestFinal_ex(c, md, &mdlen) == 1 && mdlen == 20;
+        EVP_MD_CTX_free(c); EVP_MD_free(sha1);
+        if (!ok) goto out;
+        ASN1_OCTET_STRING *os = ASN1_OCTET_STRING_new();
+        if (!os) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        ok = ASN1_OCTET_STRING_set(os, md, (int)mdlen) == 1;
+        /* X509V3_EXT_i2d, not X509_EXTENSION_create_by_NID. The extension
+         * VALUE is the DER encoding of the extension's own ASN.1 type, so a
+         * subjectKeyIdentifier must be `04 14 <20 bytes>` and not the 20 bytes
+         * on their own. create_by_NID takes the octet-string object and stores
+         * its content verbatim, which produced a 20-byte value here and a
+         * malformed extension.
+         *
+         * The failure mode is worth remembering: OpenSSL flagged the whole
+         * certificate invalid and abandoned its extension cache, so keyUsage
+         * -- correctly encoded as 03 02 01 06 -- also read back as absent. One
+         * malformed extension hid a sound one, and only dumping the raw
+         * extension bytes showed which was which. */
+        X509_EXTENSION *ski = ok ? X509V3_EXT_i2d(NID_subject_key_identifier,
+                                                   0, os)
+                                 : NULL;
+        ok = ski && X509_add_ext(x, ski, -1) == 1;
+        X509_EXTENSION_free(ski); ASN1_OCTET_STRING_free(os);
+        if (!ok) goto out;
+    }
+
+    /* Both AlgorithmIdentifiers. RFC 5280 §4.1.1.2: the outer
+     * signatureAlgorithm MUST equal the signature field inside the TBS. They
+     * are two separate fields and are set separately, so the test checks they
+     * agree rather than trusting that this code did. */
+    if (!set_composite_algor((X509_ALGOR *)X509_get0_tbs_sigalg(x))) goto out;
+    {
+        const ASN1_BIT_STRING *cs = NULL; const X509_ALGOR *ca = NULL;
+        X509_get0_signature(&cs, &ca, x);
+        if (!cs || !ca) goto out;
+        if (!set_composite_algor((X509_ALGOR *)ca)) goto out;
+        sigbs = (ASN1_BIT_STRING *)cs;      /* owned by x, not freed here */
+    }
+
+    {
+        int tbs_len = i2d_re_X509_tbs(x, &tbs);
+        if (tbs_len <= 0) goto out;
+        sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
+        if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        size_t sig_len = FHSM_COMPOSITE_SIG_MAX;
+        rv = sign(sign_ctx, tbs, (size_t)tbs_len, sig, &sig_len);
+        if (rv != FHSM_RV_OK) goto out;
+        rv = FHSM_RV_FUNCTION_FAILED;
+        if (ASN1_BIT_STRING_set(sigbs, sig, (int)sig_len) != 1) goto out;
+        sigbs->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
+        sigbs->flags |= ASN1_STRING_FLAG_BITS_LEFT;
+    }
+
+    {
+        int n = i2d_X509(x, &der);
+        if (n <= 0) goto out;
+        if (*out_len < (size_t)n) { *out_len = (size_t)n;
+                                     rv = FHSM_RV_BUFFER_TOO_SMALL; goto out; }
+        memcpy(out, der, (size_t)n);
+        *out_len = (size_t)n;
+        rv = FHSM_RV_OK;
+    }
+out:
+    if (der) OPENSSL_free(der);
+    if (tbs) OPENSSL_free(tbs);
+    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
+    X509_NAME_free(name);
+    X509_free(x);
+    return rv;
+}

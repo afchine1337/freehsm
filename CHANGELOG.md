@@ -8,6 +8,33 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **Self-signed composite root certificates (#112).**
+  `fhsm_composite_selfsigned` produces a v3 CA certificate with a composite
+  key: `basicConstraints CA:TRUE` and `keyUsage keyCertSign,cRLSign` both
+  critical, and a `subjectKeyIdentifier` computed as SHA-1 of the raw composite
+  key — RFC 5280 §4.2.1.2 method (1) — because `X509V3_EXT_conf_nid` with
+  `"hash"` would ask OpenSSL to digest a key it cannot load.
+
+  Both `AlgorithmIdentifier` fields are set: RFC 5280 §4.1.1.2 requires the
+  outer `signatureAlgorithm` to equal the `signature` field inside the TBS.
+  They are separate fields written by separate calls, so the test compares them
+  with `X509_ALGOR_cmp` rather than trusting that the code agreed with itself.
+
+  `openssl x509 -text` reads the result in full — version, issuer, ten-year
+  validity, all three extensions, `Certificate Sign, CRL Sign` spelled out.
+
+  **One malformed extension hid a sound one.** The first version built the
+  `subjectKeyIdentifier` with `X509_EXTENSION_create_by_NID`, which stores the
+  octet string's *content* rather than its DER encoding: 20 bytes where
+  `04 14 <20 bytes>` was needed. OpenSSL then flagged the whole certificate
+  invalid and abandoned its extension cache, so `keyUsage` — correctly encoded
+  as `03 02 01 06` — also read back as absent. Two failures, one cause, and
+  only dumping the raw extension bytes distinguished them. `X509V3_EXT_i2d`
+  fixes it, and both checks passed together.
+
+  Serial 0 and zero validity are refused rather than corrected: a caller that
+  asked for a specific serial and silently got another has a worse problem than
+  one whose call failed.
 * **PKCS#10 certification requests with a composite key (#112).**
   `fhsm_composite_csr` builds a `CertificationRequest`: OpenSSL encodes the
   Name, the attribute set and the outer structure; this module supplies the
