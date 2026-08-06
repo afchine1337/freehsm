@@ -8,6 +8,37 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **Composite ML-DSA is reachable through PKCS#11 (#112).**
+  `C_GenerateKeyPair`, `C_SignInit`, `C_Sign`, `C_VerifyInit` and `C_Verify`
+  now handle `CKM_COMPOSITE_MLDSA65_ED25519`. A composite key pair is
+  generated, used to sign, and verified, entirely through the module's public
+  surface.
+
+  **The profile gate is applied at each entry point separately — three sites,
+  three checks — and not hoisted into one shared helper.** Every defect this
+  project has found in itself has the same shape: a control wired to some of
+  the paths that reach a state and not the rest. `fhsm_pkcs11.c` is where they
+  lived. A single shared gate is exactly what a fourth path would later bypass
+  without anyone noticing, so the repetition is deliberate.
+
+  `tests/test_composite_p11` detects which profile it is looking at and asserts
+  the behaviour that follows. Under interop it runs the full round trip,
+  including the PKCS#11 size query, `CKR_BUFFER_TOO_SMALL` with the length
+  reported, rejection over a different message, rejection of a corrupted half
+  on each side, and refusal to sign with the public handle. Under fips-strict
+  it asserts refusal at all three entry points — a test that only ran under
+  interop would leave the gates unexercised, which is how one goes missing.
+
+  A composite key gets its own key type, `CKK_COMPOSITE_MLDSA65_ED25519`.
+  Reporting it as `CKK_ML_DSA` would be a claim a caller could act on — pulling
+  it out and handing it to an ML-DSA verifier — and it would be false.
+
+  The mechanism constant is redefined locally in `fhsm_pkcs11.c`, following
+  that file's convention. A `_Static_assert` in `fhsm_composite.c` ties it to
+  the generated table, so a drift is a build failure rather than a mechanism
+  quietly dispatching to the wrong handler. Verified by making it drift.
+
+  Clean under ASan/UBSan; eleven test binaries pass in both profiles.
 * **The Composite ML-DSA signature combiner (#112, task zero).**
   `fhsm_composite_mprime()` builds the message representative
   `M' = Prefix || Label || len(ctx) || ctx || PH(M)` of

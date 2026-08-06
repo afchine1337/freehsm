@@ -41,6 +41,7 @@
 #include "fhsm_common.h"
 #include "fhsm_crypto.h"
 #include "fhsm_token.h"
+#include "fhsm_composite.h"
 #include "fhsm_audit.h"
 #include "fhsm_session.h"
 #include "fhsm_session.h"
@@ -3075,12 +3076,21 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 #define CKM_ML_KEM_KEY_PAIR_GEN    0x0000000FUL
 #define CKM_ML_KEM_OP              0x00000017UL
 #define CKM_ML_DSA_KEY_PAIR_GEN    0x0000001CUL
+/* Composite ML-DSA (#112). Value must match the generated table in
+ * include/fhsm_pkcs11_mechanisms.h; this file redefines mechanism constants
+ * locally by convention. */
+#define CKM_COMPOSITE_MLDSA65_ED25519  0x80004202UL
 #define CKM_ML_DSA_OP              0x0000001DUL
 #define CKM_SLH_DSA_KEY_PAIR_GEN   0x0000002DUL
 #define CKM_SLH_DSA_OP             0x0000002EUL
 #define CKK_ML_KEM                 0x00000049UL
 #define CKK_ML_DSA                 0x0000004AUL
 #define CKK_SLH_DSA                0x0000004BUL
+/* Vendor key type for a composite key (#112). A composite key is one object
+ * carrying both components, so it needs a type of its own: reporting it as
+ * CKK_ML_DSA would be a claim that a caller could act on -- extracting it and
+ * feeding it to an ML-DSA verifier -- and it would be false. */
+#define CKK_COMPOSITE_MLDSA65_ED25519  0x80004202UL
 /* CKA_PARAMETER_SET = 0x0000061D (PKCS#11 v3.2). This was previously
  * #defined as 0x170, which is CKA_MODIFIABLE -- a plain boolean attribute.
  * Two consequences, both observed (#125):
@@ -3209,7 +3219,47 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     uint32_t  ckk_type = 0;
     fhsm_pairwise_family_t pw_family = 0;
 
-    if (pMechanism->mechanism == CKM_RSA_PKCS_KEY_PAIR_GEN) {
+    /* Declared here rather than after the mechanism chain because the
+     * composite branch fills them directly: a composite key is not an
+     * EVP_PKEY and never becomes one. */
+    uint8_t *pub_der = NULL, *priv_der = NULL;
+    int pub_len = 0, priv_len = 0;
+    int composite = 0;
+
+    /* ---- Composite ML-DSA (#112) -----------------------------------
+     * Handled before the EVP chain and entirely apart from it. The key is
+     * two components in one blob, produced by fhsm_composite_keygen and by
+     * nothing else -- draft §3.1 forbids reusing component key material,
+     * and the way that requirement is met here is that no interface exists
+     * through which two existing keys could be supplied. See
+     * docs/COMPOSITE_SIGS_GAP.md.
+     *
+     * The profile gate is applied here and independently at C_SignInit and
+     * C_VerifyInit. Three sites, three checks: this file is where the
+     * project's recurring "control wired to some of the paths" defect
+     * lives, so the gate is not hoisted into one shared helper that a
+     * fourth path could later bypass. */
+    if (pMechanism->mechanism == CKM_COMPOSITE_MLDSA65_ED25519) {
+        if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+        uint8_t pv[FHSM_COMPOSITE_PRIV_MAX], pb[FHSM_COMPOSITE_PUB_MAX];
+        size_t pvl = sizeof pv, pbl = sizeof pb;
+        fhsm_rv_t crv = fhsm_composite_keygen(
+                            FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                            pv, &pvl, pb, &pbl);
+        if (crv != FHSM_RV_OK) { fhsm_zeroize(pv, sizeof pv); return crv; }
+        pub_der  = OPENSSL_malloc(pbl);
+        priv_der = OPENSSL_malloc(pvl);
+        if (!pub_der || !priv_der) {
+            fhsm_zeroize(pv, sizeof pv);
+            OPENSSL_free(pub_der); OPENSSL_free(priv_der);
+            return FHSM_RV_HOST_MEMORY;
+        }
+        memcpy(pub_der, pb, pbl);  pub_len  = (int)pbl;
+        memcpy(priv_der, pv, pvl); priv_len = (int)pvl;
+        fhsm_zeroize(pv, sizeof pv);
+        ckk_type  = CKK_COMPOSITE_MLDSA65_ED25519;
+        composite = 1;
+    } else if (pMechanism->mechanism == CKM_RSA_PKCS_KEY_PAIR_GEN) {
         long bits = 2048;
         long i = find_attr(pPub, ulPub, CKA_MODULUS_BITS);
         if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen == sizeof(CK_ULONG))
@@ -3273,7 +3323,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     } else {
         return FHSM_RV_MECHANISM_INVALID;
     }
-    if (!pkey) return FHSM_RV_FUNCTION_FAILED;
+    if (!composite && !pkey) return FHSM_RV_FUNCTION_FAILED;
 
     /* ---- FIPS 140-3 §7.10.2.b : pair-wise consistency check ---------
      * Verify that the freshly-generated keypair is mathematically
@@ -3281,7 +3331,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * silent keygen corruption (RNG fault, OpenSSL bug, RAM bit-flip).
      * On failure we latch the module ERROR state and refuse to store
      * the keypair. The audit log records the verdict. */
-    {
+    if (!composite) {
         fhsm_rv_t pw_rv = fhsm_pairwise_check(pkey, pw_family);
         (void)fhsm_audit_event(FHSM_EV_KAT_REPORT,
                                 -1, (int)hSession,
@@ -3295,25 +3345,25 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         }
     }
 
-    /* Serialize public key (SubjectPublicKeyInfo). */
-    uint8_t *pub_der = NULL;
-    int pub_len = i2d_PUBKEY(pkey, &pub_der);
-    if (pub_len <= 0 || pub_len > 5500) {
+    if (!composite) {
+        /* Serialize public key (SubjectPublicKeyInfo). */
+        pub_len = i2d_PUBKEY(pkey, &pub_der);
+        if (pub_len <= 0 || pub_len > 5500) {
+            EVP_PKEY_free(pkey);
+            OPENSSL_free(pub_der);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        /* Serialize private key (PKCS#8 unencrypted ; the token store will
+         * encrypt it under the DEK). */
+        priv_len = i2d_PrivateKey(pkey, &priv_der);
+        if (priv_len <= 0 || priv_len > 5500) {
+            EVP_PKEY_free(pkey);
+            OPENSSL_free(pub_der);
+            OPENSSL_free(priv_der);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
         EVP_PKEY_free(pkey);
-        OPENSSL_free(pub_der);
-        return FHSM_RV_FUNCTION_FAILED;
     }
-    /* Serialize private key (PKCS#8 unencrypted ; the token store will
-     * encrypt it under the DEK). */
-    uint8_t *priv_der = NULL;
-    int priv_len = i2d_PrivateKey(pkey, &priv_der);
-    if (priv_len <= 0 || priv_len > 5500) {
-        EVP_PKEY_free(pkey);
-        OPENSSL_free(pub_der);
-        OPENSSL_free(priv_der);
-        return FHSM_RV_FUNCTION_FAILED;
-    }
-    EVP_PKEY_free(pkey);
 
     char         label_pub[64] = "", label_priv[64] = "";
     const uint8_t *id_pub = NULL, *id_priv = NULL;
@@ -5964,6 +6014,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : interop only */
         case CKM_RSA_X_509:     /* raw RSA, no padding : interop only */
+        case CKM_COMPOSITE_MLDSA65_ED25519: /* Composite ML-DSA (#112) : interop only */
             if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
             break;
         default:
@@ -6335,6 +6386,34 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
 
+    /* ---- Composite ML-DSA (#112) ------------------------------------
+     * The key value IS the composite blob; there is no EVP_PKEY to build.
+     * Size query first, as PKCS#11 requires: a caller passing pSignature
+     * NULL wants the length, not a signature. */
+    if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519) {
+        const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+        fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
+        if (cl != CKO_PRIVATE_KEY || kt != CKK_COMPOSITE_MLDSA65_ED25519) {
+            op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        }
+        const size_t need = 3309u + 64u;   /* ML-DSA-65 || Ed25519 */
+        if (pSignature == NULL) { *pulSignatureLen = need; return FHSM_RV_OK; }
+        if (*pulSignatureLen < need) {
+            *pulSignatureLen = need;
+            return FHSM_RV_BUFFER_TOO_SMALL;   /* op stays active, per spec */
+        }
+        size_t slen = *pulSignatureLen;
+        rv = fhsm_composite_sign(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                  kv, kvl, pData, ulDataLen, NULL, 0,
+                                  pSignature, &slen);
+        *pulSignatureLen = (rv == FHSM_RV_OK) ? slen : 0;
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, "composite");
+        return rv;
+    }
+
     fhsm_hash_t hmac_hash; size_t hmac_need;
     if (fhsm_hmac_hash_of(op->mechanism, &hmac_hash, &hmac_need)) {
         const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
@@ -6462,6 +6541,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : interop only */
         case CKM_RSA_X_509:     /* raw RSA, no padding : interop only */
+        case CKM_COMPOSITE_MLDSA65_ED25519: /* Composite ML-DSA (#112) : interop only */
             if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
             break;
         default: return FHSM_RV_MECHANISM_INVALID;
@@ -6500,6 +6580,21 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
+
+    /* ---- Composite ML-DSA (#112) ------------------------------------
+     * Valid if and only if BOTH component signatures verify (draft §3.3).
+     * fhsm_composite_verify enforces that; nothing is decided here. */
+    if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519) {
+        op->active = 0;
+        if (cl != CKO_PUBLIC_KEY || kt != CKK_COMPOSITE_MLDSA65_ED25519)
+            return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        rv = fhsm_composite_verify(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                    kv, kvl, pData, ulDataLen, NULL, 0,
+                                    pSig, ulSigLen);
+        (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, "composite");
+        return rv;
+    }
 
     fhsm_hash_t vhash; size_t vneed;
     if (fhsm_hmac_hash_of(op->mechanism, &vhash, &vneed)) {

@@ -14,6 +14,18 @@
  * ========================================================================= */
 
 #include "fhsm_composite.h"
+#include "fhsm_pkcs11_mechanisms.h"
+
+/* src/fhsm_pkcs11.c redefines mechanism constants locally -- the file's
+ * convention, since it does not include the generated header. A value copied
+ * by hand into a second place drifts eventually, so the two are tied together
+ * here, where both are visible, and a mismatch becomes a build failure rather
+ * than a mechanism that dispatches to the wrong handler. */
+#define FHSM_LOCAL_CKM_COMPOSITE_MLDSA65_ED25519 0x80004202UL
+_Static_assert(FHSM_LOCAL_CKM_COMPOSITE_MLDSA65_ED25519
+                 == CKM_COMPOSITE_MLDSA65_ED25519,
+               "the mechanism constant copied into src/fhsm_pkcs11.c has "
+               "drifted from the generated table");
 
 #include <openssl/evp.h>
 #include <string.h>

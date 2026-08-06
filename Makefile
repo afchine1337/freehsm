@@ -317,6 +317,12 @@ tests/test_composite_mprime: tests/test_composite_mprime.c $(LIB_OBJ)
 tests/test_composite_sign: tests/test_composite_sign.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+# Composite ML-DSA through the PKCS#11 surface (#112). Links the shared object
+# with -ldl so it drives the module exactly as a caller would, and so the
+# profile baked into the .so is what the test observes.
+tests/test_composite_p11: tests/test_composite_p11.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # Single-action driver for the real-TPM validation (#109). NOT part of `make
 # tests`: it needs a TPM, a provisioned parent handle, and a reboot between
 # phases -- see scripts/validate_tpm_sealing.sh.
@@ -405,13 +411,15 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
 .PHONY: tests
-tests: tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects
+tests: tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_tpm
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_cbc_pad_oracle
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_composite_mprime
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_composite_sign
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) \
+		LD_LIBRARY_PATH=. ./tests/test_composite_p11
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 LD_LIBRARY_PATH=. ./tests/test_token_capacity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_decrypt_null_args
