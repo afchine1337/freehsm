@@ -107,6 +107,7 @@ DEBUG_FLAGS  = -g3 -O1
 endif
 
 CFLAGS  = $(WARN_FLAGS) $(HARDEN_FLAGS) $(SAN_FLAGS) $(REPRO_FLAGS) $(DEBUG_FLAGS) \
+          $(LOCAL_CFLAGS) \
           -std=c11 -D_GNU_SOURCE \
           -Iinclude $(OPENSSL_CFLAGS)
 
@@ -116,6 +117,7 @@ CFLAGS  = $(WARN_FLAGS) $(HARDEN_FLAGS) $(SAN_FLAGS) $(REPRO_FLAGS) $(DEBUG_FLAG
 #   --sort-common          stable .bss/.common ordering
 #   --reproducible         ld >= 2.38 honors the bundle (binutils 2.38+)
 LDFLAGS = $(SAN_FLAGS) -Wl,-z,relro,-z,now,-z,noexecstack,-z,defs \
+          $(LOCAL_LDFLAGS) \
           -Wl,--no-undefined \
           -Wl,--build-id=none \
           -Wl,--hash-style=gnu \
