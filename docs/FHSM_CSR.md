@@ -23,7 +23,7 @@ fhsm-csr keygen --label NAME [--module PATH] [--slot N]
 fhsm-csr csr    --label NAME --subject DN [--out FILE] [--pem] [--module PATH] [--slot N]
 fhsm-csr root   --label NAME --subject DN [--days N] [--serial N] [--out FILE] [--pem] ...
 
-fhsm-ca  issue  --label NAME --ca-cert FILE --csr FILE [--subject DN] [--san LIST] [--days N] ...
+fhsm-ca  issue  --label NAME --ca-cert FILE --csr FILE [--subject DN] [--san LIST] [--crl-url URL]... [--days N] ...
 fhsm-ca  revoke --db FILE --serial HEX [--reason NAME] [--date WHEN]
 fhsm-ca  crl    --label NAME --ca-cert FILE --db FILE [--days N] [--out FILE] [--pem]
 ```
@@ -203,6 +203,52 @@ type prefix, an empty value, an address that is not one — makes the whole
 command fail rather than dropping that entry, because a name silently missing
 from a certificate is a name you believe is covered and is not.
 
+**Where the revocation list lives comes from `--crl-url`**, which you repeat
+rather than comma-separate:
+
+```bash
+fhsm-ca issue --label root-ca --ca-cert root.crt --csr web01.csr \
+              --crl-url "http://crl.exemple.fr/exemple-root.crl" \
+              --crl-url "ldap://ldap.exemple.fr/cn=CRL,ou=CA,o=Exemple?certificateRevocationList" \
+              --out web01.crt
+```
+
+It repeats because an LDAP URI carries commas inside its DN, and a comma
+separator would cut that into invalid pieces. The order you give is the order a
+client walks, and it is preserved.
+
+All the URLs go into **one** distribution point, not one each: RFC 5280
+§4.2.1.13 reads several names inside a point as several routes to the *same*
+list, which is what publishing over both HTTP and LDAP is. Separate points
+would claim separate lists.
+
+Three refusals worth knowing before you hit them:
+
+* **`https` is refused.** A CRL is a signed object, so transport
+  confidentiality adds nothing, and fetching one over TLS can require
+  validating a certificate — which can require a CRL. The CA/Browser Forum
+  Baseline Requirements mandate plain HTTP for that reason, and §4.2.1.13 names
+  only HTTP and LDAP. It is an easy habit to reach for; better refused here than
+  discovered as a circular dependency in production.
+* **`ldap://` without a `?attribute` part is refused.** Such a URI names a
+  directory entry but not which attribute holds the list, so a client has
+  nothing to read. Any attribute is accepted —
+  `certificateRevocationList`, `authorityRevocationList` and
+  `deltaRevocationList` are all legitimate; the check is only that one is
+  present.
+* **Non-ASCII is refused.** `IA5String` is ASCII by definition. Punycode your
+  host names.
+
+As with `--san`, a URL that is not understood fails the issuance rather than
+being dropped — and here the reason is sharper. A certificate that silently
+lost its only reachable URL points at a list nobody can fetch, and unlike a
+missing name, nothing about it looks wrong.
+
+At most eight `--crl-url` entries; a ninth is refused rather than ignored.
+
+The extension is optional: omit `--crl-url` and the certificate simply carries
+none, which is what every certificate issued before this option existed does.
+
 ---
 
 ## Revocation
@@ -308,10 +354,13 @@ implementation of Composite ML-DSA.
 **No OCSP.** Only CRLs. OCSP is a network service and belongs with the rest of
 the service work (#111), not with a set of command-line tools.
 
-**No delta CRLs, no CRL distribution points.** Issued certificates carry no
-`cRLDistributionPoints` extension, so nothing tells a verifier where to fetch
-the list — publishing it, and telling relying parties where it is, is the
-operator's job today.
+**No delta CRLs.** Only full lists. `removeFromCRL` is refused for the same
+reason.
+
+**Publishing the list is still yours.** `--crl-url` puts the address in the
+certificates you issue, so a verifier knows where to look — but nothing here
+uploads the file. Whatever `fhsm-ca crl --out` produced has to reach that URL
+by your own means, and it has to be replaced before its `nextUpdate` passes.
 
 **Private and loopback addresses are accepted.** A public CA must refuse them;
 this one exists for the internal networks of universities and public bodies,

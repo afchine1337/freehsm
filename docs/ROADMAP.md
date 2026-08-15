@@ -229,7 +229,7 @@ keys and reading a tenth that is absent is not. Whichever is chosen, the
 
 | # | Task | Effort | Status |
 |---|---|---|---|
-| #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h **+ ~8h** | 🟡 Composite ML-DSA conforming and PKCS#11-reachable; `fhsm-csr` (keygen, PKCS#10, self-signed root), `fhsm-ca issue` (proof of possession verified, CA-set extensions, random serials, `subjectAltName`) and revocation (`revoke` + `crl`, hand-assembled `TBSCertList` checked byte for byte against OpenSSL) all ship. **Remaining: OCSP, and `cRLDistributionPoints` on issued certificates** |
+| #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h **+ ~8h** | 🟡 Composite ML-DSA conforming and PKCS#11-reachable; `fhsm-csr` (keygen, PKCS#10, self-signed root), `fhsm-ca issue` (proof of possession verified, CA-set extensions, random serials, `subjectAltName`, `cRLDistributionPoints` over HTTP and LDAP) and revocation (`revoke` + `crl`, hand-assembled `TBSCertList` checked byte for byte against OpenSSL) all ship — the revocation chain is now closed both in the code and to a third party, since a verifier can find the list. **Remaining: OCSP, which stays behind the network work in #111** |
 | #123 | Signing tool `fhsm-sign` L1+L2 (raw + CMS/PKCS#7), PQC-ready | ~10h | ⏳ **MVP multiplier** |
 
 ### #112 — the composite signatures have to be built before the CA (2026-08-03)

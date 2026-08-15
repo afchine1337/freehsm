@@ -8,6 +8,49 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **`cRLDistributionPoints` on issued certificates (#112).** `fhsm-ca issue
+  --crl-url URL`, repeatable. Revocation shipped correct to the byte and
+  nothing could find it: a verifier holding a certificate had no indication of
+  where the list lived, so the chain was closed in the code and open in the
+  world.
+
+  **Repeatable rather than comma-separated like `--san`**, because an LDAP URI
+  carries commas inside its DN —
+  `ldap://h/cn=CRL,ou=CA,o=Example?certificateRevocationList` — and a comma
+  separator would cut that into three invalid pieces. Repeating the flag needs
+  no escaping rule and keeps the operator's order, which matters: a client
+  walks the points in the order it finds them.
+
+  **Every URI goes into one `DistributionPoint`, not one each.** RFC 5280
+  §4.2.1.13 reads several names inside a point as several ways to reach the
+  same list, which is what publishing over both HTTP and LDAP is; separate
+  points would assert separate lists. Non-critical, as §4.2.1.13 says it
+  SHOULD be.
+
+  **Three things are refused.** `https`, because a CRL is a signed object —
+  transport confidentiality adds nothing — and fetching one over TLS can
+  require validating a certificate, which can require a CRL; the CA/Browser
+  Forum Baseline Requirements mandate plain HTTP for that reason, and
+  §4.2.1.13 names only HTTP and LDAP. `ldap://` without a `?attribute` part,
+  because such a URI names a directory entry but not which attribute holds the
+  list, leaving a client nothing to read. And non-ASCII, because `IA5String`
+  is ASCII by definition and `ASN1_STRING_set` does not enforce it, so a UTF-8
+  host name would produce an `IA5String` that is not one.
+
+  **A URI that is not understood refuses the issuance rather than being
+  dropped**, as with `subjectAltName` and for a sharper reason: a certificate
+  whose distribution point silently lost its only reachable URI points at a
+  list nobody can fetch, and unlike a missing name, nothing about it looks
+  wrong.
+
+  `tests/test_composite_issue` section `[F]` covers one point and not two,
+  both URIs inside it, the operator's order preserved, the extension
+  non-critical, then the eight refusals — constructed rather than described.
+  Two boundaries are covered because they would otherwise be assumed: a `NULL`
+  inside the array must not be walked past, and no URLs at all must stay valid,
+  since the extension is optional and every certificate issued before this has
+  none.
+
 * **Revocation: `fhsm-ca revoke` and `fhsm-ca crl` (#112).** Issuing
   certificates without being able to withdraw one is an authority that cannot
   correct its own mistakes. The chain now closes: a root, a request, a
