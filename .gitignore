@@ -36,6 +36,20 @@ tests/*
 !tests/*.*
 !tests/*/
 !tests/wycheproof/VECTORS_SHA
+
+# Fourth attempt. `!tests/*.*` above re-admits anything with a dot, and an
+# object file has a dot -- so tests/fhsm_tpm_testhooks.o was committed as a
+# 382 KB blob despite the `*.o` rule at the top of this file. The shape
+# invariant "sources have an extension, binaries do not" is false for
+# compiler artefacts, which have both. Re-exclude them by extension, after
+# the negation so these win.
+tests/*.o
+tests/*.a
+tests/*.so
+tests/*.d
+tests/*.gcno
+tests/*.gcda
+tests/*.gcov
 tests/fuzz/
 fuzz/fuzz_*
 !fuzz/fuzz_*.c
