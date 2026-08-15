@@ -65,6 +65,22 @@ else
     bad "FHSM_VERSION_STRING is \"$CUR\", expected \"$VERSION-FIPS\" ($HDR)"
 fi
 
+# --- 3b. version macros --------------------------------------------------
+# FHSM_VERSION_MINOR feeds libraryVersion and firmwareVersion in C_GetInfo,
+# C_GetSlotInfo and C_GetTokenInfo. v1.6.0 shipped with the string bumped and
+# the macros left at 1.5.0, so for two weeks the module answered "1.5" to
+# every caller that asked it through the standard API while everything else
+# -- filename, tarball, build seed, tag -- said 1.6.0. Checking only the
+# string is checking the one field no consumer reads programmatically.
+V_MAJ=$(awk '/FHSM_VERSION_MAJOR/{print $3; exit}' "$HDR" 2>/dev/null)
+V_MIN=$(awk '/FHSM_VERSION_MINOR/{print $3; exit}' "$HDR" 2>/dev/null)
+V_PAT=$(awk '/FHSM_VERSION_PATCH/{print $3; exit}' "$HDR" 2>/dev/null)
+if [ "$V_MAJ.$V_MIN.$V_PAT" = "$VERSION" ]; then
+    ok "version macros = $V_MAJ.$V_MIN.$V_PAT"
+else
+    bad "version macros are $V_MAJ.$V_MIN.$V_PAT, expected $VERSION ($HDR)"
+fi
+
 # --- 4. changelog --------------------------------------------------------
 # The tag must not land on a tree whose changelog still says Unreleased.
 if grep -qE "^## \[$VERSION\]" "$CHANGELOG" 2>/dev/null; then

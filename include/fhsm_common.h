@@ -67,7 +67,7 @@ extern "C" {
  * invalidates the current FIPS 140-3 / CC certificate.
  * ----------------------------------------------------------------------- */
 #define FHSM_VERSION_MAJOR   1
-#define FHSM_VERSION_MINOR   5
+#define FHSM_VERSION_MINOR   6
 #define FHSM_VERSION_PATCH   0
 #define FHSM_VERSION_STRING  "1.6.0-FIPS"
 
