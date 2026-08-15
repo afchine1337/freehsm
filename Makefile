@@ -172,7 +172,17 @@ ifdef FHSM_MAX_OBJECTS
 CFLAGS += -DFHSM_MAX_OBJECTS=$(FHSM_MAX_OBJECTS)
 endif
 
-LIB_OBJ = $(LIB_SRC:.c=.o)
+# Objects are built out of tree. This repository is normally checked out on a
+# VirtualBox shared folder, where vboxsf is slow on the many small writes a C
+# build produces and serves mtimes from the host clock while make compares
+# them against the guest's. Sources stay where they are -- they are read, not
+# rewritten -- and the objects go wherever OBJDIR points, which on that setup
+# is a native filesystem.
+#
+# The default is in-tree so that a fresh clone behaves the way a contributor
+# expects. Override it in the environment:  export OBJDIR=$HOME/.cache/freehsm
+OBJDIR ?= .obj
+LIB_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(LIB_SRC))
 
 LIB     = libfreehsm-fips.so
 LIB_VER = $(LIB).$(shell awk -F'"' '/FHSM_VERSION_STRING/{print $$2; exit}' include/fhsm_common.h)
@@ -189,13 +199,13 @@ tools/freehsm-audit: tools/freehsm_audit.c
 # fhsm-csr links only the composite encoder -- src/fhsm_composite.o stands
 # alone against libcrypto -- and loads the PKCS#11 module at runtime, so it
 # drives any module implementing the mechanism, not only this one.
-tools/fhsm-csr: tools/fhsm_csr.c src/fhsm_composite.o
+tools/fhsm-csr: tools/fhsm_csr.c $(OBJDIR)/src/fhsm_composite.o
 	$(CC) $(CFLAGS) -Itools -o $@ $^ $(LDFLAGS) -ldl
 
 # fhsm-ca signs for other people; fhsm-csr makes requests and its own root.
 # Separate binaries because they are separate authorities, usually separate
 # operators, and a single tool named for one of them would misname the other.
-tools/fhsm-ca: tools/fhsm_ca.c src/fhsm_composite.o
+tools/fhsm-ca: tools/fhsm_ca.c $(OBJDIR)/src/fhsm_composite.o
 	$(CC) $(CFLAGS) -Itools -o $@ $^ $(LDFLAGS) -ldl
 
 # ---------------------------------------------------------------------------
@@ -252,7 +262,8 @@ show-profile:
 $(LIB): $(LIB_OBJ)
 	$(CC) -shared -Wl,-soname,$(LIB) -o $@ $^ $(LDFLAGS)
 
-%.o: %.c
+$(OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ---------------------------------------------------------------------------
@@ -359,12 +370,13 @@ tests/tpm_hw_probe: tests/tpm_hw_probe.c $(LIB_OBJ)
 # and by nothing else: the shipped library has no way to be pointed at a fake
 # TPM, which is the whole reason the seam is compile-time and not an
 # environment variable the module always reads.
-tests/fhsm_tpm_testhooks.o: src/fhsm_tpm.c
+$(OBJDIR)/tests/fhsm_tpm_testhooks.o: src/fhsm_tpm.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -DFHSM_TPM_TEST_HOOKS -c -o $@ $<
 
-tests/test_tpm: tests/test_tpm.c tests/fhsm_tpm_testhooks.o $(LIB_OBJ)
-	$(CC) $(CFLAGS) -o $@ $< tests/fhsm_tpm_testhooks.o \
-	    $(filter-out src/fhsm_tpm.o,$(LIB_OBJ)) $(LDFLAGS) -lpthread
+tests/test_tpm: tests/test_tpm.c $(OBJDIR)/tests/fhsm_tpm_testhooks.o $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(OBJDIR)/tests/fhsm_tpm_testhooks.o \
+	    $(filter-out $(OBJDIR)/src/fhsm_tpm.o,$(LIB_OBJ)) $(LDFLAGS) -lpthread
 
 tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
@@ -573,7 +585,8 @@ uninstall:
 
 .PHONY: clean
 clean:
-	rm -f $(LIB) $(LIB_OBJ) tests/test_smoke tests/*.o
+	rm -rf $(OBJDIR)
+	rm -f $(LIB) tests/test_smoke tests/*.o
 	rm -f freehsm-c-src.tar.xz freehsm-c-src.tar.xz.sha256
 	rm -rf out/
 
@@ -620,7 +633,12 @@ dist-verify:
 	@# If a release reference digest exists for this version, compare
 	@# against it. Otherwise fall back to the build-twice consistency
 	@# check (no signed reference yet -- useful during development).
-	@VERSION=$$(grep -oP 'FHSM_VERSION_STRING\s*=\s*"\K[^"]+' include/fhsm_common.h 2>/dev/null); \
+	@# FHSM_VERSION_STRING comes from the variable at the top of this file,
+	@# which parses the header with awk. The grep -oP that used to be here
+	@# looked for `FHSM_VERSION_STRING = "..."` and the header writes
+	@# `#define FHSM_VERSION_STRING  "..."`, so it never matched and this
+	@# recipe compared against dist/refs/v.sha256 -- a file that cannot exist.
+	@VERSION='$(FHSM_VERSION_STRING)'; \
 	if [ -f dist/refs/v$$VERSION.sha256 ]; then \
 	    echo "[dist-verify] reference found for v$$VERSION ; comparing local build"; \
 	    scripts/dist_verify_ref.sh; \

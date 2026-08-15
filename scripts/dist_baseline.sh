@@ -14,7 +14,11 @@
 set -euo pipefail
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-$(grep -oP 'FHSM_VERSION_STRING\s*=\s*"\K[^"]+' "$PROJ_ROOT/include/fhsm_common.h" 2>/dev/null || echo unknown)}"
+# The header writes `#define FHSM_VERSION_STRING  "1.6.0-FIPS"`, with no `=`.
+# The grep -oP that used to be here required one, so it never matched and this
+# script would have written its baseline as "unknown" -- under a name
+# dist-verify does not look for.
+VERSION="${VERSION:-$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' "$PROJ_ROOT/include/fhsm_common.h" 2>/dev/null || echo unknown)}"
 REF_DIR="${PROJ_ROOT}/dist/refs"
 REF_FILE="${REF_DIR}/v${VERSION}.sha256"
 

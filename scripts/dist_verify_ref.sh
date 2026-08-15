@@ -23,7 +23,9 @@
 set -euo pipefail
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-$(grep -oP 'FHSM_VERSION_STRING\s*=\s*"\K[^"]+' "$PROJ_ROOT/include/fhsm_common.h" 2>/dev/null || echo unknown)}"
+# Same defect as dist_baseline.sh: the grep -oP required an `=` the header
+# does not have, so this looked for a reference named "unknown".
+VERSION="${VERSION:-$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' "$PROJ_ROOT/include/fhsm_common.h" 2>/dev/null || echo unknown)}"
 REF_FILE="${PROJ_ROOT}/dist/refs/v${VERSION}.sha256"
 OUT_DIR="${PROJ_ROOT}/out"
 

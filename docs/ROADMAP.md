@@ -301,6 +301,71 @@ The check that cannot be recovered afterwards is the build profile: an interop
 build ships the non-approved mechanisms live while every visible sign says
 fips-strict.
 
+### The reproducibility claim has never been anchored (noted 2026-08-15)
+
+`dist/refs/` has held nothing but `.gitkeep` since 10 June, across six tagged
+releases. `make dist-verify` therefore always took its fallback branch, which
+builds twice in the same container on the same day and compares the two. That
+proves the build is deterministic. It does not prove the published artefact can
+be reproduced, which is the property a third party actually wants: take the
+v1.5.0 tag, rebuild it today, obtain the bytes that were published in July.
+
+Nothing was hiding this. The fallback prints which branch it took, `make
+dist-baseline` exists to record a reference, and the release pre-flight simply
+never asks whether one was recorded. A step that is available and never
+required is a step that does not happen.
+
+**The containerised build cannot have run.** `scripts/build_reproducible.sh`
+mounts the tree `-v "${PROJ_ROOT}:/src:ro"` and the image's ENTRYPOINT is
+`cd /src && make clean && make all && ...`. `make all` has to write objects,
+the shared object, and everything `make generate` produces --
+`include/fhsm_pkcs11_mechanisms.h`, `src/gen/fhsm_dispatch.c`,
+`docs/MECHANISMS.md` -- all of them under `/src`. On a read-only mount none of
+that is possible. The ENTRYPOINT is unchanged since v1.1.0 and `dist/refs/`
+has never received a commit, so the honest reading is that this path has never
+completed once.
+
+That is also why the three defects below went unseen: they sit downstream of a
+step that always failed first.
+
+Fixing it is deferred, deliberately, because it touches the guarantee the
+project advertises and deserves its own sitting. Three shapes to weigh:
+
+* drop `:ro` -- one character, and gives up the property that a build cannot
+  mutate its own source;
+* copy `/src` to a writable directory inside the container and build there --
+  keeps the source immutable, no Makefile change beyond `OBJDIR`;
+* make the build entirely out of tree, objects and generated files and
+  artefact alike -- the cleanest, and the most work.
+
+Three defects found while looking at it, the last two fixed the same day:
+
+* `dist-verify`, `dist_baseline.sh` and `dist_verify_ref.sh` each read the
+  version with `grep -oP 'FHSM_VERSION_STRING\s*=\s*"\K[^"]+'`, which requires
+  an `=` that a `#define` does not have. The pattern never matched. The recipe
+  looked for `dist/refs/v.sha256` and the two scripts would have written and
+  read `unknown` -- different wrong names, so a recorded baseline would never
+  have been found even once it existed. Both now use the same `awk` form the
+  rest of the file has always used.
+* Objects moved out of tree the same day (`OBJDIR`), which is exactly the kind
+  of change that can leak a path into a binary. It did not, but only the
+  build-twice check could say so, because there is no reference to compare
+  against.
+
+What remains, and is not yet scheduled:
+
+1. Record a reference for the current release and commit it under `dist/refs/`.
+2. Make the release pre-flight refuse a tag whose reference is missing, in the
+   same spirit as the profile and CHANGELOG checks.
+3. Decide whether references for the six already-published releases are worth
+   reconstructing. Rebuilding v1.1.0 in the pinned container is cheap; whether
+   the result is meaningful depends on whether that container image is itself
+   still reproducible, which nobody has checked.
+
+Until (1) and (2) are done, "reproducible build" should be read as
+"deterministic build", and the documentation should say so rather than let a
+reader supply the stronger meaning on their own.
+
 ## Continuous / parallel
 
 | # | Task | Cadence | Status |
