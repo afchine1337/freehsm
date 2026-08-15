@@ -79,8 +79,31 @@ fuzz/artifacts/
 coverage.info
 lcov-report/
 
-# Tools
-tools/freehsm-audit
+# Tools --- by shape, for the same reason tests/ is.
+#
+# This was a list of one name, tools/freehsm-audit, and it stayed correct
+# exactly as long as there was one tool. Adding fhsm-csr and fhsm-ca to the
+# Makefile did not add them here, so 093ad70 committed both as ELF blobs,
+# 1.8 MB together. That is the sixth time in this file that a control was
+# wired to some of the paths reaching a state and not the rest -- the commit
+# immediately before it is titled "the fifth entry, one commit after
+# predicting it". Enumeration keeps losing to the next file that does not
+# exist yet.
+#
+# Same invariant as tests/: every source in tools/ has an extension, every
+# built binary has none. Ignore everything, re-admit anything with a dot,
+# then re-exclude compiler artefacts by extension -- an object file has a dot
+# too, which is how tests/ was caught out on its fourth attempt.
+tools/*
+!tools/*.*
+!tools/*/
+tools/*.o
+tools/*.a
+tools/*.so
+tools/*.d
+tools/*.gcno
+tools/*.gcda
+tools/*.gcov
 
 # Reproducible-build outputs
 dist/
