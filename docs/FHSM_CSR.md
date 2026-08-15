@@ -22,6 +22,10 @@ constrains what a request produced here can be used for today.
 fhsm-csr keygen --label NAME [--module PATH] [--slot N]
 fhsm-csr csr    --label NAME --subject DN [--out FILE] [--pem] [--module PATH] [--slot N]
 fhsm-csr root   --label NAME --subject DN [--days N] [--serial N] [--out FILE] [--pem] ...
+
+fhsm-ca  issue  --label NAME --ca-cert FILE --csr FILE [--subject DN] [--san LIST] [--days N] ...
+fhsm-ca  revoke --db FILE --serial HEX [--reason NAME] [--date WHEN]
+fhsm-ca  crl    --label NAME --ca-cert FILE --db FILE [--days N] [--out FILE] [--pem]
 ```
 
 The PIN is read from the `FHSM_PIN` environment variable.
@@ -199,6 +203,116 @@ type prefix, an empty value, an address that is not one — makes the whole
 command fail rather than dropping that entry, because a name silently missing
 from a certificate is a name you believe is covered and is not.
 
+---
+
+## Revocation
+
+An authority that can issue but not withdraw cannot correct its own mistakes.
+Two commands, deliberately separate:
+
+```bash
+# record a revocation --- no key, no PIN, nothing signed
+fhsm-ca revoke --db ca.db --serial 5A223663B7571B2345CC3E06A2F4E3DB6899713F \
+               --reason keyCompromise
+
+# publish the signed list
+fhsm-ca crl --label root-ca --ca-cert root-ca.crt --db ca.db \
+            --days 30 --out ca.crl
+```
+
+They are separate because recording a revocation is urgent and may fall to
+whoever noticed, at any hour, while signing a list needs the token and its
+PIN. Combining them would mean either that a revocation cannot be written
+down without the key present, or that the key has to be reachable by a more
+casual operation than it should be.
+
+The serial is the one the certificate carries, in the form `openssl` prints:
+
+```bash
+openssl x509 -in web01.crt -noout -serial
+```
+
+Accepted reasons, from RFC 5280 §5.3.1: `unspecified`, `keyCompromise`,
+`cACompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation`,
+`certificateHold`, `privilegeWithdrawn`, `aACompromise`. `removeFromCRL` is
+not accepted — it belongs to delta CRLs, which this tool does not produce.
+Omitting `--reason` is legitimate and says less than guessing.
+
+### The database
+
+```
+# fhsm-ca revocation database v1
+# SERIAL(hex)  DATE(YYYYMMDDHHMMSSZ)  REASON  ('-' for none)
+crlNumber 5
+5A223663B7571B2345CC3E06A2F4E3DB6899713F 20260806195116Z keyCompromise
+```
+
+Plain text, one entry per line: readable, greppable, diffable, and something
+you can put under version control. **Back it up.** Serials here are random, so
+the CA keeps no other record of what it has issued; this file is the only
+thing that remembers what has been withdrawn.
+
+`crlNumber` lives in the same file as the entries on purpose. Two files can be
+backed up, copied or restored separately, and a number that has gone backwards
+relative to its list is precisely the failure it exists to prevent: a verifier
+holding a newer list must be able to tell that an older one is older, or
+replaying last month's list hides every revocation since.
+
+Each `crl` run advances the number before signing and writes the database
+before the list leaves the process. If signing then fails, a number has been
+consumed and nothing published — a gap, which is harmless. The reverse order
+would publish two different lists under one number, which is not.
+
+**A malformed line refuses the whole file**, naming the line and changing
+nothing. Reading a database only partly would produce a list missing
+revocations, and a list missing revocations is a signed statement that a
+compromised certificate is still good — worse than publishing none at all.
+
+**There is no locking.** This is a single-operator tool for small
+authorities; two people running `revoke` at the same moment is a situation it
+does not handle. Saying so is more useful than a lock that would only narrow
+the window.
+
+### What a verifier sees
+
+`openssl crl` reads the result completely, including the fields it has no
+verifier for:
+
+```
+$ openssl crl -inform DER -in ca.crl -text -noout
+Certificate Revocation List (CRL):
+        Version 2 (0x1)
+        Signature Algorithm: 1.3.6.1.5.5.7.6.48
+        Issuer: C=FR, O=Université Exemple, CN=Exemple Root CA
+        Last Update: Aug  6 19:51:16 2026 GMT
+        Next Update: Sep  5 19:51:16 2026 GMT
+        CRL extensions:
+            X509v3 Authority Key Identifier:
+                5F:93:57:27:2B:96:BC:13:C5:13:99:1C:89:E5:9A:D6:36:00:2A:F6
+            X509v3 CRL Number:
+                1
+Revoked Certificates:
+    Serial Number: 5A223663B7571B2345CC3E06A2F4E3DB6899713F
+        Revocation Date: Aug  6 19:51:16 2026 GMT
+        CRL entry extensions:
+            X509v3 CRL Reason Code:
+                Key Compromise
+```
+
+The `authorityKeyIdentifier` is copied from the CA certificate's
+`subjectKeyIdentifier`, so the list can be tied to the certificate that signed
+it without guessing. The limitation stated above applies here too: OpenSSL
+parses the structure but cannot check the signature, because it has no
+implementation of Composite ML-DSA.
+
+**No OCSP.** Only CRLs. OCSP is a network service and belongs with the rest of
+the service work (#111), not with a set of command-line tools.
+
+**No delta CRLs, no CRL distribution points.** Issued certificates carry no
+`cRLDistributionPoints` extension, so nothing tells a verifier where to fetch
+the list — publishing it, and telling relying parties where it is, is the
+operator's job today.
+
 **Private and loopback addresses are accepted.** A public CA must refuse them;
 this one exists for the internal networks of universities and public bodies,
 where `10.0.0.0/8` is the entire point. Applying a rule written for public
@@ -225,7 +339,9 @@ Revocation and OCSP are not implemented.
 | `0` | Success |
 | `1` | Usage error, `FHSM_PIN` unset, or `--pin` passed |
 | `2` | Module could not be loaded, or a PKCS#11 call failed |
-| `3` | No key with that label, or more than one |
+| `3` | No key with that label, or more than one; or a malformed revocation database |
+| `4` | The request's signature does not match the key it carries (`fhsm-ca issue`) |
+| `5` | That serial is already revoked; the database was left unchanged |
 
 Two keys sharing a label is refused rather than resolved by taking the first
 match: signing with a key the operator did not intend is worse than a command

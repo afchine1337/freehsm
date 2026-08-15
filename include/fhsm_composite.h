@@ -332,6 +332,80 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
                                 fhsm_composite_sign_cb sign, void *sign_ctx,
                                 uint8_t *out, size_t *out_len);
 
+/* ---------------------------------------------------------------------------
+ * Revocation lists.
+ *
+ * A CRL needs a TBSCertList carrying the composite AlgorithmIdentifier, and
+ * OpenSSL cannot produce one. For a certificate, X509_get0_tbs_sigalg reaches
+ * the inner algorithm and i2d_re_X509_tbs does the rest. There is no CRL
+ * equivalent: only the outer algorithm is reachable, the inner one stays
+ * empty, and i2d_re_X509_CRL_tbs fails with "illegal zero content".
+ *
+ * So the structure is assembled here. To keep that as small and as checkable
+ * as possible, the assembler below takes parts OpenSSL has already encoded --
+ * the AlgorithmIdentifier, the issuer Name, the times, the revoked entries,
+ * the extensions -- and writes only the envelopes and the version. Nothing
+ * that requires knowing how a Name or a UTCTime is encoded happens here.
+ *
+ * That split is what makes it testable: with an Ed25519 AlgorithmIdentifier
+ * the output must equal, byte for byte, what OpenSSL itself produces from the
+ * same parts. tests/test_composite_crl does exactly that, for every
+ * combination of the OPTIONAL fields.
+ *
+ *   TBSCertList ::= SEQUENCE {
+ *       version              INTEGER (v2),        -- always written
+ *       signature            AlgorithmIdentifier, -- `algid`
+ *       issuer               Name,                -- `issuer`
+ *       thisUpdate           Time,                -- `this_upd`
+ *       nextUpdate           Time            OPTIONAL,
+ *       revokedCertificates  SEQUENCE OF ... OPTIONAL,
+ *       crlExtensions   [0]  EXPLICIT Extensions OPTIONAL }
+ *
+ * `revoked` is a complete SEQUENCE OF, `exts` a complete SEQUENCE OF
+ * Extension; each is omitted entirely when NULL, never emitted empty. Every
+ * part is checked to start with the tag its position requires, so a caller
+ * that passes the wrong buffer is refused rather than encoded.
+ * ------------------------------------------------------------------------- */
+fhsm_rv_t fhsm_composite_crl_tbs(const uint8_t *algid,    size_t algid_len,
+                                  const uint8_t *issuer,   size_t issuer_len,
+                                  const uint8_t *this_upd, size_t this_upd_len,
+                                  const uint8_t *next_upd, size_t next_upd_len,
+                                  const uint8_t *revoked,  size_t revoked_len,
+                                  const uint8_t *exts,     size_t exts_len,
+                                  uint8_t *out, size_t *out_len);
+
+/* One entry of the revocation list. `serial` is the unsigned big-endian
+ * magnitude as it appears in the certificate; the encoder adds the leading
+ * zero octet when the top bit is set, so a serial is never turned negative.
+ * `reason` is an RFC 5280 5.3.1 code, or -1 for no reason extension --
+ * omitting it is legitimate and says less than guessing. */
+typedef struct {
+    const uint8_t *serial;
+    size_t         serial_len;
+    int64_t        date;      /* seconds since the epoch */
+    int            reason;
+} fhsm_composite_revoked_t;
+
+/* Build and sign a complete CRL under the CA's own key.
+ *
+ * The issuer is the CA certificate's subject, and the authorityKeyIdentifier
+ * is copied from its subjectKeyIdentifier, so a verifier can tie the list to
+ * the certificate that signed it. `crl_number` must increase between issues:
+ * a verifier that holds a newer list will otherwise accept an older one, and
+ * an older one is missing revocations.
+ *
+ * `days` sets nextUpdate. A CRL past its nextUpdate is not an invalid CRL --
+ * it is a CRL a verifier should stop trusting, which is the point.
+ */
+fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
+                              const uint8_t *ca_cert, size_t ca_cert_len,
+                              const fhsm_composite_revoked_t *revoked,
+                              size_t n_revoked,
+                              uint64_t crl_number,
+                              int days,
+                              fhsm_composite_sign_cb sign, void *sign_ctx,
+                              uint8_t *out, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif

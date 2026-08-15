@@ -229,7 +229,7 @@ keys and reading a tenth that is absent is not. Whichever is chosen, the
 
 | # | Task | Effort | Status |
 |---|---|---|---|
-| #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h **+ ~8h** | 🟡 Composite ML-DSA conforming and PKCS#11-reachable; `fhsm-csr` (keygen, PKCS#10, self-signed root) and `fhsm-ca issue` (proof of possession verified, CA-set extensions, random serials) both ship. **Remaining: revocation, CRL, OCSP, subjectAltName** |
+| #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h **+ ~8h** | 🟡 Composite ML-DSA conforming and PKCS#11-reachable; `fhsm-csr` (keygen, PKCS#10, self-signed root), `fhsm-ca issue` (proof of possession verified, CA-set extensions, random serials, `subjectAltName`) and revocation (`revoke` + `crl`, hand-assembled `TBSCertList` checked byte for byte against OpenSSL) all ship. **Remaining: OCSP, and `cRLDistributionPoints` on issued certificates** |
 | #123 | Signing tool `fhsm-sign` L1+L2 (raw + CMS/PKCS#7), PQC-ready | ~10h | ⏳ **MVP multiplier** |
 
 ### #112 — the composite signatures have to be built before the CA (2026-08-03)
@@ -259,7 +259,18 @@ nothing else can verify is worth less than no CA. So the order is:
    thing that gets built.
 1. `fhsm-csr` and certificate issuance on top of it.
 2. Revocation, then OCSP — OCSP is a network service and #111 is deliberately
-   after the MVP, so CRL first.
+   after the MVP, so CRL first. **CRLs now ship**; OCSP stays where it was,
+   behind the service work.
+
+   One thing found while building them, worth recording because it shapes any
+   future structure signed with a composite algorithm: OpenSSL can be made to
+   emit a *certificate* carrying an algorithm it does not implement, because
+   `X509_get0_tbs_sigalg` reaches the inner `AlgorithmIdentifier`. There is no
+   CRL equivalent, so a `TBSCertList` has to be assembled by hand. The
+   arrangement that makes that safe — hand-assemble only the envelopes, let
+   OpenSSL encode every value, then require the result to match OpenSSL's own
+   output byte for byte on an algorithm it *does* implement — is the pattern
+   to reuse rather than rediscover.
 
 The upside of finding this now: Appendix E is 150 pages of test vectors, so for
 once the implementation can be checked against someone else's numbers instead of

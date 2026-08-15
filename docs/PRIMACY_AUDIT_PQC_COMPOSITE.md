@@ -45,7 +45,8 @@ Source: https://datatracker.ietf.org/doc/draft-ietf-lamps-pq-composite-sigs/
 | **Bouncy Castle** | MIT-style, OSS | ✅ Library-level composite support (1.79+); PoC deployments reported | 2024–2025 | ❌ Library, not a product | ❌ No |
 | **oqs-provider (OpenSSL 3)** | MIT, OSS | ⚠️ Experimental composite integration **removed**; pure/hybrid PQC X.509 + CMS available, not draft-composite | — | ❌ Provider, not a product | ❌ No |
 | **step-ca, Dogtag, OpenXPKI, OpenBao/Vault PKI** | OSS | ❌ No composite support found (pure ML-DSA at best, partial) | — | ❌ | ❌ |
-| **SoftHSM2** | OSS | ❌ No PQC at all | — | ❌ | ✅ (nearest analog to us; no PKI, no signing, no PQC) |
+| **SoftHSM2** | OSS (BSD-2) | ⚠️ **CORRECTED 2026-08-15** : ML-DSA + ML-KEM available via `--enable-mldsa` / `--enable-mlkem` build flags (tracking issue #800). **No composite.** Prior "no PQC at all" was wrong. | 2026 | ❌ | ✅ (nearest analog to us; PQC primitives but no composite, no PKI, no signing) |
+| **EU DSS (European Commission)** | OSS | ❓ Composite status **unconfirmed** — audit before v2.0-beta. eIDAS reference implementation. | — | ✅ Yes (XAdES / CAdES / PAdES / JAdES / ASiC) | ❌ No |
 | **Proteccio / Trustway (incumbent, commercial)** | Proprietary | ❌ Raw ML-DSA/ML-KEM/SLH-DSA only, **no composite** (per design-notes interview, #113) | — | ❌ | Hardware HSM |
 
 Key sources:
@@ -58,6 +59,11 @@ Key sources:
 * Keyfactor composite state-of-play (Nov 2025): https://www.ejbca.org/resources/keymaster-the-current-state-of-composites-signatures-and-certificates/
 * oqs-provider (composite removed): https://github.com/open-quantum-safe/oqs-provider
 * PKI Consortium PQC Capabilities Matrix: https://pkic.org/wg/pqc/pqccm/
+* SoftHSMv2 PQC build flags: https://github.com/softhsm/SoftHSMv2 — `--enable-mldsa`, `--enable-mlkem`
+* SoftHSMv2 ML-DSA tracking issue #800: https://github.com/softhsm/SoftHSMv2/issues/800
+* EU DSS (eIDAS reference impl): https://ec.europa.eu/digital-building-blocks/DSS/webapp-demo/doc/dss-documentation.html
+* IETF composite draft — WG last call Mar 2026, target RFC Q4 2026: https://lamps-wg.github.io/draft-composite-sigs/draft-ietf-lamps-pq-composite-sigs.html
+* Microsoft AD CS ML-DSA (KB5087539, May 2026): https://learn.microsoft.com/en-us/windows-server/identity/ad-cs/configure-ml-dsa-certification-authority
 
 ---
 

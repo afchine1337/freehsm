@@ -8,6 +8,54 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **Revocation: `fhsm-ca revoke` and `fhsm-ca crl` (#112).** Issuing
+  certificates without being able to withdraw one is an authority that cannot
+  correct its own mistakes. The chain now closes: a root, a request, a
+  certificate, and a signed list saying which certificates no longer count.
+
+  **The `TBSCertList` is assembled by hand, and that is the interesting part.**
+  For a certificate, OpenSSL exposes `X509_get0_tbs_sigalg`, so the inner
+  `AlgorithmIdentifier` can be set to the composite OID and `i2d_re_X509_tbs`
+  does the rest. There is no CRL equivalent — only the outer algorithm is
+  reachable, the inner one stays empty, and `i2d_re_X509_CRL_tbs` fails with
+  *illegal zero content*. Measured, not assumed.
+
+  **So the assembler was written to be checkable rather than to be read.** It
+  takes parts OpenSSL has already encoded — the name, the times, the revoked
+  entries, the extensions — and writes only versions, tags and lengths.
+  `tests/test_composite_crl` then feeds it an *Ed25519* `AlgorithmIdentifier`
+  and requires the output to equal, byte for byte, what OpenSSL itself
+  produces from the same parts. Five combinations of the OPTIONAL fields are
+  covered, so neither a stray empty `SEQUENCE` nor a missing one can hide.
+  Five deliberate mutations — a `[1]` tag for `[0]`, v1 for v2, two fields
+  swapped, an outer length short by one, an empty list emitted instead of
+  omitted — were each confirmed to make the test fail. A hand-written DER
+  length was already wrong once in this module and reading it did not catch
+  it; this is the arrangement that would.
+
+  **The revocation database is a text file the operator can read.** One line
+  per entry, `SERIAL DATE REASON`, with `crlNumber` in the same file. The
+  number lives with the list on purpose: two files can be backed up or
+  restored separately, and a number that goes backwards relative to its list
+  is exactly the failure it exists to prevent. Writes go through a temporary
+  file and a rename, so an interrupted run leaves the previous database whole.
+
+  **A malformed line refuses the whole file.** Skipping a line that is not
+  understood would produce a list missing revocations — a signed assurance
+  that a compromised certificate is still good. That is worse than no list at
+  all, so it is not done quietly.
+
+  **`revoke` needs no key and signs nothing.** Recording a revocation is
+  urgent and may happen at three in the morning; signing a list needs the
+  token and its PIN. Tying them together would mean either that a revocation
+  cannot be recorded without the key present, or that the key has to be
+  available to a more casual operation than it should be.
+
+  Also: `der_len` gained the three-octet form. Revocation lists are the only
+  structure in this module that grows without bound, and 64 KiB is about two
+  thousand entries — a ceiling a long-running CA reaches. Exercised
+  differentially against OpenSSL with a 3000-entry list (66 166 bytes).
+
 * **`subjectAltName` on issued certificates (#112).** `fhsm-ca issue --san`
   takes the syntax operators already know — `DNS:`, `IP:`, `email:`, `URI:`,
   comma-separated. Without it nothing issued here is usable for TLS, since

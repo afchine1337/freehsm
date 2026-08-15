@@ -409,7 +409,14 @@ static size_t der_len(size_t n, uint8_t *out, size_t cap) {
     if (n <= 0xFF)     { if (cap < 2) return 0; out[0] = 0x81; out[1] = (uint8_t)n; return 2; }
     if (n <= 0xFFFF)   { if (cap < 3) return 0; out[0] = 0x82;
                          out[1] = (uint8_t)(n >> 8); out[2] = (uint8_t)n; return 3; }
-    return 0;   /* nothing here is larger than 64 KiB */
+    if (n <= 0xFFFFFF) { if (cap < 4) return 0; out[0] = 0x83;
+                         out[1] = (uint8_t)(n >> 16); out[2] = (uint8_t)(n >> 8);
+                         out[3] = (uint8_t)n; return 4; }
+    return 0;
+    /* The three-octet form is here for revocation lists, which are the only
+     * structure in this module that grows without bound: a CA that has been
+     * running for years accumulates entries, and 64 KiB is about two thousand
+     * of them. Certificates and requests never come close. */
 }
 
 fhsm_rv_t fhsm_composite_raw_pub(fhsm_composite_alg_t alg,
@@ -1156,5 +1163,352 @@ out:
     if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
     X509_NAME_free(subj);
     X509_free(x); X509_free(ca); X509_REQ_free(req);
+    return rv;
+}
+
+/* ===========================================================================
+ * Revocation lists.
+ *
+ * See the commentary in fhsm_composite.h for why the TBSCertList is assembled
+ * here instead of by OpenSSL. In short: there is no CRL equivalent of
+ * X509_get0_tbs_sigalg, so the inner AlgorithmIdentifier cannot be set and
+ * i2d_re_X509_CRL_tbs refuses to encode.
+ *
+ * The rule followed below is that nothing here decides how a value is
+ * encoded -- only where it goes. Names, times, integers and extensions all
+ * arrive already encoded by OpenSSL. What is written here is versions, tags
+ * and lengths, and tests/test_composite_crl compares every byte of it against
+ * OpenSSL's own output.
+ * ========================================================================= */
+
+/* v2. RFC 5280 5.1.2.1: a conforming CRL carrying extensions must be v2, and
+ * this one always carries crlNumber. Written unconditionally so the field can
+ * never be silently dropped along with the extensions. */
+static const uint8_t CRL_VERSION_V2[] = { 0x02, 0x01, 0x01 };
+
+fhsm_rv_t fhsm_composite_crl_tbs(const uint8_t *algid,    size_t algid_len,
+                                  const uint8_t *issuer,   size_t issuer_len,
+                                  const uint8_t *this_upd, size_t this_upd_len,
+                                  const uint8_t *next_upd, size_t next_upd_len,
+                                  const uint8_t *revoked,  size_t revoked_len,
+                                  const uint8_t *exts,     size_t exts_len,
+                                  uint8_t *out, size_t *out_len)
+{
+    if (!algid || !algid_len || !issuer || !issuer_len
+        || !this_upd || !this_upd_len || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+
+    /* A pointer without a length, or a length without a pointer, is a caller
+     * bug that would otherwise encode a truncated field or skip a present
+     * one. Neither is detectable downstream. */
+    if ((next_upd == NULL) != (next_upd_len == 0)) return FHSM_RV_ARGUMENTS_BAD;
+    if ((revoked  == NULL) != (revoked_len  == 0)) return FHSM_RV_ARGUMENTS_BAD;
+    if ((exts     == NULL) != (exts_len     == 0)) return FHSM_RV_ARGUMENTS_BAD;
+
+    /* Each part must start with the tag its position requires. This is the
+     * cheap check that catches two buffers passed in the wrong order -- an
+     * error that produces structurally valid DER describing something else
+     * entirely, which no later stage would notice. */
+    if (algid[0]  != 0x30) return FHSM_RV_ARGUMENTS_BAD;   /* SEQUENCE      */
+    if (issuer[0] != 0x30) return FHSM_RV_ARGUMENTS_BAD;   /* RDNSequence   */
+    if (this_upd[0] != 0x17 && this_upd[0] != 0x18)        /* UTC / Gen.    */
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (next_upd && next_upd[0] != 0x17 && next_upd[0] != 0x18)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (revoked && revoked[0] != 0x30) return FHSM_RV_ARGUMENTS_BAD;
+    if (exts    && exts[0]    != 0x30) return FHSM_RV_ARGUMENTS_BAD;
+
+    /* crlExtensions is [0] EXPLICIT: the Extensions SEQUENCE goes inside a
+     * context tag, it does not replace it. */
+    uint8_t ext_hdr[4]; size_t ext_hdr_n = 0, ext_total = 0;
+    if (exts) {
+        ext_hdr_n = der_len(exts_len, ext_hdr, sizeof ext_hdr);
+        if (!ext_hdr_n) return FHSM_RV_FUNCTION_FAILED;
+        ext_total = 1 + ext_hdr_n + exts_len;
+    }
+
+    const size_t content = sizeof CRL_VERSION_V2 + algid_len + issuer_len
+                         + this_upd_len + next_upd_len + revoked_len + ext_total;
+
+    uint8_t sq[4]; size_t sq_n = der_len(content, sq, sizeof sq);
+    if (!sq_n) return FHSM_RV_FUNCTION_FAILED;
+
+    const size_t total = 1 + sq_n + content;
+    if (*out_len < total) { *out_len = total; return FHSM_RV_BUFFER_TOO_SMALL; }
+
+    uint8_t *c = out;
+    *c++ = 0x30; memcpy(c, sq, sq_n); c += sq_n;
+    memcpy(c, CRL_VERSION_V2, sizeof CRL_VERSION_V2); c += sizeof CRL_VERSION_V2;
+    memcpy(c, algid, algid_len);         c += algid_len;
+    memcpy(c, issuer, issuer_len);       c += issuer_len;
+    memcpy(c, this_upd, this_upd_len);   c += this_upd_len;
+    if (next_upd) { memcpy(c, next_upd, next_upd_len); c += next_upd_len; }
+    if (revoked)  { memcpy(c, revoked, revoked_len);   c += revoked_len; }
+    if (exts) {
+        *c++ = 0xA0; memcpy(c, ext_hdr, ext_hdr_n); c += ext_hdr_n;
+        memcpy(c, exts, exts_len); c += exts_len;
+    }
+
+    *out_len = (size_t)(c - out);
+    return (*out_len == total) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+/* Wrap already-encoded content in a tag. Returns total bytes written, 0 if it
+ * does not fit. */
+static size_t tag_wrap(uint8_t tag, const uint8_t *content, size_t n,
+                        uint8_t *out, size_t cap)
+{
+    uint8_t l[4]; size_t ln = der_len(n, l, sizeof l);
+    if (!ln || cap < 1 + ln + n) return 0;
+    out[0] = tag;
+    memcpy(out + 1, l, ln);
+    memcpy(out + 1 + ln, content, n);
+    return 1 + ln + n;
+}
+
+/* Encode one revoked entry. OpenSSL builds the structure; this only hands it
+ * the pieces. The serial arrives as an unsigned magnitude, so BN_bin2bn is
+ * used to turn it into an INTEGER -- that adds the leading zero octet when
+ * the top bit is set, which is what keeps a serial from being read as a
+ * negative number by the verifier. */
+static fhsm_rv_t revoked_one(const fhsm_composite_revoked_t *r,
+                              uint8_t **der, int *der_len_out)
+{
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    X509_REVOKED *x = X509_REVOKED_new();
+    ASN1_INTEGER *sn = NULL;
+    ASN1_TIME    *rd = NULL;
+    BIGNUM       *bn = NULL;
+
+    if (!x) return FHSM_RV_HOST_MEMORY;
+    if (!r->serial || r->serial_len == 0) { rv = FHSM_RV_ARGUMENTS_BAD; goto out; }
+
+    bn = BN_bin2bn(r->serial, (int)r->serial_len, NULL);
+    if (!bn) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    sn = BN_to_ASN1_INTEGER(bn, NULL);
+    rd = ASN1_TIME_set(NULL, (time_t)r->date);
+    if (!sn || !rd) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+
+    if (X509_REVOKED_set_serialNumber(x, sn) != 1) goto out;
+    if (X509_REVOKED_set_revocationDate(x, rd) != 1) goto out;
+
+    /* A reason is optional and stays optional. RFC 5280 5.3.1 gives the
+     * codes; anything outside them would be a value a verifier cannot read,
+     * so it is refused rather than written. removeFromCRL (8) belongs to
+     * delta CRLs, which this does not produce. */
+    if (r->reason >= 0) {
+        if (r->reason == 7 || r->reason == 8 || r->reason > 10) {
+            rv = FHSM_RV_ARGUMENTS_BAD; goto out;
+        }
+        ASN1_ENUMERATED *e = ASN1_ENUMERATED_new();
+        X509_EXTENSION  *ext = NULL;
+        int good = e && ASN1_ENUMERATED_set(e, r->reason) == 1
+                && (ext = X509V3_EXT_i2d(NID_crl_reason, 0, e)) != NULL
+                && X509_REVOKED_add_ext(x, ext, -1) == 1;
+        X509_EXTENSION_free(ext); ASN1_ENUMERATED_free(e);
+        if (!good) goto out;
+    }
+
+    *der = NULL;
+    *der_len_out = i2d_X509_REVOKED(x, der);
+    rv = (*der_len_out > 0) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+out:
+    BN_free(bn); ASN1_INTEGER_free(sn); ASN1_TIME_free(rd);
+    X509_REVOKED_free(x);
+    return rv;
+}
+
+fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
+                              const uint8_t *ca_cert, size_t ca_cert_len,
+                              const fhsm_composite_revoked_t *revoked,
+                              size_t n_revoked,
+                              uint64_t crl_number,
+                              int days,
+                              fhsm_composite_sign_cb sign, void *sign_ctx,
+                              uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+        || !ca_cert || !sign || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (days <= 0) return FHSM_RV_ARGUMENTS_BAD;
+    if (n_revoked && !revoked) return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    X509      *ca = NULL;
+    ASN1_TIME *t1 = NULL, *t2 = NULL;
+    uint8_t   *issuer = NULL, *this_u = NULL, *next_u = NULL;
+    uint8_t   *rev_buf = NULL, *rev_seq = NULL;
+    uint8_t   *ext_seq = NULL;
+    uint8_t   *tbs = NULL, *sig = NULL;
+    int issuer_n = 0, this_n = 0, next_n = 0;
+    size_t rev_seq_n = 0, ext_seq_n = 0, tbs_n = 0;
+
+    {
+        const uint8_t *p = ca_cert;
+        ca = d2i_X509(NULL, &p, (long)ca_cert_len);
+    }
+    if (!ca) return FHSM_RV_ARGUMENTS_BAD;
+
+    /* ---- issuer and validity ------------------------------------------
+     * The issuer of a CRL is the subject of the certificate that signs it.
+     * Taking it from anywhere else would produce a list no verifier ties
+     * back to this CA. */
+    issuer_n = i2d_X509_NAME(X509_get_subject_name(ca), &issuer);
+    if (issuer_n <= 0) goto out;
+
+    {
+        time_t now = time(NULL);
+        t1 = ASN1_TIME_set(NULL, now);
+        t2 = ASN1_TIME_set(NULL, now + (time_t)days * 86400);
+        if (!t1 || !t2) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        this_n = i2d_ASN1_TIME(t1, &this_u);
+        next_n = i2d_ASN1_TIME(t2, &next_u);
+        if (this_n <= 0 || next_n <= 0) goto out;
+    }
+
+    /* ---- the revoked entries ------------------------------------------
+     * Absent, not empty, when there is nothing to list: RFC 5280 5.1.2.6.
+     * An empty SEQUENCE is a different encoding and some verifiers reject
+     * it. */
+    if (n_revoked) {
+        size_t cap = 0, used = 0;
+        for (size_t i = 0; i < n_revoked; i++) {
+            uint8_t *d = NULL; int n = 0;
+            rv = revoked_one(&revoked[i], &d, &n);
+            if (rv != FHSM_RV_OK) { OPENSSL_free(d); goto out; }
+            if (used + (size_t)n > cap) {
+                size_t want = (used + (size_t)n) * 2 + 256;
+                uint8_t *grown = OPENSSL_realloc(rev_buf, want);
+                if (!grown) { OPENSSL_free(d); rv = FHSM_RV_HOST_MEMORY; goto out; }
+                rev_buf = grown; cap = want;
+            }
+            memcpy(rev_buf + used, d, (size_t)n);
+            used += (size_t)n;
+            OPENSSL_free(d);
+        }
+        rv = FHSM_RV_FUNCTION_FAILED;
+        rev_seq = OPENSSL_malloc(used + 8);
+        if (!rev_seq) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        rev_seq_n = tag_wrap(0x30, rev_buf, used, rev_seq, used + 8);
+        if (!rev_seq_n) goto out;
+    }
+
+    /* ---- crlExtensions: authorityKeyIdentifier and crlNumber -----------
+     * crlNumber is what lets a verifier tell a newer list from an older one.
+     * Without it, replaying yesterday's list hides today's revocations. */
+    {
+        uint8_t buf[512]; size_t used = 0;
+        const ASN1_OCTET_STRING *skid = X509_get0_subject_key_id(ca);
+        X509_EXTENSION *e1 = NULL, *e2 = NULL;
+        AUTHORITY_KEYID *akid = NULL;
+        ASN1_INTEGER *num = ASN1_INTEGER_new();
+        int good = num != NULL;
+
+        if (good && skid) {
+            akid = AUTHORITY_KEYID_new();
+            good = akid && (akid->keyid = ASN1_OCTET_STRING_dup(skid)) != NULL
+                && (e1 = X509V3_EXT_i2d(NID_authority_key_identifier, 0, akid)) != NULL;
+        }
+        if (good)
+            good = ASN1_INTEGER_set_uint64(num, crl_number) == 1
+                && (e2 = X509V3_EXT_i2d(NID_crl_number, 0, num)) != NULL;
+
+        X509_EXTENSION *both[2]; both[0] = e1; both[1] = e2;
+        for (int i = 0; good && i < 2; i++) {
+            if (!both[i]) continue;
+            uint8_t *d = NULL;
+            int n = i2d_X509_EXTENSION(both[i], &d);
+            good = n > 0 && used + (size_t)n <= sizeof buf;
+            if (good) { memcpy(buf + used, d, (size_t)n); used += (size_t)n; }
+            OPENSSL_free(d);
+        }
+        X509_EXTENSION_free(e1); X509_EXTENSION_free(e2);
+        AUTHORITY_KEYID_free(akid); ASN1_INTEGER_free(num);
+        if (!good) goto out;
+
+        ext_seq = OPENSSL_malloc(used + 8);
+        if (!ext_seq) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        ext_seq_n = tag_wrap(0x30, buf, used, ext_seq, used + 8);
+        if (!ext_seq_n) goto out;
+    }
+
+    /* ---- the TBSCertList ----------------------------------------------- */
+    {
+        /* Size query. The assembler refuses a NULL output -- rightly, since a
+         * NULL there is a caller bug everywhere else -- so the probe is a
+         * real buffer of length zero. */
+        uint8_t probe[1]; size_t need = 0;
+        rv = fhsm_composite_crl_tbs(ALGID_MLDSA65_ED25519,
+                                     sizeof ALGID_MLDSA65_ED25519,
+                                     issuer, (size_t)issuer_n,
+                                     this_u, (size_t)this_n,
+                                     next_u, (size_t)next_n,
+                                     rev_seq, rev_seq_n,
+                                     ext_seq, ext_seq_n,
+                                     probe, &need);
+        /* A NULL output with a zero size is the size query; anything other
+         * than "too small" here means the parts themselves are wrong. */
+        if (rv != FHSM_RV_BUFFER_TOO_SMALL) { if (rv == FHSM_RV_OK) rv = FHSM_RV_FUNCTION_FAILED; goto out; }
+        tbs = OPENSSL_malloc(need);
+        if (!tbs) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        tbs_n = need;
+        rv = fhsm_composite_crl_tbs(ALGID_MLDSA65_ED25519,
+                                     sizeof ALGID_MLDSA65_ED25519,
+                                     issuer, (size_t)issuer_n,
+                                     this_u, (size_t)this_n,
+                                     next_u, (size_t)next_n,
+                                     rev_seq, rev_seq_n,
+                                     ext_seq, ext_seq_n,
+                                     tbs, &tbs_n);
+        if (rv != FHSM_RV_OK) goto out;
+    }
+
+    /* ---- sign, then the outer CertificateList --------------------------
+     * Assembled here rather than through X509_CRL for the same reason the
+     * TBSCertList is: the outer AlgorithmIdentifier would have to be a
+     * composite one, and setting it through the API leaves the inner one
+     * empty. Both are the same twelve bytes, and they must match -- a
+     * verifier that finds them different is looking at a substituted
+     * algorithm. */
+    sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
+    if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    {
+        size_t sl = FHSM_COMPOSITE_SIG_MAX;
+        rv = sign(sign_ctx, tbs, tbs_n, sig, &sl);
+        if (rv != FHSM_RV_OK) goto out;
+        rv = FHSM_RV_FUNCTION_FAILED;
+
+        /* BIT STRING: one "unused bits" octet, then the signature. */
+        uint8_t bs_hdr[5]; size_t bs_content = 1 + sl;
+        size_t bs_hdr_n = der_len(bs_content, bs_hdr, sizeof bs_hdr);
+        if (!bs_hdr_n) goto out;
+
+        const size_t content = tbs_n + sizeof ALGID_MLDSA65_ED25519
+                             + 1 + bs_hdr_n + bs_content;
+        uint8_t sq[5]; size_t sq_n = der_len(content, sq, sizeof sq);
+        if (!sq_n) goto out;
+
+        const size_t total = 1 + sq_n + content;
+        if (*out_len < total) { *out_len = total; rv = FHSM_RV_BUFFER_TOO_SMALL; goto out; }
+
+        uint8_t *c = out;
+        *c++ = 0x30; memcpy(c, sq, sq_n); c += sq_n;
+        memcpy(c, tbs, tbs_n); c += tbs_n;
+        memcpy(c, ALGID_MLDSA65_ED25519, sizeof ALGID_MLDSA65_ED25519);
+        c += sizeof ALGID_MLDSA65_ED25519;
+        *c++ = 0x03; memcpy(c, bs_hdr, bs_hdr_n); c += bs_hdr_n;
+        *c++ = 0x00;
+        memcpy(c, sig, sl); c += sl;
+
+        *out_len = (size_t)(c - out);
+        rv = (*out_len == total) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+    }
+out:
+    OPENSSL_free(issuer); OPENSSL_free(this_u); OPENSSL_free(next_u);
+    OPENSSL_free(rev_buf); OPENSSL_free(rev_seq);
+    OPENSSL_free(ext_seq); OPENSSL_free(tbs);
+    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
+    ASN1_TIME_free(t1); ASN1_TIME_free(t2);
+    X509_free(ca);
     return rv;
 }
