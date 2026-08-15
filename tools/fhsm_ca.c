@@ -277,7 +277,8 @@ static void usage(void) {
     fprintf(stderr,
       "fhsm-ca --- issue and revoke certificates with a composite PQ key\n\n"
       "  fhsm-ca issue  --label NAME --ca-cert FILE --csr FILE\n"
-      "                 [--subject DN] [--san LIST] [--days N] [--out FILE] [--pem]\n"
+      "                 [--subject DN] [--san LIST] [--crl-url URL]...\n"
+      "                 [--days N] [--out FILE] [--pem]\n"
       "  fhsm-ca revoke --db FILE --serial HEX [--reason NAME] [--date WHEN]\n"
       "  fhsm-ca crl    --label NAME --ca-cert FILE --db FILE\n"
       "                 [--days N] [--out FILE] [--pem]\n\n"
@@ -292,6 +293,11 @@ static void usage(void) {
       "  --date WHEN     revocation date, YYYYMMDDHHMMSSZ (default: now)\n"
       "  --subject DN    replace the requested subject entirely\n"
       "  --san LIST      DNS:/IP:/email:/URI: entries, comma separated\n"
+      "  --crl-url URL   where this certificate's revocation list is published.\n"
+      "                  Repeat for several; they all describe the same list.\n"
+      "                  http://... or ldap://...?attribute . https is refused:\n"
+      "                  fetching a CRL over TLS can require a CRL, and the list\n"
+      "                  is signed, so the transport protects nothing.\n"
       "  --days N        validity in days (issue: 365, crl: 30)\n"
       "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n"
       "  --slot N        slot index (default 0)\n"
@@ -310,6 +316,11 @@ static int cmd_issue(int argc, char **argv) {
     const char *module = "./libfreehsm-fips.so", *label = NULL;
     const char *cacert_p = NULL, *csr_p = NULL, *subject = NULL, *out = NULL;
     const char *san = NULL;
+    /* Repeatable rather than comma-separated like --san: an LDAP URI carries
+     * commas inside its DN (ldap://h/cn=CRL,ou=CA,o=Example?attr), so a comma
+     * cannot separate these without an escaping rule nobody would remember. */
+    const char *crl_urls[8];
+    size_t      n_crl_urls = 0;
     int pem = 0, slot = 0, days = 365;
 
     for (int i = 2; i < argc; ++i) {
@@ -319,6 +330,14 @@ static int cmd_issue(int argc, char **argv) {
         else if (!strcmp(argv[i],"--csr")     && i+1<argc) csr_p    = argv[++i];
         else if (!strcmp(argv[i],"--subject") && i+1<argc) subject  = argv[++i];
         else if (!strcmp(argv[i],"--san")     && i+1<argc) san      = argv[++i];
+        else if (!strcmp(argv[i],"--crl-url") && i+1<argc) {
+            if (n_crl_urls == sizeof crl_urls / sizeof *crl_urls) {
+                fprintf(stderr, "fhsm-ca: at most %zu --crl-url entries\n",
+                        sizeof crl_urls / sizeof *crl_urls);
+                return 1;
+            }
+            crl_urls[n_crl_urls++] = argv[++i];
+        }
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
         else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = atoi(argv[++i]);
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]);
@@ -355,7 +374,8 @@ static int cmd_issue(int argc, char **argv) {
     static uint8_t der[32768]; size_t n = sizeof der;
     fhsm_rv_t r = fhsm_composite_issue(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
                                         cabuf, calen, csrbuf, csrlen,
-                                        subject, san, days, p11_sign, &sg, der, &n);
+                                        subject, san, crl_urls, n_crl_urls,
+                                        days, p11_sign, &sg, der, &n);
     if (r == FHSM_RV_SIGNATURE_INVALID) {
         fprintf(stderr,
           "fhsm-ca: the request's signature does not match the key it carries.\n"

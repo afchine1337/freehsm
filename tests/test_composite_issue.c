@@ -67,7 +67,7 @@ int main(void) {
 
     printf("\n[B] issuance\n");
     static uint8_t leaf[16384]; size_t ll = sizeof leaf;
-    rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, 365,
+    rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, NULL, 0, 365,
                                sg, &ca_s, leaf, &ll);
     snprintf(d, sizeof d, "%zu bytes", ll);
     ck("a certificate is issued", rv == FHSM_RV_OK, d);
@@ -130,7 +130,7 @@ int main(void) {
         ck("the forged request was built (it is well-formed)", fr == FHSM_RV_OK, "");
 
         static uint8_t bad[16384]; size_t bl = sizeof bad;
-        fhsm_rv_t ir = fhsm_composite_issue(ALG, cacert, cl, forged, fl, NULL, NULL, 365,
+        fhsm_rv_t ir = fhsm_composite_issue(ALG, cacert, cl, forged, fl, NULL, NULL, NULL, 0, 365,
                                              sg, &ca_s, bad, &bl);
         ck("issuance REFUSES it (CKR_SIGNATURE_INVALID)",
            ir == FHSM_RV_SIGNATURE_INVALID,
@@ -143,7 +143,7 @@ int main(void) {
         /* flip a byte inside the subject region, well before the signature */
         tampered[40] ^= 0x01;
         bl = sizeof bad;
-        fhsm_rv_t tr = fhsm_composite_issue(ALG, cacert, cl, tampered, rl, NULL, NULL, 365,
+        fhsm_rv_t tr = fhsm_composite_issue(ALG, cacert, cl, tampered, rl, NULL, NULL, NULL, 0, 365,
                                              sg, &ca_s, bad, &bl);
         ck("a request altered after signing is refused", tr != FHSM_RV_OK, "");
     }
@@ -153,7 +153,7 @@ int main(void) {
         static uint8_t o[16384]; size_t ol = sizeof o;
         rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl,
                                    "/C=FR/O=Universite Exemple/CN=imposed.example",
-                                   NULL, 365, sg, &ca_s, o, &ol);
+                                   NULL, NULL, 0, 365, sg, &ca_s, o, &ol);
         ck("--subject replaces the requested subject", rv == FHSM_RV_OK, "");
         if (rv == FHSM_RV_OK) {
             const uint8_t *q = o; X509 *y = d2i_X509(NULL, &q, (long)ol);
@@ -164,12 +164,12 @@ int main(void) {
         }
         ol = sizeof o;
         ck("a zero validity is refused",
-           fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, 0, sg, &ca_s, o, &ol)
+           fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, NULL, 0, 0, sg, &ca_s, o, &ol)
                == FHSM_RV_ARGUMENTS_BAD, "");
         ol = sizeof o;
         ck("garbage in place of a request is refused",
            fhsm_composite_issue(ALG, cacert, cl, (const uint8_t*)"not a csr", 9,
-                                 NULL, NULL, 365, sg, &ca_s, o, &ol)
+                                 NULL, NULL, NULL, 0, 365, sg, &ca_s, o, &ol)
                == FHSM_RV_ARGUMENTS_BAD, "");
     }
 
@@ -178,7 +178,7 @@ int main(void) {
         static uint8_t o[16384]; size_t ol = sizeof o;
         rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL,
                  "DNS:web01.exemple.fr,DNS:www.exemple.fr,IP:10.0.0.7,email:ca@exemple.fr",
-                 365, sg, &ca_s, o, &ol);
+                 NULL, 0, 365, sg, &ca_s, o, &ol);
         ck("a certificate with four alternative names is issued",
            rv == FHSM_RV_OK, "");
         if (rv == FHSM_RV_OK) {
@@ -220,9 +220,122 @@ int main(void) {
         for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
             ol = sizeof o;
             fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL,
-                                                 bad[i].san, 365, sg, &ca_s, o, &ol);
+                                                 bad[i].san, NULL, 0, 365, sg, &ca_s, o, &ol);
             snprintf(d, sizeof d, "\"%s\" -- %s", bad[i].san, bad[i].why);
             ck("refused rather than silently dropped", br != FHSM_RV_OK, d);
+        }
+    }
+
+    printf("\n[F] cRLDistributionPoints -- where the revocation list lives\n");
+    {
+        static uint8_t o[16384]; size_t ol = sizeof o;
+        const char *urls[] = {
+            "http://crl.exemple.fr/ca.crl",
+            "ldap://ldap.exemple.fr/cn=CRL1,ou=CA,o=Exemple"
+                "?certificateRevocationList;binary",
+        };
+
+        rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
+                                   urls, 2, 365, sg, &ca_s, o, &ol);
+        ck("a certificate carrying two distribution URIs is issued",
+           rv == FHSM_RV_OK, "");
+
+        if (rv == FHSM_RV_OK) {
+            const uint8_t *q = o; X509 *y = d2i_X509(NULL, &q, (long)ol);
+            CRL_DIST_POINTS *cdp = y ? X509_get_ext_d2i(y,
+                       NID_crl_distribution_points, NULL, NULL) : NULL;
+
+            /* One DistributionPoint, not two. Several names inside one point
+             * are several ways to the same list (RFC 5280 4.2.1.13); two
+             * points would assert two different lists. */
+            snprintf(d, sizeof d, "%d point(s)", cdp ? sk_DIST_POINT_num(cdp) : -1);
+            ck("OpenSSL reads back exactly one DistributionPoint",
+               cdp && sk_DIST_POINT_num(cdp) == 1, d);
+
+            if (cdp && sk_DIST_POINT_num(cdp) == 1) {
+                DIST_POINT *dp = sk_DIST_POINT_value(cdp, 0);
+                ck("it is a fullName", dp->distpoint && dp->distpoint->type == 0, "");
+
+                GENERAL_NAMES *gs = dp->distpoint ? dp->distpoint->name.fullname : NULL;
+                snprintf(d, sizeof d, "%d name(s)", gs ? sk_GENERAL_NAME_num(gs) : -1);
+                ck("both URIs are inside it", gs && sk_GENERAL_NAME_num(gs) == 2, d);
+
+                if (gs && sk_GENERAL_NAME_num(gs) == 2) {
+                    int all_uri = 1, order_kept = 1;
+                    for (int i = 0; i < 2; ++i) {
+                        int t = 0;
+                        ASN1_IA5STRING *s5 =
+                            GENERAL_NAME_get0_value(sk_GENERAL_NAME_value(gs,i), &t);
+                        if (t != GEN_URI) { all_uri = 0; continue; }
+                        if (strcmp((const char *)ASN1_STRING_get0_data(s5), urls[i]))
+                            order_kept = 0;
+                    }
+                    ck("both are uniformResourceIdentifier", all_uri, "");
+                    /* Order matters: a client walks the points in the order
+                     * they appear, so the operator's order is the fallback
+                     * order they intended. */
+                    ck("and in the order the operator gave them", order_kept, "");
+                }
+
+                /* Non-critical per 4.2.1.13: a client that cannot read the
+                 * extension must still be able to use the certificate. */
+                int loc = X509_get_ext_by_NID(y, NID_crl_distribution_points, -1);
+                ck("the extension is not critical",
+                   loc >= 0 && X509_EXTENSION_get_critical(X509_get_ext(y, loc)) == 0, "");
+            }
+            if (cdp) CRL_DIST_POINTS_free(cdp);
+            X509_free(y);
+        }
+
+        /* Refusals. Same rule as subjectAltName: a URI that is not understood
+         * stops the issuance. A distribution point that silently lost its only
+         * reachable URI points at a list nobody can fetch, and nothing about
+         * the certificate looks wrong. */
+        struct { const char *url; const char *why; } bad[] = {
+            { "https://crl.exemple.fr/ca.crl",
+              "https -- fetching a CRL over TLS can require a CRL" },
+            { "ldap://ldap.exemple.fr/cn=CRL1,ou=CA,o=Exemple",
+              "ldap without ?attribute -- names an entry, not a list" },
+            { "ftp://crl.exemple.fr/ca.crl",     "unsupported scheme" },
+            { "http://",                          "scheme only" },
+            { "crl.exemple.fr/ca.crl",            "no scheme" },
+            { "http://crl.exemple.fr/\xc3\xa9.crl",
+              "non-ASCII -- IA5String cannot hold it" },
+        };
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
+            const char *one[] = { bad[i].url };
+            ol = sizeof o;
+            fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
+                                                 one, 1, 365, sg, &ca_s, o, &ol);
+            snprintf(d, sizeof d, "%s", bad[i].why);
+            ck("refused", br == FHSM_RV_ARGUMENTS_BAD, d);
+        }
+
+        /* A NULL in the middle must not be walked past: the count is what the
+         * caller promised, and a hole in the array is a caller bug, not a
+         * reason to issue a shorter list than asked for. */
+        {
+            const char *holed[] = { "http://crl.exemple.fr/ca.crl", NULL };
+            ol = sizeof o;
+            fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
+                                                 holed, 2, 365, sg, &ca_s, o, &ol);
+            ck("refused", br == FHSM_RV_ARGUMENTS_BAD, "a NULL entry inside the array");
+        }
+
+        /* No URLs at all is not an error -- the extension is optional, and
+         * every certificate issued before this feature existed has none. */
+        {
+            ol = sizeof o;
+            fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
+                                                 NULL, 0, 365, sg, &ca_s, o, &ol);
+            ck("omitting the extension entirely is still valid",
+               br == FHSM_RV_OK, "no --crl-url given");
+            if (br == FHSM_RV_OK) {
+                const uint8_t *q = o; X509 *y = d2i_X509(NULL, &q, (long)ol);
+                ck("and then the certificate carries no distribution point",
+                   y && X509_get_ext_by_NID(y, NID_crl_distribution_points, -1) < 0, "");
+                X509_free(y);
+            }
         }
     }
 

@@ -968,11 +968,71 @@ out:
     return rv;
 }
 
+/* One cRLDistributionPoints URI, or 0 for anything refused. The reasoning
+ * behind each refusal is in the header; this only enforces it. */
+static int crldp_uri_ok(const char *u) {
+    for (const unsigned char *c = (const unsigned char *)u; *c; ++c)
+        if (*c < 0x20 || *c > 0x7e) return 0;      /* IA5String is ASCII */
+
+    if (!strncmp(u, "http://", 7))
+        return u[7] != '\0';
+
+    if (!strncmp(u, "ldap://", 7)) {
+        const char *q = strchr(u + 7, '?');
+        return q != NULL && q[1] != '\0';          /* an attribute, any one */
+    }
+    return 0;                                       /* https:// lands here */
+}
+
+/* cRLDistributionPoints: one DistributionPoint, every URI inside it. */
+static fhsm_rv_t crldp_extension(const char *const *urls, size_t n,
+                                  X509_EXTENSION **out_ext) {
+    CRL_DIST_POINTS *cdp   = NULL;
+    DIST_POINT      *dp    = NULL;
+    GENERAL_NAMES   *names = NULL;
+    fhsm_rv_t rv = FHSM_RV_HOST_MEMORY;
+
+    if (n == 0) return FHSM_RV_ARGUMENTS_BAD;
+
+    if (!(cdp = CRL_DIST_POINTS_new()))            goto out;
+    if (!(dp  = DIST_POINT_new()))                 goto out;
+    if (!(dp->distpoint = DIST_POINT_NAME_new()))  goto out;
+    if (!(names = GENERAL_NAMES_new()))            goto out;
+
+    for (size_t i = 0; i < n; ++i) {
+        if (!urls[i] || !crldp_uri_ok(urls[i])) {
+            rv = FHSM_RV_ARGUMENTS_BAD; goto out;   /* refuse, do not skip */
+        }
+        GENERAL_NAME   *gn  = GENERAL_NAME_new();
+        ASN1_IA5STRING *ia5 = ASN1_IA5STRING_new();
+        if (!gn || !ia5 || ASN1_STRING_set(ia5, urls[i], -1) != 1) {
+            ASN1_IA5STRING_free(ia5); GENERAL_NAME_free(gn); goto out;
+        }
+        GENERAL_NAME_set0_value(gn, GEN_URI, ia5);
+        if (!sk_GENERAL_NAME_push(names, gn)) { GENERAL_NAME_free(gn); goto out; }
+    }
+
+    dp->distpoint->type          = 0;               /* fullName */
+    dp->distpoint->name.fullname = names;
+    names = NULL;                                   /* dp owns it now */
+    if (!sk_DIST_POINT_push(cdp, dp)) goto out;
+    dp = NULL;                                      /* cdp owns it now */
+
+    *out_ext = X509V3_EXT_i2d(NID_crl_distribution_points, 0, cdp);
+    rv = *out_ext ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+out:
+    GENERAL_NAMES_free(names);
+    DIST_POINT_free(dp);
+    CRL_DIST_POINTS_free(cdp);
+    return rv;
+}
+
 fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
                                 const uint8_t *ca_cert, size_t ca_cert_len,
                                 const uint8_t *csr, size_t csr_len,
                                 const char *subject_override,
                                 const char *san,
+                                const char *const *crl_urls, size_t n_crl_urls,
                                 int days,
                                 fhsm_composite_sign_cb sign, void *sign_ctx,
                                 uint8_t *out, size_t *out_len)
@@ -1121,6 +1181,19 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
     if (san) {
         X509_EXTENSION *e = NULL;
         rv = san_extension(san, &e);
+        if (rv != FHSM_RV_OK) goto out;
+        int ok = X509_add_ext(x, e, -1) == 1;
+        X509_EXTENSION_free(e);
+        if (!ok) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
+        rv = FHSM_RV_FUNCTION_FAILED;
+    }
+
+    /* cRLDistributionPoints, from the operator's list. Non-critical: RFC 5280
+     * §4.2.1.13 says a CA SHOULD mark it so, and a client that cannot read it
+     * must still be able to use the certificate. */
+    if (crl_urls && n_crl_urls) {
+        X509_EXTENSION *e = NULL;
+        rv = crldp_extension(crl_urls, n_crl_urls, &e);
         if (rv != FHSM_RV_OK) goto out;
         int ok = X509_add_ext(x, e, -1) == 1;
         X509_EXTENSION_free(e);

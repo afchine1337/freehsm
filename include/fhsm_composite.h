@@ -322,12 +322,47 @@ fhsm_rv_t fhsm_composite_pub_from_raw(fhsm_composite_alg_t alg,
  *
  * The list comes from the operator, never from the request, which follows the
  * policy above: the applicant does not choose what the CA asserts about them.
+ *
+ * ---------------------------------------------------------------------------
+ * cRLDistributionPoints (RFC 5280 §4.2.1.13), from crl_urls / n_crl_urls.
+ *
+ * Every URI goes into a single DistributionPoint. That is the RFC's own
+ * reading: several names inside one DistributionPoint are several ways to
+ * reach the *same* list, which is what an operator publishing over both HTTP
+ * and LDAP is doing. Separate DistributionPoints would assert separate lists.
+ *
+ * Refused, and why:
+ *
+ *   https://   A CRL is a signed object, so transport confidentiality adds
+ *              nothing, and fetching one over TLS can require validating a
+ *              certificate, which can require a CRL. The CA/Browser Forum
+ *              Baseline Requirements mandate plain HTTP for that reason and
+ *              §4.2.1.13 names only HTTP and LDAP. An operator will try https
+ *              out of habit; refusing here is cheaper than the circular
+ *              dependency found in production.
+ *
+ *   ldap://    without a ?attribute part. Such a URI names a directory entry
+ *              but not which attribute holds the list, so a client has
+ *              nothing to read. Any attribute is accepted --
+ *              certificateRevocationList, authorityRevocationList and
+ *              deltaRevocationList are all legitimate -- the check is only
+ *              that one is present.
+ *
+ *   non-ASCII  IA5String is ASCII by definition and ASN1_STRING_set does not
+ *              enforce it, so a UTF-8 host name would produce an IA5String
+ *              that is not one. Punycode is the operator's job.
+ *
+ * As with subjectAltName, a URI that is not understood refuses the issuance
+ * rather than being dropped. A certificate whose distribution point silently
+ * lost its only reachable URI is a certificate whose revocation nobody can
+ * check -- and unlike a missing name, nothing about it looks wrong.
  */
 fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
                                 const uint8_t *ca_cert, size_t ca_cert_len,
                                 const uint8_t *csr, size_t csr_len,
                                 const char *subject_override,
                                 const char *san,
+                                const char *const *crl_urls, size_t n_crl_urls,
                                 int days,
                                 fhsm_composite_sign_cb sign, void *sign_ctx,
                                 uint8_t *out, size_t *out_len);
