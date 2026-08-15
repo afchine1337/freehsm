@@ -50,6 +50,8 @@ tests/*.d
 tests/*.gcno
 tests/*.gcda
 tests/*.gcov
+tests/*.sha256
+tests/*.tampered
 tests/fuzz/
 fuzz/fuzz_*
 !fuzz/fuzz_*.c
