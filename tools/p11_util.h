@@ -23,12 +23,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Each tool uses a subset of what this header offers -- fhsm-sign never needs
+ * the signing callback, fhsm-csr never needs the multipart entry points. With
+ * -Werror that makes "defined but not used" a build failure for whichever tool
+ * happens to use least. Marking the shared helpers is the honest fix; the
+ * alternative is splitting the header per consumer, which is how two copies of
+ * the "exactly one key" rule would appear. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define P11_MAYBE_UNUSED __attribute__((unused))
+#else
+#  define P11_MAYBE_UNUSED
+#endif
+
 typedef unsigned long CK_ULONG; typedef unsigned char CK_BYTE;
 typedef CK_ULONG CK_RV, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_SLOT_ID, CK_FLAGS;
 typedef struct { CK_ULONG type; void *pValue; CK_ULONG ulValueLen; } CK_ATTRIBUTE;
 typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; } CK_MECHANISM;
 
 #define CKR_OK      0UL
+#define CKR_SIGNATURE_INVALID 0x000000C0UL
 #define CKF_RW      6UL
 #define CKU_USER    1UL
 #define CKA_CLASS   0x00000000UL
@@ -54,6 +67,12 @@ static struct {
     CK_RV (*GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
     CK_RV (*SignInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
     CK_RV (*Sign)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
+    /* Multipart, for streaming a file too large to hold (#123). */
+    CK_RV (*SignUpdate)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
+    CK_RV (*SignFinal)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG*);
+    CK_RV (*VerifyInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
+    CK_RV (*VerifyUpdate)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
+    CK_RV (*VerifyFinal)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
 } p11;
 
 /* Set by each tool before anything can fail. Extracting this header from
@@ -62,13 +81,13 @@ static struct {
  * operator to the wrong manual page. */
 static const char *p11_progname = "fhsm";
 
-static void die(const char *what, CK_RV rv) {
+P11_MAYBE_UNUSED static void die(const char *what, CK_RV rv) {
     if (rv) fprintf(stderr, "%s: %s failed (0x%lx)\n", p11_progname, what, (unsigned long)rv);
     else    fprintf(stderr, "%s: %s\n", p11_progname, what);
     exit(2);
 }
 
-static void load_module(const char *path) {
+P11_MAYBE_UNUSED static void load_module(const char *path) {
     p11.h = dlopen(path, RTLD_NOW);
     if (!p11.h) { fprintf(stderr, "%s: cannot load %s: %s\n", p11_progname, path, dlerror()); exit(2); }
     #define S(f,n) do { *(void**)&p11.f = dlsym(p11.h, n); \
@@ -80,13 +99,16 @@ static void load_module(const char *path) {
     S(FindObjectsFinal,"C_FindObjectsFinal");
     S(GetAttributeValue,"C_GetAttributeValue");
     S(SignInit,"C_SignInit"); S(Sign,"C_Sign");
+    S(SignUpdate,"C_SignUpdate"); S(SignFinal,"C_SignFinal");
+    S(VerifyInit,"C_VerifyInit");
+    S(VerifyUpdate,"C_VerifyUpdate"); S(VerifyFinal,"C_VerifyFinal");
     #undef S
 }
 
 /* Find exactly one object of a class carrying a label. "Exactly": two objects
  * with the same label is an ambiguity the operator has to resolve, and picking
  * the first would silently sign with a key they did not mean. */
-static CK_OBJECT_HANDLE find_one(CK_SESSION_HANDLE s, CK_ULONG cls, const char *label) {
+P11_MAYBE_UNUSED static CK_OBJECT_HANDLE find_one(CK_SESSION_HANDLE s, CK_ULONG cls, const char *label) {
     CK_ULONG c = cls;
     CK_ATTRIBUTE t[] = { {CKA_CLASS,&c,sizeof c},
                           {CKA_LABEL,(void*)label,(CK_ULONG)strlen(label)} };
@@ -106,7 +128,7 @@ static CK_OBJECT_HANDLE find_one(CK_SESSION_HANDLE s, CK_ULONG cls, const char *
  * certificate builders never hold a key, they ask for a signature. */
 struct signer { CK_SESSION_HANDLE s; CK_OBJECT_HANDLE priv; };
 
-static fhsm_rv_t p11_sign(void *vctx, const uint8_t *tbs, size_t tbs_len,
+P11_MAYBE_UNUSED static fhsm_rv_t p11_sign(void *vctx, const uint8_t *tbs, size_t tbs_len,
                            uint8_t *sig, size_t *sig_len) {
     struct signer *g = vctx;
     CK_MECHANISM m = { CKM_COMPOSITE_MLDSA65_ED25519, NULL, 0 };

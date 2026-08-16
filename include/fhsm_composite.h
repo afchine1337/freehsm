@@ -150,6 +150,48 @@ fhsm_rv_t fhsm_composite_verify(fhsm_composite_alg_t alg,
                                  const uint8_t *ctx, size_t ctx_len,
                                  const uint8_t *sig, size_t sig_len);
 
+/* ---------------------------------------------------------------------------
+ * The same three operations, with PH(M) supplied already computed.
+ *
+ * Why they exist: PKCS#11 multipart signing hands the module the message in
+ * pieces, and the caller may never hold all of it -- a four-gigabyte file
+ * streamed through C_SignUpdate is the case that matters. The composite
+ * construction hashes M internally, so the one-shot entry points need the
+ * whole message and C_Sign refuses anything past 2 GiB.
+ *
+ * SHA-512 computed over a stream equals SHA-512 computed in one call, so
+ * feeding the digest in produces exactly the M' the one-shot path would build
+ * and the signature stays conforming. That equality is not assumed: the tests
+ * sign the same message both ways and require the results to interoperate.
+ *
+ * `ph` must be exactly the pre-hash length of the algorithm -- 64 bytes for
+ * SHA-512. A short or long digest is refused rather than padded, because a
+ * digest of the wrong length is a caller who hashed with the wrong function,
+ * and signing it would produce a signature nobody can verify.
+ * ------------------------------------------------------------------------- */
+fhsm_rv_t fhsm_composite_mprime_prehashed(fhsm_composite_alg_t alg,
+                                           const uint8_t *ph,  size_t ph_len,
+                                           const uint8_t *ctx, size_t ctx_len,
+                                           uint8_t *out, size_t *out_len);
+
+fhsm_rv_t fhsm_composite_sign_prehashed(fhsm_composite_alg_t alg,
+                                         const uint8_t *priv, size_t priv_len,
+                                         const uint8_t *ph,   size_t ph_len,
+                                         const uint8_t *ctx,  size_t ctx_len,
+                                         uint8_t *sig, size_t *sig_len);
+
+fhsm_rv_t fhsm_composite_verify_prehashed(fhsm_composite_alg_t alg,
+                                           const uint8_t *pub, size_t pub_len,
+                                           const uint8_t *ph,  size_t ph_len,
+                                           const uint8_t *ctx, size_t ctx_len,
+                                           const uint8_t *sig, size_t sig_len);
+
+/* The pre-hash OpenSSL name and length for an algorithm, so a caller running
+ * the digest itself uses the one the construction specifies rather than the
+ * one it assumed. */
+const char *fhsm_composite_ph_name(fhsm_composite_alg_t alg);
+size_t      fhsm_composite_ph_len(fhsm_composite_alg_t alg);
+
 /* Length of the ML-DSA component within a composite signature, so a caller
  * that needs to split one knows where the boundary is. */
 fhsm_rv_t fhsm_composite_split(fhsm_composite_alg_t alg,

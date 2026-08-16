@@ -61,10 +61,15 @@ int main(void) {
     CK_RV (*C_Sign)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
     CK_RV (*C_VerifyInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
     CK_RV (*C_Verify)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG);
+    CK_RV (*C_SignUpdate)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
+    CK_RV (*C_SignFinal)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG*);
+    CK_RV (*C_VerifyUpdate)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
+    CK_RV (*C_VerifyFinal)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
     #define SYM(n) *(void**)&n = dlsym(h,#n)
     SYM(C_Initialize); SYM(C_InitToken); SYM(C_OpenSession); SYM(C_Login);
     SYM(C_InitPIN); SYM(C_GenerateKeyPair); SYM(C_SignInit); SYM(C_Sign);
     SYM(C_VerifyInit); SYM(C_Verify);
+    SYM(C_SignUpdate); SYM(C_SignFinal); SYM(C_VerifyUpdate); SYM(C_VerifyFinal);
 
     C_Initialize(NULL);
     CK_BYTE so[] = "00000000", up[] = "user0000", lbl[32];
@@ -96,6 +101,14 @@ int main(void) {
            C_SignInit(s, &m, 1) == CKR_MECHANISM_INVALID, "");
         ck("C_VerifyInit refuses it",
            C_VerifyInit(s, &m, 1) == CKR_MECHANISM_INVALID, "");
+        /* The multipart entry points are reached only through SignInit, so
+           they cannot be refused independently -- what must hold is that no
+           operation is left active for them to run against. */
+        CK_ULONG dummy = 0;
+        ck("C_SignUpdate has no operation to continue",
+           C_SignUpdate(s, (CK_BYTE*)"x", 1) != CKR_OK, "");
+        ck("C_SignFinal has no operation to finish",
+           C_SignFinal(s, NULL, &dummy) != CKR_OK, "");
         printf("\n%s : %d failure(s)\n", fails ? "FAIL" : "PASS", fails);
         return fails ? 1 : 0;
     }
@@ -150,6 +163,68 @@ int main(void) {
      * with the PRIVATE one, has to be refused rather than silently misread. */
     ck("C_SignInit with the public handle is refused",
        C_SignInit(s, &m, hpub) != CKR_OK, "");
+
+    /* ---- multipart (#123) -------------------------------------------------
+     * The property that matters is not "multipart works" but "multipart signs
+     * the same thing". A streamed signature that only verifies through the
+     * streamed path would be a private construction wearing a standard OID.
+     * So every check below crosses the two paths. */
+    printf("\n[multipart] streaming must sign exactly what one-shot signs\n");
+
+    CK_BYTE mp[100000];
+    for (size_t i = 0; i < sizeof mp; i++) mp[i] = (CK_BYTE)(i * 37 + 11);
+
+    /* Signed in awkward pieces on purpose: a 1-byte first chunk, a 0-byte
+       chunk, then the rest. Uniform chunking would hide an offset bug. */
+    CK_BYTE msig[4096]; CK_ULONG mlen = sizeof msig;
+    ck("C_SignInit for multipart", C_SignInit(s, &m, hpriv) == CKR_OK, "");
+    ck("C_SignUpdate, 1 byte",      C_SignUpdate(s, mp, 1) == CKR_OK, "");
+    ck("C_SignUpdate, 0 bytes",     C_SignUpdate(s, mp + 1, 0) == CKR_OK, "");
+    ck("C_SignUpdate, the rest",    C_SignUpdate(s, mp + 1, sizeof mp - 1) == CKR_OK, "");
+    CK_ULONG mneed = 0;
+    ck("C_SignFinal size query",
+       C_SignFinal(s, NULL, &mneed) == CKR_OK && mneed == 3373, "");
+    ck("C_SignFinal succeeds",
+       C_SignFinal(s, msig, &mlen) == CKR_OK && mlen == 3373, "");
+
+    C_VerifyInit(s, &m, hpub);
+    ck("the streamed signature verifies through one-shot C_Verify",
+       C_Verify(s, mp, sizeof mp, msig, mlen) == CKR_OK, "");
+
+    /* And the converse: a one-shot signature verified in pieces. */
+    CK_BYTE osig[4096]; CK_ULONG olen = sizeof osig;
+    C_SignInit(s, &m, hpriv);
+    ck("one-shot C_Sign over the same message",
+       C_Sign(s, mp, sizeof mp, osig, &olen) == CKR_OK, "");
+    ck("C_VerifyInit for multipart", C_VerifyInit(s, &m, hpub) == CKR_OK, "");
+    ck("C_VerifyUpdate, 1 byte",     C_VerifyUpdate(s, mp, 1) == CKR_OK, "");
+    ck("C_VerifyUpdate, the rest",   C_VerifyUpdate(s, mp + 1, sizeof mp - 1) == CKR_OK, "");
+    ck("C_VerifyFinal accepts the one-shot signature",
+       C_VerifyFinal(s, osig, olen) == CKR_OK, "");
+
+    /* A single flipped byte in the middle of the stream must break it --
+       otherwise the update calls are not actually feeding the digest. */
+    mp[sizeof mp / 2] ^= 0x01;
+    C_VerifyInit(s, &m, hpub);
+    C_VerifyUpdate(s, mp, sizeof mp);
+    ck("one flipped byte in the stream breaks verification",
+       C_VerifyFinal(s, osig, olen) == CKR_SIGNATURE_INVALID, "");
+    mp[sizeof mp / 2] ^= 0x01;
+
+    /* Final with no Update at all is the empty message, and must agree with
+       one-shot over zero bytes rather than being an error or a different
+       digest. */
+    CK_BYTE esig[4096]; CK_ULONG elen = sizeof esig;
+    C_SignInit(s, &m, hpriv);
+    ck("C_SignFinal with no Update signs the empty message",
+       C_SignFinal(s, esig, &elen) == CKR_OK && elen == 3373, "");
+    C_VerifyInit(s, &m, hpub);
+    ck("and one-shot C_Verify over zero bytes accepts it",
+       C_Verify(s, (CK_BYTE*)"", 0, esig, elen) == CKR_OK, "");
+
+    /* An operation must not survive its Final. */
+    ck("C_SignUpdate after Final is refused",
+       C_SignUpdate(s, mp, 1) != CKR_OK, "");
 
     printf("\n%s : %d failure(s)\n", fails ? "FAIL" : "PASS", fails);
     return fails ? 1 : 0;

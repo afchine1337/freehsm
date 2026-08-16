@@ -61,6 +61,64 @@ size_t fhsm_composite_mprime_len(fhsm_composite_alg_t alg, size_t ctx_len) {
     return FHSM_COMPOSITE_PREFIX_LEN + p->label_len + 1u + ctx_len + p->ph_len;
 }
 
+/* The layout of M', and the only place it is written. fhsm_composite_mprime
+ * computes PH(M) and calls this; the prehashed entry point calls it directly.
+ * Two independent assemblies of the same structure would be the recurring
+ * defect of this project in miniature -- a change applied to one path and not
+ * the other -- and here the two paths must agree byte for byte or a streamed
+ * signature verifies against nothing. */
+static fhsm_rv_t mprime_layout(const fhsm_composite_params_t *p,
+                                const uint8_t *ph, size_t ph_len,
+                                const uint8_t *ctx, size_t ctx_len,
+                                uint8_t *out, size_t *out_len)
+{
+    if (!ctx && ctx_len)                 return FHSM_RV_ARGUMENTS_BAD;
+    if (!ph || ph_len != p->ph_len)      return FHSM_RV_ARGUMENTS_BAD;
+
+    /* §3.2 step 1, and the reason len(ctx) is a single byte in §2.2. This is a
+     * hard refusal, not a truncation: silently shortening an application's
+     * context would change what gets signed without telling anyone. */
+    if (ctx_len > FHSM_COMPOSITE_CTX_MAX) return FHSM_RV_DATA_LEN_RANGE;
+
+    const size_t need = FHSM_COMPOSITE_PREFIX_LEN + p->label_len + 1
+                      + ctx_len + p->ph_len;
+    if (*out_len < need)                 { *out_len = need; return FHSM_RV_BUFFER_TOO_SMALL; }
+
+    /* Written in draft order so the code reads like the specification. */
+    uint8_t *cur = out;
+    memcpy(cur, FHSM_COMPOSITE_PREFIX, FHSM_COMPOSITE_PREFIX_LEN);
+    cur += FHSM_COMPOSITE_PREFIX_LEN;
+    memcpy(cur, p->label, p->label_len);
+    cur += p->label_len;
+    *cur++ = (uint8_t)ctx_len;              /* single unsigned byte, §2.2 */
+    if (ctx_len) { memcpy(cur, ctx, ctx_len); cur += ctx_len; }
+    memcpy(cur, ph, p->ph_len);
+    cur += p->ph_len;
+
+    *out_len = (size_t)(cur - out);
+    return (*out_len == need) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+const char *fhsm_composite_ph_name(fhsm_composite_alg_t alg) {
+    const fhsm_composite_params_t *p = fhsm_composite_params(alg);
+    return p ? p->ph_name : NULL;
+}
+
+size_t fhsm_composite_ph_len(fhsm_composite_alg_t alg) {
+    const fhsm_composite_params_t *p = fhsm_composite_params(alg);
+    return p ? p->ph_len : 0;
+}
+
+fhsm_rv_t fhsm_composite_mprime_prehashed(fhsm_composite_alg_t alg,
+                                           const uint8_t *ph,  size_t ph_len,
+                                           const uint8_t *ctx, size_t ctx_len,
+                                           uint8_t *out, size_t *out_len)
+{
+    const fhsm_composite_params_t *p = fhsm_composite_params(alg);
+    if (!p || !out || !out_len) return FHSM_RV_ARGUMENTS_BAD;
+    return mprime_layout(p, ph, ph_len, ctx, ctx_len, out, out_len);
+}
+
 fhsm_rv_t fhsm_composite_mprime(fhsm_composite_alg_t alg,
                                  const uint8_t *msg, size_t msg_len,
                                  const uint8_t *ctx, size_t ctx_len,
@@ -69,32 +127,15 @@ fhsm_rv_t fhsm_composite_mprime(fhsm_composite_alg_t alg,
     const fhsm_composite_params_t *p = fhsm_composite_params(alg);
     if (!p || !out || !out_len)          return FHSM_RV_ARGUMENTS_BAD;
     if (!msg && msg_len)                 return FHSM_RV_ARGUMENTS_BAD;
-    if (!ctx && ctx_len)                 return FHSM_RV_ARGUMENTS_BAD;
 
-    /* §3.2 step 1, and the reason len(ctx) is a single byte in §2.2. This is a
-     * hard refusal, not a truncation: silently shortening an application's
-     * context would change what gets signed without telling anyone. */
+    /* Size query and context bound answered before hashing, so a caller
+     * probing for the length does not pay for a digest. */
     if (ctx_len > FHSM_COMPOSITE_CTX_MAX) return FHSM_RV_DATA_LEN_RANGE;
-
     const size_t need = fhsm_composite_mprime_len(alg, ctx_len);
     if (need == 0)                       return FHSM_RV_ARGUMENTS_BAD;
     if (*out_len < need)                 { *out_len = need; return FHSM_RV_BUFFER_TOO_SMALL; }
 
-    /* PH( M ). Computed straight into its final position so the digest is not
-     * copied around; the layout below is written in draft order so the code
-     * reads like the specification. */
-    uint8_t *cur = out;
-
-    memcpy(cur, FHSM_COMPOSITE_PREFIX, FHSM_COMPOSITE_PREFIX_LEN);
-    cur += FHSM_COMPOSITE_PREFIX_LEN;
-
-    memcpy(cur, p->label, p->label_len);
-    cur += p->label_len;
-
-    *cur++ = (uint8_t)ctx_len;              /* single unsigned byte, §2.2 */
-
-    if (ctx_len) { memcpy(cur, ctx, ctx_len); cur += ctx_len; }
-
+    uint8_t ph[EVP_MAX_MD_SIZE];
     unsigned int dlen = 0;
     EVP_MD *md = EVP_MD_fetch(NULL, p->ph_name, NULL);
     if (!md) return FHSM_RV_FUNCTION_FAILED;
@@ -103,20 +144,23 @@ fhsm_rv_t fhsm_composite_mprime(fhsm_composite_alg_t alg,
 
     int ok = EVP_DigestInit_ex(mdctx, md, NULL) == 1
           && (msg_len == 0 || EVP_DigestUpdate(mdctx, msg, msg_len) == 1)
-          && EVP_DigestFinal_ex(mdctx, cur, &dlen) == 1;
+          && EVP_DigestFinal_ex(mdctx, ph, &dlen) == 1;
 
     EVP_MD_CTX_free(mdctx);
     EVP_MD_free(md);
 
     if (!ok || dlen != p->ph_len) {
+        OPENSSL_cleanse(ph, sizeof ph);
         /* Leave nothing half-built behind: a partially written M' that a
          * caller ignored the return code on would sign the wrong thing. */
         memset(out, 0, need);
         return FHSM_RV_FUNCTION_FAILED;
     }
 
-    *out_len = need;
-    return FHSM_RV_OK;
+    fhsm_rv_t rv = mprime_layout(p, ph, dlen, ctx, ctx_len, out, out_len);
+    OPENSSL_cleanse(ph, sizeof ph);
+    if (rv != FHSM_RV_OK) memset(out, 0, need);
+    return rv;
 }
 
 /* ===========================================================================
@@ -296,24 +340,20 @@ fhsm_rv_t fhsm_composite_split(fhsm_composite_alg_t alg,
     return FHSM_RV_OK;
 }
 
-fhsm_rv_t fhsm_composite_sign(fhsm_composite_alg_t alg,
-                               const uint8_t *priv, size_t priv_len,
-                               const uint8_t *msg,  size_t msg_len,
-                               const uint8_t *ctx,  size_t ctx_len,
-                               uint8_t *sig, size_t *sig_len)
+/* Sign an already-assembled M'. The only place the two components are driven,
+ * so the one-shot and streamed paths cannot drift in what they sign or in
+ * which order they concatenate. */
+static fhsm_rv_t sign_mprime(fhsm_composite_alg_t alg,
+                              const uint8_t *priv, size_t priv_len,
+                              const uint8_t *mprime, size_t mplen,
+                              uint8_t *sig, size_t *sig_len)
 {
     const fhsm_composite_params_t *p = fhsm_composite_params(alg);
     const char *pq_name, *trad_name;
     if (!p || !component_names(alg, &pq_name, &trad_name)) return FHSM_RV_ARGUMENTS_BAD;
-    if (!priv || !sig || !sig_len)                          return FHSM_RV_ARGUMENTS_BAD;
 
     const uint8_t *dpq, *dtr; size_t lpq, ltr;
     fhsm_rv_t rv = blob_unpack(alg, priv, priv_len, &dpq, &lpq, &dtr, &ltr);
-    if (rv != FHSM_RV_OK) return rv;
-
-    uint8_t mprime[512];
-    size_t mplen = sizeof mprime;
-    rv = fhsm_composite_mprime(alg, msg, msg_len, ctx, ctx_len, mprime, &mplen);
     if (rv != FHSM_RV_OK) return rv;
 
     const uint8_t *q = dpq;
@@ -334,21 +374,53 @@ fhsm_rv_t fhsm_composite_sign(fhsm_composite_alg_t alg,
     *sig_len = spq + str_;      /* mldsaSig || tradSig, draft order */
     rv = FHSM_RV_OK;
 out:
-    OPENSSL_cleanse(mprime, sizeof mprime);
     EVP_PKEY_free(kpq); EVP_PKEY_free(ktr);
     return rv;
 }
 
-fhsm_rv_t fhsm_composite_verify(fhsm_composite_alg_t alg,
-                                 const uint8_t *pub, size_t pub_len,
-                                 const uint8_t *msg, size_t msg_len,
-                                 const uint8_t *ctx, size_t ctx_len,
-                                 const uint8_t *sig, size_t sig_len)
+fhsm_rv_t fhsm_composite_sign(fhsm_composite_alg_t alg,
+                               const uint8_t *priv, size_t priv_len,
+                               const uint8_t *msg,  size_t msg_len,
+                               const uint8_t *ctx,  size_t ctx_len,
+                               uint8_t *sig, size_t *sig_len)
+{
+    if (!priv || !sig || !sig_len) return FHSM_RV_ARGUMENTS_BAD;
+    uint8_t mprime[512];
+    size_t mplen = sizeof mprime;
+    fhsm_rv_t rv = fhsm_composite_mprime(alg, msg, msg_len, ctx, ctx_len, mprime, &mplen);
+    if (rv != FHSM_RV_OK) return rv;
+    rv = sign_mprime(alg, priv, priv_len, mprime, mplen, sig, sig_len);
+    OPENSSL_cleanse(mprime, sizeof mprime);
+    return rv;
+}
+
+fhsm_rv_t fhsm_composite_sign_prehashed(fhsm_composite_alg_t alg,
+                                         const uint8_t *priv, size_t priv_len,
+                                         const uint8_t *ph,   size_t ph_len,
+                                         const uint8_t *ctx,  size_t ctx_len,
+                                         uint8_t *sig, size_t *sig_len)
+{
+    if (!priv || !sig || !sig_len) return FHSM_RV_ARGUMENTS_BAD;
+    uint8_t mprime[512];
+    size_t mplen = sizeof mprime;
+    fhsm_rv_t rv = fhsm_composite_mprime_prehashed(alg, ph, ph_len, ctx, ctx_len,
+                                                    mprime, &mplen);
+    if (rv != FHSM_RV_OK) return rv;
+    rv = sign_mprime(alg, priv, priv_len, mprime, mplen, sig, sig_len);
+    OPENSSL_cleanse(mprime, sizeof mprime);
+    return rv;
+}
+
+/* Verify against an already-assembled M'. Single site, same reason as
+ * sign_mprime. */
+static fhsm_rv_t verify_mprime(fhsm_composite_alg_t alg,
+                                const uint8_t *pub, size_t pub_len,
+                                const uint8_t *mprime, size_t mplen,
+                                const uint8_t *sig, size_t sig_len)
 {
     const fhsm_composite_params_t *p = fhsm_composite_params(alg);
     const char *pq_name, *trad_name;
     if (!p || !component_names(alg, &pq_name, &trad_name)) return FHSM_RV_ARGUMENTS_BAD;
-    if (!pub || !sig)                                       return FHSM_RV_ARGUMENTS_BAD;
 
     size_t spq, str_;
     fhsm_rv_t rv = fhsm_composite_split(alg, sig, sig_len, &spq, &str_);
@@ -356,11 +428,6 @@ fhsm_rv_t fhsm_composite_verify(fhsm_composite_alg_t alg,
 
     const uint8_t *ppq, *ptr_; size_t lpq, ltr;
     rv = blob_unpack(alg, pub, pub_len, &ppq, &lpq, &ptr_, &ltr);
-    if (rv != FHSM_RV_OK) return rv;
-
-    uint8_t mprime[512];
-    size_t mplen = sizeof mprime;
-    rv = fhsm_composite_mprime(alg, msg, msg_len, ctx, ctx_len, mprime, &mplen);
     if (rv != FHSM_RV_OK) return rv;
 
     const uint8_t *q = ppq; EVP_PKEY *kpq = d2i_PUBKEY(NULL, &q, (long)lpq);
@@ -373,8 +440,40 @@ fhsm_rv_t fhsm_composite_verify(fhsm_composite_alg_t alg,
        && verify_component(ktr, NULL, mprime, mplen, sig + spq, str_))
          ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
 out:
-    OPENSSL_cleanse(mprime, sizeof mprime);
     EVP_PKEY_free(kpq); EVP_PKEY_free(ktr);
+    return rv;
+}
+
+fhsm_rv_t fhsm_composite_verify(fhsm_composite_alg_t alg,
+                                 const uint8_t *pub, size_t pub_len,
+                                 const uint8_t *msg, size_t msg_len,
+                                 const uint8_t *ctx, size_t ctx_len,
+                                 const uint8_t *sig, size_t sig_len)
+{
+    if (!pub || !sig) return FHSM_RV_ARGUMENTS_BAD;
+    uint8_t mprime[512];
+    size_t mplen = sizeof mprime;
+    fhsm_rv_t rv = fhsm_composite_mprime(alg, msg, msg_len, ctx, ctx_len, mprime, &mplen);
+    if (rv != FHSM_RV_OK) return rv;
+    rv = verify_mprime(alg, pub, pub_len, mprime, mplen, sig, sig_len);
+    OPENSSL_cleanse(mprime, sizeof mprime);
+    return rv;
+}
+
+fhsm_rv_t fhsm_composite_verify_prehashed(fhsm_composite_alg_t alg,
+                                           const uint8_t *pub, size_t pub_len,
+                                           const uint8_t *ph,  size_t ph_len,
+                                           const uint8_t *ctx, size_t ctx_len,
+                                           const uint8_t *sig, size_t sig_len)
+{
+    if (!pub || !sig) return FHSM_RV_ARGUMENTS_BAD;
+    uint8_t mprime[512];
+    size_t mplen = sizeof mprime;
+    fhsm_rv_t rv = fhsm_composite_mprime_prehashed(alg, ph, ph_len, ctx, ctx_len,
+                                                    mprime, &mplen);
+    if (rv != FHSM_RV_OK) return rv;
+    rv = verify_mprime(alg, pub, pub_len, mprime, mplen, sig, sig_len);
+    OPENSSL_cleanse(mprime, sizeof mprime);
     return rv;
 }
 

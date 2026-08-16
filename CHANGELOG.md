@@ -8,6 +8,54 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **`fhsm-sign` — detached signatures over arbitrary data (#123, L1).** Two
+  subcommands, `sign` and `verify`, over a Composite ML-DSA key in the module.
+  Input is a file or standard input, output the raw signature bytes.
+
+  **Verification ships with it, not after it.** No off-the-shelf tool can check
+  a Composite ML-DSA signature today, so without a verifier the tool would
+  produce something nobody — including its operator — could test.
+
+  **A failed verification exits 4, and nothing else does.** A bad signature is
+  not a tool failure; collapsing the two into one non-zero code is how a broken
+  pipeline gets read as a forgery.
+
+  **The output records nothing about itself** — no container, no algorithm
+  identifier — and the manual says so rather than leaving it to be discovered.
+  Carrying that metadata is CMS, and CMS with a composite algorithm needs its
+  `SignedData` hand-assembled, the same obstacle the revocation lists hit.
+
+* **Multipart signing and verification for the composite mechanism (#112).**
+  `C_SignUpdate` / `C_SignFinal` / `C_VerifyUpdate` / `C_VerifyFinal` accept
+  `CKM_COMPOSITE_MLDSA65_ED25519`. They previously handled HMAC and nothing
+  else, which made large-file signing impossible: the composite construction
+  hashes M inside the combiner, so one-shot `C_Sign` needs the whole message
+  and refuses anything past 2 GiB.
+
+  `SHA-512(M)` is now accumulated across `Update` calls and handed to new
+  prehashed entry points. **The signature stays conforming**, because SHA-512
+  over a stream equals SHA-512 in one call — and that is tested rather than
+  asserted: signatures made one way must verify the other way, in both
+  directions, with the stream deliberately cut at one byte, then zero, then the
+  rest. A byte flipped mid-stream must break it, which is what proves the
+  updates feed the digest at all.
+
+  **One site assembles `M'`, one site drives the two components.** The
+  one-shot and streamed paths share both. Two parallel assemblies of the same
+  structure would be this project's recurring defect in miniature, and here it
+  would only have surfaced on a file too large to appear in a test.
+
+  Measured: a 40 MiB file signs in 0.63 s with 8.9 MiB peak resident memory.
+
+### Fixed
+* **`C_SignFinal` invented a mechanism instead of refusing one.** Anything that
+  was not an HMAC fell back to SHA-256 and a 32-byte output. `C_SignUpdate`
+  made that unreachable, so nothing was broken — but it is the wrong shape of
+  guard, and the next mechanism wired into `Update` would have inherited it in
+  silence. It now returns `CKR_MECHANISM_INVALID`. The seventh instance in this
+  project of a control wired to some of the paths reaching a state and not the
+  rest.
+
 * **`cRLDistributionPoints` on issued certificates (#112).** `fhsm-ca issue
   --crl-url URL`, repeatable. Revocation shipped correct to the byte and
   nothing could find it: a verifier holding a certificate had no indication of

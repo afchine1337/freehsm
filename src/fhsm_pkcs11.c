@@ -6956,6 +6956,58 @@ CK_RV C_DigestFinal(CK_SESSION_HANDLE hSession, unsigned char *pDigest,
     return ok == 1 ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
 
+/* ---------------------------------------------------------------------------
+ * Multipart pre-hash for the composite mechanism.
+ *
+ * The composite construction hashes M inside fhsm_composite_sign, so the
+ * one-shot path needs the whole message -- and C_Sign refuses anything past
+ * 2 GiB. Streaming means computing PH(M) here, incrementally, and handing the
+ * digest to the prehashed entry point. SHA-512 over a stream equals SHA-512 in
+ * one call, so what gets signed is exactly what the one-shot path would sign;
+ * tests/test_composite_prehash checks that by cross-verifying signatures made
+ * each way.
+ *
+ * The digest name comes from fhsm_composite_ph_name rather than a literal, so
+ * a future algorithm with a different pre-hash cannot leave this path hashing
+ * with the wrong function while the rest of the module moves on.
+ * ------------------------------------------------------------------------- */
+static fhsm_rv_t composite_ph_update(fhsm_op_t *op,
+                                      const unsigned char *part, size_t len) {
+    if (!op->md_ctx) {
+        const char *dn = fhsm_composite_ph_name(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512);
+        if (!dn) return FHSM_RV_MECHANISM_INVALID;
+        EVP_MD *md = EVP_MD_fetch(NULL, dn, NULL);
+        if (!md) return FHSM_RV_MECHANISM_INVALID;
+        EVP_MD_CTX *c = EVP_MD_CTX_new();
+        int ok = c && EVP_DigestInit_ex(c, md, NULL) == 1;
+        EVP_MD_free(md);
+        if (!ok) { EVP_MD_CTX_free(c); return FHSM_RV_FUNCTION_FAILED; }
+        op->md_ctx = c;
+    }
+    if (len && EVP_DigestUpdate((EVP_MD_CTX *)op->md_ctx, part, len) != 1)
+        return FHSM_RV_FUNCTION_FAILED;
+    return FHSM_RV_OK;
+}
+
+/* Finish the pre-hash and release the context. A Final with no preceding
+ * Update is the digest of the empty message, which is what signing nothing
+ * means -- not an error, and the one-shot path accepts ulDataLen = 0 too. */
+static fhsm_rv_t composite_ph_final(fhsm_op_t *op, uint8_t *ph, size_t *ph_len) {
+    const size_t want = fhsm_composite_ph_len(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512);
+    if (want == 0 || want > EVP_MAX_MD_SIZE) return FHSM_RV_FUNCTION_FAILED;
+    if (!op->md_ctx) {
+        fhsm_rv_t rv = composite_ph_update(op, (const unsigned char *)"", 0);
+        if (rv != FHSM_RV_OK) return rv;
+    }
+    unsigned int l = 0;
+    int ok = EVP_DigestFinal_ex((EVP_MD_CTX *)op->md_ctx, ph, &l) == 1;
+    EVP_MD_CTX_free((EVP_MD_CTX *)op->md_ctx);
+    op->md_ctx = NULL;
+    if (!ok || l != want) return FHSM_RV_FUNCTION_FAILED;
+    *ph_len = l;
+    return FHSM_RV_OK;
+}
+
 CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                    CK_ULONG ulPartLen) {
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
@@ -6975,6 +7027,11 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     /* NULL part + non-zero length would deref NULL in the EVP update
      * (pkcs11-check security/test_ffi_null_pointer, #125). */
     if (pPart == NULL && ulPartLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+    /* Composite: accumulate PH(M) instead of a MAC. Before the token lookup,
+     * because nothing about the key is needed to hash the message. */
+    if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519)
+        return composite_ph_update(op, pPart, (size_t)ulPartLen);
+
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!op->mac_ctx) {
@@ -7016,10 +7073,52 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pulSigLen) return FHSM_RV_ARGUMENTS_BAD;
+
+    /* Composite: finish PH(M) and sign the digest. */
+    if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519) {
+        const size_t need = 3309u + 64u;   /* ML-DSA-65 || Ed25519 */
+        if (pSig == NULL) { *pulSigLen = need; return FHSM_RV_OK; }
+        if (*pulSigLen < need) { *pulSigLen = need; return FHSM_RV_BUFFER_TOO_SMALL; }
+
+        fhsm_token_t *ct = fhsm_session_token(hSession);
+        if (!ct) return FHSM_RV_SESSION_HANDLE_INVALID;
+        const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+        fhsm_rv_t crv = fhsm_token_object_get(ct, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (crv != FHSM_RV_OK) { op->active = 0; return crv; }
+        if (cl != CKO_PRIVATE_KEY || kt != CKK_COMPOSITE_MLDSA65_ED25519) {
+            op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        }
+        uint8_t ph[EVP_MAX_MD_SIZE]; size_t phl = 0;
+        crv = composite_ph_final(op, ph, &phl);
+        if (crv == FHSM_RV_OK) {
+            size_t slen = *pulSigLen;
+            crv = fhsm_composite_sign_prehashed(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                                 kv, kvl, ph, phl, NULL, 0,
+                                                 pSig, &slen);
+            *pulSigLen = (crv == FHSM_RV_OK) ? slen : 0;
+        } else {
+            *pulSigLen = 0;
+        }
+        OPENSSL_cleanse(ph, sizeof ph);
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
+                                fhsm_session_role(hSession), crv, "composite-multipart");
+        return crv;
+    }
+
     /* Signature length is the MAC length of the mechanism's hash, not a
      * hard-coded 32 (#125 multipart HMAC for SHA-384/512/SHA-3). */
     fhsm_hash_t fhash; size_t fmac;
-    if (!fhsm_hmac_hash_of(op->mechanism, &fhash, &fmac)) { fhash = FHSM_HASH_SHA256; fmac = 32; }
+    /* Anything that is neither composite nor an HMAC is refused here. It used
+     * to fall back to SHA-256 and 32 bytes, which C_SignUpdate makes
+     * unreachable today -- but a fallback that invents a mechanism is the
+     * wrong shape of guard, and the next mechanism wired into Update would
+     * have inherited it silently. */
+    if (!fhsm_hmac_hash_of(op->mechanism, &fhash, &fmac)) {
+        if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
+        op->active = 0;
+        return FHSM_RV_MECHANISM_INVALID;
+    }
     if (pSig == NULL) { *pulSigLen = fmac; return FHSM_RV_OK; }
     if (*pulSigLen < fmac) { *pulSigLen = fmac; return 0x00000150UL; }
     size_t out_len = 0;
@@ -7076,6 +7175,10 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     if (pPart == NULL && ulPartLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* Composite: accumulate PH(M), same single site as the sign path. */
+    if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519)
+        return composite_ph_update(op, pPart, (size_t)ulPartLen);
+
     if (op->mechanism != CKM_SHA256_HMAC_INIT_VAL) {
         /* Asymmetric multipart not implemented in this scaffold. */
         return FHSM_RV_MECHANISM_INVALID;
@@ -7110,6 +7213,26 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pSig) return FHSM_RV_ARGUMENTS_BAD;
+    if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519) {
+        fhsm_token_t *ct = fhsm_session_token(hSession);
+        if (!ct) return FHSM_RV_SESSION_HANDLE_INVALID;
+        const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+        fhsm_rv_t crv = fhsm_token_object_get(ct, op->key_handle, &kv, &kvl, &cl, &kt);
+        op->active = 0;
+        if (crv != FHSM_RV_OK) return crv;
+        if (cl != CKO_PUBLIC_KEY || kt != CKK_COMPOSITE_MLDSA65_ED25519)
+            return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        uint8_t ph[EVP_MAX_MD_SIZE]; size_t phl = 0;
+        crv = composite_ph_final(op, ph, &phl);
+        if (crv == FHSM_RV_OK)
+            crv = fhsm_composite_verify_prehashed(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                                   kv, kvl, ph, phl, NULL, 0,
+                                                   pSig, ulSigLen);
+        OPENSSL_cleanse(ph, sizeof ph);
+        (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
+                                fhsm_session_role(hSession), crv, "composite-multipart");
+        return crv;
+    }
     if (op->mechanism != CKM_SHA256_HMAC_INIT_VAL) {
         if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
         op->active = 0;
