@@ -68,6 +68,28 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Measured: a 40 MiB file signs in 0.63 s with 8.9 MiB peak resident memory.
 
 ### Fixed
+* **The `output_length` report in this repository asserted the opposite of
+  what is measurable.** It stated that `gc.collect()` before `mmap.close()`
+  "does not help", and recommended `ctypes.byref` as the fix. Re-measured on
+  CPython 3.10, 3.12 and 3.13, twenty-four runs across both callee kinds and
+  both cast forms: `gc.collect()` fixes it every time, and `byref` does not
+  even type-check against the declared argtypes.
+
+  The cause was also wrong. The cast objects are not "argument temporaries
+  already released" — they sit in a reference cycle that `del` cannot break,
+  which is exactly why refcounting alone leaves the export outstanding and
+  why a collection clears it.
+
+  The better fix, now identified and verified: drop the `cast` and pass the
+  array, since `raw` declares `CK_BYTE_PTR` in its argtypes and ctypes
+  converts without building the cycle.
+
+  The report is not sent, and now says so and why, so the decision is not
+  re-taken by default. It also records what was *not* verified: the real probe
+  never ran here, because its two 4 GiB mappings do not fit — the reference
+  semantics were measured at 4 MiB, which is size-independent for this
+  question but is not the same as running the thing.
+
 * **`test_legacy_cipher` had never run its interop branch.** It detected the
   profile by looking for mechanism `0x130` in the advertised list. `0x130` is
   `CKM_DES2_KEY_GEN`; `CKM_DES3_KEY_GEN` is `0x131`, and the module advertises
