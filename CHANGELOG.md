@@ -68,6 +68,29 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Measured: a 40 MiB file signs in 0.63 s with 8.9 MiB peak resident memory.
 
 ### Fixed
+* **`test_legacy_cipher` had never run its interop branch.** It detected the
+  profile by looking for mechanism `0x130` in the advertised list. `0x130` is
+  `CKM_DES2_KEY_GEN`; `CKM_DES3_KEY_GEN` is `0x131`, and the module advertises
+  `0x130` in neither profile. The search always failed, the test always
+  believed it was in fips-strict, and the interop path — 3DES key generation
+  and a 3DES-CBC round trip — had never executed since it was written.
+
+  **Both fips-strict assertions passed for reasons unrelated to the profile.**
+  One generated a key with a mechanism that does not exist. The other called
+  `C_EncryptInit(CKM_DES3_CBC)` with an *AES* key, which fails on key type in
+  either profile. Checking only "non-zero" is what allowed it; both now
+  require `CKR_MECHANISM_INVALID` specifically.
+
+  The feature itself was fine — verified directly: in interop,
+  `C_GenerateKey(0x131)` succeeds and 3DES-CBC round-trips. So this is a test
+  that was counted as covering something it never touched, which is worse than
+  a missing test. Found because the interop suite printed
+  `profile = fips-strict` next to two siblings printing `interop`.
+
+  The two siblings were checked and are correct: `test_legacy_digest` uses
+  `0x220` (SHA-1) and `test_legacy_rsa` uses `0x1` (RSA-PKCS), both genuinely
+  interop-only.
+
 * **A PIN outside the accepted length reported `CKR_ARGUMENTS_BAD`.** PKCS#11
   has `CKR_PIN_LEN_RANGE` for exactly this, and the difference matters: one is
   a value the user can retype, the other is a bug in the calling code. All

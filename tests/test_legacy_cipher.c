@@ -50,6 +50,8 @@ static CK_BYTE *fhsm_pad_label(CK_BYTE buf[32], const char *s) {
     memset(buf, ' ', 32); memcpy(buf, s, n);
     return buf;
 }
+#define CKR_MECHANISM_INVALID 0x70UL
+
 
 int main(void) {
     H = dlopen("./libfreehsm-fips.so", RTLD_NOW);
@@ -71,10 +73,20 @@ int main(void) {
 
     CK_ULONG mn = 0; GML(0, NULL, &mn);
     CK_ULONG *ml = calloc(mn, sizeof *ml); GML(0, ml, &mn);
-    /* 3DES key generation (0x130) is non-approved -> advertised only in the
-     * interop build ; use it to detect the active profile. AES-ECB is now
-     * FIPS-approved (SP 800-38A) and available in both profiles. */
-    int strict = 1; for (CK_ULONG i = 0; i < mn; ++i) if (ml[i] == 0x130) { strict = 0; break; }
+    /* 3DES key generation is non-approved -> advertised only in the interop
+     * build ; use it to detect the active profile. AES-ECB is now
+     * FIPS-approved (SP 800-38A) and available in both profiles.
+     *
+     * The constant here was 0x130 for a long time. That is CKM_DES2_KEY_GEN.
+     * CKM_DES3_KEY_GEN is 0x131, and the module never advertises 0x130 in
+     * either profile -- so the search always failed, the test always believed
+     * it was in fips-strict, and the interop branch below had never run once.
+     * Both fips-strict assertions still passed, for reasons that had nothing
+     * to do with the profile: one used a mechanism that does not exist, the
+     * other an AES key with a 3DES mechanism. A test that passes in both
+     * profiles while exercising one is worse than a missing test, because it
+     * is counted. */
+    int strict = 1; for (CK_ULONG i = 0; i < mn; ++i) if (ml[i] == 0x131) { strict = 0; break; }
     free(ml);
     printf("test_legacy_cipher : profile = %s\n", strict ? "fips-strict" : "interop");
 
@@ -87,18 +99,31 @@ int main(void) {
     CK_MECHANISM ecb = { 0x1081, NULL, 0 };
     CK_BYTE iv8[8] = {1,2,3,4,5,6,7,8};
     CK_MECHANISM d3 = { 0x133, iv8, 8 };
-    CK_MECHANISM kg = { 0x130, NULL, 0 };
+    CK_MECHANISM kg = { 0x131, NULL, 0 };     /* CKM_DES3_KEY_GEN */
 
     /* AES-ECB is FIPS-approved and must round-trip in BOTH profiles. */
     int rc = roundtrip(s, &ecb, akey, "AES-ECB");
 
     if (strict) {
-        /* 3DES-CBC at EncryptInit and 3DES keygen must be rejected. */
-        if (EI(s, &d3, akey) == 0) { fprintf(stderr, "  FAIL 3DES-CBC not rejected\n"); return 1; }
-        printf("  3DES-CBC rejected : OK\n");
+        /* Rejected because the mechanism is disabled, and the return code has
+         * to say so. Checking merely "non-zero" is what let the old version
+         * pass: an AES key handed to a 3DES mechanism fails too, and that
+         * failure proves nothing about the profile. */
+        CK_RV r3 = EI(s, &d3, akey);
+        if (r3 != CKR_MECHANISM_INVALID) {
+            fprintf(stderr, "  FAIL 3DES-CBC -> 0x%lx, want CKR_MECHANISM_INVALID\n",
+                    (unsigned long)r3);
+            return 1;
+        }
+        printf("  3DES-CBC rejected as CKR_MECHANISM_INVALID : OK\n");
         CK_OBJECT_HANDLE dk = 0;
-        if (GK(s, &kg, NULL, 0, &dk) == 0) { fprintf(stderr, "  FAIL DES3 keygen not rejected\n"); return 1; }
-        printf("  3DES keygen rejected : OK\n");
+        CK_RV rk = GK(s, &kg, NULL, 0, &dk);
+        if (rk != CKR_MECHANISM_INVALID) {
+            fprintf(stderr, "  FAIL DES3 keygen -> 0x%lx, want CKR_MECHANISM_INVALID\n",
+                    (unsigned long)rk);
+            return 1;
+        }
+        printf("  3DES keygen rejected as CKR_MECHANISM_INVALID : OK\n");
         if (rc) return 1;
         printf("test_legacy_cipher : PASS\n");
         return 0;
