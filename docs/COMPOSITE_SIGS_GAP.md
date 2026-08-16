@@ -251,6 +251,48 @@ code, and it will lift when the RFC publishes and implementations follow — but
 until then it belongs in any documentation that mentions composite CSRs, and
 in any answer given to a user who asks whether they can use one.
 
+## The composite path does not use the module's own DRBG (found 2026-08-16)
+
+`src/fhsm_drbg.c` exists because the module wanted more than `RAND_bytes`:
+multi-source seeding, a SHA-256 conditioner, SP 800-90B health tests (RCT, APT,
+CRNGT), auto-reseed every 1 MiB or hour, and — the point — a **latching
+failure**. An alarm puts the module in `FHSM_STATE_ERROR` and every subsequent
+`C_*` call returns `CKR_DEVICE_ERROR`, so key material stops being produced the
+moment the entropy source is suspect. `fhsm_rng_bytes` is the way in.
+
+Two places in the composite path go around it.
+
+**Key generation.** `gen_one()` calls `EVP_PKEY_keygen` with a `NULL` library
+context, so both components — the ML-DSA-65 seed and the Ed25519 scalar — come
+from OpenSSL's default RAND. The health tests never see that draw, and an alarm
+that would latch the module does not prevent a composite key pair from being
+generated.
+
+**Certificate serial numbers.** `fhsm_composite_issue` fills its 20 random
+octets with `RAND_bytes` directly. Random serials are load-bearing here: they
+are what makes the to-be-signed bytes unpredictable, which is the defence
+against a chosen-prefix attack on the signature hash. That defence rests on
+entropy the module's own audited path never inspected.
+
+Neither is exploitable on its own — OpenSSL's DRBG is not a weak generator, and
+that is why this is a gap rather than a defect. What is lost is the property
+the DRBG was built for: that every byte of key material passed the health
+tests, and that a failing source stops the module instead of quietly producing
+keys.
+
+The fix has two halves of very different sizes. Serials are easy:
+`fhsm_rng_bytes` in place of `RAND_bytes`, one line. Key generation is not,
+because the seed is drawn inside OpenSSL's provider — it needs a library
+context whose RAND is backed by `fhsm_drbg`, which is plumbing the module does
+not have yet and which would also cover every other `EVP_PKEY_keygen` call.
+
+Worth stating plainly, since this was carried in conversation as "§10.2
+requires the seed to come from `fhsm_drbg`": **no such requirement was found.**
+The only §10.2 in these documents is `RNG.md` citing SP 800-90A §10.2.1.5, on
+reseed intervals, which says nothing about this. The gap is real and worth
+closing on its own merits — consistency with the module's stated RNG
+guarantees — not because a specification demands it.
+
 ## Claims to review before the v2.0 announcements
 
 `PRIMACY_AUDIT_PQC_COMPOSITE.md` §5 rests on "PQC composite signatures

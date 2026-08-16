@@ -258,6 +258,57 @@ fixed layout over a CBOR/TLV `extras` blob deliberately (see above): with no
 installed base, bumping the magic again is cheaper than carrying another
 hand-written parser.
 
+## What a mutation costs (measured 2026-08-16)
+
+Every mutation rewrites the whole file. `write_atomic` builds the 317-byte
+header, serialises **all** objects, encrypts the complete blob under
+AES-256-GCM, writes it to `<path>.tmp`, `fsync`s, and renames. There is no
+incremental path: fourteen call sites reach it, and adding one key costs the
+same as rewriting every key.
+
+That sounds like the thing to fix. Measured, it mostly is not.
+
+`tests/bench_capacity`, RSA-2048-sized values (1 191 bytes), ext4, this
+sandbox:
+
+| objects | total    | average per key |
+|--------:|---------:|----------------:|
+|      64 |   255 ms |        3.99 ms |
+|     128 |   525 ms |        4.10 ms |
+|     256 | 1 059 ms |        4.14 ms |
+|     512 | 2 350 ms |        4.59 ms |
+|   1 024 | 5 468 ms |        5.34 ms |
+
+Fitting `T(N) = aN + bN²` over those five points lands within ±2.3 % at every
+one of them:
+
+* **a ≈ 3.82 ms** — fixed cost per mutation, independent of how full the store is
+* **b ≈ 1.487 µs** — per object already present, which *is* the whole-store rewrite
+
+So the last key at the 1 024 ceiling costs about **6.9 ms**, and filling an
+empty token takes about 5.5 s.
+
+**The fixed cost is durability, not the rewrite.** A separate probe —
+`open`/`write`/`fsync`/`rename` in a loop, same directory — gives 2.94 ms with
+`fsync` and 0.26 ms without, for a 317-byte file. On tmpfs the same loop is
+0.011 ms. Roughly 2.7 of the 3.82 ms is the disk barrier: the price of not
+losing a freshly generated key to a power cut, and not removable while that
+guarantee stands.
+
+Which redirects the fix. Making the format incremental would remove the `bN²`
+term and nothing else — about 1.5 ms out of 6.9 ms at the ceiling, and
+essentially nothing on a token holding a few dozen keys. The lever that
+matters is **batching**: one `fsync` per group of mutations rather than per
+mutation, with the durability boundary stated so callers know what they are
+trading. That is a different change, in a different place, and cheaper.
+
+Noted because it was carried in conversation for weeks as "7.25 ms per key
+creation, whole-store rewrite per mutation" and never written down. Two things
+were wrong with that. The number was a marginal cost near the ceiling on other
+hardware, not an average — quoting it for a token with fifty keys would
+overstate by 70 %. And the cause was misattributed: the rewrite is real, but at
+today's ceiling it is the smaller half.
+
 ## Build-time configuration
 
 `FHSM_MAX_OBJECTS` (default 1024) is overridable via `-DFHSM_MAX_OBJECTS=N`
