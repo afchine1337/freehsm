@@ -118,13 +118,43 @@ static int cmd_init(const char *module, int slot, const char *label, int force) 
                         "  the SO PIN would leave a token no application can log into.\n");
         return 1;
     }
+    /* Check the length here as well, against the bounds the module itself
+     * advertises rather than a copy of them. The module refuses out-of-range
+     * PINs with CKR_PIN_LEN_RANGE, but a numeric code at the end of a command
+     * is not an explanation -- and the first thing an operator does with a
+     * placeholder PIN from a manual is paste it. */
+    {
+        struct tok_info probe; memset(&probe, 0, sizeof probe);
+        unsigned long lo = 4, hi = 64;
+        load_module(module);
+        if (p11.Initialize(NULL) == CKR_OK
+            && p11.GetTokenInfo((CK_SLOT_ID)slot, &probe) == CKR_OK
+            && probe.ulMinPinLen && probe.ulMinPinLen <= probe.ulMaxPinLen) {
+            lo = (unsigned long)probe.ulMinPinLen;
+            hi = (unsigned long)probe.ulMaxPinLen;
+        }
+        int bad_so   = strlen(so)   < lo || strlen(so)   > hi;
+        int bad_user = strlen(user) < lo || strlen(user) > hi;
+        const char *which = bad_so && bad_user ? "FHSM_SO_PIN and FHSM_PIN are"
+                          : bad_so             ? "FHSM_SO_PIN is"
+                          : bad_user           ? "FHSM_PIN is" : NULL;
+        if (which) {
+            fprintf(stderr, "fhsm-token: %s outside the token's accepted length "
+                            "(%lu..%lu characters).\n"
+                            "  Nothing was changed. If you pasted a placeholder from a\n"
+                            "  manual, that is the usual cause.\n", which, lo, hi);
+            p11.Finalize(NULL);
+            return 1;
+        }
+        p11.Finalize(NULL);
+    }
+
     if (strlen(label) > 32) {
         fprintf(stderr, "fhsm-token: --label is at most 32 characters "
                         "(PKCS#11 pads it to exactly that).\n");
         return 1;
     }
 
-    load_module(module);
     CK_RV rv = p11.Initialize(NULL);
     if (rv != CKR_OK) die("C_Initialize", rv);
 

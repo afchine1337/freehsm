@@ -21,6 +21,8 @@ typedef struct { CK_ULONG mechanism; void *p; CK_ULONG l; } CK_MECHANISM;
 #define CKR_OK 0UL
 #define CKR_ATTRIBUTE_VALUE_INVALID  0x13UL
 #define CKR_MECHANISM_PARAM_INVALID  0x71UL
+#define CKR_ARGUMENTS_BAD            0x07UL
+#define CKR_PIN_LEN_RANGE            0xA2UL
 
 static void *H;
 static CK_RV (*OS)(CK_SLOT_ID,CK_FLAGS,void*,void*,CK_SESSION_HANDLE*);
@@ -102,6 +104,46 @@ int main(void) {
       struct { void *pIv; CK_ULONG il, ib; void *pAAD; CK_ULONG al, tb; } g = { NULL, 12, 96, NULL, 0, 128 };
       CK_MECHANISM m = { 0x1087, &g, sizeof g };
       expect(EI(s, &m, AESK), CKR_MECHANISM_PARAM_INVALID, "EncryptInit GCM NULL pIv len=12"); CS(s); }
+
+    /* PIN length: out of range is CKR_PIN_LEN_RANGE, not CKR_ARGUMENTS_BAD.
+     * The two were collapsed into one code at all three PIN entry points, so
+     * an application could not tell a value the user should retype from a bug
+     * in its own call -- and the operator got a bare 0x7 naming no cause.
+     * Both directions are checked at each site, plus the NULL case, which
+     * must stay ARGUMENTS_BAD: that one really is a caller bug. */
+    {
+        CK_BYTE lbl[32]; memset(lbl, ' ', sizeof lbl);
+        CK_BYTE longpin[80]; memset(longpin, 'a', sizeof longpin);
+        expect(IT(1, (CK_BYTE*)"abc", 3, lbl),
+               CKR_PIN_LEN_RANGE, "InitToken PIN too short");
+        expect(IT(1, longpin, 65, lbl),
+               CKR_PIN_LEN_RANGE, "InitToken PIN too long");
+        expect(IT(1, NULL, 8, lbl),
+               CKR_ARGUMENTS_BAD, "InitToken NULL pPin stays ARGUMENTS_BAD");
+        expect(IP(s0, (CK_BYTE*)"abc", 3),
+               CKR_PIN_LEN_RANGE, "InitPIN PIN too short");
+        expect(IP(s0, longpin, 65),
+               CKR_PIN_LEN_RANGE, "InitPIN PIN too long");
+        expect(IP(s0, NULL, 8),
+               CKR_ARGUMENTS_BAD, "InitPIN NULL pPin stays ARGUMENTS_BAD");
+
+        /* And the bounds the module advertises must be the ones it enforces.
+         * They were five separate literals; a drift between them would be
+         * invisible until an application trusted ulMinPinLen. */
+        CK_RV (*GTI)(CK_ULONG, void*);
+        *(void**)&GTI = dlsym(H, "C_GetTokenInfo");
+        struct { CK_BYTE l[32], m[32], mo[16], sn[16]; CK_ULONG f, a,b,c,d, maxp, minp; } ti;
+        memset(&ti, 0, sizeof ti);
+        if (GTI && GTI(0, &ti) == CKR_OK) {
+            if (ti.minp != 4 || ti.maxp != 64) {
+                fprintf(stderr, "FAIL: advertised PIN bounds %lu..%lu, enforced 4..64\n",
+                        (unsigned long)ti.minp, (unsigned long)ti.maxp);
+                fails++;
+            } else {
+                printf("  %-38s -> OK\n", "advertised PIN bounds match enforced");
+            }
+        }
+    }
 
     if (fails) { fprintf(stderr, "test_input_validation : %d FAIL\n", fails); return 1; }
     printf("test_input_validation : PASS\n");

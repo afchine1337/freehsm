@@ -68,6 +68,27 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Measured: a 40 MiB file signs in 0.63 s with 8.9 MiB peak resident memory.
 
 ### Fixed
+* **A PIN outside the accepted length reported `CKR_ARGUMENTS_BAD`.** PKCS#11
+  has `CKR_PIN_LEN_RANGE` for exactly this, and the difference matters: one is
+  a value the user can retype, the other is a bug in the calling code. All
+  three entry points — `C_InitToken`, `C_InitPIN`, `C_SetPIN` — collapsed both
+  into one return, so an application could not tell them apart and an operator
+  got a bare `0x7` naming no cause. `NULL` still returns `CKR_ARGUMENTS_BAD`;
+  that one really is a caller bug.
+
+  **The bounds were five separate literals** — three enforcement sites and the
+  two fields `C_GetTokenInfo` advertises — with nothing tying them together.
+  The module could have advertised bounds it did not enforce, and an
+  application trusting `ulMinPinLen` would have been the one to find out. They
+  now come from `FHSM_PIN_MIN_LEN` / `FHSM_PIN_MAX_LEN`, and
+  `tests/test_input_validation` asserts the advertised pair equals the enforced
+  one.
+
+  `fhsm-token init` also checks the length itself, against the bounds the
+  module reports rather than a copy of them, and says which variable is wrong.
+  A numeric code at the end of a command is not an explanation — and pasting a
+  placeholder PIN out of a manual is the ordinary way to hit this.
+
 * **`CKF_USER_PIN_INITIALIZED` was read from the failed-attempt counter.**
   `C_GetTokenInfo` set the flag when `fhsm_token_failed_count(USER) > 0`, which
   is a different question and got both cases wrong: a freshly provisioned token

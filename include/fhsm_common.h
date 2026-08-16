@@ -90,7 +90,12 @@ typedef uint32_t fhsm_rv_t;
 #define FHSM_RV_CANCEL                      0x00000001u
 #define FHSM_RV_HOST_MEMORY                 0x00000002u
 #define FHSM_RV_DEVICE_MEMORY               0x00000131u  /* CKR_DEVICE_MEMORY : token storage full */
-#define FHSM_RV_DEVICE_ERROR                0x00000030u  /* CKR_DEVICE_ERROR : token hardware fault (#109) */
+#define FHSM_RV_DEVICE_ERROR                0x00000030u
+/* CKR_PIN_LEN_RANGE. A PIN outside the advertised bounds is a value the user
+ * can correct, not a caller bug; reporting it as CKR_ARGUMENTS_BAD told
+ * applications the wrong thing and left operators with an error that named no
+ * cause. PKCS#11 v3.2 has had this code all along. */
+#define FHSM_RV_PIN_LEN_RANGE               0x000000A2u  /* CKR_DEVICE_ERROR : token hardware fault (#109) */
 #define FHSM_RV_BUFFER_TOO_SMALL            0x00000150u  /* CKR_BUFFER_TOO_SMALL : output buffer too small */
 #define FHSM_RV_SLOT_ID_INVALID             0x00000003u
 #define FHSM_RV_GENERAL_ERROR               0x00000005u
@@ -271,6 +276,21 @@ int fhsm_fips_mode(void);
 #ifndef FHSM_PIN_THROTTLE_MAX_MS
 #define FHSM_PIN_THROTTLE_MAX_MS  60000
 #endif
+/* PIN length bounds, in one place.
+ *
+ * They used to be the literals 4 and 64, written five times: three
+ * enforcement sites (C_InitToken, C_InitPIN, C_SetPIN) and the two fields
+ * C_GetTokenInfo advertises. Nothing tied them together, so the module could
+ * have ended up advertising bounds it did not enforce, or enforcing bounds it
+ * did not advertise -- and an application that trusts ulMinPinLen would have
+ * been the one to find out. */
+#ifndef FHSM_PIN_MIN_LEN
+#define FHSM_PIN_MIN_LEN          4
+#endif
+#ifndef FHSM_PIN_MAX_LEN
+#define FHSM_PIN_MAX_LEN          64
+#endif
+
 #ifndef FHSM_PIN_MAX_FAILED
 #define FHSM_PIN_MAX_FAILED       5
 #endif

@@ -942,8 +942,8 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
     info->ulSessionCount         = 0;
     info->ulMaxRwSessionCount    = 128;
     info->ulRwSessionCount       = 0;
-    info->ulMaxPinLen            = 64;
-    info->ulMinPinLen            = 4;
+    info->ulMaxPinLen            = FHSM_PIN_MAX_LEN;
+    info->ulMinPinLen            = FHSM_PIN_MIN_LEN;
     info->ulTotalPublicMemory    = 0;
     info->ulFreePublicMemory     = 0;
     info->ulTotalPrivateMemory   = 0;
@@ -1217,7 +1217,9 @@ CK_RV C_InitToken(CK_SLOT_ID slotID, CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen,
                    CK_UTF8CHAR_PTR pLabel) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
-    if (!pPin || ulPinLen < 4 || ulPinLen > 64) return FHSM_RV_ARGUMENTS_BAD;
+    if (!pPin) return FHSM_RV_ARGUMENTS_BAD;
+    if (ulPinLen < FHSM_PIN_MIN_LEN || ulPinLen > FHSM_PIN_MAX_LEN)
+        return FHSM_RV_PIN_LEN_RANGE;
     if (!pLabel) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_slot_table_init_once();
 
@@ -1256,7 +1258,9 @@ CK_RV C_InitToken(CK_SLOT_ID slotID, CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen,
 CK_RV C_InitPIN(CK_SESSION_HANDLE hSession, CK_UTF8CHAR_PTR pPin,
                  CK_ULONG ulPinLen) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
-    if (!pPin || ulPinLen < 4 || ulPinLen > 64) return FHSM_RV_ARGUMENTS_BAD;
+    if (!pPin) return FHSM_RV_ARGUMENTS_BAD;
+    if (ulPinLen < FHSM_PIN_MIN_LEN || ulPinLen > FHSM_PIN_MAX_LEN)
+        return FHSM_RV_PIN_LEN_RANGE;
     fhsm_token_t *t = fhsm_session_token(hSession);
     fhsm_role_t   r = fhsm_session_role(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -1279,8 +1283,9 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
                 CK_UTF8CHAR_PTR pNewPin, CK_ULONG ulNewLen) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pOldPin || !pNewPin) return FHSM_RV_ARGUMENTS_BAD;
-    if (ulOldLen < 4 || ulOldLen > 64 || ulNewLen < 4 || ulNewLen > 64)
-        return FHSM_RV_ARGUMENTS_BAD;
+    if (ulOldLen < FHSM_PIN_MIN_LEN || ulOldLen > FHSM_PIN_MAX_LEN
+        || ulNewLen < FHSM_PIN_MIN_LEN || ulNewLen > FHSM_PIN_MAX_LEN)
+        return FHSM_RV_PIN_LEN_RANGE;
     fhsm_token_t *t = fhsm_session_token(hSession);
     fhsm_role_t   r = fhsm_session_role(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
