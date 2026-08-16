@@ -138,6 +138,11 @@ fhsm_rv_t fhsm_token_reinit(fhsm_token_t *t,
 const char *fhsm_token_label(const fhsm_token_t *t);
 const char *fhsm_token_serial(const fhsm_token_t *t);
 uint32_t    fhsm_token_failed_count(const fhsm_token_t *t, fhsm_role_t role);
+
+/* Whether C_InitPIN has ever run on this token, i.e. whether a user PIN
+ * exists. Persisted at byte 292 of the header. Exposed because C_GetTokenInfo
+ * has to report CKF_USER_PIN_INITIALIZED and had no way to ask. */
+int         fhsm_token_user_initialized(const fhsm_token_t *t);
 int         fhsm_token_is_locked(const fhsm_token_t *t, fhsm_role_t role);
 uint64_t    fhsm_token_throttle_remaining_ms(const fhsm_token_t *t, fhsm_role_t role);
 

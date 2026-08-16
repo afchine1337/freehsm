@@ -43,6 +43,7 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKR_OK      0UL
 #define CKR_SIGNATURE_INVALID 0x000000C0UL
 #define CKF_RW      6UL
+#define CKU_SO      0UL
 #define CKU_USER    1UL
 #define CKA_CLASS   0x00000000UL
 #define CKA_TOKEN   0x00000001UL
@@ -73,6 +74,10 @@ static struct {
     CK_RV (*VerifyInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
     CK_RV (*VerifyUpdate)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
     CK_RV (*VerifyFinal)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
+    /* Provisioning (fhsm-token). */
+    CK_RV (*InitToken)(CK_SLOT_ID,CK_BYTE*,CK_ULONG,CK_BYTE*);
+    CK_RV (*InitPIN)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
+    CK_RV (*GetTokenInfo)(CK_SLOT_ID,void*);
 } p11;
 
 /* Set by each tool before anything can fail. Extracting this header from
@@ -102,6 +107,8 @@ P11_MAYBE_UNUSED static void load_module(const char *path) {
     S(SignUpdate,"C_SignUpdate"); S(SignFinal,"C_SignFinal");
     S(VerifyInit,"C_VerifyInit");
     S(VerifyUpdate,"C_VerifyUpdate"); S(VerifyFinal,"C_VerifyFinal");
+    S(InitToken,"C_InitToken"); S(InitPIN,"C_InitPIN");
+    S(GetTokenInfo,"C_GetTokenInfo");
     #undef S
 }
 

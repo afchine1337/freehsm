@@ -211,6 +211,9 @@ tools/fhsm-ca: tools/fhsm_ca.c $(OBJDIR)/src/fhsm_composite.o
 tools/fhsm-sign: tools/fhsm_sign.c $(OBJDIR)/src/fhsm_composite.o
 	$(CC) $(CFLAGS) -Itools -o $@ $^ $(LDFLAGS) -ldl
 
+tools/fhsm-token: tools/fhsm_token.c $(OBJDIR)/src/fhsm_composite.o
+	$(CC) $(CFLAGS) -Itools -o $@ $^ $(LDFLAGS) -ldl
+
 # ---------------------------------------------------------------------------
 # Code generation --- runs scripts/gen_p11_thunks.py to regenerate
 # include/fhsm_pkcs11_mechanisms.h, src/gen/fhsm_dispatch.c, docs/MECHANISMS.md.
@@ -243,6 +246,31 @@ profile-stamp:
 $(PROFILE_STAMP): profile-stamp
 	@:
 
+# The stamp watches a transition; this watches the state.
+#
+# The stamp is rewritten when PROFILE changes, which covers the operator who
+# forgets the flag. It does not cover the generated files changing underneath
+# it -- a git checkout, a branch switch, a merge, a stash pop. When that
+# happens the stamp still says one profile while src/gen says the other, make
+# sees nothing out of date, and the build links a dispatch table nobody asked
+# for. Found the hard way: restoring src/gen from HEAD left a fips-strict
+# dispatch behind an interop stamp, and the only symptom was CKR_MECHANISM_
+# INVALID from a mechanism that was supposed to be enabled.
+#
+# The dangerous direction is the other one. A tree generated for interop and
+# rebuilt as fips-strict ships the non-approved mechanisms live while every
+# visible sign says otherwise, and nothing downstream would catch it --
+# docs/ROADMAP.md already names this as the check that cannot be recovered
+# after a release.
+#
+# So: assert the post-condition. fhsm_build_fips_strict is written by the
+# generator and read by the profile gates, which makes it the one value that
+# cannot be right by accident.
+.PHONY: check-profile
+check-profile:
+	@want=$$( [ "$(PROFILE)" = "interop" ] && echo 0 || echo 1 ); 	got=$$(sed -n 's/^const int fhsm_build_fips_strict = \([01]\);.*/\1/p' \
+	        src/gen/fhsm_dispatch.c 2>/dev/null); 	if [ -z "$$got" ]; then 	    echo "[freehsm] cannot read fhsm_build_fips_strict from src/gen/fhsm_dispatch.c" >&2; 	    exit 1; 	fi; 	if [ "$$got" != "$$want" ]; then 	    echo "[freehsm] PROFILE=$(PROFILE) but the generated dispatch says" >&2; 	    echo "          fhsm_build_fips_strict = $$got (expected $$want)." >&2; 	    echo "          The generated sources and the profile stamp disagree --" >&2; 	    echo "          usually a checkout or merge replaced src/gen underneath." >&2; 	    echo "          Run:  rm -f $(PROFILE_STAMP) && make PROFILE=$(PROFILE) generate" >&2; 	    exit 1; 	fi
+
 .PHONY: generate
 generate:
 	python3 scripts/gen_p11_thunks.py --profile=$(PROFILE)
@@ -262,7 +290,13 @@ show-profile:
 	@grep -oE 'fhsm_build_fips_strict = [01]' src/gen/fhsm_dispatch.c 2>/dev/null \
 	    | grep -oE '[01]$$' || echo '?'
 
-$(LIB): $(LIB_OBJ)
+# The choke point: everything that carries the profile goes through this
+# object, so gating it covers the library, the tests and the tools alike --
+# gating only $(LIB) would leave `make tests` building against a dispatch the
+# check never looked at.
+$(OBJDIR)/src/gen/fhsm_dispatch.o: | check-profile
+
+$(LIB): $(LIB_OBJ) | check-profile
 	$(CC) -shared -Wl,-soname,$(LIB) -o $@ $^ $(LDFLAGS)
 
 $(OBJDIR)/%.o: %.c

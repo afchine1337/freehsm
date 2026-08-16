@@ -922,7 +922,17 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
      * C_InitToken has populated the .tok file. */
     info->flags = CKF_RNG | CKF_LOGIN_REQUIRED;
     if (t) info->flags |= CKF_TOKEN_INITIALIZED;
-    if (t && fhsm_token_failed_count(t, FHSM_ROLE_USER) > 0)
+    /* CKF_USER_PIN_INITIALIZED was derived from the failed-attempt counter
+     * being non-zero. That is not the same question, and it got both cases
+     * wrong: a freshly provisioned token with a working PIN and no failures
+     * reported "user PIN not set", while one wrong entry on a token whose PIN
+     * had never been set would have reported the opposite. Applications read
+     * this flag to decide whether to prompt for a PIN or to run
+     * initialisation, so the answer has to come from whether C_InitPIN ever
+     * ran -- which is what the header records at byte 292. Found while
+     * writing fhsm-token, whose `info` printed the wrong answer immediately
+     * after its own `init` succeeded. */
+    if (t && fhsm_token_user_initialized(t))
         info->flags |= CKF_USER_PIN_INITIALIZED;
     if (t && fhsm_token_is_locked(t, FHSM_ROLE_USER))
         info->flags |= CKF_USER_PIN_LOCKED;

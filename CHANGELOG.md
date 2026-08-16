@@ -8,6 +8,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **`fhsm-token` — provisioning, which the manual promised and nothing
+  provided.** `init` and `info`. `FHSM_CSR.md` told operators hitting
+  `CKR_TOKEN_NOT_PRESENT` to *"initialise it first (`C_InitToken`, or the
+  module's own provisioning tool)"*; there was no such tool, so every
+  documented path into this project's own tooling began with a step that could
+  not be taken. It went unnoticed because the tests call `C_InitToken` directly
+  from C — nothing that ran regularly needed the missing piece. It surfaced the
+  first time someone followed the manual instead.
+
+  Separate binary rather than an `fhsm-csr` subcommand, on the reasoning
+  already settled when `fhsm-ca` was split out: a tool named for certification
+  requests should not also be the thing that wipes a token.
+
+  **`init` refuses an already-initialised token unless `--force`.** It destroys
+  every key, and `init` differs from `info` by four characters.
+
+  Both PINs come from `FHSM_SO_PIN` and `FHSM_PIN`, never from an argument —
+  the rule the other tools follow, and it matters most here since this is the
+  only command that takes the Security Officer PIN.
+
 * **`fhsm-sign` — detached signatures over arbitrary data (#123, L1).** Two
   subcommands, `sign` and `verify`, over a Composite ML-DSA key in the module.
   Input is a file or standard input, output the raw signature bytes.
@@ -48,6 +68,39 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Measured: a 40 MiB file signs in 0.63 s with 8.9 MiB peak resident memory.
 
 ### Fixed
+* **`CKF_USER_PIN_INITIALIZED` was read from the failed-attempt counter.**
+  `C_GetTokenInfo` set the flag when `fhsm_token_failed_count(USER) > 0`, which
+  is a different question and got both cases wrong: a freshly provisioned token
+  with a working PIN and no failures reported "user PIN not set", and one wrong
+  entry against a token whose PIN had never been set would have reported the
+  opposite. Applications read this flag to decide whether to prompt for a PIN
+  or to run initialisation. It now comes from whether `C_InitPIN` ever ran,
+  which the header has recorded at byte 292 since v1.1.0.
+
+  Found by `fhsm-token info` printing the wrong answer immediately after its
+  own `init` succeeded — the value of having a tool that states what it sees.
+
+* **The build-profile guard watched the transition, not the state.**
+  `src/gen/.profile.stamp` is rewritten when `PROFILE` changes, which covers
+  the operator who forgets the flag. It does not cover the generated sources
+  changing underneath it — a checkout, a branch switch, a merge, a stash pop.
+  When that happens the stamp says one profile, `src/gen` holds the other, make
+  sees nothing out of date, and the build links a dispatch table nobody asked
+  for.
+
+  Reproduced accidentally: restoring `src/gen` from `HEAD` left a fips-strict
+  dispatch behind an interop stamp, and the only symptom was
+  `CKR_MECHANISM_INVALID` from a mechanism that was supposed to be enabled.
+  **The dangerous direction is the other one** — a tree generated for interop
+  and rebuilt as fips-strict ships the non-approved mechanisms live while every
+  visible sign says otherwise, which `docs/ROADMAP.md` already names as the
+  check that cannot be recovered after a release.
+
+  `make check-profile` now asserts the post-condition: `fhsm_build_fips_strict`
+  in the generated dispatch must match the requested profile. It runs before
+  the library links, and was verified to fail in both directions on a
+  deliberately desynchronised tree.
+
 * **`C_SignFinal` invented a mechanism instead of refusing one.** Anything that
   was not an HMAC fell back to SHA-256 and a 32-byte output. `C_SignUpdate`
   made that unreachable, so nothing was broken — but it is the wrong shape of

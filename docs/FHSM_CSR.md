@@ -401,8 +401,13 @@ that fails.
 ## Troubleshooting
 
 **`C_OpenSession failed (0xe0)`** — `CKR_TOKEN_NOT_PRESENT`. The slot has no
-initialised token. Initialise it first (`C_InitToken`, or the module's own
-provisioning tool), and check `FHSM_TOKENS_DIR` points where you think it does.
+initialised token. Run `fhsm-token init` first (see
+[`FHSM_TOKEN.md`](FHSM_TOKEN.md)), and check `FHSM_TOKENS_DIR` points where you
+think it does.
+
+This sentence used to say "or the module's own provisioning tool". There was
+none, so the advice sent the reader looking for something that did not exist —
+which is how the gap was eventually found.
 
 **`C_Login failed (0xa0)`** — wrong PIN. After `FHSM_PIN_MAX_FAILED`
 consecutive failures the role locks; see `AGD_OPE.md` §4.1.

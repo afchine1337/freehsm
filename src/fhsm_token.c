@@ -1044,6 +1044,10 @@ uint32_t fhsm_token_failed_count(const fhsm_token_t *t, fhsm_role_t role) {
     if (!t) return 0;
     return (role == FHSM_ROLE_SO) ? t->failed_so : t->failed_user;
 }
+
+int fhsm_token_user_initialized(const fhsm_token_t *t) {
+    return t ? t->user_initialized : 0;
+}
 int fhsm_token_is_locked(const fhsm_token_t *t, fhsm_role_t role) {
     return fhsm_token_failed_count(t, role) >= FHSM_PIN_MAX_FAILED;
 }
