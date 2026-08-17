@@ -1,6 +1,13 @@
-/* Le chemin pre-hache doit etre indiscernable du chemin one-shot.
- * S'il ne l'est pas, une signature produite en flux ne verifie contre rien --
- * et le defaut ne se voit qu'a l'usage, sur un fichier trop gros pour le test. */
+/* ===========================================================================
+ * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+ * SPDX-License-Identifier: Apache-2.0
+ * ===========================================================================
+ * The prehashed path must be indistinguishable from the one-shot path.
+ *
+ * If it is not, a signature produced from a stream verifies against nothing --
+ * and the defect only shows in use, on a file too large to appear in a test,
+ * which is the worst place to find it.
+ * ========================================================================= */
 #include <stdio.h>
 #include <string.h>
 #include <openssl/evp.h>
@@ -10,7 +17,7 @@
 static int fails = 0;
 static void ck(const char *w, int c) { printf("  [%s] %s\n", c?"PASS":"FAIL", w); if(!c) fails++; }
 
-/* SHA-512 par blocs, comme le ferait C_SignUpdate. */
+/* SHA-512 in blocks, the way C_SignUpdate would. */
 static int stream_digest(const uint8_t *m, size_t n, size_t chunk, uint8_t *out) {
     EVP_MD *md = EVP_MD_fetch(NULL, fhsm_composite_ph_name(ALG), NULL);
     EVP_MD_CTX *c = EVP_MD_CTX_new();
@@ -29,62 +36,62 @@ int main(void) {
     static uint8_t priv[FHSM_COMPOSITE_PRIV_MAX], pub[FHSM_COMPOSITE_PUB_MAX];
     size_t pl = sizeof priv, bl = sizeof pub;
     if (fhsm_composite_keygen(ALG, priv, &pl, pub, &bl) != FHSM_RV_OK) {
-        printf("keygen a echoue\n"); return 1;
+        printf("keygen failed\n"); return 1;
     }
 
     static uint8_t msg[300000];
     for (size_t i = 0; i < sizeof msg; i++) msg[i] = (uint8_t)(i * 31 + 7);
     const uint8_t ctx[] = { 'f','h','s','m','-','s','i','g','n' };
 
-    printf("== M' : les deux chemins ==\n");
+    printf("== M': the two paths ==\n");
     for (size_t cl = 0; cl <= 9; cl += 9) {
         uint8_t a[512], b[512]; size_t la = sizeof a, lb = sizeof b;
         uint8_t ph[64];
-        ck("digest par blocs de 4096 calcule", stream_digest(msg, sizeof msg, 4096, ph));
+        ck("digest computed in 4096-byte blocks", stream_digest(msg, sizeof msg, 4096, ph));
         fhsm_rv_t r1 = fhsm_composite_mprime(ALG, msg, sizeof msg, cl?ctx:NULL, cl, a, &la);
         fhsm_rv_t r2 = fhsm_composite_mprime_prehashed(ALG, ph, 64, cl?ctx:NULL, cl, b, &lb);
-        char m[80]; snprintf(m, sizeof m, "M' identique octet pour octet (ctx=%zu)", cl);
+        char m[80]; snprintf(m, sizeof m, "M' identical byte for byte (ctx=%zu)", cl);
         ck(m, r1 == FHSM_RV_OK && r2 == FHSM_RV_OK && la == lb && memcmp(a, b, la) == 0);
     }
 
-    printf("\n== signatures interchangeables ==\n");
+    printf("\n== signatures are interchangeable ==\n");
     {
         uint8_t ph[64];
-        stream_digest(msg, sizeof msg, 1, ph);   /* octet par octet : pire cas */
+        stream_digest(msg, sizeof msg, 1, ph);   /* one byte at a time: worst case */
         static uint8_t s1[FHSM_COMPOSITE_SIG_MAX], s2[FHSM_COMPOSITE_SIG_MAX];
         size_t l1 = sizeof s1, l2 = sizeof s2;
-        ck("signature one-shot",
+        ck("one-shot signature",
            fhsm_composite_sign(ALG, priv, pl, msg, sizeof msg, ctx, 9, s1, &l1) == FHSM_RV_OK);
-        ck("signature pre-hachee",
+        ck("prehashed signature",
            fhsm_composite_sign_prehashed(ALG, priv, pl, ph, 64, ctx, 9, s2, &l2) == FHSM_RV_OK);
-        /* ML-DSA est randomise : les octets different, c'est attendu. Ce qui
-         * doit tenir, c'est la verification croisee dans les deux sens. */
-        ck("one-shot verifiee par le chemin pre-hache",
+        /* ML-DSA is randomised, so the bytes differ and that is expected.
+         * What has to hold is cross-verification, in both directions. */
+        ck("one-shot verified through the prehashed path",
            fhsm_composite_verify_prehashed(ALG, pub, bl, ph, 64, ctx, 9, s1, l1) == FHSM_RV_OK);
-        ck("pre-hachee verifiee par le chemin one-shot",
+        ck("prehashed verified through the one-shot path",
            fhsm_composite_verify(ALG, pub, bl, msg, sizeof msg, ctx, 9, s2, l2) == FHSM_RV_OK);
-        ck("un contexte different casse la verification",
+        ck("a different context breaks verification",
            fhsm_composite_verify(ALG, pub, bl, msg, sizeof msg, ctx, 8, s2, l2) != FHSM_RV_OK);
         ph[0] ^= 1;
-        ck("un digest modifie casse la verification",
+        ck("a modified digest breaks verification",
            fhsm_composite_verify_prehashed(ALG, pub, bl, ph, 64, ctx, 9, s1, l1) != FHSM_RV_OK);
     }
 
-    printf("\n== longueur de pre-hachage refusee, pas rattrapee ==\n");
+    printf("\n== a wrong pre-hash length is refused, not patched up ==\n");
     {
         uint8_t ph[64] = {0}, out[512]; size_t lo = sizeof out;
-        ck("63 octets refuses",
+        ck("63 bytes refused",
            fhsm_composite_mprime_prehashed(ALG, ph, 63, NULL, 0, out, &lo) == FHSM_RV_ARGUMENTS_BAD);
         lo = sizeof out;
-        ck("65 octets refuses",
+        ck("65 bytes refused",
            fhsm_composite_mprime_prehashed(ALG, ph, 65, NULL, 0, out, &lo) == FHSM_RV_ARGUMENTS_BAD);
         lo = sizeof out;
-        ck("NULL refuse",
+        ck("NULL refused",
            fhsm_composite_mprime_prehashed(ALG, NULL, 64, NULL, 0, out, &lo) == FHSM_RV_ARGUMENTS_BAD);
-        ck("le nom du pre-hachage est SHA512",
+        ck("the pre-hash is named SHA512",
            strcmp(fhsm_composite_ph_name(ALG), "SHA512") == 0 && fhsm_composite_ph_len(ALG) == 64);
     }
 
-    printf("\n%s\n", fails ? "ECHECS" : "tout passe");
+    printf("\n%s\n", fails ? "FAILURES" : "all checks passed");
     return fails ? 1 : 0;
 }
