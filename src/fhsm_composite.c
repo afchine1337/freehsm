@@ -15,6 +15,7 @@
 
 #include "fhsm_composite.h"
 #include "fhsm_pkcs11_mechanisms.h"
+#include "fhsm_crypto.h"   /* fhsm_rng_bytes: the module's own DRBG */
 
 /* src/fhsm_pkcs11.c redefines mechanism constants locally -- the file's
  * convention, since it does not include the generated header. A value copied
@@ -1191,7 +1192,14 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
     /* ---- Serial: 20 random octets, top bit cleared ------------------- */
     {
         uint8_t sn[20];
-        if (RAND_bytes(sn, (int)sizeof sn) != 1) goto out;
+        /* Through fhsm_rng_bytes, not RAND_bytes. The module built a DRBG
+         * with SP 800-90B health tests and a latching failure precisely so
+         * that key material stops being produced when the entropy source is
+         * suspect; a serial drawn around it is entropy that path never
+         * inspected. And serials are load-bearing here -- they are what makes
+         * the to-be-signed bytes unpredictable against a chosen-prefix attack
+         * on the signature hash. */
+        if (fhsm_rng_bytes(sn, sizeof sn) != FHSM_RV_OK) goto out;
         sn[0] &= 0x7F;                 /* positive INTEGER (RFC 5280 §4.1.2.2) */
         if (sn[0] == 0) sn[0] = 1;     /* and never a leading zero octet */
         BIGNUM *bn = BN_bin2bn(sn, (int)sizeof sn, NULL);

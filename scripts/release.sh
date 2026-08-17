@@ -22,6 +22,7 @@
 #  no git write operations: it checks, prints the commands, and stops.
 #
 #  Usage:  scripts/release.sh 1.6.0
+#          scripts/release.sh 2.0.0-beta   (pre-release suffixes allowed)
 # ===========================================================================
 set -u
 
@@ -29,6 +30,13 @@ VERSION="${1:-}"
 [ -n "$VERSION" ] || { echo "usage: $0 <version>   (e.g. 1.6.0)" >&2; exit 2; }
 
 TAG="v$VERSION"
+# The macros feed CK_VERSION bytes in C_GetInfo, C_GetSlotInfo and
+# C_GetTokenInfo. They are numbers and cannot carry a pre-release suffix, so
+# comparing them against a version like 2.0.0-beta compares two different
+# kinds of thing and always fails. Strip the suffix for that one check, and
+# only for it: the version STRING must still match in full, suffix included,
+# because that is the field a human reads.
+VERSION_NUM="${VERSION%%-*}"
 HDR="include/fhsm_common.h"
 GEN="src/gen/fhsm_dispatch.c"
 CHANGELOG="CHANGELOG.md"
@@ -75,10 +83,10 @@ fi
 V_MAJ=$(awk '/FHSM_VERSION_MAJOR/{print $3; exit}' "$HDR" 2>/dev/null)
 V_MIN=$(awk '/FHSM_VERSION_MINOR/{print $3; exit}' "$HDR" 2>/dev/null)
 V_PAT=$(awk '/FHSM_VERSION_PATCH/{print $3; exit}' "$HDR" 2>/dev/null)
-if [ "$V_MAJ.$V_MIN.$V_PAT" = "$VERSION" ]; then
+if [ "$V_MAJ.$V_MIN.$V_PAT" = "$VERSION_NUM" ]; then
     ok "version macros = $V_MAJ.$V_MIN.$V_PAT"
 else
-    bad "version macros are $V_MAJ.$V_MIN.$V_PAT, expected $VERSION ($HDR)"
+    bad "version macros are $V_MAJ.$V_MIN.$V_PAT, expected $VERSION_NUM ($HDR)"
 fi
 
 # --- 4. changelog --------------------------------------------------------

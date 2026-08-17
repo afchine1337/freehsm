@@ -193,8 +193,15 @@ LIB_VER = $(LIB).$(shell awk -F'"' '/FHSM_VERSION_STRING/{print $$2; exit}' incl
 .PHONY: all
 all: generate $(LIB) tests/test_smoke tools/freehsm-audit
 
+# Built against the same OpenSSL as everything else. This rule used to be a
+# bare `cc ... -lcrypto`, the only one in the file ignoring OPENSSL_PREFIX. It
+# builds anyway wherever the system headers happen to be on the default path,
+# which is why nobody noticed -- and where they are not, the release pre-flight
+# fails at the last tool. Worse where it does build: the audit tool would link
+# a different libcrypto from the module it audits, which is precisely the sort
+# of divergence an audit tool exists to rule out.
 tools/freehsm-audit: tools/freehsm_audit.c
-	cc -O2 -Wall -Wextra -o $@ $< -lcrypto
+	$(CC) -O2 -Wall -Wextra $(OPENSSL_CFLAGS) -o $@ $< $(OPENSSL_LDFLAGS)
 
 # fhsm-csr links only the composite encoder -- src/fhsm_composite.o stands
 # alone against libcrypto -- and loads the PKCS#11 module at runtime, so it

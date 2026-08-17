@@ -7,6 +7,38 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [2.0.0-beta] - 2026-08-17
+
+**The PKI and signing tools, and the composite signatures under them.**
+
+This is the release the v2.0 line was for: `fhsm-token`, `fhsm-csr`, `fhsm-ca`
+and `fhsm-sign` on top of a Composite ML-DSA implementation that matches the
+draft's own Appendix D vectors byte for byte.
+
+**Read these three before deploying it.**
+
+*The specification is not published.* Everything composite here follows
+`draft-ietf-lamps-pq-composite-sigs-19`, which is in the RFC Editor queue. The
+OID `1.3.6.1.5.5.7.6.48`, the label and the M' construction come from that
+draft. **If any of them changes at publication, signatures produced by this
+release stop verifying under conforming implementations.** That is why this is
+a beta and not a stable, and why anything signed for long-term retention may
+need re-issuing.
+
+*The composite mechanism ships in the interop profile only.* The default build
+is fips-strict, where every entry point refuses it. `make PROFILE=interop` is
+required, and `docs/COMPOSITE_SIGS_GAP.md` explains why the mechanism is not
+announced as FIPS-approved.
+
+*Composite key generation does not use this module's DRBG.* `EVP_PKEY_keygen`
+is called with a NULL library context, so the ML-DSA seed and the Ed25519
+scalar come from OpenSSL's RAND rather than `fhsm_drbg`. The SP 800-90B health
+tests never see that draw, and an alarm that would latch the module does not
+prevent a key pair being generated. Certificate serial numbers were on the
+same path and are fixed in this release; closing it for key generation needs a
+library context backed by `fhsm_drbg` and is not done. Recorded in
+`docs/COMPOSITE_SIGS_GAP.md`.
+
 ### Added
 * **CMS/PKCS#7 SignedData — `fhsm-sign cms` and `cms-verify` (#123, L2).**
   Detached RFC 5652 `SignedData` with signed attributes, carrying the signer's
