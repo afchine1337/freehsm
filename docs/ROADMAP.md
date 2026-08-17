@@ -366,6 +366,44 @@ Until (1) and (2) are done, "reproducible build" should be read as
 "deterministic build", and the documentation should say so rather than let a
 reader supply the stronger meaning on their own.
 
+### The audit log is not written (found 2026-08-17, after v2.0.0-beta shipped)
+
+`fhsm_audit_open()` is defined in `src/fhsm_audit.c`, declared in the header,
+and **called from nowhere**. `g_audit_fd` therefore stays at `-1`, and
+`fhsm_audit_event()` opens with a guard that returns `FHSM_RV_OK` and writes
+nothing. Forty-nine call sites across `fhsm_pkcs11.c`, `fhsm_token.c` and
+`fhsm_state.c` are silently inert.
+
+Verified empirically, not only by reading: a full session — `C_InitToken`, SO
+login, `C_InitPIN`, user login, key generation, attribute reads — produces
+`slot0.tok` and no log anywhere on the filesystem.
+
+`FHSM_AUDIT_MANDATORY` is defined as `1` in `fhsm_common.h` and read by no
+code. The backpressure `fhsm_audit.h` describes — *"the module is latched into
+the ERROR state ... no security-relevant action is allowed without a durable
+trace"* — is not implemented either.
+
+Found while correcting a mistyped command in `AGD_OPE` §4.3, which told the
+Security Officer to review this log weekly. Both AGD manuals and both AGD_PRE
+acceptance lists have been corrected to say plainly that the control does not
+exist; the procedures are kept as the specification the implementation must
+satisfy.
+
+**The open question is the key**, and it is a design decision rather than
+wiring. `fhsm_audit_open` takes a 32-byte HMAC key. Deriving it from the token
+DEK would mean the log can only be written while logged in — leaving
+`login_fail`, `login_locked` and `integrity_fail` untraceable, which are
+precisely the events §4.3 tells the SO to investigate. A separate key needs an
+entry in `freehsm.conf`, a provisioning step, and somewhere to keep it that is
+not the machine being audited.
+
+The second decision is the backpressure. Latching `ERROR` when a trace cannot
+be written is what the header promises and what an audit control is worth; it
+also means a full disk stops the module. That is defensible for an HSM and
+should be stated, not discovered.
+
+---
+
 ## Continuous / parallel
 
 | # | Task | Cadence | Status |

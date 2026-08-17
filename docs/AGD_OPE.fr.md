@@ -135,11 +135,33 @@ Marteler à travers le throttle ne change pas le résultat ; le cooldown survit 
 
 ### 4.3 Revue du log d'audit
 
-Le SO DOIT :
+> **Le journal d'audit n'est pas produit par cette version.**
+> `fhsm_audit_open()` est définie et appelée de nulle part : le descripteur
+> reste fermé et les quarante-neuf appels à `fhsm_audit_event()` retournent
+> succès sans rien écrire. Vérifié empiriquement — une session complète, de la
+> création du token à la génération de clés, produit le fichier de token et
+> aucun journal.
+>
+> La contre-pression annoncée est absente pour la même raison :
+> `FHSM_AUDIT_MANDATORY` vaut `1` dans `fhsm_common.h` et n'est lu par aucun
+> code, donc le module n'est **pas** verrouillé en `ERROR` lorsqu'une trace ne
+> peut pas être écrite.
+>
+> **Ne comptez pas sur ce contrôle.** La procédure ci-dessous décrit le
+> comportement visé et reste ici parce qu'elle est ce que l'implémentation
+> devra satisfaire — non parce qu'elle fonctionne. Reporté après la
+> v2.0.0-beta ; la question ouverte est l'origine de la clé HMAC, une clé
+> dérivée du token laissant les échecs de connexion — les événements les plus
+> utiles — sans trace.
 
-1. Périodiquement (recommandé : hebdomadaire) vérifier la chaîne avec le verifier :
+Quand il sera implémenté, le SO DEVRA :
+
+1. Périodiquement (recommandé : hebdomadaire) vérifier la chaîne. Attention à
+   la syntaxe : `verify` est une sous-commande et la clé d'audit de 32 octets
+   est un argument obligatoire — le binaire s'appelle `freehsm-audit`, et
+   `freehsm-audit-verify` n'existe pas.
    ```bash
-   freehsm-audit-verify /var/lib/freehsm/audit/slot0.audit.log
+   freehsm-audit verify /var/lib/freehsm/audit/slot0.audit.log <audit_key_hex_64>
    ```
 2. Investiguer tout `login_fail`, `login_locked`, `login_throttled`, `integrity_fail`.
 3. Archiver mensuellement vers stockage immuable.

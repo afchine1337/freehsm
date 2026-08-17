@@ -7,6 +7,30 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+* **The manuals promised an audit log that is never written.** `AGD_OPE` §4.3
+  instructed the Security Officer to verify the HMAC chain weekly, and both
+  `AGD_PRE` acceptance lists required the log to contain entries. No log
+  exists: `fhsm_audit_open()` is called from nowhere, so all forty-nine
+  `fhsm_audit_event()` sites return success and write nothing. Confirmed
+  empirically — a full session produces the token file and no log.
+
+  `FHSM_AUDIT_MANDATORY` is likewise defined and read by no code, so the
+  latch-to-`ERROR`-on-write-failure the header describes does not happen.
+
+  All four documents now say so plainly. The procedures are kept as the
+  specification the implementation must satisfy rather than deleted, and the
+  acceptance criterion is struck rather than left to fail during
+  commissioning. Recorded in `docs/ROADMAP.md` with the two decisions the fix
+  needs: where the HMAC key comes from, and whether a failed write really
+  stops the module.
+
+  The command was also wrong: `freehsm-audit-verify <path>` does not exist.
+  The binary is `freehsm-audit`, `verify` is a subcommand, and the 32-byte key
+  is required. `AGD_PRE` had it right while `AGD_OPE` had it wrong — two
+  manuals describing the same tool differently.
+
+
 ## [2.0.0-beta] - 2026-08-17
 
 **The PKI and signing tools, and the composite signatures under them.**

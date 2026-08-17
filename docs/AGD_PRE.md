@@ -372,7 +372,14 @@ The module is *operationally validated* when **all** of the following criteria h
 4. Test §7.2 outputs `ROUND-TRIP OK` --- proof that the RSA private key remains internal to the HSM and that the module correctly decrypts external input.
 5. `make integrity` reports a non-zero digest (= 32 hex bytes) in the `.fhsm_digest` section.
 6. `fhsm_kat_results()` after `C_Initialize` reports `passed=1` for all 15 KATs (6 smoke + 9 CAVP SHA-256).
-7. The audit log contains `module_init/login_ok/sign/encrypt/decrypt` entries with intact HMAC chain (verifiable via `freehsm-audit verify`).
+7. ~~The audit log contains `module_init/login_ok/sign/encrypt/decrypt` entries
+   with intact HMAC chain.~~ **Cannot be satisfied by v2.0.0-beta: no audit log
+   is written.** `fhsm_audit_open()` is called from nowhere, so every event is
+   silently dropped. An acceptance criterion that always fails is worse than an
+   absent one, so it is struck rather than left to be discovered during
+   commissioning. See `AGD_OPE.md` §4.3. When the log exists, the check is
+   `freehsm-audit verify <path> <audit_key_hex_64>` — `verify` is a
+   subcommand, and the key is required.
 
 ### 7.4 Automated suite
 

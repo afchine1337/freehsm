@@ -141,11 +141,32 @@ Repeatedly hammering through the throttle does not change the outcome ; the cool
 
 ### 4.3 Audit log review
 
-The audit log lives at `/var/lib/freehsm/audit/slot<n>.audit.log` and is HMAC-chained. The SO MUST :
+> **The audit log is not produced by this release.** `fhsm_audit_open()` is
+> defined and called from nowhere, so the file descriptor stays closed and all
+> forty-nine `fhsm_audit_event()` call sites return success while writing
+> nothing. Verified empirically: a full session — token creation, SO login,
+> user PIN initialisation, key generation — produces the token file and no log.
+>
+> The backpressure this header promises is absent for the same reason.
+> `FHSM_AUDIT_MANDATORY` is defined as `1` in `fhsm_common.h` and read by no
+> code, so the module is **not** latched into `ERROR` when a trace cannot be
+> written.
+>
+> **Do not rely on this control.** The procedure below describes the intended
+> behaviour and is kept because it is what the implementation must satisfy —
+> not because it works today. Tracked for a release after v2.0.0-beta; the
+> open question is where the HMAC key comes from, since a key derived from the
+> token would leave failed logins — the events most worth having — untraceable.
 
-1. Periodically (recommended : weekly) verify the chain with the supplied verifier :
+The audit log is intended to live at `/var/lib/freehsm/audit/slot<n>.audit.log`,
+HMAC-chained. When it is implemented, the SO MUST :
+
+1. Periodically (recommended : weekly) verify the chain with the supplied
+   verifier. Note the syntax: `verify` is a subcommand, and the 32-byte audit
+   key is a required argument — the binary is `freehsm-audit`, and no
+   `freehsm-audit-verify` exists.
    ```bash
-   freehsm-audit-verify /var/lib/freehsm/audit/slot0.audit.log
+   freehsm-audit verify /var/lib/freehsm/audit/slot0.audit.log <audit_key_hex_64>
    ```
 2. Investigate every `login_fail`, `login_locked`, `login_throttled`, and `integrity_fail` event.
 3. Archive monthly logs to immutable storage (WORM bucket, append-only volume) per the site's retention policy.
