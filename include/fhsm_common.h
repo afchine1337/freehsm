@@ -90,12 +90,12 @@ typedef uint32_t fhsm_rv_t;
 #define FHSM_RV_CANCEL                      0x00000001u
 #define FHSM_RV_HOST_MEMORY                 0x00000002u
 #define FHSM_RV_DEVICE_MEMORY               0x00000131u  /* CKR_DEVICE_MEMORY : token storage full */
-#define FHSM_RV_DEVICE_ERROR                0x00000030u
+#define FHSM_RV_DEVICE_ERROR                0x00000030u  /* CKR_DEVICE_ERROR : token hardware fault (#109) */
 /* CKR_PIN_LEN_RANGE. A PIN outside the advertised bounds is a value the user
  * can correct, not a caller bug; reporting it as CKR_ARGUMENTS_BAD told
  * applications the wrong thing and left operators with an error that named no
  * cause. PKCS#11 v3.2 has had this code all along. */
-#define FHSM_RV_PIN_LEN_RANGE               0x000000A2u  /* CKR_DEVICE_ERROR : token hardware fault (#109) */
+#define FHSM_RV_PIN_LEN_RANGE               0x000000A2u  /* CKR_PIN_LEN_RANGE : PIN outside FHSM_PIN_MIN/MAX_LEN */
 #define FHSM_RV_BUFFER_TOO_SMALL            0x00000150u  /* CKR_BUFFER_TOO_SMALL : output buffer too small */
 #define FHSM_RV_SLOT_ID_INVALID             0x00000003u
 #define FHSM_RV_GENERAL_ERROR               0x00000005u

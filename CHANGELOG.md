@@ -8,6 +8,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Fixed
+* **`FHSM_RV_PIN_LEN_RANGE` was documented as `CKR_DEVICE_ERROR`.** Inserting
+  the new constant pushed the trailing comment off `FHSM_RV_DEVICE_ERROR` and
+  onto it, so the public header declared `0x000000A2` to be a "token hardware
+  fault (#109)" while `FHSM_RV_DEVICE_ERROR` was left with no comment at all.
+  The value is right and the module behaves correctly; only the header lied.
+  Both comments are now on their own constant.
+
+* **Line endings are stated, in a `.gitattributes` the repository never had.**
+  Without one, each clone's git decided for itself. A clone made by
+  git-for-windows with the default `core.autocrlf=true` rewrote all 252 files
+  to CRLF: no content changed, but `scripts/release.sh` acquired
+  `#!/usr/bin/env bash\r`, which Linux answers with "bad interpreter", and the
+  `Makefile` went the same way. The whole tree then read as modified, so the
+  next commit from that clone would have recorded the conversion for everyone.
+
+  `* text=auto eol=lf`, with the fuzz corpus, detached signatures, armoured
+  keys, KAT vectors and binary assets excluded — a corpus entry holding no NUL
+  byte would otherwise be taken for text and line-normalised, silently
+  changing an input that once found a crash.
+
 * **`make all` did not build the four PKI tools, and the release pre-flight
   ran `make all`.** `fhsm-csr`, `fhsm-ca`, `fhsm-sign` and `fhsm-token` link
   only `src/fhsm_composite.o`, not the module. A change to that file can

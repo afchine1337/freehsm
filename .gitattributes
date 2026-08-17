@@ -1,0 +1,55 @@
+# ===========================================================================
+# .gitattributes
+#
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Simorgh Labs
+#
+# Line endings, stated once.
+#
+# The repository had no .gitattributes, so line endings were whatever each
+# clone's git decided. A clone made by git-for-windows with its default
+# core.autocrlf=true rewrote all 252 files to CRLF -- no content change, but
+# scripts/release.sh acquired `#!/usr/bin/env bash\r`, which Linux answers
+# with "bad interpreter: no such file or directory", and the Makefile went
+# the same way. The whole tree then showed as modified, so the next commit
+# from that clone would have recorded the conversion for everyone.
+#
+# `eol=lf` rather than `text=auto` alone: auto normalises the repository but
+# still lets the working tree be CRLF on Windows, which is exactly the state
+# that breaks the build. This project is built on Linux; LF everywhere, in
+# the objects and on disk.
+# ---------------------------------------------------------------------------
+
+* text=auto eol=lf
+
+# --- Files that must reach disk byte-for-byte -------------------------------
+#
+# text=auto guesses, and a guess is not good enough here.
+#
+# Fuzz corpus entries are opaque inputs: an entry that happens to hold no NUL
+# byte would be taken for text and line-normalised, silently changing the
+# input that found a crash. A corpus is only worth what its bytes are.
+fuzz/corpus/**    -text -diff
+
+# Detached signatures and armoured keys sign bytes. Normalising them breaks
+# the verification they exist for.
+*.asc             -text
+*.sig             -text
+*.gpg             binary
+
+# CAVP and KAT vectors are read by the self-tests against published digests.
+kat/**            -text
+tests/wycheproof/VECTORS_SHA  -text
+
+# Binary assets.
+*.png             binary
+*.jpg             binary
+*.pdf             binary
+*.so              binary
+*.o               binary
+
+# --- Diff hints -------------------------------------------------------------
+*.c   diff=cpp
+*.h   diff=cpp
+*.py  diff=python
+*.md  diff=markdown
