@@ -190,8 +190,16 @@ LIB_VER = $(LIB).$(shell awk -F'"' '/FHSM_VERSION_STRING/{print $$2; exit}' incl
 # ---------------------------------------------------------------------------
 # Default target
 # ---------------------------------------------------------------------------
+# The four PKI tools link only src/fhsm_composite.o, not the module, so a
+# change to that file can compile inside the module and fail to link outside
+# it. That is exactly what happened: `all` did not name these binaries, the
+# release pre-flight ran `all`, and a tree in which a quarter of the shipped
+# programs did not build was validated and tagged. They are named here so the
+# question cannot be asked again.
+TOOLS = tools/fhsm-csr tools/fhsm-ca tools/fhsm-sign tools/fhsm-token
+
 .PHONY: all
-all: generate $(LIB) tests/test_smoke tools/freehsm-audit
+all: generate $(LIB) tests/test_smoke tools/freehsm-audit $(TOOLS)
 
 # Built against the same OpenSSL as everything else. This rule used to be a
 # bare `cc ... -lcrypto`, the only one in the file ignoring OPENSSL_PREFIX. It
@@ -639,6 +647,7 @@ uninstall:
 clean:
 	rm -rf $(OBJDIR)
 	rm -f $(LIB) tests/test_smoke tests/*.o
+	rm -f tools/freehsm-audit $(TOOLS)
 	rm -f freehsm-c-src.tar.xz freehsm-c-src.tar.xz.sha256
 	rm -rf out/
 

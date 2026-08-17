@@ -375,7 +375,8 @@ static int cmd_issue(int argc, char **argv) {
     fhsm_rv_t r = fhsm_composite_issue(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
                                         cabuf, calen, csrbuf, csrlen,
                                         subject, san, crl_urls, n_crl_urls,
-                                        days, p11_sign, &sg, der, &n);
+                                        days, p11_sign, &sg, p11_rng, &s,
+                                        der, &n);
     if (r == FHSM_RV_SIGNATURE_INVALID) {
         fprintf(stderr,
           "fhsm-ca: the request's signature does not match the key it carries.\n"

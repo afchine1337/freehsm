@@ -314,6 +314,22 @@ fhsm_rv_t fhsm_composite_algid(fhsm_composite_alg_t alg,
  * through PKCS#11, through fhsm_composite_sign, or somewhere else entirely.
  * That indirection is what lets fhsm-csr drive a key it cannot read.
  */
+/* Where randomness comes from, supplied by the caller for the same reason the
+ * signature is: this code runs in two places with different answers.
+ *
+ * Inside the module, `fhsm_rng_bytes` routes through fhsm_drbg with its
+ * SP 800-90B health tests and its latching failure. In a command-line tool
+ * that reaches the module through PKCS#11, the right source is
+ * C_GenerateRandom -- which is that same DRBG, asked for over the standard
+ * API, rather than a second generator living in the tool's own process.
+ *
+ * Getting this wrong is not obvious from the outside. A serial drawn from the
+ * tool's OpenSSL RAND looks identical to one drawn from the module's DRBG,
+ * and only the second was inspected by the health tests or seen by the audit
+ * path. So the choice is made explicit and pushed to whoever knows.
+ */
+typedef fhsm_rv_t (*fhsm_composite_rng_cb)(void *ctx, uint8_t *out, size_t n);
+
 typedef fhsm_rv_t (*fhsm_composite_sign_cb)(void *ctx,
                                              const uint8_t *tbs, size_t tbs_len,
                                              uint8_t *sig, size_t *sig_len);
@@ -490,6 +506,7 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
                                 const char *const *crl_urls, size_t n_crl_urls,
                                 int days,
                                 fhsm_composite_sign_cb sign, void *sign_ctx,
+                                fhsm_composite_rng_cb rng, void *rng_ctx,
                                 uint8_t *out, size_t *out_len);
 
 /* ---------------------------------------------------------------------------

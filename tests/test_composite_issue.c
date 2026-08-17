@@ -18,6 +18,7 @@
 #include "fhsm_composite.h"
 
 #include <openssl/x509.h>
+#include <openssl/rand.h>
 #include <openssl/x509v3.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,6 +38,14 @@ static fhsm_rv_t sg(void *v, const uint8_t *t, size_t tl, uint8_t *s, size_t *sl
 }
 
 #define ALG FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+
+/* The test supplies its own randomness. Passing NULL is refused, which is the
+ * point: a caller that forgets where serials come from should not silently get
+ * whichever generator happened to be linked. */
+static fhsm_rv_t t_rng(void *c, uint8_t *out, size_t n) {
+    (void)c;
+    return (RAND_bytes(out, (int)n) == 1) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
 
 int main(void) {
     printf("=== test_composite_issue : issuing from a third-party request ===\n\n");
@@ -68,7 +77,7 @@ int main(void) {
     printf("\n[B] issuance\n");
     static uint8_t leaf[16384]; size_t ll = sizeof leaf;
     rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, NULL, 0, 365,
-                               sg, &ca_s, leaf, &ll);
+                               sg, &ca_s, t_rng, NULL, leaf, &ll);
     snprintf(d, sizeof d, "%zu bytes", ll);
     ck("a certificate is issued", rv == FHSM_RV_OK, d);
     if (rv != FHSM_RV_OK) { printf("\nFAIL\n"); return 1; }
@@ -131,7 +140,7 @@ int main(void) {
 
         static uint8_t bad[16384]; size_t bl = sizeof bad;
         fhsm_rv_t ir = fhsm_composite_issue(ALG, cacert, cl, forged, fl, NULL, NULL, NULL, 0, 365,
-                                             sg, &ca_s, bad, &bl);
+                                             sg, &ca_s, t_rng, NULL, bad, &bl);
         ck("issuance REFUSES it (CKR_SIGNATURE_INVALID)",
            ir == FHSM_RV_SIGNATURE_INVALID,
            ir == FHSM_RV_OK ? "it was issued -- proof of possession is not enforced"
@@ -144,7 +153,7 @@ int main(void) {
         tampered[40] ^= 0x01;
         bl = sizeof bad;
         fhsm_rv_t tr = fhsm_composite_issue(ALG, cacert, cl, tampered, rl, NULL, NULL, NULL, 0, 365,
-                                             sg, &ca_s, bad, &bl);
+                                             sg, &ca_s, t_rng, NULL, bad, &bl);
         ck("a request altered after signing is refused", tr != FHSM_RV_OK, "");
     }
 
@@ -153,7 +162,7 @@ int main(void) {
         static uint8_t o[16384]; size_t ol = sizeof o;
         rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl,
                                    "/C=FR/O=Universite Exemple/CN=imposed.example",
-                                   NULL, NULL, 0, 365, sg, &ca_s, o, &ol);
+                                   NULL, NULL, 0, 365, sg, &ca_s, t_rng, NULL, o, &ol);
         ck("--subject replaces the requested subject", rv == FHSM_RV_OK, "");
         if (rv == FHSM_RV_OK) {
             const uint8_t *q = o; X509 *y = d2i_X509(NULL, &q, (long)ol);
@@ -164,12 +173,12 @@ int main(void) {
         }
         ol = sizeof o;
         ck("a zero validity is refused",
-           fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, NULL, 0, 0, sg, &ca_s, o, &ol)
+           fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, NULL, 0, 0, sg, &ca_s, t_rng, NULL, o, &ol)
                == FHSM_RV_ARGUMENTS_BAD, "");
         ol = sizeof o;
         ck("garbage in place of a request is refused",
            fhsm_composite_issue(ALG, cacert, cl, (const uint8_t*)"not a csr", 9,
-                                 NULL, NULL, NULL, 0, 365, sg, &ca_s, o, &ol)
+                                 NULL, NULL, NULL, 0, 365, sg, &ca_s, t_rng, NULL, o, &ol)
                == FHSM_RV_ARGUMENTS_BAD, "");
     }
 
@@ -178,7 +187,7 @@ int main(void) {
         static uint8_t o[16384]; size_t ol = sizeof o;
         rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL,
                  "DNS:web01.exemple.fr,DNS:www.exemple.fr,IP:10.0.0.7,email:ca@exemple.fr",
-                 NULL, 0, 365, sg, &ca_s, o, &ol);
+                 NULL, 0, 365, sg, &ca_s, t_rng, NULL, o, &ol);
         ck("a certificate with four alternative names is issued",
            rv == FHSM_RV_OK, "");
         if (rv == FHSM_RV_OK) {
@@ -220,7 +229,7 @@ int main(void) {
         for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
             ol = sizeof o;
             fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL,
-                                                 bad[i].san, NULL, 0, 365, sg, &ca_s, o, &ol);
+                                                 bad[i].san, NULL, 0, 365, sg, &ca_s, t_rng, NULL, o, &ol);
             snprintf(d, sizeof d, "\"%s\" -- %s", bad[i].san, bad[i].why);
             ck("refused rather than silently dropped", br != FHSM_RV_OK, d);
         }
@@ -236,7 +245,7 @@ int main(void) {
         };
 
         rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
-                                   urls, 2, 365, sg, &ca_s, o, &ol);
+                                   urls, 2, 365, sg, &ca_s, t_rng, NULL, o, &ol);
         ck("a certificate carrying two distribution URIs is issued",
            rv == FHSM_RV_OK, "");
 
@@ -306,7 +315,7 @@ int main(void) {
             const char *one[] = { bad[i].url };
             ol = sizeof o;
             fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
-                                                 one, 1, 365, sg, &ca_s, o, &ol);
+                                                 one, 1, 365, sg, &ca_s, t_rng, NULL, o, &ol);
             snprintf(d, sizeof d, "%s", bad[i].why);
             ck("refused", br == FHSM_RV_ARGUMENTS_BAD, d);
         }
@@ -318,7 +327,7 @@ int main(void) {
             const char *holed[] = { "http://crl.exemple.fr/ca.crl", NULL };
             ol = sizeof o;
             fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
-                                                 holed, 2, 365, sg, &ca_s, o, &ol);
+                                                 holed, 2, 365, sg, &ca_s, t_rng, NULL, o, &ol);
             ck("refused", br == FHSM_RV_ARGUMENTS_BAD, "a NULL entry inside the array");
         }
 
@@ -327,7 +336,7 @@ int main(void) {
         {
             ol = sizeof o;
             fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
-                                                 NULL, 0, 365, sg, &ca_s, o, &ol);
+                                                 NULL, 0, 365, sg, &ca_s, t_rng, NULL, o, &ol);
             ck("omitting the extension entirely is still valid",
                br == FHSM_RV_OK, "no --crl-url given");
             if (br == FHSM_RV_OK) {

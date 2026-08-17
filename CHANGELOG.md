@@ -8,6 +8,33 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Fixed
+* **`make all` did not build the four PKI tools, and the release pre-flight
+  ran `make all`.** `fhsm-csr`, `fhsm-ca`, `fhsm-sign` and `fhsm-token` link
+  only `src/fhsm_composite.o`, not the module. A change to that file can
+  therefore compile inside the module and fail to link outside it, and nothing
+  in the default build would notice.
+
+  That is not hypothetical: the serial-number change made for v2.0.0-beta
+  called `fhsm_rng_bytes` directly, which dragged `fhsm_drbg`, the integrity
+  check and the KATs into every tool linking that object. All four failed to
+  link. `make all` never named them, so the pre-flight validated — and the tag
+  went out on — a tree in which a quarter of the shipped programs did not
+  build.
+
+  `all` now names them. `clean` now removes them too, so a stale binary can no
+  longer survive a rebuild and be tested in place of the one you believe you
+  just built. Verified by mutation: an undefined reference added to
+  `tools/fhsm_sign.c` makes `make all` fail with exit 2, and removing it makes
+  it pass again.
+
+* **Serial numbers now come from the caller's generator, not the module's.**
+  `fhsm_composite_issue()` takes an `fhsm_composite_rng_cb` alongside the
+  existing signing callback. The tools pass `p11_rng`, which draws from
+  `C_GenerateRandom` on the session already open for signing — so the serial
+  comes from the same token as the signature, which is what an issuing
+  authority should be able to say. This also removes the link dependency
+  described above rather than working around it.
+
 * **The manuals promised an audit log that is never written.** `AGD_OPE` §4.3
   instructed the Security Officer to verify the HMAC chain weekly, and both
   `AGD_PRE` acceptance lists required the log to contain entries. No log

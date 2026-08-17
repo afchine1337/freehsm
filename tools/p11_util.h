@@ -78,6 +78,7 @@ static struct {
     CK_RV (*InitToken)(CK_SLOT_ID,CK_BYTE*,CK_ULONG,CK_BYTE*);
     CK_RV (*InitPIN)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
     CK_RV (*GetTokenInfo)(CK_SLOT_ID,void*);
+    CK_RV (*GenerateRandom)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
 } p11;
 
 /* Set by each tool before anything can fail. Extracting this header from
@@ -109,6 +110,7 @@ P11_MAYBE_UNUSED static void load_module(const char *path) {
     S(VerifyUpdate,"C_VerifyUpdate"); S(VerifyFinal,"C_VerifyFinal");
     S(InitToken,"C_InitToken"); S(InitPIN,"C_InitPIN");
     S(GetTokenInfo,"C_GetTokenInfo");
+    S(GenerateRandom,"C_GenerateRandom");
     #undef S
 }
 
@@ -148,5 +150,18 @@ P11_MAYBE_UNUSED static fhsm_rv_t p11_sign(void *vctx, const uint8_t *tbs, size_
     return FHSM_RV_OK;
 }
 
+
+/* Randomness for the certificate builders, taken from the module rather than
+ * from this process. C_GenerateRandom is the token's own DRBG -- the one with
+ * the SP 800-90B health tests and the latching failure -- reached over the
+ * standard API. A tool that generated serials itself would be using a second
+ * generator that the module never inspected and the audit path never saw. */
+P11_MAYBE_UNUSED
+static fhsm_rv_t p11_rng(void *vctx, uint8_t *out, size_t n) {
+    CK_SESSION_HANDLE *s = vctx;
+    if (!s || !out) return FHSM_RV_ARGUMENTS_BAD;
+    CK_RV rv = p11.GenerateRandom(*s, out, (CK_ULONG)n);
+    return (rv == CKR_OK) ? FHSM_RV_OK : (fhsm_rv_t)rv;
+}
 
 #endif /* FHSM_TOOLS_P11_UTIL_H */
