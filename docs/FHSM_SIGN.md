@@ -19,8 +19,10 @@ bytes mean.
 ## Synopsis
 
 ```
-fhsm-sign sign   --label NAME [--in FILE] [--out FILE] [--module PATH] [--slot N]
-fhsm-sign verify --label NAME --sig FILE [--in FILE] [--module PATH] [--slot N]
+fhsm-sign sign       --label NAME [--in FILE] [--out FILE] [--module PATH] [--slot N]
+fhsm-sign verify     --label NAME --sig FILE [--in FILE] [--module PATH] [--slot N]
+fhsm-sign cms        --label NAME --cert FILE [--in FILE] [--out FILE] [--module PATH]
+fhsm-sign cms-verify --cms FILE [--in FILE]
 ```
 
 `--in` defaults to standard input, `--out` to standard output. The PIN is read
@@ -102,6 +104,69 @@ is never held.
 
 ---
 
+## CMS / PKCS#7 (`cms`, `cms-verify`)
+
+The raw form above records nothing about itself. CMS does: it carries the
+signer's certificate, the algorithm, and the digest of what was signed.
+
+```bash
+fhsm-sign cms --label release-signer --cert release-signer.crt \
+              --in freehsm-2.0.0.tar.xz --out freehsm-2.0.0.tar.xz.p7s
+
+fhsm-sign cms-verify --cms freehsm-2.0.0.tar.xz.p7s \
+                     --in freehsm-2.0.0.tar.xz
+```
+
+**`cms-verify` needs no token, no PIN and no module.** The signer's
+certificate travels inside the structure, which is the whole reason CMS
+carries it. That makes this the only verification in the project a third party
+can run with nothing but the file, the data, and the tool.
+
+The output is a **detached** `SignedData` with **signed attributes** —
+`contentType` and `messageDigest`, the two RFC 5652 §5.3 requires when
+`signedAttrs` is present. There is no attached form.
+
+### Why signed attributes make large files cheap
+
+With `signedAttrs`, the signature covers the attributes — about a hundred
+bytes — rather than the content. The content is only hashed. So a file of any
+size costs one SHA-512 pass and one composite signature, and nothing is held
+in memory. Measured on 20 MiB: 0.31 s, 11.5 MiB peak resident.
+
+### What a verifier checks, and in what order
+
+`cms-verify` refuses early and for a stated reason:
+
+1. the `signatureAlgorithm` is the composite OID with parameters absent;
+2. the `messageDigest` attribute equals SHA-512 of the data you supplied;
+3. the signature verifies over the signed attributes **as they appear when
+   the structure is re-encoded**.
+
+The third point is not pedantry. Verifying over the bytes we were handed would
+prove only that the tool agrees with itself. Re-encoding first means the check
+is against what any other implementation would reconstruct.
+
+### The one trap worth knowing
+
+RFC 5652 §5.4: the signature is computed over the signed attributes in their
+`SET OF` form (`0x31`), while the structure transmits the same bytes under
+`[0] IMPLICIT` (`0xA0`). Sign one, send the other, and the result verifies
+nowhere — with nothing in either encoding to say why.
+
+This is handled in one place, and attributes handed over already in `[0]` form
+are **refused** rather than accepted: tolerating both would make the
+substitution a guess.
+
+### Third-party tooling
+
+`openssl cms -cmsout -inform DER -in file.p7s -print` reads the whole
+structure, showing the composite OID as `undefined (1.3.6.1.5.5.7.6.48)` —
+it has no name for an algorithm it does not implement. It cannot verify the
+signature, for the same reason. That is the limitation stated below, not a
+defect in the output.
+
+---
+
 ## Options
 
 | Option | Meaning |
@@ -110,6 +175,8 @@ is never held.
 | `--in FILE` | data to sign or check; `-` or absent means standard input |
 | `--out FILE` | where the signature goes; absent means standard output |
 | `--sig FILE` | the signature to check (`verify` only) |
+| `--cert FILE` | the signer's certificate, DER or PEM (`cms` only) |
+| `--cms FILE` | the CMS structure to check (`cms-verify` only) |
 | `--module PATH` | PKCS#11 module, default `./libfreehsm-fips.so` |
 | `--slot N` | slot index, default 0 |
 
@@ -142,6 +209,13 @@ single non-zero code is how a broken pipeline gets read as a bad signature.
 **Composite only.** The mechanism is `CKM_COMPOSITE_MLDSA65_ED25519`. Signing
 with a plain ML-DSA, ECDSA or RSA key held in the token is not wired up.
 
+**The CMS structure is assembled by hand.** OpenSSL builds the `SignedData`
+envelope but refuses the `SignerInfo`: `CMS_add1_signer` calls
+`X509_get_pubkey`, there is no provider for the composite OID, and it fails
+with *private key does not match certificate*. The assemblers are checked
+against OpenSSL's own output byte for byte on Ed25519 — see
+`tests/test_composite_cms`.
+
 **Not available in the FIPS-strict profile.** The composite mechanism ships in
 the interop profile only; in fips-strict every entry point refuses it. See
 `docs/COMPOSITE_SIGS_GAP.md` for why.
@@ -151,7 +225,13 @@ Composite ML-DSA signature — OpenSSL 3.5 has no implementation. `fhsm-sign
 verify` is currently the only way to check what `fhsm-sign sign` produced,
 which is precisely why verification ships with the tool rather than after it.
 
-**Detached only.** The signature never contains the data.
+**Detached only.** Neither form ever contains the data.
+
+**CMS carries one signer and one certificate.** Countersignatures, certificate
+chains and timestamps are not produced. `signingTime` is not added either —
+OpenSSL adds it by default, this does not, because a signature that silently
+records when it was made is a decision the operator should take rather than
+inherit.
 
 ---
 

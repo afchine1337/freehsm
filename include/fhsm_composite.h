@@ -192,6 +192,51 @@ fhsm_rv_t fhsm_composite_verify_prehashed(fhsm_composite_alg_t alg,
 const char *fhsm_composite_ph_name(fhsm_composite_alg_t alg);
 size_t      fhsm_composite_ph_len(fhsm_composite_alg_t alg);
 
+/* ---------------------------------------------------------------------------
+ * CMS SignedData (RFC 5652), detached, with signed attributes.
+ *
+ * Same obstacle as the revocation lists, one level deeper. OpenSSL will build
+ * the SignedData envelope -- CMS_sign(CMS_PARTIAL) succeeds -- but it cannot
+ * add a SignerInfo for a composite certificate: CMS_add1_signer calls
+ * X509_get_pubkey, there is no provider for the OID, and it fails with
+ * "private key does not match certificate". Measured, not assumed.
+ *
+ * So the SignerInfo is assembled here, from parts OpenSSL has already
+ * encoded: the issuer Name, the serial INTEGER, the AlgorithmIdentifiers, the
+ * attributes. Nothing below decides how a value is encoded, only where it
+ * goes -- the arrangement that made the TBSCertList checkable, reused.
+ *
+ *   SignerInfo ::= SEQUENCE {
+ *       version            INTEGER (1),        -- issuerAndSerialNumber form
+ *       sid                IssuerAndSerialNumber,
+ *       digestAlgorithm    AlgorithmIdentifier,
+ *       signedAttrs   [0]  IMPLICIT SET OF Attribute,
+ *       signatureAlgorithm AlgorithmIdentifier,
+ *       signature          OCTET STRING }
+ *
+ * `sattrs` is the attributes as a DER SET OF -- tag 0x31. That is deliberate
+ * and it is the part worth reading twice: RFC 5652 §5.4 says the signature is
+ * computed over the SET OF encoding, while the structure transmits the same
+ * bytes under [0] IMPLICIT (0xA0). Caller signs what it passes; this function
+ * retags it. One place does the substitution, because two would eventually
+ * disagree and the failure mode is a signature that verifies nowhere.
+ * ------------------------------------------------------------------------- */
+fhsm_rv_t fhsm_composite_cms_signerinfo(const uint8_t *issuer, size_t issuer_len,
+                                         const uint8_t *serial, size_t serial_len,
+                                         const uint8_t *digalg, size_t digalg_len,
+                                         const uint8_t *sattrs, size_t sattrs_len,
+                                         const uint8_t *sigalg, size_t sigalg_len,
+                                         const uint8_t *sig,    size_t sig_len,
+                                         uint8_t *out, size_t *out_len);
+
+/* The SignedData envelope and its ContentInfo wrapper. `certs` is a complete
+ * SET OF Certificate or NULL; `content_type` the eContentType OID DER. The
+ * content itself is never included -- detached only. */
+fhsm_rv_t fhsm_composite_cms_wrap(const uint8_t *digalg, size_t digalg_len,
+                                   const uint8_t *certs,  size_t certs_len,
+                                   const uint8_t *signerinfo, size_t si_len,
+                                   uint8_t *out, size_t *out_len);
+
 /* Length of the ML-DSA component within a composite signature, so a caller
  * that needs to split one knows where the boundary is. */
 fhsm_rv_t fhsm_composite_split(fhsm_composite_alg_t alg,
@@ -399,6 +444,44 @@ fhsm_rv_t fhsm_composite_pub_from_raw(fhsm_composite_alg_t alg,
  * lost its only reachable URI is a certificate whose revocation nobody can
  * check -- and unlike a missing name, nothing about it looks wrong.
  */
+/* Build and sign a detached CMS SignedData over `data`.
+ *
+ * The signed attributes are content-type and message-digest, the two RFC 5652
+ * §5.3 requires when signedAttrs is present. Because the signature then covers
+ * about a hundred bytes of attributes rather than the content, a file of any
+ * size costs one SHA-512 pass and one composite signature -- the digest is the
+ * only thing that has to see the data.
+ *
+ * `digest` is SHA-512 of the content, computed by the caller so it can stream.
+ */
+fhsm_rv_t fhsm_composite_cms(fhsm_composite_alg_t alg,
+                              const uint8_t *cert, size_t cert_len,
+                              const uint8_t *digest, size_t digest_len,
+                              fhsm_composite_sign_cb sign, void *sign_ctx,
+                              uint8_t *out, size_t *out_len);
+
+/* Verify a detached composite CMS against a digest the caller computed.
+ *
+ * Needs no token and no key: the signer's certificate is embedded in the
+ * structure, which is the whole reason CMS carries it. That makes this the
+ * only verification path in the project a third party can run with nothing
+ * but the file and the tool.
+ *
+ * Checks, in order, and all of them: the signatureAlgorithm is the composite
+ * OID with absent parameters; the messageDigest attribute equals `digest`;
+ * and the signature verifies over the signed attributes as they appear when
+ * the structure is re-encoded -- not as they were handed to the signer, which
+ * would prove only that we are self-consistent.
+ *
+ * Returns FHSM_RV_SIGNATURE_INVALID for a signature that does not match or a
+ * digest that does not agree, and FHSM_RV_ARGUMENTS_BAD for anything that is
+ * not a well-formed composite CMS. The two are kept apart because one means
+ * the data changed and the other means the file is not what was expected.
+ */
+fhsm_rv_t fhsm_composite_cms_verify(fhsm_composite_alg_t alg,
+                                     const uint8_t *cms, size_t cms_len,
+                                     const uint8_t *digest, size_t digest_len);
+
 fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
                                 const uint8_t *ca_cert, size_t ca_cert_len,
                                 const uint8_t *csr, size_t csr_len,

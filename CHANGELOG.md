@@ -8,6 +8,54 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **CMS/PKCS#7 SignedData — `fhsm-sign cms` and `cms-verify` (#123, L2).**
+  Detached RFC 5652 `SignedData` with signed attributes, carrying the signer's
+  certificate. Unlike the raw form it records which key and which algorithm
+  made it, so **`cms-verify` needs no token, no PIN and no module** — the only
+  verification in this project a third party can run with nothing but the
+  file, the data and the tool.
+
+  **OpenSSL builds the envelope and refuses the SignerInfo.** Measured before
+  anything was written: `CMS_sign(CMS_PARTIAL)` succeeds, `CMS_add1_signer`
+  fails with *private key does not match certificate*, because
+  `X509_get_pubkey` cannot load a key whose OID has no provider. Same obstacle
+  as the revocation lists, one level deeper — and the same answer: assemble by
+  hand, let OpenSSL encode every leaf, then require the result to equal
+  OpenSSL's own byte for byte on an algorithm it does implement.
+
+  Both assemblers match exactly, at the `SignerInfo` and at the whole
+  `ContentInfo`. Five deliberate mutations were each confirmed to break the
+  comparison: the retag removed, `BIT STRING` for `OCTET STRING`, issuer and
+  serial swapped, `CMSVersion` 3 for 1, a length short by one.
+
+  **The trap this exists to survive:** RFC 5652 §5.4 signs the attributes in
+  `SET OF` form while the structure transmits them under `[0] IMPLICIT`. One
+  place performs that substitution, and attributes handed over already in
+  `[0]` form are **refused** — tolerating both would make it a guess, and the
+  failure mode is a signature that verifies nowhere with nothing to say why.
+
+  **Verification re-encodes before checking.** Verifying over the bytes we were
+  handed would prove only self-consistency; the check is against what another
+  implementation would reconstruct. A wrong content digest is
+  `SIGNATURE_INVALID`, a malformed file is `ARGUMENTS_BAD`, and the tool keeps
+  them at exit 4 and exit 2 — a broken pipeline should not read as a forgery.
+
+  Signed attributes also make size free: the signature covers a hundred bytes
+  of attributes, not the content. Measured on 20 MiB — 0.31 s, 11.5 MiB peak
+  resident.
+
+  Two notes for whoever reads the code. `i2d_ASN1_SET_OF_X509_ATTRIBUTE` is not
+  public in OpenSSL 3, so the `SET OF` ordering X.690 §11.6 requires is done
+  here; getting it wrong yields something that parses and is not DER, and since
+  the signature covers those exact bytes a verifier that re-sorts them rejects
+  a signature that was never wrong. And `i2d_CMS_SignerInfo` does not exist —
+  only `CMS_ContentInfo` has ASN.1 functions — hence the small DER reader used
+  to reach the signed attributes.
+
+  `signingTime` is deliberately not added, though OpenSSL adds it by default:
+  recording when a signature was made is a decision for the operator, not an
+  inheritance.
+
 * **`fhsm-token` — provisioning, which the manual promised and nothing
   provided.** `init` and `info`. `FHSM_CSR.md` told operators hitting
   `CKR_TOKEN_NOT_PRESENT` to *"initialise it first (`C_InitToken`, or the

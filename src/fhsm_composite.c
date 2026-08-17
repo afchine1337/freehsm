@@ -758,6 +758,7 @@ out:
  * ========================================================================= */
 
 #include <openssl/x509v3.h>
+#include <openssl/cms.h>
 
 /* Put the composite SubjectPublicKeyInfo into an X509_PUBKEY slot. Shared by
  * the CSR and the certificate: one place that knows the trick, so a change to
@@ -1682,5 +1683,473 @@ out:
     if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
     ASN1_TIME_free(t1); ASN1_TIME_free(t2);
     X509_free(ca);
+    return rv;
+}
+
+/* ===========================================================================
+ * CMS SignedData (RFC 5652), detached, signed attributes.
+ *
+ * See the header for why this is assembled by hand. In short: OpenSSL builds
+ * the envelope but refuses the SignerInfo, because CMS_add1_signer needs a
+ * public key it cannot load from a composite certificate.
+ * ========================================================================= */
+
+/* id-signedData 1.2.840.113549.1.7.2, as a complete OID TLV. */
+static const uint8_t OID_SIGNED_DATA[] = {
+    0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02
+};
+/* id-data 1.2.840.113549.1.7.1 -- the eContentType of a plain signature. */
+static const uint8_t OID_DATA[] = {
+    0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01
+};
+
+/* CMSVersion 1: the version that goes with the issuerAndSerialNumber form of
+ * SignerIdentifier (RFC 5652 §5.3). Using subjectKeyIdentifier would make it
+ * 3, so the two cannot be chosen independently. */
+static const uint8_t CMS_VERSION_1[] = { 0x02, 0x01, 0x01 };
+
+fhsm_rv_t fhsm_composite_cms_signerinfo(const uint8_t *issuer, size_t issuer_len,
+                                         const uint8_t *serial, size_t serial_len,
+                                         const uint8_t *digalg, size_t digalg_len,
+                                         const uint8_t *sattrs, size_t sattrs_len,
+                                         const uint8_t *sigalg, size_t sigalg_len,
+                                         const uint8_t *sig,    size_t sig_len,
+                                         uint8_t *out, size_t *out_len)
+{
+    if (!issuer || !issuer_len || !serial || !serial_len || !digalg || !digalg_len
+        || !sattrs || !sattrs_len || !sigalg || !sigalg_len || !sig || !sig_len
+        || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+
+    /* Shape checks, same reasoning as the TBSCertList assembler: two buffers
+     * passed in the wrong order produce valid DER describing something else,
+     * which nothing downstream would notice. */
+    if (issuer[0] != 0x30) return FHSM_RV_ARGUMENTS_BAD;   /* Name           */
+    if (serial[0] != 0x02) return FHSM_RV_ARGUMENTS_BAD;   /* INTEGER        */
+    if (digalg[0] != 0x30) return FHSM_RV_ARGUMENTS_BAD;   /* AlgorithmId    */
+    if (sigalg[0] != 0x30) return FHSM_RV_ARGUMENTS_BAD;
+    /* And the one that matters most: the attributes must arrive in the form
+     * that was signed, not the form that is transmitted. Accepting 0xA0 here
+     * would silently sign one encoding and send another. */
+    if (sattrs[0] != 0x31) return FHSM_RV_ARGUMENTS_BAD;   /* SET OF         */
+
+    /* IssuerAndSerialNumber ::= SEQUENCE { Name, CertificateSerialNumber } */
+    const size_t ias_content = issuer_len + serial_len;
+    uint8_t ias_l[5]; size_t ias_ln = der_len(ias_content, ias_l, sizeof ias_l);
+    if (!ias_ln) return FHSM_RV_FUNCTION_FAILED;
+    const size_t ias_total = 1 + ias_ln + ias_content;
+
+    /* signature is an OCTET STRING here, not a BIT STRING -- CMS differs from
+     * X.509 on this and the two are easy to confuse. */
+    uint8_t sig_l[5]; size_t sig_ln = der_len(sig_len, sig_l, sizeof sig_l);
+    if (!sig_ln) return FHSM_RV_FUNCTION_FAILED;
+    const size_t sig_total = 1 + sig_ln + sig_len;
+
+    /* The retag: same content, same length, [0] IMPLICIT instead of SET OF.
+     * Only the identifier octet changes, which is what "IMPLICIT" means. */
+    const size_t attr_total = sattrs_len;
+
+    const size_t content = sizeof CMS_VERSION_1 + ias_total + digalg_len
+                         + attr_total + sigalg_len + sig_total;
+    uint8_t sq[5]; size_t sq_n = der_len(content, sq, sizeof sq);
+    if (!sq_n) return FHSM_RV_FUNCTION_FAILED;
+    const size_t total = 1 + sq_n + content;
+    if (*out_len < total) { *out_len = total; return FHSM_RV_BUFFER_TOO_SMALL; }
+
+    uint8_t *c = out;
+    *c++ = 0x30; memcpy(c, sq, sq_n); c += sq_n;
+    memcpy(c, CMS_VERSION_1, sizeof CMS_VERSION_1); c += sizeof CMS_VERSION_1;
+    *c++ = 0x30; memcpy(c, ias_l, ias_ln); c += ias_ln;
+    memcpy(c, issuer, issuer_len); c += issuer_len;
+    memcpy(c, serial, serial_len); c += serial_len;
+    memcpy(c, digalg, digalg_len); c += digalg_len;
+    memcpy(c, sattrs, sattrs_len); c += sattrs_len;
+    c[-(ptrdiff_t)sattrs_len] = 0xA0;            /* SET OF -> [0] IMPLICIT */
+    memcpy(c, sigalg, sigalg_len); c += sigalg_len;
+    *c++ = 0x04; memcpy(c, sig_l, sig_ln); c += sig_ln;
+    memcpy(c, sig, sig_len); c += sig_len;
+
+    *out_len = (size_t)(c - out);
+    return (*out_len == total) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+fhsm_rv_t fhsm_composite_cms_wrap(const uint8_t *digalg, size_t digalg_len,
+                                   const uint8_t *certs,  size_t certs_len,
+                                   const uint8_t *signerinfo, size_t si_len,
+                                   uint8_t *out, size_t *out_len)
+{
+    if (!digalg || !digalg_len || !signerinfo || !si_len || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (digalg[0] != 0x30 || signerinfo[0] != 0x30) return FHSM_RV_ARGUMENTS_BAD;
+    if ((certs == NULL) != (certs_len == 0)) return FHSM_RV_ARGUMENTS_BAD;
+    if (certs && certs[0] != 0x31) return FHSM_RV_ARGUMENTS_BAD;  /* SET OF */
+
+    /* digestAlgorithms ::= SET OF, one entry. */
+    uint8_t da_l[5]; size_t da_ln = der_len(digalg_len, da_l, sizeof da_l);
+    if (!da_ln) return FHSM_RV_FUNCTION_FAILED;
+    const size_t da_total = 1 + da_ln + digalg_len;
+
+    /* EncapsulatedContentInfo with eContent absent -- this is what makes the
+     * signature detached, and it is one omitted field rather than a flag. */
+    uint8_t ec_l[5]; size_t ec_ln = der_len(sizeof OID_DATA, ec_l, sizeof ec_l);
+    if (!ec_ln) return FHSM_RV_FUNCTION_FAILED;
+    const size_t ec_total = 1 + ec_ln + sizeof OID_DATA;
+
+    /* certificates [0] IMPLICIT CertificateSet: the SET OF retagged, again
+     * only the identifier octet. */
+    const size_t certs_total = certs ? certs_len : 0;
+
+    uint8_t si_l[5]; size_t si_ln = der_len(si_len, si_l, sizeof si_l);
+    if (!si_ln) return FHSM_RV_FUNCTION_FAILED;
+    const size_t sis_total = 1 + si_ln + si_len;      /* SET OF SignerInfo */
+
+    const size_t sd_content = sizeof CMS_VERSION_1 + da_total + ec_total
+                            + certs_total + sis_total;
+    uint8_t sd_l[5]; size_t sd_ln = der_len(sd_content, sd_l, sizeof sd_l);
+    if (!sd_ln) return FHSM_RV_FUNCTION_FAILED;
+    const size_t sd_total = 1 + sd_ln + sd_content;
+
+    /* content [0] EXPLICIT SignedData -- EXPLICIT here, unlike the two
+     * IMPLICIT retags above, so the SEQUENCE stays inside its context tag. */
+    uint8_t c0_l[5]; size_t c0_ln = der_len(sd_total, c0_l, sizeof c0_l);
+    if (!c0_ln) return FHSM_RV_FUNCTION_FAILED;
+    const size_t c0_total = 1 + c0_ln + sd_total;
+
+    const size_t ci_content = sizeof OID_SIGNED_DATA + c0_total;
+    uint8_t ci_l[5]; size_t ci_ln = der_len(ci_content, ci_l, sizeof ci_l);
+    if (!ci_ln) return FHSM_RV_FUNCTION_FAILED;
+    const size_t total = 1 + ci_ln + ci_content;
+    if (*out_len < total) { *out_len = total; return FHSM_RV_BUFFER_TOO_SMALL; }
+
+    uint8_t *c = out;
+    *c++ = 0x30; memcpy(c, ci_l, ci_ln); c += ci_ln;
+    memcpy(c, OID_SIGNED_DATA, sizeof OID_SIGNED_DATA); c += sizeof OID_SIGNED_DATA;
+    *c++ = 0xA0; memcpy(c, c0_l, c0_ln); c += c0_ln;
+    *c++ = 0x30; memcpy(c, sd_l, sd_ln); c += sd_ln;
+    memcpy(c, CMS_VERSION_1, sizeof CMS_VERSION_1); c += sizeof CMS_VERSION_1;
+    *c++ = 0x31; memcpy(c, da_l, da_ln); c += da_ln;
+    memcpy(c, digalg, digalg_len); c += digalg_len;
+    *c++ = 0x30; memcpy(c, ec_l, ec_ln); c += ec_ln;
+    memcpy(c, OID_DATA, sizeof OID_DATA); c += sizeof OID_DATA;
+    if (certs) {
+        memcpy(c, certs, certs_len); c += certs_len;
+        c[-(ptrdiff_t)certs_len] = 0xA0;         /* SET OF -> [0] IMPLICIT */
+    }
+    *c++ = 0x31; memcpy(c, si_l, si_ln); c += si_ln;
+    memcpy(c, signerinfo, si_len); c += si_len;
+
+    *out_len = (size_t)(c - out);
+    return (*out_len == total) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+/* Build the two signed attributes RFC 5652 §5.3 requires when signedAttrs is
+ * present -- contentType and messageDigest -- as a DER SET OF, the form that
+ * gets signed.
+ *
+ * OpenSSL encodes each attribute; the SET OF ordering is done here because
+ * i2d_ASN1_SET_OF_X509_ATTRIBUTE is not public in OpenSSL 3. X.690 §11.6
+ * requires the members of a SET OF to appear in ascending order of their
+ * encodings, compared as octet strings. Getting that wrong produces a
+ * structure that encodes and parses and simply is not DER -- and since the
+ * signature covers these exact bytes, a verifier that re-sorts them computes
+ * a different digest and rejects a signature that was never wrong.
+ *
+ * With two members the sort is one comparison, written out rather than hidden
+ * in a qsort so the rule is visible next to the code that depends on it.
+ */
+static int der_setof_before(const uint8_t *a, size_t na,
+                             const uint8_t *b, size_t nb) {
+    size_t n = na < nb ? na : nb;
+    int c = memcmp(a, b, n);
+    if (c) return c < 0;
+    return na < nb;          /* a prefix sorts before what extends it */
+}
+
+static fhsm_rv_t cms_signed_attrs(const uint8_t *digest, size_t digest_len,
+                                   uint8_t **out, int *out_len)
+{
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    X509_ATTRIBUTE *a_ct = X509_ATTRIBUTE_new();
+    X509_ATTRIBUTE *a_md = X509_ATTRIBUTE_new();
+    ASN1_OCTET_STRING *md = ASN1_OCTET_STRING_new();
+    uint8_t *e_ct = NULL, *e_md = NULL, *buf = NULL;
+    int n_ct = 0, n_md = 0;
+
+    if (!a_ct || !a_md || !md) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    if (ASN1_OCTET_STRING_set(md, digest, (int)digest_len) != 1) goto out;
+
+    if (X509_ATTRIBUTE_set1_object(a_ct, OBJ_nid2obj(NID_pkcs9_contentType)) != 1)
+        goto out;
+    if (X509_ATTRIBUTE_set1_data(a_ct, V_ASN1_OBJECT,
+                                  OBJ_nid2obj(NID_pkcs7_data), -1) != 1) goto out;
+    if (X509_ATTRIBUTE_set1_object(a_md, OBJ_nid2obj(NID_pkcs9_messageDigest)) != 1)
+        goto out;
+    if (X509_ATTRIBUTE_set1_data(a_md, V_ASN1_OCTET_STRING,
+                                  ASN1_STRING_get0_data((ASN1_STRING *)md),
+                                  ASN1_STRING_length((ASN1_STRING *)md)) != 1)
+        goto out;
+
+    n_ct = i2d_X509_ATTRIBUTE(a_ct, &e_ct);
+    n_md = i2d_X509_ATTRIBUTE(a_md, &e_md);
+    if (n_ct <= 0 || n_md <= 0) goto out;
+
+    const uint8_t *first = e_ct, *second = e_md;
+    size_t nf = (size_t)n_ct, ns = (size_t)n_md;
+    if (!der_setof_before(e_ct, (size_t)n_ct, e_md, (size_t)n_md)) {
+        first = e_md; nf = (size_t)n_md;
+        second = e_ct; ns = (size_t)n_ct;
+    }
+
+    const size_t content = nf + ns;
+    uint8_t l[5]; size_t ln = der_len(content, l, sizeof l);
+    if (!ln) goto out;
+    buf = OPENSSL_malloc(1 + ln + content);
+    if (!buf) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    buf[0] = 0x31; memcpy(buf + 1, l, ln);
+    memcpy(buf + 1 + ln, first, nf);
+    memcpy(buf + 1 + ln + nf, second, ns);
+
+    *out = buf; buf = NULL;
+    *out_len = (int)(1 + ln + content);
+    rv = FHSM_RV_OK;
+out:
+    OPENSSL_free(e_ct); OPENSSL_free(e_md); OPENSSL_free(buf);
+    X509_ATTRIBUTE_free(a_ct); X509_ATTRIBUTE_free(a_md);
+    ASN1_OCTET_STRING_free(md);
+    return rv;
+}
+
+fhsm_rv_t fhsm_composite_cms(fhsm_composite_alg_t alg,
+                              const uint8_t *cert, size_t cert_len,
+                              const uint8_t *digest, size_t digest_len,
+                              fhsm_composite_sign_cb sign, void *sign_ctx,
+                              uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+        || !cert || !digest || !sign || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    /* The digest must be the algorithm's pre-hash length. A shorter one is a
+     * caller who hashed with something else, and the messageDigest attribute
+     * would then attest to a digest no verifier recomputes. */
+    if (digest_len != fhsm_composite_ph_len(alg)) return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    X509 *x = NULL;
+    uint8_t *attrs = NULL, *d_iss = NULL, *d_ser = NULL, *d_cert = NULL;
+    uint8_t *sig = NULL, *si = NULL;
+    int n_attrs = 0, n_iss = 0, n_ser = 0, n_cert = 0;
+
+    { const uint8_t *p = cert; x = d2i_X509(NULL, &p, (long)cert_len); }
+    if (!x) return FHSM_RV_ARGUMENTS_BAD;
+
+    rv = cms_signed_attrs(digest, digest_len, &attrs, &n_attrs);
+    if (rv != FHSM_RV_OK) goto out;
+    rv = FHSM_RV_FUNCTION_FAILED;
+
+    /* The signature covers the attributes, not the content -- which is why a
+     * file of any size costs one digest pass. RFC 5652 §5.4: the SET OF
+     * encoding is what is signed, and that is exactly what
+     * i2d_ASN1_SET_OF_X509_ATTRIBUTE just produced. */
+    sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
+    if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    size_t slen = FHSM_COMPOSITE_SIG_MAX;
+    rv = sign(sign_ctx, attrs, (size_t)n_attrs, sig, &slen);
+    if (rv != FHSM_RV_OK) goto out;
+    rv = FHSM_RV_FUNCTION_FAILED;
+
+    n_iss  = i2d_X509_NAME(X509_get_issuer_name(x), &d_iss);
+    n_ser  = i2d_ASN1_INTEGER(X509_get_serialNumber(x), &d_ser);
+    n_cert = i2d_X509(x, &d_cert);
+    if (n_iss <= 0 || n_ser <= 0 || n_cert <= 0) goto out;
+
+    /* SHA-512 as the digestAlgorithm, which is the composite pre-hash: a
+     * verifier recomputing the messageDigest has to use the same function,
+     * and this field is where it learns which. */
+    uint8_t digalg[16];
+    {
+        X509_ALGOR *a = X509_ALGOR_new();
+        if (!a) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        int okalg = X509_ALGOR_set0(a, OBJ_nid2obj(NID_sha512), V_ASN1_UNDEF, NULL);
+        uint8_t *d = NULL; int n = okalg ? i2d_X509_ALGOR(a, &d) : -1;
+        if (n > 0 && (size_t)n <= sizeof digalg) memcpy(digalg, d, (size_t)n);
+        OPENSSL_free(d); X509_ALGOR_free(a);
+        if (n <= 0 || (size_t)n > sizeof digalg) goto out;
+
+        /* certificates [0]: the signer's own, as a SET OF of one. */
+        uint8_t cs_l[5]; size_t cs_ln = der_len((size_t)n_cert, cs_l, sizeof cs_l);
+        if (!cs_ln) goto out;
+        const size_t cs_total = 1 + cs_ln + (size_t)n_cert;
+        uint8_t *certs = OPENSSL_malloc(cs_total);
+        if (!certs) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        certs[0] = 0x31; memcpy(certs + 1, cs_l, cs_ln);
+        memcpy(certs + 1 + cs_ln, d_cert, (size_t)n_cert);
+
+        si = OPENSSL_malloc(16384);
+        if (!si) { OPENSSL_free(certs); rv = FHSM_RV_HOST_MEMORY; goto out; }
+        size_t si_len = 16384;
+        rv = fhsm_composite_cms_signerinfo(d_iss, (size_t)n_iss,
+                                            d_ser, (size_t)n_ser,
+                                            digalg, (size_t)n,
+                                            attrs, (size_t)n_attrs,
+                                            ALGID_MLDSA65_ED25519,
+                                            sizeof ALGID_MLDSA65_ED25519,
+                                            sig, slen, si, &si_len);
+        if (rv == FHSM_RV_OK)
+            rv = fhsm_composite_cms_wrap(digalg, (size_t)n, certs, cs_total,
+                                          si, si_len, out, out_len);
+        OPENSSL_free(certs);
+    }
+out:
+    OPENSSL_free(attrs); OPENSSL_free(d_iss); OPENSSL_free(d_ser);
+    OPENSSL_free(d_cert); OPENSSL_free(si);
+    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
+    X509_free(x);
+    return rv;
+}
+
+/* ---------------------------------------------------------------------------
+ * A minimal DER reader, for reaching the signed attributes inside a CMS.
+ * i2d_CMS_SignerInfo does not exist -- only CMS_ContentInfo has ASN.1
+ * functions -- so there is no supported route to those bytes except walking
+ * to them. Definite lengths only, which is all DER produces.
+ * ------------------------------------------------------------------------- */
+typedef struct { const uint8_t *p; size_t len; uint8_t tag;
+                 const uint8_t *val; size_t vlen; } fhsm_tlv_t;
+
+static int tlv_at(const uint8_t *p, size_t avail, fhsm_tlv_t *t) {
+    if (avail < 2) return 0;
+    t->p = p; t->tag = p[0];
+    size_t hl = 2, n = p[1];
+    if (n & 0x80) {
+        size_t k = n & 0x7F;
+        if (k == 0 || k > 4 || avail < 2 + k) return 0;
+        n = 0;
+        for (size_t i = 0; i < k; i++) n = (n << 8) | p[2 + i];
+        hl = 2 + k;
+    }
+    if (avail < hl + n) return 0;
+    t->val = p + hl; t->vlen = n; t->len = hl + n;
+    return 1;
+}
+
+static int tlv_child(const fhsm_tlv_t *parent, size_t idx, fhsm_tlv_t *out) {
+    const uint8_t *p = parent->val; size_t left = parent->vlen;
+    for (size_t i = 0; ; i++) {
+        fhsm_tlv_t t;
+        if (!left || !tlv_at(p, left, &t)) return 0;
+        if (i == idx) { *out = t; return 1; }
+        p += t.len; left -= t.len;
+    }
+}
+
+/* ContentInfo -> [0] -> SignedData -> trailing SET OF -> first SignerInfo */
+static int cms_find_signerinfo(const uint8_t *der, size_t len, fhsm_tlv_t *out) {
+    fhsm_tlv_t ci, c0, sd, last;
+    memset(&last, 0, sizeof last);
+    int have = 0;
+    if (!tlv_at(der, len, &ci))        return 0;
+    if (!tlv_child(&ci, 1, &c0))       return 0;
+    if (!tlv_at(c0.val, c0.vlen, &sd)) return 0;
+    const uint8_t *p = sd.val; size_t left = sd.vlen;
+    while (left) {
+        fhsm_tlv_t t;
+        if (!tlv_at(p, left, &t)) return 0;
+        last = t; have = 1;
+        p += t.len; left -= t.len;
+    }
+    if (!have || last.tag != 0x31) return 0;
+    return tlv_child(&last, 0, out);
+}
+
+fhsm_rv_t fhsm_composite_cms_verify(fhsm_composite_alg_t alg,
+                                     const uint8_t *cms, size_t cms_len,
+                                     const uint8_t *digest, size_t digest_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512 || !cms || !digest)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (digest_len != fhsm_composite_ph_len(alg)) return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_rv_t rv = FHSM_RV_ARGUMENTS_BAD;
+    CMS_ContentInfo *ci = NULL;
+    STACK_OF(X509) *certs = NULL;
+    uint8_t *re = NULL, *attrs = NULL;
+    static uint8_t pubblob[FHSM_COMPOSITE_PUB_MAX];
+
+    { const uint8_t *p = cms; ci = d2i_CMS_ContentInfo(NULL, &p, (long)cms_len);
+      if (!ci || (size_t)(p - cms) != cms_len) goto out; }
+
+    STACK_OF(CMS_SignerInfo) *sis = CMS_get0_SignerInfos(ci);
+    if (sk_CMS_SignerInfo_num(sis) != 1) goto out;
+    CMS_SignerInfo *si = sk_CMS_SignerInfo_value(sis, 0);
+
+    /* The algorithm, before anything else: a structure claiming another one
+     * is not something to half-check. */
+    {
+        X509_ALGOR *sa = NULL;
+        CMS_SignerInfo_get0_algs(si, NULL, NULL, NULL, &sa);
+        const ASN1_OBJECT *o = NULL; int pt = 0; const void *pv = NULL;
+        X509_ALGOR_get0(&o, &pt, &pv, sa);
+        char b[128] = ""; OBJ_obj2txt(b, sizeof b, o, 1);
+        if (strcmp(b, FHSM_COMPOSITE_OID_MLDSA65_ED25519) != 0) goto out;
+        if (pt != V_ASN1_UNDEF) goto out;
+    }
+
+    /* The messageDigest must agree with the content the caller hashed. This
+     * is what ties the signature to the data at all: the signature itself
+     * covers only the attributes. */
+    {
+        int loc = CMS_signed_get_attr_by_NID(si, NID_pkcs9_messageDigest, -1);
+        if (loc < 0) goto out;
+        X509_ATTRIBUTE *at = CMS_signed_get_attr(si, loc);
+        ASN1_TYPE *v = at ? X509_ATTRIBUTE_get0_type(at, 0) : NULL;
+        if (!v || v->type != V_ASN1_OCTET_STRING) goto out;
+        if ((size_t)ASN1_STRING_length(v->value.octet_string) != digest_len) {
+            rv = FHSM_RV_SIGNATURE_INVALID; goto out;
+        }
+        if (memcmp(ASN1_STRING_get0_data(v->value.octet_string),
+                    digest, digest_len) != 0) {
+            rv = FHSM_RV_SIGNATURE_INVALID; goto out;
+        }
+    }
+
+    /* The signer's public key, from the certificate the structure carries. */
+    {
+        certs = CMS_get1_certs(ci);
+        if (!certs || sk_X509_num(certs) != 1) goto out;
+        X509 *x = sk_X509_value(certs, 0);
+        const unsigned char *pk = NULL; int pkl = 0;
+        X509_PUBKEY_get0_param(NULL, &pk, &pkl, NULL, X509_get_X509_PUBKEY(x));
+        if (!pk || pkl != (int)FHSM_COMPOSITE_RAW_PUB) goto out;
+        size_t bl = sizeof pubblob;
+        if (fhsm_composite_pub_from_raw(alg, pk, (size_t)pkl, pubblob, &bl)
+            != FHSM_RV_OK) goto out;
+
+        /* Re-encode and verify over the attributes as they appear there --
+         * verifying over the bytes we were given would only prove we agree
+         * with ourselves. */
+        int re_n = i2d_CMS_ContentInfo(ci, &re);
+        if (re_n <= 0) goto out;
+        fhsm_tlv_t s2, at;
+        int found = 0;
+        if (cms_find_signerinfo(re, (size_t)re_n, &s2))
+            for (size_t k = 0; tlv_child(&s2, k, &at); k++)
+                if (at.tag == 0xA0) { found = 1; break; }
+        if (!found) goto out;
+
+        attrs = OPENSSL_malloc(at.len);
+        if (!attrs) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        memcpy(attrs, at.p, at.len);
+        attrs[0] = 0x31;                     /* [0] IMPLICIT -> SET OF */
+
+        ASN1_OCTET_STRING *sg = CMS_SignerInfo_get0_signature(si);
+        if (!sg) goto out;
+        rv = fhsm_composite_verify(alg, pubblob, bl, attrs, at.len, NULL, 0,
+                                    ASN1_STRING_get0_data((const ASN1_STRING *)sg),
+                                    (size_t)ASN1_STRING_length((const ASN1_STRING *)sg));
+    }
+out:
+    OPENSSL_free(re); OPENSSL_free(attrs);
+    sk_X509_pop_free(certs, X509_free);
+    CMS_ContentInfo_free(ci);
     return rv;
 }
