@@ -27,19 +27,19 @@ int main(int argc, char **argv){
     CK_SESSION_HANDLE s=0; OpenSession(0,6,NULL,NULL,&s);
 
     NOW(a); CK_RV r1=Login(s,1,(CK_BYTE*)(size_t)pin,strlen(pin)); NOW(b);
-    printf("  1re connexion, PIN correct ......... %7.2f ms  (rv=0x%lx)\n",ms(a,b),r1);
+    printf("  1st login, correct PIN ............. %7.2f ms  (rv=0x%lx)\n",ms(a,b),r1);
     Logout(s);
     NOW(c); Login(s,1,(CK_BYTE*)(size_t)pin,strlen(pin)); NOW(d);
-    printf("  2e connexion, PIN correct .......... %7.2f ms\n",ms(c,d));
+    printf("  2nd login, correct PIN ............. %7.2f ms\n",ms(c,d));
     Logout(s);
     NOW(e); Login(s,1,(CK_BYTE*)(size_t)pin,strlen(pin)); NOW(f);
-    printf("  3e connexion, PIN correct .......... %7.2f ms\n",ms(e,f));
+    printf("  3rd login, correct PIN ............. %7.2f ms\n",ms(e,f));
     Logout(s);
 
-    const char*bad="mauvais-pin-xyz";
+    const char*bad="wrong-pin-xyz";
     NOW(g); CK_RV rb=Login(s,1,(CK_BYTE*)(size_t)bad,strlen(bad)); NOW(i);
-    printf("  connexion avec un PIN FAUX ......... %7.2f ms  (rv=0x%lx)\n",ms(g,i),rb);
+    printf("  login with a WRONG PIN ............. %7.2f ms  (rv=0x%lx)\n",ms(g,i),rb);
     NOW(j); Login(s,1,(CK_BYTE*)(size_t)bad,strlen(bad)); NOW(k);
-    printf("  seconde tentative, PIN FAUX ........ %7.2f ms  (etranglement inclus)\n",ms(j,k));
+    printf("  second attempt, WRONG PIN .......... %7.2f ms  (throttle included)\n",ms(j,k));
     CloseSession(s); Finalize(NULL); return 0;
 }

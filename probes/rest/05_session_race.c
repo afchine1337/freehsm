@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: 2026 Simorgh Labs
  *
- * Les signatures produites par N fils sur UNE session sont-elles valides ?
- * L'etat d'operation est partitionne par poignee de session ; partager une
- * poignee entre fils, c'est partager cet etat. */
+ * Are the signatures produced by N threads on ONE session valid?
+ * Operation state is partitioned by session handle; sharing a handle between
+ * threads means sharing that state. */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -65,7 +65,7 @@ int main(int argc, char **argv){
         for(int i=0;i<N;i++){ar[i].id=i;ar[i].data=(unsigned char)(0x10+i);pthread_create(&th[i],NULL,w,&ar[i]);}
         int rvb=0,lenb=0;
         for(int i=0;i<N;i++){pthread_join(th[i],NULL);rvb+=ar[i].rv_bad;lenb+=ar[i].len_bad;}
-        printf("  %d fil(s) sur UNE session : %3d operations, %d erreurs PKCS#11, %d longueurs fausses\n",
+        printf("  %d thread(s) on ONE session : %3d operations, %d PKCS#11 errors, %d wrong lengths\n",
                N, N*K, rvb, lenb);
         pthread_barrier_destroy(&g_bar);
     }

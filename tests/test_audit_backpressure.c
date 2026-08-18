@@ -29,13 +29,13 @@
 
 static int g_fail = 0;
 static void ok(int cond, const char *what) {
-    printf("  %-64s %s\n", what, cond ? "OK" : "ECHEC");
+    printf("  %-64s %s\n", what, cond ? "OK" : "FAIL");
     if (!cond) g_fail++;
 }
 
 int main(void)
 {
-    printf("Contre-pression du journal d'audit\n\n");
+    printf("Audit log backpressure\n\n");
 
     char dir[] = "/tmp/fhsm-audit-bp-XXXXXX";
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 2; }
@@ -45,53 +45,53 @@ int main(void)
 
     uint8_t key[32];
     fhsm_rv_t rv = fhsm_audit_key_provision(dir, key, NULL);
-    ok(rv == FHSM_RV_OK, "la cle de chainage est provisionnee");
+    ok(rv == FHSM_RV_OK, "the chaining key is provisioned");
 
     rv = fhsm_audit_open(logp, FHSM_SLICE(key, sizeof key));
-    ok(rv == FHSM_RV_OK, "le journal s'ouvre");
+    ok(rv == FHSM_RV_OK, "the log opens");
 
-    /* --- une entree normale passe, et l'etat ne bouge pas --------------- */
+    /* --- a normal record goes through, and the state does not move ------ */
     rv = fhsm_audit_event(FHSM_EV_MODULE_INIT, -1, -1, FHSM_ROLE_NONE,
                           FHSM_RV_OK, NULL);
-    ok(rv == FHSM_RV_OK, "une entree s'ecrit normalement");
+    ok(rv == FHSM_RV_OK, "a record is written normally");
     ok(fhsm_state_get() != FHSM_STATE_ERROR,
-       "  et le module n'est pas verrouille");
+       "  and the module is not latched");
 
     struct stat st;
-    ok(stat(logp, &st) == 0 && st.st_size > 0, "  le fichier a grossi");
+    ok(stat(logp, &st) == 0 && st.st_size > 0, "  the file grew");
     off_t before = st.st_size;
 
-    /* --- on rend toute ecriture impossible ------------------------------ */
+    /* --- make every write impossible ------------------------------------ */
     signal(SIGXFSZ, SIG_IGN);
     struct rlimit rl;
     getrlimit(RLIMIT_FSIZE, &rl);
     struct rlimit small = { (rlim_t)before, rl.rlim_max };
     ok(setrlimit(RLIMIT_FSIZE, &small) == 0,
-       "on abaisse RLIMIT_FSIZE a la taille actuelle du journal");
+       "lower RLIMIT_FSIZE to the log's current size");
 
     rv = fhsm_audit_event(FHSM_EV_SIGN, -1, -1, FHSM_ROLE_USER,
-                          FHSM_RV_OK, "alg", "essai", NULL);
+                          FHSM_RV_OK, "alg", "probe", NULL);
     ok(rv != FHSM_RV_OK,
-       "  l'entree suivante echoue au lieu de reussir en silence");
+       "  the next record fails instead of succeeding silently");
     ok(fhsm_state_get() == FHSM_STATE_ERROR,
-       "  et le module est verrouille en ERREUR");
+       "  and the module is latched into ERROR");
 
-    /* Le point de tout l'exercice : ne pas signer sans trace. L'etat ERREUR
-     * est irreversible, donc plus aucune operation pertinente pour la
-     * securite ne passera jusqu'au redemarrage. */
+    /* The whole point: do not sign without a trace. The ERROR state is
+     * irreversible, so no security-relevant operation will go through until
+     * the module is restarted. */
     ok(fhsm_state_set(FHSM_STATE_INITIALIZED) != FHSM_RV_OK,
-       "  et le verrou ne se releve pas par un simple changement d'etat");
+       "  and the latch does not lift on a plain state change");
 
     setrlimit(RLIMIT_FSIZE, &rl);
     fhsm_audit_close();
 
-    /* --- ce qui reste sur le disque doit rester coherent ---------------- */
+    /* --- what is left on disk must stay coherent ------------------------ */
     ok(stat(logp, &st) == 0 && st.st_size == before,
-       "le journal n'a pas ete allonge par l'ecriture ratee");
+       "the log was not lengthened by the failed write");
 
     char keyp[512]; snprintf(keyp, sizeof keyp, "%s/audit.key", dir);
     unlink(logp); unlink(keyp); rmdir(dir);
 
-    printf("\n%s : %d echec(s)\n", g_fail ? "ECHEC" : "PASS", g_fail);
+    printf("\n%s : %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

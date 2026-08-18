@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: 2026 Simorgh Labs
  *
- * Combien de clients simultanes tient le module, et ou ca coince ?
- * Deux modeles : une session par fil (le pool qu'un service tiendrait), et
- * une seule session partagee par tous (le cas ou le pool serait mal fait). */
+ * How many concurrent clients does the module take, and where does it bind?
+ * Two models: one session per thread (the pool a service would hold), and one
+ * session shared by all of them (the pool done wrong). */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -39,13 +39,13 @@ static CK_OBJECT_HANDLE find_key(CK_SESSION_HANDLE s,const char*label){
     return n ? h : 0;
 }
 
-static int K = 20;                 /* signatures par fil */
+static int K = 20;                 /* signatures per thread */
 static int shared_mode = 0;
 static CK_SESSION_HANDLE g_shared = 0;
 static CK_OBJECT_HANDLE  g_key = 0;
 static const char *g_pin, *g_label;
 static pthread_barrier_t g_bar;
-static double *g_lat;              /* toutes les latences, pour les centiles */
+static double *g_lat;              /* every latency, for the percentiles */
 
 typedef struct { int id; } arg_t;
 
@@ -83,7 +83,7 @@ static void run(int nthreads){
     NOW(b);
     double tot=ms(a,b); int n=nthreads*K;
     qsort(g_lat,(size_t)n,sizeof *g_lat,cmpd);
-    printf("  %2d fils : %7.1f sig/s   latence med %6.2f ms   p95 %6.2f ms   max %6.2f ms\n",
+    printf("  %2d threads : %7.1f sig/s   median %6.2f ms   p95 %6.2f ms   max %6.2f ms\n",
            nthreads, 1000.0*n/tot, g_lat[n/2], g_lat[(int)(n*0.95)], g_lat[n-1]);
     free(g_lat);free(th);free(ar);
     pthread_barrier_destroy(&g_bar);
@@ -103,11 +103,11 @@ int main(int argc, char **argv){
     Login(g_shared,1,(CK_BYTE*)(size_t)g_pin,(CK_ULONG)strlen(g_pin));
     g_key=find_key(g_shared,g_label);
 
-    printf("\n  Une session par fil (le pool qu'un service tiendrait) :\n");
+    printf("\n  One session per thread (the pool a service would hold):\n");
     shared_mode=0;
     for(int n=1;n<=8;n*=2) run(n);
 
-    printf("\n  Une seule session partagee par tous les fils :\n");
+    printf("\n  A single session shared by every thread:\n");
     shared_mode=1;
     for(int n=1;n<=8;n*=2) run(n);
 

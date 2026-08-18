@@ -36,7 +36,7 @@
 
 static int g_fail = 0;
 static void ok(int cond, const char *what) {
-    printf("  %-64s %s\n", what, cond ? "OK" : "ECHEC");
+    printf("  %-64s %s\n", what, cond ? "OK" : "FAIL");
     if (!cond) g_fail++;
 }
 
@@ -88,7 +88,7 @@ static void write_log(mut_t m, size_t at) {
     for (size_t i = 0; i < g_n; i++) {
         if (m == MUT_DELETE && i == at) continue;
         if (m == MUT_TRUNCATE && i >= at) break;
-        if (m == MUT_INSERT && i == at) fputs(g_lines[i], f);   /* en double */
+        if (m == MUT_INSERT && i == at) fputs(g_lines[i], f);   /* duplicated */
         if (m == MUT_ALTER && i == at) {
             /* Change one character of the payload, not of the HMAC: the point
              * is a record that says something else, not a corrupted digest. */
@@ -122,81 +122,81 @@ static void case_mutation(const char *label, mut_t m, size_t at) {
     int tool_status = run_tool();
 
     char msg[160];
-    snprintf(msg, sizeof msg, "%s  (bibliotheque)", label);
+    snprintf(msg, sizeof msg, "%s  (library)", label);
     ok(lib_caught, msg);
-    if (lib_caught && bad) printf("      premiere ligne en defaut : %zu\n", bad);
+    if (lib_caught && bad) printf("      first line at fault: %zu\n", bad);
 
     if (tool_status >= 0) {
-        snprintf(msg, sizeof msg, "%s  (outil freehsm-audit)", label);
+        snprintf(msg, sizeof msg, "%s  (freehsm-audit tool)", label);
         ok(tool_status != 0, msg);
     }
 }
 
 int main(void)
 {
-    printf("Verification de la chaine du journal d'audit\n\n");
+    printf("Audit log chain verification\n\n");
 
     if (!mkdtemp(g_dir)) { perror("mkdtemp"); return 2; }
     snprintf(g_log,  sizeof g_log,  "%s/audit.log", g_dir);
     snprintf(g_keyp, sizeof g_keyp, "%s/audit.key", g_dir);
 
     if (!make_log() || !slurp_lines()) {
-        printf("  impossible de produire un journal de reference\n");
+        printf("  cannot produce a reference log\n");
         return 2;
     }
-    printf("  journal de reference : %zu entrees\n\n", g_n);
+    printf("  reference log: %zu records\n\n", g_n);
 
     /* --- intact ---------------------------------------------------------- */
     size_t bad = 0;
     fhsm_rv_t rv = fhsm_audit_verify(g_log, FHSM_SLICE(g_key, sizeof g_key), &bad);
-    ok(rv == FHSM_RV_OK, "un journal intact est accepte  (bibliotheque)");
+    ok(rv == FHSM_RV_OK, "an intact log is accepted  (library)");
     int t = run_tool();
-    if (t >= 0) ok(t == 0, "un journal intact est accepte  (outil freehsm-audit)");
-    else printf("  (outil non construit, comparaison croisee sautee)\n");
+    if (t >= 0) ok(t == 0, "an intact log is accepted  (freehsm-audit tool)");
+    else printf("  (tool not built, cross-check skipped)\n");
 
-    /* --- une mauvaise cle ne doit rien valider --------------------------- */
+    /* --- a wrong key must validate nothing ------------------------------- */
     {
         uint8_t wrong[32];
         memcpy(wrong, g_key, 32); wrong[0] ^= 0xFF;
         rv = fhsm_audit_verify(g_log, FHSM_SLICE(wrong, sizeof wrong), &bad);
-        ok(rv != FHSM_RV_OK, "une cle fausse est rejetee des la premiere ligne");
+        ok(rv != FHSM_RV_OK, "a wrong key is rejected at the first line");
     }
     printf("\n");
 
-    /* --- les quatre falsifications --------------------------------------- */
-    case_mutation("une entree modifiee est detectee", MUT_ALTER, 2);
+    /* --- the four falsifications ----------------------------------------- */
+    case_mutation("an altered record is detected", MUT_ALTER, 2);
     printf("\n");
-    case_mutation("une entree supprimee est detectee", MUT_DELETE, 2);
+    case_mutation("a deleted record is detected", MUT_DELETE, 2);
     printf("\n");
-    case_mutation("une entree dupliquee est detectee", MUT_INSERT, 2);
+    case_mutation("a duplicated record is detected", MUT_INSERT, 2);
     printf("\n");
-    /* Et celle qui n'est PAS detectee. Elle est ici pour rester visible a
-     * chaque execution : un journal coupe en fin de fichier est une chaine
-     * plus courte qui se verifie parfaitement, et aucun controle interne au
-     * fichier ne peut distinguer les deux -- c'est le meme fichier. Le jour
-     * ou un ancrage externe existera, cette assertion devra s'inverser, et
-     * c'est exactement ce qu'on veut qu'elle signale. */
+    /* And the one that is NOT detected. It is here so the limitation stays
+     * visible on every run: a log cut short at the end is a shorter chain
+     * that verifies perfectly, and no check confined to the file can tell
+     * the two apart -- it is the same file. The day an external anchor
+     * exists this assertion has to invert, which is exactly what we want it
+     * to signal. */
     write_log(MUT_TRUNCATE, g_n - 1);
     {
         size_t b = 0;
         fhsm_rv_t tr = fhsm_audit_verify(g_log, FHSM_SLICE(g_key, sizeof g_key), &b);
         ok(tr == FHSM_RV_OK,
-           "un journal tronque a la fin passe -- limite connue, pas un defaut");
+           "a log truncated at the end passes -- known limit, not a defect");
         int ts = run_tool();
         if (ts >= 0)
-            ok(ts == 0, "  l'outil est d'accord, ce qui prouve qu'ils s'accordent");
+            ok(ts == 0, "  the tool agrees, which proves the two are in step");
     }
     printf("\n");
 
-    /* --- et il redevient valide une fois remis en etat ------------------- */
+    /* --- and it becomes valid again once restored ------------------------ */
     write_log(MUT_NONE, 0);
     rv = fhsm_audit_verify(g_log, FHSM_SLICE(g_key, sizeof g_key), &bad);
-    ok(rv == FHSM_RV_OK, "remis en etat, le journal est de nouveau accepte");
+    ok(rv == FHSM_RV_OK, "restored, the log is accepted again");
 
     for (size_t i = 0; i < g_n; i++) free(g_lines[i]);
     free(g_lines);
     unlink(g_log); unlink(g_keyp); rmdir(g_dir);
 
-    printf("\n%s : %d echec(s)\n", g_fail ? "ECHEC" : "PASS", g_fail);
+    printf("\n%s : %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

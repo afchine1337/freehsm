@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: 2026 Simorgh Labs
  *
- * Combien coute une requete de signature, selon qu'on ouvre une session par
- * requete ou qu'on en garde une ouverte ? C'est le chiffre qui decide si une
- * API REST sans etat peut l'etre jusqu'au bout. */
+ * What does one signature request cost, opening a session per request versus
+ * keeping one warm? That is the number that decides whether a stateless REST
+ * API can be stateless all the way down. */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -66,12 +66,12 @@ int main(int argc, char **argv) {
     SYM(FindObjectsFinal); SYM(SignInit); SYM(Sign);
 
     NOW(t0); if (p11.Initialize(NULL)) { fprintf(stderr,"init\n"); return 2; } NOW(t1);
-    printf("  C_Initialize .............. %8.2f ms  (une fois par processus)\n", ms(t0,t1));
+    printf("  C_Initialize .............. %8.2f ms  (once per process)\n", ms(t0,t1));
 
     CK_BYTE data[32]; memset(data, 0x5A, sizeof data);
     static CK_BYTE sig[8192];
 
-    /* --- chemin sans etat : tout par requete -------------------------- */
+    /* --- the stateless path: everything per request ------------------- */
     double open_t=0, login_t=0, find_t=0, sign_t=0, close_t=0;
     const int N = 5;
     for (int i = 0; i < N; i++) {
@@ -85,18 +85,18 @@ int main(int argc, char **argv) {
         p11.CloseSession(s); NOW(f);
         open_t+=ms(a,b); login_t+=ms(b,c); find_t+=ms(c,d); sign_t+=ms(d,e); close_t+=ms(e,f);
     }
-    printf("\n  Une requete, session ouverte et fermee a chaque fois :\n");
+    printf("\n  One request, session opened and closed every time:\n");
     printf("    C_OpenSession ........... %8.2f ms\n", open_t/N);
     printf("    C_Login ................. %8.2f ms   <-- PBKDF2, 200000 iterations\n", login_t/N);
-    printf("    recherche de la cle ..... %8.2f ms\n", find_t/N);
+    printf("    key lookup .............. %8.2f ms\n", find_t/N);
     printf("    C_SignInit + C_Sign ..... %8.2f ms\n", sign_t/N);
     printf("    C_CloseSession .......... %8.2f ms\n", close_t/N);
     printf("    -------------------------------------\n");
-    printf("    total par requete ....... %8.2f ms  -> %6.1f requetes/s\n",
+    printf("    total per request ....... %8.2f ms  -> %6.1f requests/s\n",
            (open_t+login_t+find_t+sign_t+close_t)/N,
            1000.0*N/(open_t+login_t+find_t+sign_t+close_t));
 
-    /* --- chemin avec session gardee ouverte --------------------------- */
+    /* --- the path with a session kept open ---------------------------- */
     {
         CK_SESSION_HANDLE s = 0;
         p11.OpenSession(0, 6, NULL, NULL, &s);
@@ -111,8 +111,8 @@ int main(int argc, char **argv) {
             p11.Sign(s, data, sizeof data, sig, &sl);
         }
         NOW(b);
-        printf("\n  Une requete, session deja ouverte et connectee :\n");
-        printf("    C_SignInit + C_Sign ..... %8.2f ms  -> %6.1f requetes/s\n",
+        printf("\n  One request, session already open and logged in:\n");
+        printf("    C_SignInit + C_Sign ..... %8.2f ms  -> %6.1f requests/s\n",
                ms(a,b)/M, 1000.0*M/ms(a,b));
         p11.CloseSession(s);
     }
