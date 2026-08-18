@@ -42,6 +42,8 @@
 #include "fhsm_crypto.h"
 #include "fhsm_token.h"
 #include "fhsm_composite.h"
+#include <sys/stat.h>
+#include <errno.h>
 #include "fhsm_audit.h"
 #include "fhsm_session.h"
 #include "fhsm_session.h"
@@ -390,13 +392,44 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
         if (env && *env) snprintf(logp, sizeof logp, "%s", env);
         else             snprintf(logp, sizeof logp, "%s/audit.log", dir);
 
+        /* Create the directory if it is not there. On a fresh install nothing
+         * has made it yet, and the alternative is a module that refuses to
+         * start until the operator guesses which directory to mkdir. 0700:
+         * it holds the tokens and the chaining key. */
+        struct stat dst;
+        if (stat(dir, &dst) != 0 && mkdir(dir, 0700) != 0 && errno != EEXIST) {
+            fprintf(stderr,
+                    "[freehsm-c] FATAL : cannot create the tokens directory %s : %s\n"
+                    "  The audit log lives there and the module will not run without it.\n"
+                    "  Create it, or point FHSM_TOKENS_DIR somewhere writable.\n",
+                    dir, strerror(errno));
+            fhsm_state_latch_error("tokens directory unusable");
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+
         uint8_t akey[32]; int sealed = 0;
         fhsm_rv_t arv = fhsm_audit_key_provision(dir, akey, &sealed);
-        if (arv == FHSM_RV_OK) {
-            arv = fhsm_audit_open(logp, FHSM_SLICE(akey, sizeof akey));
-            fhsm_zeroize(akey, sizeof akey);
-        }
         if (arv != FHSM_RV_OK) {
+            /* A bare 0x6 at this point tells an operator nothing, and this is
+             * a refusal they are meant to act on. Name the path. */
+            fprintf(stderr,
+                    "[freehsm-c] FATAL : cannot provision the audit key in %s (rv=0x%x)\n"
+                    "  Checked %s/audit.key and %s/audit.key.tpm.\n"
+                    "  A key readable by group or others is refused on purpose ;\n"
+                    "  so is a sealed blob that will not unseal. See AGD_OPE 4.4.\n",
+                    dir, (unsigned)arv, dir, dir);
+            fhsm_state_latch_error("audit key could not be provisioned");
+            return arv;
+        }
+        arv = fhsm_audit_open(logp, FHSM_SLICE(akey, sizeof akey));
+        fhsm_zeroize(akey, sizeof akey);
+        if (arv != FHSM_RV_OK) {
+            fprintf(stderr,
+                    "[freehsm-c] FATAL : cannot open the audit log %s (rv=0x%x)\n"
+                    "  An existing log whose last line cannot be parsed is refused\n"
+                    "  rather than continued, which would start a second chain in\n"
+                    "  the same file. See AGD_OPE 4.3.\n",
+                    logp, (unsigned)arv);
             fhsm_state_latch_error("audit log could not be opened");
             return arv;
         }
