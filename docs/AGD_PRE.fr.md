@@ -415,16 +415,21 @@ Le module est *opérationnellement validé* quand **tous** les critères suivant
 4. Le test §8.2 affiche `ROUND-TRIP OK` — preuve que la clé privée RSA reste interne au HSM et que le module déchiffre correctement un input externe.
 5. `make integrity` rapporte un digest non-nul (= 32 octets hex) dans la section `.fhsm_digest`.
 6. `fhsm_kat_results()` après `C_Initialize` rapporte `passed=1` pour les 15 KAT (6 smoke + 9 CAVP SHA-256).
-7. ~~Le journal d'audit contient des entrées
-   `module_init/login_ok/sign/encrypt/decrypt` avec chaîne HMAC intacte.~~
-   **Ne peut pas être satisfait par la v2.0.0-beta : aucun journal n'est
-   écrit.** `fhsm_audit_open()` n'est appelée de nulle part, donc chaque
-   événement est silencieusement abandonné. Un critère d'acceptation qui échoue
-   toujours est pire qu'un critère absent : il est donc barré plutôt que laissé
-   à découvrir pendant la mise en service. Voir `AGD_OPE.fr.md` §4.3. Quand le
-   journal existera, le contrôle sera
-   `freehsm-audit verify <chemin> <audit_key_hex_64>` — `verify` est une
-   sous-commande et la clé est obligatoire.
+7. Le journal d'audit contient des entrées `module_init` / `login_ok` /
+   `sign` avec chaîne HMAC intacte. Ce critère était barré comme impossible à
+   satisfaire ; il est rétabli, le journal étant désormais écrit et vérifiable.
+   ```bash
+   # la cle, sur l'hote
+   KEY=$(xxd -p -c 32 /var/lib/freehsm/tokens/audit.key)
+   freehsm-audit verify /var/lib/freehsm/tokens/audit.log $KEY
+   freehsm-audit dump   /var/lib/freehsm/tokens/audit.log | head
+   ```
+   `verify` est une sous-commande et la clé est obligatoire. La sortie attendue
+   est `verify: N records OK, chain intact` et un code de retour nul.
+
+   Deux points à consigner dans le procès-verbal de réception plutôt qu'à
+   découvrir plus tard : un journal tronqué à la fin n'est pas détecté, et un
+   échec d'intégrité au démarrage n'y figurera pas. Voir `AGD_OPE.fr.md` §4.3.
 
 ### 8.4 Suite automatisée
 

@@ -343,6 +343,10 @@ static void fhsm_pack_field(unsigned char *dst, const char *src, size_t n) {
 static pid_t g_init_pid = 0;
 static void fhsm_reset_after_fork(void);   /* defined below, next to the state it clears */
 
+/* Defined with the slot registry further down; needed here to place the
+ * audit log beside the tokens. */
+static const char *fhsm_tokens_dir(void);
+
 CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
     (void)pInitArgs;
     /* Before anything else: if the state was built by another process, this is
@@ -362,6 +366,42 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
         fhsm_state_latch_error("crypto_init failed in C_Initialize");
         return rv;
     }
+    /* ---- open the audit log -------------------------------------------
+     * Until this call existed, `fhsm_audit_open` was reached from nowhere and
+     * all forty-nine `fhsm_audit_event` sites returned success while writing
+     * nothing. The manuals told the Security Officer to review a log that was
+     * never created.
+     *
+     * It goes here, and not earlier, because chaining an entry needs HMAC and
+     * HMAC needs the crypto layer up. That leaves one honest gap: if
+     * `fhsm_crypto_init` fails its integrity check or a KAT, the failure
+     * cannot be logged -- the primitives that would authenticate the entry are
+     * the ones that just failed. The module latches ERROR and refuses
+     * everything, which is the observable behaviour; the log will not carry
+     * the reason. Stated in AGD_OPE rather than left to be discovered.
+     *
+     * A log that cannot be opened is fatal, by the same reasoning as a write
+     * that fails: FHSM_AUDIT_MANDATORY means no security-relevant action
+     * without a durable trace, and initialising is one. */
+    {
+        const char *dir = fhsm_tokens_dir();
+        char logp[512];
+        const char *env = getenv("FHSM_AUDIT_LOG");
+        if (env && *env) snprintf(logp, sizeof logp, "%s", env);
+        else             snprintf(logp, sizeof logp, "%s/audit.log", dir);
+
+        uint8_t akey[32]; int sealed = 0;
+        fhsm_rv_t arv = fhsm_audit_key_provision(dir, akey, &sealed);
+        if (arv == FHSM_RV_OK) {
+            arv = fhsm_audit_open(logp, FHSM_SLICE(akey, sizeof akey));
+            fhsm_zeroize(akey, sizeof akey);
+        }
+        if (arv != FHSM_RV_OK) {
+            fhsm_state_latch_error("audit log could not be opened");
+            return arv;
+        }
+    }
+
     rv = fhsm_state_set(FHSM_STATE_INITIALIZED);
     (void)fhsm_audit_event(FHSM_EV_MODULE_INIT, -1, -1,
                             FHSM_ROLE_NONE, rv, NULL);
@@ -3348,11 +3388,18 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * the keypair. The audit log records the verdict. */
     if (!composite) {
         fhsm_rv_t pw_rv = fhsm_pairwise_check(pkey, pw_family);
+        /* Written as if this were printf: "pairwise=%d" followed by an int.
+         * It is not -- the variadic part is (key, value) string pairs ending
+         * in NULL, so the int was read as a char* and dereferenced. It never
+         * crashed because the log was never open and the function returned
+         * before touching the arguments. */
+        char pw_fam[24];
+        snprintf(pw_fam, sizeof pw_fam, "%d", (int)pw_family);
         (void)fhsm_audit_event(FHSM_EV_KAT_REPORT,
                                 -1, (int)hSession,
                                 fhsm_session_role(hSession),
                                 pw_rv,
-                                "pairwise=%d", (int)pw_family);
+                                "pairwise_family", pw_fam, NULL);
         if (pw_rv != FHSM_RV_OK) {
             (void)fhsm_state_set(FHSM_STATE_ERROR);
             EVP_PKEY_free(pkey);
@@ -6425,7 +6472,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         *pulSignatureLen = (rv == FHSM_RV_OK) ? slen : 0;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
-                                fhsm_session_role(hSession), rv, "composite");
+                                fhsm_session_role(hSession), rv, "alg", "composite", NULL);
         return rv;
     }
 
@@ -6607,7 +6654,7 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
                                     kv, kvl, pData, ulDataLen, NULL, 0,
                                     pSig, ulSigLen);
         (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
-                                fhsm_session_role(hSession), rv, "composite");
+                                fhsm_session_role(hSession), rv, "alg", "composite", NULL);
         return rv;
     }
 
@@ -7117,7 +7164,7 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
         OPENSSL_cleanse(ph, sizeof ph);
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
-                                fhsm_session_role(hSession), crv, "composite-multipart");
+                                fhsm_session_role(hSession), crv, "alg", "composite-multipart", NULL);
         return crv;
     }
 
@@ -7245,7 +7292,7 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
                                                    pSig, ulSigLen);
         OPENSSL_cleanse(ph, sizeof ph);
         (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
-                                fhsm_session_role(hSession), crv, "composite-multipart");
+                                fhsm_session_role(hSession), crv, "alg", "composite-multipart", NULL);
         return crv;
     }
     if (op->mechanism != CKM_SHA256_HMAC_INIT_VAL) {

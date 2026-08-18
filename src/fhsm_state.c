@@ -92,15 +92,23 @@ fhsm_rv_t fhsm_state_set(fhsm_module_state_t s) {
 }
 
 void fhsm_state_latch_error(const char *reason) {
+    int changed = 0;
     pthread_mutex_lock(&g_state_mu);
     if (g_state != FHSM_STATE_ERROR) {
         g_state = FHSM_STATE_ERROR;
+        changed = 1;
         if (reason) {
             /* snprintf for gcc 14 -Wstringop-truncation compliance. */
             (void)snprintf(g_error_reason, sizeof(g_error_reason), "%s", reason);
         }
     }
     pthread_mutex_unlock(&g_state_mu);
+
+    /* Only on the transition. Latching an already-latched module is a no-op,
+     * and emitting an event for it was one half of the recursion that a failed
+     * audit write produced: write fails -> latch -> event -> write fails. The
+     * other half is guarded inside fhsm_audit_event. */
+    if (!changed) return;
 
     (void)fhsm_audit_event(FHSM_EV_STATE_TRANSITION, -1, -1,
                             FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,

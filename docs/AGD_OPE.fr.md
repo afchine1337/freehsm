@@ -135,26 +135,34 @@ Marteler à travers le throttle ne change pas le résultat ; le cooldown survit 
 
 ### 4.3 Revue du log d'audit
 
-> **Le journal d'audit n'est pas produit par cette version.**
-> `fhsm_audit_open()` est définie et appelée de nulle part : le descripteur
-> reste fermé et les quarante-neuf appels à `fhsm_audit_event()` retournent
-> succès sans rien écrire. Vérifié empiriquement — une session complète, de la
-> création du token à la génération de clés, produit le fichier de token et
-> aucun journal.
+> **Le journal d'audit est produit, et la chaîne est vérifiable.**
+> L'avertissement qui figurait ici — aucun journal écrit, contrôle sur lequel
+> il ne fallait pas compter — ne s'applique plus. `C_Initialize` ouvre le
+> journal, la chaîne survit aux redémarrages, une écriture ratée verrouille le
+> module en `ERREUR`, et les deux vérificateurs détectent une entrée modifiée,
+> supprimée, insérée ou réordonnée.
 >
-> La contre-pression annoncée est absente pour la même raison :
-> `FHSM_AUDIT_MANDATORY` vaut `1` dans `fhsm_common.h` et n'est lu par aucun
-> code, donc le module n'est **pas** verrouillé en `ERROR` lorsqu'une trace ne
-> peut pas être écrite.
+> Trois limites subsistent, à connaître avant de s'appuyer sur ce contrôle :
 >
-> **Ne comptez pas sur ce contrôle.** La procédure ci-dessous décrit le
-> comportement visé et reste ici parce qu'elle est ce que l'implémentation
-> devra satisfaire — non parce qu'elle fonctionne. Reporté après la
-> v2.0.0-beta ; la question ouverte est l'origine de la clé HMAC, une clé
-> dérivée du token laissant les échecs de connexion — les événements les plus
-> utiles — sans trace.
+> 1. **Un journal tronqué à la fin n'est pas détecté**, et ne peut pas l'être
+>    depuis le seul fichier : ce qui reste est une chaîne plus courte qui se
+>    vérifie parfaitement, indistinguable d'un journal qui se serait arrêté là.
+>    Atténuation : l'archivage (étape 3) et la comparaison du nombre d'entrées
+>    entre deux archives — un `seq` qui recule est le signal.
+> 2. **Un échec d'intégrité ou de KAT au démarrage n'est pas journalisé.** Le
+>    journal s'ouvre après la couche cryptographique, parce que chaîner une
+>    entrée exige HMAC. Si l'auto-test échoue, les primitives qui
+>    authentifieraient l'entrée sont celles qui viennent d'échouer. Le module
+>    verrouille en `ERREUR` et refuse tout, donc la condition reste observable
+>    — mais la raison ne sera pas dans le journal. Lire la sortie d'erreur du
+>    processus et les drapeaux de `C_GetTokenInfo` dans ce cas.
+> 3. **La clé de chaînage ne protège pas d'un root actif.** Scellée dans le
+>    TPM, elle résiste à qui emporte le disque ou modifie la chaîne de
+>    démarrage ; elle est descellée en mémoire du processus pour servir. Voir
+>    §4.4.
 
-Quand il sera implémenté, le SO DEVRA :
+Le journal vit dans `{tokens_dir}/audit.log`, ou là où pointe
+`FHSM_AUDIT_LOG`. Le SO DOIT :
 
 1. Périodiquement (recommandé : hebdomadaire) vérifier la chaîne. Attention à
    la syntaxe : `verify` est une sous-commande et la clé d'audit de 32 octets
@@ -166,7 +174,39 @@ Quand il sera implémenté, le SO DEVRA :
 2. Investiguer tout `login_fail`, `login_locked`, `login_throttled`, `integrity_fail`.
 3. Archiver mensuellement vers stockage immuable.
 
-Une chaîne brisée est un **événement de sécurité critique** : prendre le système offline et suivre la procédure d'incident response (`SECURITY.md`).
+Une chaîne brisée est un **événement de sécurité critique** : le journal sur
+disque a été altéré par quelqu'un ayant accès en écriture au répertoire
+d'audit. Le vérificateur nomme la première ligne fautive et ce qu'il y a
+trouvé — entrée modifiée, `prev_hmac` qui ne suit pas, ou `seq` décalé.
+Prendre le système hors ligne et suivre la procédure d'incident (`SECURITY.md`).
+
+### 4.4 La clé d'audit
+
+La chaîne est authentifiée par une clé de 32 octets, provisionnée au premier
+démarrage puis récupérée. Elle n'est **pas** dérivée de la DEK du token : le
+journal ne serait alors écrivable qu'une fois connecté, et `login_fail`,
+`login_locked` et `integrity_fail` — les trois événements que l'étape 2
+demande d'investiguer — ne seraient jamais enregistrés.
+
+| Emplacement | Quand |
+|---|---|
+| `{tokens_dir}/audit.key.tpm`, scellée | `FHSM_TPM_SEALING=1` et TPM présent |
+| `{tokens_dir}/audit.key`, mode 0600 | sinon |
+
+Le module refuse de démarrer plutôt que de se dégrader en silence :
+
+* une clé lisible par le groupe ou par tous est refusée — une clé de chaînage
+  que tout le monde peut lire est une chaîne que tout le monde peut forger ;
+* un blob scellé qui ne se descelle pas est refusé, au lieu d'être remplacé
+  par une clé neuve qui démarrerait silencieusement une seconde chaîne dans le
+  même fichier ;
+* un scellement demandé et indisponible est refusé, au lieu d'écrire la clé en
+  clair.
+
+Vérifier un journal exige cette clé. La lire avec `xxd -p -c 32
+{tokens_dir}/audit.key` sur l'hôte, ou l'y desceller. **Un journal archivé sans
+sa clé ne pourra pas être vérifié plus tard** — archiver les deux séparément,
+et jamais sur le même support.
 
 ### 4.4 Sauvegarde de token
 

@@ -22,12 +22,34 @@
  *          freehsm-audit verify <path.audit.log> <audit_key_hex_64>
  *
  *  The audit format is one JSON-Lines record per line written by
- *  src/fhsm_audit.c. Each record carries an HMAC-SHA-256 of
- *  (audit_key, prev_hmac || line_minus_hmac), forming a hash chain.
+ *  src/fhsm_audit.c. Each record carries HMAC-SHA-256(audit_key, line up to
+ *  the "hmac" field) -- and that line already contains prev_hmac, so the
+ *  chain is authenticated without the previous digest being fed in again.
+ *
+ *  This file used to describe, and compute, HMAC(key, prev_hmac ||
+ *  line_minus_hmac) and to start the chain from 64 zero bytes. The module
+ *  does neither. No line the module writes could ever have verified here,
+ *  in two independent ways -- invisible while no log was ever written.
  *
  *  `dump` formats every event as a single human-readable row.
- *  `verify` walks the chain and checks every HMAC ; the first line's
- *  prev_hmac must be 64 zero bytes.
+ *  `verify` walks the chain. Three checks per line, all required:
+ *    - the recorded HMAC matches the line          (catches modification)
+ *    - prev_hmac equals the previous line's hmac   (catches deletion,
+ *      insertion, reordering -- each line self-authenticates, so removing
+ *      one leaves the rest individually valid)
+ *    - seq equals the line number                  (catches a middle record
+ *      removed by a forger who renumbered)
+ *
+ *  Not caught, and not catchable from the file alone: truncation at the end.
+ *  A log cut short is a shorter chain that verifies perfectly. See the note
+ *  in src/fhsm_audit.c and docs/ROADMAP.md.
+ *
+ *  The first line's prev_hmac is HMAC(key, "FHSM-AUDIT-INIT|seq=0").
+ *
+ *  This tool deliberately does not link the module: an auditor should be
+ *  able to build the verifier on its own, and a check that shares code with
+ *  what it checks is a mirror. tests/test_audit_verify.c runs both against
+ *  the same real log, which is what would have caught the drift above.
  *
  *  Build : cc tools/freehsm_audit.c -lcrypto -o freehsm-audit
  * ========================================================================= */
@@ -205,29 +227,52 @@ static int verify_file(const char *path, const char *key_hex) {
     }
     FILE *f = fopen(path, "r");
     if (!f) { perror(path); return 1; }
+
+    /* Chain head, as src/fhsm_audit.c seeds it. */
+    static const char INIT[] = "FHSM-AUDIT-INIT|seq=0";
+    uint8_t expect_prev[32];
+    if (hmac_sha256(key, 32, NULL, 0,
+                     (const uint8_t*)INIT, sizeof INIT - 1, expect_prev) != 0) {
+        fprintf(stderr, "verify: cannot compute the chain head\n");
+        fclose(f); return 1;
+    }
+
     char line[LINE_MAX_LEN];
-    uint8_t prev[32] = {0};
     int n = 0, bad = 0;
     while (fgets(line, sizeof(line), f)) {
         n++;
         const char *h = strstr(line, "\"hmac\":\"");
-        if (!h) { fprintf(stderr, "line %d : missing hmac field\n", n); bad++; continue; }
+        const char *p = strstr(line, "\"prev_hmac\":\"");
+        const char *q = strstr(line, "\"seq\":");
+        if (!h || !p || !q) {
+            fprintf(stderr, "line %d : missing hmac, prev_hmac or seq field\n", n);
+            bad++; continue;
+        }
         size_t body_len = (size_t)(h - line);
-        uint8_t recorded[32];
-        if (hex2bin(h + 8, recorded, 32) < 0) {
+        uint8_t recorded[32], prev_field[32];
+        if (hex2bin(h + 8, recorded, 32) < 0 || hex2bin(p + 13, prev_field, 32) < 0) {
             fprintf(stderr, "line %d : malformed hmac hex\n", n); bad++; continue;
         }
         uint8_t mac[32];
-        if (hmac_sha256(key, 32, prev, 32,
+        if (hmac_sha256(key, 32, NULL, 0,
                          (const uint8_t*)line, body_len, mac) != 0) {
             fprintf(stderr, "line %d : HMAC computation failed\n", n);
             bad++; continue;
         }
         if (CRYPTO_memcmp(mac, recorded, 32) != 0) {
-            fprintf(stderr, "line %d : HMAC mismatch (chain broken)\n", n);
+            fprintf(stderr, "line %d : HMAC mismatch (record altered)\n", n);
             bad++;
         }
-        memcpy(prev, recorded, 32);
+        if (CRYPTO_memcmp(prev_field, expect_prev, 32) != 0) {
+            fprintf(stderr, "line %d : prev_hmac does not follow line %d"
+                             " (record deleted, inserted or reordered)\n", n, n - 1);
+            bad++;
+        }
+        if (strtoull(q + 6, NULL, 10) != (unsigned long long)n) {
+            fprintf(stderr, "line %d : seq is not %d (records missing)\n", n, n);
+            bad++;
+        }
+        memcpy(expect_prev, recorded, 32);
     }
     fclose(f);
     if (bad) {

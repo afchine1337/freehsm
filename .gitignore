@@ -171,3 +171,7 @@ tests/test_legacy_digest
 tests/test_legacy_cipher
 tests/test_legacy_rsa
 src/gen/.profile.stamp
+
+# Brouillons de messages de commit, jamais du contenu du depot.
+# Un de ces fichiers est parti dans b8ee63a faute de cette ligne.
+.commit-msg-*.txt

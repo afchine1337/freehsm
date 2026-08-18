@@ -141,25 +141,31 @@ Repeatedly hammering through the throttle does not change the outcome ; the cool
 
 ### 4.3 Audit log review
 
-> **The audit log is not produced by this release.** `fhsm_audit_open()` is
-> defined and called from nowhere, so the file descriptor stays closed and all
-> forty-nine `fhsm_audit_event()` call sites return success while writing
-> nothing. Verified empirically: a full session — token creation, SO login,
-> user PIN initialisation, key generation — produces the token file and no log.
+> **The audit log is produced, and the chain is verifiable.** The warning that
+> stood here — that no log was written and the control could not be relied on —
+> no longer applies. `C_Initialize` opens the log, the chain survives restarts,
+> a failed write latches the module into `ERROR`, and both verifiers detect a
+> modified, deleted, inserted or reordered record.
 >
-> The backpressure this header promises is absent for the same reason.
-> `FHSM_AUDIT_MANDATORY` is defined as `1` in `fhsm_common.h` and read by no
-> code, so the module is **not** latched into `ERROR` when a trace cannot be
-> written.
+> Three limits remain, and an operator should know them before relying on this:
 >
-> **Do not rely on this control.** The procedure below describes the intended
-> behaviour and is kept because it is what the implementation must satisfy —
-> not because it works today. Tracked for a release after v2.0.0-beta; the
-> open question is where the HMAC key comes from, since a key derived from the
-> token would leave failed logins — the events most worth having — untraceable.
+> 1. **A log truncated at the end is not detected**, and cannot be from the file
+>    alone: what remains is a shorter chain that verifies perfectly, which is
+>    indistinguishable from a log that stopped there. Mitigate by archiving
+>    (step 3 below) and by comparing the archived record count over time — a
+>    `seq` that goes backwards between two archives is the signal.
+> 2. **A start-up integrity or KAT failure is not logged.** The log is opened
+>    after the crypto layer, because chaining an entry needs HMAC. If the
+>    self-test fails, the primitives that would authenticate the entry are the
+>    ones that just failed. The module latches `ERROR` and refuses everything,
+>    so the condition is observable — but the reason will not be in the log.
+>    Read the process's stderr and `C_GetTokenInfo` flags in that case.
+> 3. **The chaining key does not defend against a live root.** Sealed to the
+>    TPM it resists an attacker who takes the disk or changes the boot chain;
+>    it is unsealed into process memory to be used at all. See §4.4.
 
-The audit log is intended to live at `/var/lib/freehsm/audit/slot<n>.audit.log`,
-HMAC-chained. When it is implemented, the SO MUST :
+The audit log lives at `{tokens_dir}/audit.log`, or wherever `FHSM_AUDIT_LOG`
+points, HMAC-chained. The SO MUST :
 
 1. Periodically (recommended : weekly) verify the chain with the supplied
    verifier. Note the syntax: `verify` is a subcommand, and the 32-byte audit
@@ -171,7 +177,38 @@ HMAC-chained. When it is implemented, the SO MUST :
 2. Investigate every `login_fail`, `login_locked`, `login_throttled`, and `integrity_fail` event.
 3. Archive monthly logs to immutable storage (WORM bucket, append-only volume) per the site's retention policy.
 
-A broken chain (verifier returns `chain broken at line N`) is a **critical security event** : the on-disk log has been tampered with by someone with write access to the audit directory. Take the system offline and follow the incident response procedure (`SECURITY.md`).
+A broken chain is a **critical security event** : the on-disk log has been
+tampered with by someone with write access to the audit directory. The verifier
+names the first line at fault and what it found — an altered record, a
+`prev_hmac` that does not follow, or a `seq` out of step. Take the system
+offline and follow the incident response procedure (`SECURITY.md`).
+
+### 4.4 The audit key
+
+The chain is authenticated by a 32-byte key, provisioned on first start and
+recovered afterwards. It is **not** derived from the token DEK: that would make
+the log writable only while logged in, and `login_fail`, `login_locked` and
+`integrity_fail` — the three events step 2 above tells you to investigate —
+would never be recorded.
+
+| Where it lives | When |
+|---|---|
+| `{tokens_dir}/audit.key.tpm`, sealed | `FHSM_TPM_SEALING=1` and a TPM is present |
+| `{tokens_dir}/audit.key`, mode 0600 | otherwise |
+
+The module refuses to start rather than degrade quietly:
+
+* a key file readable by group or others is refused — a chaining key everyone
+  can read is a chain everyone can forge ;
+* a sealed blob that will not unseal is refused, rather than replaced by a
+  fresh key that would silently start a second chain in the same file ;
+* sealing requested and unavailable is refused, rather than falling back to a
+  key in the clear.
+
+To verify a log you need that key. Read it with `xxd -p -c 32
+{tokens_dir}/audit.key` on the host, or unseal it there. **A log archived
+without its key cannot be verified later** — archive the two separately, and
+never on the same medium.
 
 ### 4.4 Token backup
 

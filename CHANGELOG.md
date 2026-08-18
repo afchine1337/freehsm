@@ -8,6 +8,66 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **The audit log is written.** `C_Initialize` opens it; the manuals had told
+  the Security Officer to review it weekly since before v1.0. It lives at
+  `{tokens_dir}/audit.log`, or wherever `FHSM_AUDIT_LOG` points.
+
+  The chaining key is its own, provisioned on first start — sealed to the TPM
+  under `FHSM_TPM_SEALING`, a 0600 file otherwise. Never the token DEK: that
+  would make the log writable only while logged in, leaving `login_fail`,
+  `login_locked` and `integrity_fail` untraceable, which are the three events
+  AGD_OPE §4.3 exists to have you investigate. Four conditions refuse to start
+  rather than degrade quietly — a key others can read, a blob that will not
+  unseal, sealing requested and unavailable, a key of the wrong size.
+
+  `fhsm_audit_verify()` is implemented; it was a stub returning `OK` without
+  reading its arguments. `tools/freehsm-audit` computed a different HMAC from
+  a different chain head, so it could never have validated a genuine line.
+  Both now agree, and `tests/test_audit_verify.c` runs both against the same
+  real log — three of the four falsifications are caught, and the fourth is
+  asserted as passing on purpose.
+
+  **Truncation at the end is not detected and cannot be** from the file alone:
+  what remains is a shorter chain that verifies perfectly. Recorded in
+  `docs/ROADMAP.md` with the two ways to close it and their cost, and stated
+  in AGD_OPE §4.3 rather than left to be discovered.
+
+  **A start-up integrity or KAT failure is not logged**, because the log needs
+  HMAC and HMAC is what just failed. The module latches ERROR and refuses
+  everything, so the condition is observable; the reason will not be in the
+  log. Also stated in AGD_OPE §4.3.
+
+### Fixed
+* **Five `fhsm_audit_event()` call sites were malformed, and none had ever
+  run.** The dead guard did not merely make the log inert — it returned before
+  the function read its arguments. One site passed an `int` where a `char *`
+  was expected, written as though the API were `printf`; four passed a key
+  with no value and no terminator. Opening the log turned all five into
+  segmentation faults.
+
+  `__attribute__((sentinel))` on the declaration now makes the compiler refuse
+  any call whose last argument is not `NULL`. Proved able to fail: removing
+  one `NULL` ends the build with `error: missing sentinel in function call`.
+
+* **The backpressure crashed the module instead of latching it.** A failed
+  write called `fhsm_state_latch_error`, which emitted a `state_transition`
+  event, whose write also failed, which latched again — unbounded recursion,
+  measured as a SIGSEGV the first time a write was made to fail. A per-thread
+  re-entrance guard in the writer, and the state machine now emits only on a
+  real transition. `tests/test_audit_backpressure.c` lowers `RLIMIT_FSIZE` to
+  make writes fail at the same point a full disk does, and asserts that the
+  module latches and does not come back.
+
+* **The chain restarted at every process start.** `fhsm_audit_open` reset
+  `seq` to 0 and reseeded the head while `O_APPEND` kept writing after the old
+  entries, so a log spanning three starts held three chains and a verifier
+  broke at every boundary. It now recovers `seq` and `prev_hmac` from the last
+  line, and refuses a tail it cannot parse rather than starting fresh.
+
+* **The chain head used a length of 20 for a 21-character string,** cutting
+  the final `0` off `"FHSM-AUDIT-INIT|seq=0"` — so it matched neither its own
+  comment nor the format the header documents.
+
 * **OCSP (RFC 6960): `fhsm-ca ocsp-respond`.** A CRL answers "which
   certificates are revoked" for all of them at once; OCSP answers "is this one
   revoked" for the one a verifier asked about. Both read the same database.

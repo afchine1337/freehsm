@@ -371,9 +371,13 @@ Until (1) and (2) are done, "reproducible build" should be read as
 "deterministic build", and the documentation should say so rather than let a
 reader supply the stronger meaning on their own.
 
-### The audit log is not written (found 2026-08-17, after v2.0.0-beta shipped)
+### The audit log (found missing 2026-08-17, implemented 2026-08-18)
 
-`fhsm_audit_open()` is defined in `src/fhsm_audit.c`, declared in the header,
+**Status: written, chained, verifiable.** What follows is the record of what
+was wrong, kept because the shape of the failure is instructive and because an
+evaluator reading `git log` will find the same story.
+
+`fhsm_audit_open()` was defined in `src/fhsm_audit.c`, declared in the header,
 and **called from nowhere**. `g_audit_fd` therefore stays at `-1`, and
 `fhsm_audit_event()` opens with a guard that returns `FHSM_RV_OK` and writes
 nothing. Forty-nine call sites across `fhsm_pkcs11.c`, `fhsm_token.c` and
@@ -394,18 +398,70 @@ acceptance lists have been corrected to say plainly that the control does not
 exist; the procedures are kept as the specification the implementation must
 satisfy.
 
-**The open question is the key**, and it is a design decision rather than
-wiring. `fhsm_audit_open` takes a 32-byte HMAC key. Deriving it from the token
-DEK would mean the log can only be written while logged in — leaving
-`login_fail`, `login_locked` and `integrity_fail` untraceable, which are
-precisely the events §4.3 tells the SO to investigate. A separate key needs an
-entry in `freehsm.conf`, a provisioning step, and somewhere to keep it that is
-not the machine being audited.
+**Both open questions are now decided and implemented.**
 
-The second decision is the backpressure. Latching `ERROR` when a trace cannot
-be written is what the header promises and what an audit control is worth; it
-also means a full disk stops the module. That is defensible for an HSM and
-should be stated, not discovered.
+*The key* is its own, never the token DEK — deriving it from the DEK would have
+made the log writable only while logged in, leaving `login_fail`,
+`login_locked` and `integrity_fail` untraceable, which are precisely the events
+§4.3 tells the SO to investigate. It is sealed to the TPM when
+`FHSM_TPM_SEALING` is on, and a 0600 file otherwise, so the control works by
+default rather than only where someone enabled it. Four conditions refuse to
+start rather than degrade quietly: a key readable by others, a blob that will
+not unseal, sealing requested and unavailable, a key of the wrong size.
+
+*The backpressure* latches `ERROR`, unconditionally, as the header always
+promised. A full disk stops the module; that is defensible for an HSM and is
+now stated in AGD_OPE §4.3 rather than discovered. Proved by lowering
+`RLIMIT_FSIZE`, which fails at the same point a full disk does.
+
+Wiring it up exposed what the dead guard had been hiding:
+
+* **Five malformed call sites**, none of which had ever run, because
+  `fhsm_audit_event` returned before reading its arguments. One passed an int
+  where a `char *` was expected — written as if the API were `printf`. Fixed,
+  and `__attribute__((sentinel))` now makes the compiler refuse the whole
+  class; proved able to fail by removing one `NULL`.
+* **Unbounded recursion in the backpressure itself**: a failed write latched
+  ERROR, which emitted a state_transition event, whose write failed. Stack
+  overflow, measured as a SIGSEGV the first time a write was made to fail.
+  Guarded per-thread in the writer; the state machine now emits only on a real
+  transition.
+* **The chain restarted at every process start**, appending a second chain to
+  the same file while `seq` went back to 1. `fhsm_audit_open` now resumes from
+  the last line.
+* **`fhsm_audit_verify` was a stub returning OK** without reading its
+  arguments, and `tools/freehsm-audit` computed a different HMAC from a
+  different chain head — two independent disagreements, neither visible while
+  no log existed. Both now agree, and `tests/test_audit_verify.c` runs both
+  against the same real log.
+
+---
+
+### The audit log's one uncloseable gap: truncation at the end (measured 2026-08-18)
+
+The chain detects a modified record, a deleted one, an inserted one and a
+reordered one -- `tests/test_audit_verify.c` proves all four against both
+verifiers. It does not detect a log cut short at the end, and no check confined
+to the file can: what remains is a shorter chain that verifies perfectly,
+which is indistinguishable from a log that simply stopped there. It is the
+same file.
+
+The test asserts that case as *passing*, deliberately, so the limitation is
+restated by every run rather than being absent from the list.
+
+Closing it needs an anchor the forger does not control -- the last seq and
+hmac, themselves authenticated, kept outside the log:
+
+* **A companion file, updated on every event.** Detects truncation as long as
+  the attacker lacks the chaining key, since the anchor is HMAC'd too. Costs
+  one more `fsync` per event: about 2.7 ms on the measurement in
+  `docs/TOKEN_STORE_FORMAT.md`, which roughly doubles the per-event cost.
+* **Shipping the log off the host.** Detects it properly and also survives the
+  host being taken, but adds a network dependency to a control that currently
+  has none -- and belongs with #111 rather than before it.
+
+Neither is chosen yet. Stating the gap is worth more than picking the cheaper
+answer quietly.
 
 ---
 

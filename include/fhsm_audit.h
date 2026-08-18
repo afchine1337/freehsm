@@ -110,6 +110,46 @@ typedef enum fhsm_audit_event_e {
 fhsm_rv_t fhsm_audit_open(const char *path,
                            fhsm_slice_t audit_key);
 
+/* ---------------------------------------------------------------------------
+ * Where the chaining key comes from.
+ *
+ * `fhsm_audit_open` takes a key and asks no questions. Something has to decide
+ * what that key is, and the decision is not obvious, so it lives here rather
+ * than at the call site.
+ *
+ * Deriving it from the token DEK was the tempting answer and is the wrong one:
+ * the log would only be writable while logged in, leaving `login_fail`,
+ * `login_locked` and `integrity_fail` untraceable — exactly the three events
+ * AGD_OPE §4.3 tells the Security Officer to investigate.
+ *
+ * So the key is its own, provisioned on first use and recovered afterwards:
+ *
+ *   {dir}/audit.key.tpm   sealed to the TPM, when FHSM_TPM_SEALING is on and
+ *                         a TPM is present. Bound to the same PCRs as the DEK,
+ *                         so a changed boot chain makes it unreadable.
+ *   {dir}/audit.key       32 raw bytes, mode 0600, otherwise.
+ *
+ * `*sealed` says which happened, so the caller can record it — an operator
+ * reading the log should be able to tell which of the two protected it.
+ *
+ * What this protects, stated plainly because the difference matters:
+ *
+ *   - Against someone who takes the disk, or edits the file offline: yes. They
+ *     do not have the key, so they cannot recompute the chain.
+ *   - Against someone who is root on the running host: no, in either case. The
+ *     sealed key is unsealed into this process's memory to be used at all, and
+ *     the file-based one is readable by root by definition. A TPM raises the
+ *     bar for offline attacks and for a tampered boot chain; it does not make
+ *     a live compromise survivable, and saying otherwise would be a lie an
+ *     evaluator would find.
+ *
+ * A key file that is group- or world-readable is refused rather than used. A
+ * chaining key everyone can read is a chain everyone can forge, and continuing
+ * would produce a log that looks authenticated and is not.
+ * ------------------------------------------------------------------------- */
+fhsm_rv_t fhsm_audit_key_provision(const char *dir, uint8_t key[32],
+                                    int *sealed);
+
 void fhsm_audit_close(void);
 
 /* Emit one event line. The variadic part is a NULL-terminated list of
@@ -119,6 +159,15 @@ void fhsm_audit_close(void);
  * Lengths of sensitive material are passed as "len=NN" pairs --- the
  * material itself is NEVER written to the log.
  */
+/* __attribute__((sentinel)): the compiler now refuses a call whose last
+ * argument is not NULL. Five sites were missing it, and one passed an int
+ * where a char* was expected -- none of them ever ran, because the log was
+ * never open and the function returned before reading its arguments. A
+ * variadic contract nobody can check by reading is one the compiler should
+ * check instead. */
+#if defined(__GNUC__)
+__attribute__((sentinel))
+#endif
 fhsm_rv_t fhsm_audit_event(fhsm_audit_event_t ev,
                             int slot,
                             int session,
