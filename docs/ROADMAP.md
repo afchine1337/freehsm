@@ -478,7 +478,7 @@ answer quietly.
 |---|---|---|---|
 | #106 | Exhaustive CC ATE_FUN test book | v2.0 stable +6mo | Worth doing for its own sake: a functional test book to CC ATE_FUN structure is both a real assurance gain and a teaching artefact. **Not for a submission** — there will not be one. |
 | #111-prep | Thread-safety of the PKCS#11 layer (blocks #111) | ~10h | 🟡 v1.6.0 — the two lazy-init races fixed, `make TSAN=1` + `tests/test_concurrency` in tree. Points 2–5 of the note (session binding, per-identity throttle, audit actor) are REST-layer work and stay with #111 |
-| #111 | Network HSM via REST API | v2.5+ | The big architectural leap — wait for MVP validation **and #111-prep** |
+| #111 | Network HSM via REST API | v2.5+ | **Design decided, nothing built** — see [`REST_API_DESIGN.md`](REST_API_DESIGN.md). Four of the five prerequisites are closed, the audit log included. Measured first (`probes/rest/`): a stateless API does **not** make the login stateless, so authorisation has to live in the service on the client certificate, not on the token being logged in. Remaining: the per-identity throttle, and where the daemon's PIN comes from |
 
 ### #111-prep — the network boundary stresses things the single-process model hides (noted 2026-07-21)
 
