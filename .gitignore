@@ -172,10 +172,10 @@ tests/test_legacy_cipher
 tests/test_legacy_rsa
 src/gen/.profile.stamp
 
-# Brouillons de messages de commit, jamais du contenu du depot.
-# Un de ces fichiers est parti dans b8ee63a faute de cette ligne.
+# Commit-message drafts, never repository content.
+# One of these went into b8ee63a for want of this line.
 .commit-msg-*.txt
 
-# Sondes de mesure : les sources sont suivies, les binaires non.
+# Measurement probes: the sources are tracked, the binaries are not.
 probes/*/0[0-9]_*
 !probes/*/0[0-9]_*.c
