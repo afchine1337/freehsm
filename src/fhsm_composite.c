@@ -1700,6 +1700,307 @@ out:
 }
 
 /* ===========================================================================
+ * OCSP (RFC 6960), assembled by hand.
+ *
+ * Same reason as the CRL and the CMS: OCSP_basic_sign wants a key OpenSSL can
+ * sign with, and a composite key is not one. It signs Ed25519 perfectly well,
+ * which is what makes the differential test possible -- the reference and this
+ * encoder are compared on the one algorithm both can produce.
+ *
+ * One difference from the CRL, and it shapes the test: i2d_re_X509_CRL_tbs is
+ * public, i2d_OCSP_RESPDATA is not. OCSP_RESPDATA is opaque, declared only in
+ * crypto/ocsp/ocsp_local.h. The test therefore slices tbsResponseData out of
+ * the DER -- it is the first inner TLV of BasicOCSPResponse, which is by
+ * construction exactly what OpenSSL signed. No private header, no symbol that
+ * could disappear between releases.
+ * ========================================================================= */
+
+fhsm_rv_t fhsm_composite_ocsp_single(const fhsm_composite_ocsp_single_t *s,
+                                      uint8_t *out, size_t *out_len)
+{
+    if (!s || !out || !out_len) return FHSM_RV_ARGUMENTS_BAD;
+    if (!s->cert_id || !s->cert_id_len)   return FHSM_RV_ARGUMENTS_BAD;
+    if (!s->this_upd || !s->this_upd_len) return FHSM_RV_ARGUMENTS_BAD;
+    if (s->cert_id[0]  != 0x30) return FHSM_RV_ARGUMENTS_BAD;  /* CertID SEQ  */
+    if (s->this_upd[0] != 0x18) return FHSM_RV_ARGUMENTS_BAD;  /* GeneralizedTime */
+    if ((s->next_upd == NULL) != (s->next_upd_len == 0)) return FHSM_RV_ARGUMENTS_BAD;
+    if (s->next_upd && s->next_upd[0] != 0x18) return FHSM_RV_ARGUMENTS_BAD;
+
+    /* A revocation time belongs to a revoked certificate and to no other. The
+     * structure cannot express "good, revoked at 3pm", so the contradiction is
+     * refused here rather than silently dropped -- an operator who passes a
+     * time expects it to appear. */
+    if (s->status == FHSM_OCSP_REVOKED) {
+        if (!s->revoked_at || !s->revoked_at_len) return FHSM_RV_ARGUMENTS_BAD;
+        if (s->revoked_at[0] != 0x18)             return FHSM_RV_ARGUMENTS_BAD;
+    } else if (s->status == FHSM_OCSP_GOOD || s->status == FHSM_OCSP_UNKNOWN) {
+        if (s->revoked_at || s->revoked_at_len)   return FHSM_RV_ARGUMENTS_BAD;
+        if (s->reason >= 0)                       return FHSM_RV_ARGUMENTS_BAD;
+    } else {
+        return FHSM_RV_ARGUMENTS_BAD;
+    }
+
+    /* ---- CertStatus ----------------------------------------------------
+     * IMPLICIT tagging replaces the tag but keeps the constructed bit of the
+     * type underneath. That is the whole subtlety here, and it splits the
+     * three cases two ways:
+     *
+     *   good     [0] IMPLICIT NULL         -> 0x80, NULL is primitive
+     *   revoked  [1] IMPLICIT RevokedInfo  -> 0xA1, SEQUENCE is constructed
+     *   unknown  [2] IMPLICIT UnknownInfo  -> 0x82, UnknownInfo is NULL
+     *
+     * Writing 0xA0 and 0xA2 for good and unknown -- which is what you get by
+     * assuming context tags are always constructed -- produces DER that looks
+     * right, has the correct length, and that no OCSP parser will accept: the
+     * CHOICE matches on the tag, and 0xA0 is not one of its alternatives. The
+     * differential test caught exactly this, on the two cases whose underlying
+     * type is primitive, while the revoked cases passed. */
+    uint8_t st[32]; size_t st_n = 0;
+    if (s->status == FHSM_OCSP_GOOD)    { st[0] = 0x80; st[1] = 0x00; st_n = 2; }
+    if (s->status == FHSM_OCSP_UNKNOWN) { st[0] = 0x82; st[1] = 0x00; st_n = 2; }
+    if (s->status == FHSM_OCSP_REVOKED) {
+        uint8_t inner[32]; size_t in_n = 0;
+        if (s->revoked_at_len > sizeof inner - 8) return FHSM_RV_ARGUMENTS_BAD;
+        memcpy(inner, s->revoked_at, s->revoked_at_len); in_n = s->revoked_at_len;
+        if (s->reason >= 0) {
+            /* revocationReason is [0] EXPLICIT CRLReason: an ENUMERATED
+             * inside the context tag. */
+            if (s->reason > 10) return FHSM_RV_ARGUMENTS_BAD;
+            inner[in_n++] = 0xA0; inner[in_n++] = 0x03;
+            inner[in_n++] = 0x0A; inner[in_n++] = 0x01;
+            inner[in_n++] = (uint8_t)s->reason;
+        }
+        st_n = tag_wrap(0xA1, inner, in_n, st, sizeof st);
+        if (!st_n) return FHSM_RV_FUNCTION_FAILED;
+    }
+
+    /* nextUpdate is [0] EXPLICIT: the GeneralizedTime goes inside the tag. */
+    uint8_t nu_hdr[4]; size_t nu_hdr_n = 0, nu_total = 0;
+    if (s->next_upd) {
+        nu_hdr_n = der_len(s->next_upd_len, nu_hdr, sizeof nu_hdr);
+        if (!nu_hdr_n) return FHSM_RV_FUNCTION_FAILED;
+        nu_total = 1 + nu_hdr_n + s->next_upd_len;
+    }
+
+    const size_t content = s->cert_id_len + st_n + s->this_upd_len + nu_total;
+    uint8_t sq[5]; size_t sq_n = der_len(content, sq, sizeof sq);
+    if (!sq_n) return FHSM_RV_FUNCTION_FAILED;
+
+    const size_t total = 1 + sq_n + content;
+    if (*out_len < total) { *out_len = total; return FHSM_RV_BUFFER_TOO_SMALL; }
+
+    uint8_t *c = out;
+    *c++ = 0x30; memcpy(c, sq, sq_n); c += sq_n;
+    memcpy(c, s->cert_id, s->cert_id_len);   c += s->cert_id_len;
+    memcpy(c, st, st_n);                     c += st_n;
+    memcpy(c, s->this_upd, s->this_upd_len); c += s->this_upd_len;
+    if (s->next_upd) {
+        *c++ = 0xA0; memcpy(c, nu_hdr, nu_hdr_n); c += nu_hdr_n;
+        memcpy(c, s->next_upd, s->next_upd_len);  c += s->next_upd_len;
+    }
+
+    *out_len = (size_t)(c - out);
+    return (*out_len == total) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+fhsm_rv_t fhsm_composite_ocsp_tbs(const uint8_t *responder_id, size_t responder_id_len,
+                                   const uint8_t *produced_at,  size_t produced_at_len,
+                                   const uint8_t *responses,    size_t responses_len,
+                                   const uint8_t *exts,         size_t exts_len,
+                                   uint8_t *out, size_t *out_len)
+{
+    if (!responder_id || !responder_id_len || !produced_at || !produced_at_len
+        || !responses || !responses_len || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if ((exts == NULL) != (exts_len == 0)) return FHSM_RV_ARGUMENTS_BAD;
+
+    /* Same positional tag check as the CRL, for the same reason: two buffers
+     * swapped produce valid DER describing something else. */
+    if (responder_id[0] != 0xA1 && responder_id[0] != 0xA2)
+        return FHSM_RV_ARGUMENTS_BAD;                       /* byName / byKey */
+    if (produced_at[0] != 0x18) return FHSM_RV_ARGUMENTS_BAD;
+    if (responses[0]   != 0x30) return FHSM_RV_ARGUMENTS_BAD;
+    if (exts && exts[0] != 0x30) return FHSM_RV_ARGUMENTS_BAD;
+
+    uint8_t ext_hdr[5]; size_t ext_hdr_n = 0, ext_total = 0;
+    if (exts) {
+        ext_hdr_n = der_len(exts_len, ext_hdr, sizeof ext_hdr);
+        if (!ext_hdr_n) return FHSM_RV_FUNCTION_FAILED;
+        ext_total = 1 + ext_hdr_n + exts_len;               /* [1] EXPLICIT */
+    }
+
+    const size_t content = responder_id_len + produced_at_len
+                         + responses_len + ext_total;
+    uint8_t sq[5]; size_t sq_n = der_len(content, sq, sizeof sq);
+    if (!sq_n) return FHSM_RV_FUNCTION_FAILED;
+
+    const size_t total = 1 + sq_n + content;
+    if (*out_len < total) { *out_len = total; return FHSM_RV_BUFFER_TOO_SMALL; }
+
+    uint8_t *c = out;
+    *c++ = 0x30; memcpy(c, sq, sq_n); c += sq_n;
+    memcpy(c, responder_id, responder_id_len); c += responder_id_len;
+    memcpy(c, produced_at, produced_at_len);   c += produced_at_len;
+    memcpy(c, responses, responses_len);       c += responses_len;
+    if (exts) {
+        *c++ = 0xA1; memcpy(c, ext_hdr, ext_hdr_n); c += ext_hdr_n;
+        memcpy(c, exts, exts_len); c += exts_len;
+    }
+
+    *out_len = (size_t)(c - out);
+    return (*out_len == total) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+fhsm_rv_t fhsm_composite_ocsp(fhsm_composite_alg_t alg,
+                               const uint8_t *responder_cert, size_t responder_cert_len,
+                               const uint8_t *produced_at, size_t produced_at_len,
+                               const fhsm_composite_ocsp_single_t *singles, size_t n,
+                               const uint8_t *exts, size_t exts_len,
+                               fhsm_composite_sign_cb sign, void *sign_ctx,
+                               uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+        || !responder_cert || !responder_cert_len
+        || !produced_at || !produced_at_len
+        || !singles || !n || !sign || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if ((exts == NULL) != (exts_len == 0)) return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    X509    *rc  = NULL;
+    uint8_t *nm  = NULL, *rid = NULL, *sr = NULL, *sr_seq = NULL;
+    uint8_t *tbs = NULL, *sig = NULL;
+    int nm_n = 0;
+    size_t rid_n = 0, sr_seq_n = 0, tbs_n = 0;
+
+    {
+        const uint8_t *p = responder_cert;
+        rc = d2i_X509(NULL, &p, (long)responder_cert_len);
+    }
+    if (!rc) return FHSM_RV_ARGUMENTS_BAD;
+
+    /* ---- responderID -----------------------------------------------------
+     * byName, taken from the subject of the certificate that signs. Deriving
+     * it from anywhere else would let the name and the key disagree, and a
+     * client matching one against the other would be right to refuse.
+     *
+     * The CHOICE is EXPLICIT, so the Name SEQUENCE goes inside [1] rather
+     * than having its tag replaced. */
+    nm_n = i2d_X509_NAME(X509_get_subject_name(rc), &nm);
+    if (nm_n <= 0) goto out;
+    rid = OPENSSL_malloc((size_t)nm_n + 8);
+    if (!rid) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    rid_n = tag_wrap(0xA1, nm, (size_t)nm_n, rid, (size_t)nm_n + 8);
+    if (!rid_n) goto out;
+
+    /* ---- the SingleResponses --------------------------------------------- */
+    {
+        size_t cap = 0, used = 0;
+        for (size_t i = 0; i < n; i++) {
+            size_t need = 0;
+            uint8_t probe[1];
+            rv = fhsm_composite_ocsp_single(&singles[i], probe, &need);
+            if (rv != FHSM_RV_BUFFER_TOO_SMALL) {
+                if (rv == FHSM_RV_OK) rv = FHSM_RV_FUNCTION_FAILED;
+                goto out;
+            }
+            if (used + need > cap) {
+                size_t want = (used + need) * 2 + 256;
+                uint8_t *grown = OPENSSL_realloc(sr, want);
+                if (!grown) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+                sr = grown; cap = want;
+            }
+            size_t got = cap - used;
+            rv = fhsm_composite_ocsp_single(&singles[i], sr + used, &got);
+            if (rv != FHSM_RV_OK) goto out;
+            used += got;
+        }
+        rv = FHSM_RV_FUNCTION_FAILED;
+        sr_seq = OPENSSL_malloc(used + 8);
+        if (!sr_seq) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        sr_seq_n = tag_wrap(0x30, sr, used, sr_seq, used + 8);
+        if (!sr_seq_n) goto out;
+    }
+
+    /* ---- tbsResponseData -------------------------------------------------- */
+    {
+        uint8_t probe[1]; size_t need = 0;
+        rv = fhsm_composite_ocsp_tbs(rid, rid_n, produced_at, produced_at_len,
+                                      sr_seq, sr_seq_n, exts, exts_len, probe, &need);
+        if (rv != FHSM_RV_BUFFER_TOO_SMALL) {
+            if (rv == FHSM_RV_OK) rv = FHSM_RV_FUNCTION_FAILED;
+            goto out;
+        }
+        tbs = OPENSSL_malloc(need);
+        if (!tbs) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        tbs_n = need;
+        rv = fhsm_composite_ocsp_tbs(rid, rid_n, produced_at, produced_at_len,
+                                      sr_seq, sr_seq_n, exts, exts_len, tbs, &tbs_n);
+        if (rv != FHSM_RV_OK) goto out;
+    }
+
+    /* ---- sign, then the BasicOCSPResponse --------------------------------
+     * certs [0] carries the responder certificate. RFC 6960 §4.2.2.2 lets a
+     * client accept a response signed by a delegate the CA designated, and it
+     * can only check that if the certificate travels with the response. For a
+     * composite responder it matters twice over: nothing else on the client's
+     * disk holds a key it can parse. */
+    sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
+    if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    {
+        size_t sl = FHSM_COMPOSITE_SIG_MAX;
+        rv = sign(sign_ctx, tbs, tbs_n, sig, &sl);
+        if (rv != FHSM_RV_OK) goto out;
+        rv = FHSM_RV_FUNCTION_FAILED;
+
+        uint8_t bs_hdr[5]; size_t bs_content = 1 + sl;
+        size_t bs_hdr_n = der_len(bs_content, bs_hdr, sizeof bs_hdr);
+        if (!bs_hdr_n) goto out;
+
+        /* certs [0] EXPLICIT SEQUENCE OF Certificate -- two wrappers, and
+         * both are needed: the inner SEQUENCE is the list, the outer tag says
+         * which optional field the list is. */
+        uint8_t inner_hdr[5], outer_hdr[5];
+        size_t inner_hdr_n = der_len(responder_cert_len, inner_hdr, sizeof inner_hdr);
+        if (!inner_hdr_n) goto out;
+        size_t inner_total = 1 + inner_hdr_n + responder_cert_len;
+        size_t outer_hdr_n = der_len(inner_total, outer_hdr, sizeof outer_hdr);
+        if (!outer_hdr_n) goto out;
+        size_t certs_total = 1 + outer_hdr_n + inner_total;
+
+        const size_t content = tbs_n + sizeof ALGID_MLDSA65_ED25519
+                             + 1 + bs_hdr_n + bs_content + certs_total;
+        uint8_t sq[5]; size_t sq_n = der_len(content, sq, sizeof sq);
+        if (!sq_n) goto out;
+
+        const size_t total = 1 + sq_n + content;
+        if (*out_len < total) { *out_len = total; rv = FHSM_RV_BUFFER_TOO_SMALL; goto out; }
+
+        uint8_t *c = out;
+        *c++ = 0x30; memcpy(c, sq, sq_n); c += sq_n;
+        memcpy(c, tbs, tbs_n); c += tbs_n;
+        memcpy(c, ALGID_MLDSA65_ED25519, sizeof ALGID_MLDSA65_ED25519);
+        c += sizeof ALGID_MLDSA65_ED25519;
+        *c++ = 0x03; memcpy(c, bs_hdr, bs_hdr_n); c += bs_hdr_n;
+        *c++ = 0x00; memcpy(c, sig, sl); c += sl;
+        *c++ = 0xA0; memcpy(c, outer_hdr, outer_hdr_n); c += outer_hdr_n;
+        *c++ = 0x30; memcpy(c, inner_hdr, inner_hdr_n); c += inner_hdr_n;
+        memcpy(c, responder_cert, responder_cert_len); c += responder_cert_len;
+
+        *out_len = (size_t)(c - out);
+        rv = (*out_len == total) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+    }
+
+out:
+    OPENSSL_free(nm); OPENSSL_free(rid);
+    OPENSSL_free(sr); OPENSSL_free(sr_seq);
+    OPENSSL_free(tbs);
+    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
+    X509_free(rc);
+    return rv;
+}
+
+/* ===========================================================================
  * CMS SignedData (RFC 5652), detached, signed attributes.
  *
  * See the header for why this is assembled by hand. In short: OpenSSL builds

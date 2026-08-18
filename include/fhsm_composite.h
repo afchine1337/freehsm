@@ -583,6 +583,97 @@ fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
                               fhsm_composite_sign_cb sign, void *sign_ctx,
                               uint8_t *out, size_t *out_len);
 
+/* ---------------------------------------------------------------------------
+ * OCSP (RFC 6960).
+ *
+ * A responder says whether one certificate is revoked, right now, signed. The
+ * CRL answers the same question for every certificate at once; OCSP answers it
+ * for one, which is what a verifier actually asked.
+ *
+ * OpenSSL cannot verify these responses -- `ASN1_item_verify_ctx: unknown
+ * signature algorithm` -- for the same reason it cannot verify our
+ * certificates, CRLs or CMS: the composite OID names an algorithm it does not
+ * implement. It parses them fine, so a third party can read the structure,
+ * including the 3-octet length a 3373-octet composite signature requires. Only
+ * the signature check needs our code.
+ *
+ * A warning for anyone scripting around `openssl ocsp`: measured on 3.5.6, the
+ * command prints `<cert>: good` on stdout even when verification failed --
+ * with an unknown algorithm, and with a deliberately corrupted Ed25519
+ * signature. The exit status is correct (0 / 1). Read the exit status; a
+ * script that greps the text accepts a forged response.
+ *
+ * --- Why the CertID arrives as bytes ---------------------------------------
+ *
+ * CertID carries a hash of the issuer name and of the issuer public key, under
+ * an algorithm the *requester* chose. RFC 6960 has the responder echo it back
+ * so the client can match the answer to its question. This encoder therefore
+ * copies those bytes and never hashes anything: a responder that recomputed
+ * the CertID would have to implement whatever the client picked, and OpenSSL's
+ * own client still picks SHA-1 by default.
+ *
+ * Deciding *which* certificate a CertID refers to does require computing that
+ * hash, and that belongs to the tool holding the revocation database, not
+ * here. Keeping it out means the module's fips-strict profile is not dragged
+ * into providing SHA-1 for an identifier.
+ * ----------------------------------------------------------------------- */
+#define FHSM_OCSP_GOOD     0
+#define FHSM_OCSP_REVOKED  1
+#define FHSM_OCSP_UNKNOWN  2
+
+typedef struct {
+    const uint8_t *cert_id;      size_t cert_id_len;      /* CertID, verbatim */
+    int            status;                                /* FHSM_OCSP_*      */
+    const uint8_t *revoked_at;   size_t revoked_at_len;   /* GeneralizedTime  */
+    int            reason;                                /* CRLReason, -1 none */
+    const uint8_t *this_upd;     size_t this_upd_len;
+    const uint8_t *next_upd;     size_t next_upd_len;     /* NULL = absent    */
+} fhsm_composite_ocsp_single_t;
+
+/* One SingleResponse. `revoked_at` is required when status is REVOKED and
+ * refused otherwise -- a revocation time on a certificate reported good is a
+ * contradiction the structure cannot express, so it is caught here rather than
+ * encoded. */
+fhsm_rv_t fhsm_composite_ocsp_single(const fhsm_composite_ocsp_single_t *s,
+                                      uint8_t *out, size_t *out_len);
+
+/* ResponseData -- the bytes the signature covers.
+ *
+ * `responder_id` is already tagged: [1] byName (0xA1) or [2] byKey (0xA2).
+ * The choice is the responder's and both are legitimate, so this encoder
+ * accepts either and checks only that one of them is what it was handed.
+ *
+ * version is omitted: v1 is the DEFAULT, and DER forbids encoding a value
+ * equal to its default. OpenSSL omits it too, which is what makes the
+ * byte-for-byte comparison in the differential test possible at all.
+ */
+fhsm_rv_t fhsm_composite_ocsp_tbs(const uint8_t *responder_id, size_t responder_id_len,
+                                   const uint8_t *produced_at,  size_t produced_at_len,
+                                   const uint8_t *responses,    size_t responses_len,
+                                   const uint8_t *exts,         size_t exts_len,
+                                   uint8_t *out, size_t *out_len);
+
+/* The complete BasicOCSPResponse: tbsResponseData, the composite
+ * AlgorithmIdentifier, the signature, and the responder certificate in
+ * certs [0] so a verifier has the key without a second lookup.
+ *
+ * The responder name is taken from `responder_cert`, which is also what signs:
+ * one certificate, one identity, no way for the two to disagree.
+ *
+ * `exts` is the responseExtensions SEQUENCE, or NULL. Its reason for existing
+ * is the nonce: RFC 8954 has the client send one and the responder echo it,
+ * and without that a recorded response can be replayed at a verifier for as
+ * long as its nextUpdate allows -- which is exactly how a revoked certificate
+ * gets accepted after revocation.
+ */
+fhsm_rv_t fhsm_composite_ocsp(fhsm_composite_alg_t alg,
+                               const uint8_t *responder_cert, size_t responder_cert_len,
+                               const uint8_t *produced_at, size_t produced_at_len,
+                               const fhsm_composite_ocsp_single_t *singles, size_t n,
+                               const uint8_t *exts, size_t exts_len,
+                               fhsm_composite_sign_cb sign, void *sign_ctx,
+                               uint8_t *out, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif

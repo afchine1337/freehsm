@@ -26,6 +26,7 @@
 #include "p11_util.h"
 
 #include <openssl/pem.h>
+#include <openssl/ocsp.h>
 
 #include <errno.h>
 #include <time.h>
@@ -281,7 +282,9 @@ static void usage(void) {
       "                 [--days N] [--out FILE] [--pem]\n"
       "  fhsm-ca revoke --db FILE --serial HEX [--reason NAME] [--date WHEN]\n"
       "  fhsm-ca crl    --label NAME --ca-cert FILE --db FILE\n"
-      "                 [--days N] [--out FILE] [--pem]\n\n"
+      "                 [--days N] [--out FILE] [--pem]\n"
+      "  fhsm-ca ocsp-respond --label NAME --ca-cert FILE --db FILE --req FILE\n"
+      "                 [--days N] [--out FILE]\n\n"
       "  --label NAME    label of the CA key inside the module\n"
       "  --ca-cert FILE  the CA's own certificate (DER or PEM)\n"
       "  --csr FILE      the request to sign (DER or PEM)\n"
@@ -298,7 +301,8 @@ static void usage(void) {
       "                  http://... or ldap://...?attribute . https is refused:\n"
       "                  fetching a CRL over TLS can require a CRL, and the list\n"
       "                  is signed, so the transport protects nothing.\n"
-      "  --days N        validity in days (issue: 365, crl: 30)\n"
+      "  --req FILE      an OCSP request in DER (ocsp-respond)\n"
+      "  --days N        validity in days (issue: 365, crl: 30, ocsp: 7)\n"
       "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n"
       "  --slot N        slot index (default 0)\n"
       "  --out FILE      output file (default stdout)\n"
@@ -308,7 +312,10 @@ static void usage(void) {
       "  `revoke` only records the revocation; it does not need the key and\n"
       "  produces nothing signed. `crl` is what signs, and it advances the\n"
       "  database's crlNumber as it goes -- so a list that has been issued is\n"
-      "  never issued again under the same number.\n");
+      "  never issued again under the same number.\n\n"
+      "  `ocsp-respond` answers one request from the same database, as a file.\n"
+      "  It echoes the client's nonce when there is one, and answers unknown --\n"
+      "  not good -- for any certificate whose issuer is not this CA.\n");
     exit(1);
 }
 
@@ -578,12 +585,286 @@ static int cmd_crl(int argc, char **argv) {
     return 0;
 }
 
+/* ===========================================================================
+ * ocsp-respond --- answer one OCSP request from the revocation database.
+ *
+ * File in, file out. No socket, no daemon: a responder that listens is a
+ * network service with its own concurrency, its own key lifetime and its own
+ * denial-of-service surface, and none of that is cryptography. This produces
+ * the signed object; publishing it is the operator's business, and a static
+ * file served over HTTP is a legitimate way to do it.
+ *
+ * --- On computing SHA-1 here ------------------------------------------------
+ *
+ * The CertID in the request carries hashes of the issuer name and issuer
+ * public key under an algorithm the *client* chose, and OpenSSL's own client
+ * still chooses SHA-1. To know which certificate is being asked about, the
+ * responder has to recompute those hashes with that same algorithm.
+ *
+ * So this tool computes SHA-1 when a client asks in SHA-1. That is not a
+ * signature: SP 800-131A withdraws SHA-1 for signature generation, not for
+ * identification, and a CertID identifies. It proves nothing about the
+ * certificate and is not relied on for anything -- the answer's integrity
+ * comes from the composite signature over the whole response.
+ *
+ * It also stays out of the module: this is OpenSSL's SHA-1, in the tool. The
+ * fips-strict profile is not asked to provide it, and does not.
+ * ========================================================================= */
+
+/* OCSPResponse ::= SEQUENCE { responseStatus ENUMERATED,
+ *                             responseBytes [0] EXPLICIT ResponseBytes OPTIONAL }
+ * Assembled here because OCSP_response_create needs an OCSP_BASICRESP, and we
+ * have bytes rather than a structure OpenSSL could have built. */
+static size_t wrap_response(const uint8_t *basic, size_t n, uint8_t *out, size_t cap)
+{
+    static const uint8_t OID_BASIC[] = {
+        0x06, 0x09, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01, 0x01
+    };
+    uint8_t oct[8], rb[8], bytes_hdr[8], outer[8];
+    size_t oct_n = 0, rb_n = 0, bytes_n = 0, outer_n = 0;
+
+#define LEN(v, buf, nn) do {                                              \
+        size_t _v = (v);                                                  \
+        if (_v < 0x80) { (buf)[0] = (uint8_t)_v; (nn) = 1; }               \
+        else if (_v <= 0xFF) { (buf)[0]=0x81; (buf)[1]=(uint8_t)_v; (nn)=2; } \
+        else if (_v <= 0xFFFF) { (buf)[0]=0x82; (buf)[1]=(uint8_t)(_v>>8); \
+                                 (buf)[2]=(uint8_t)_v; (nn)=3; }           \
+        else { (buf)[0]=0x83; (buf)[1]=(uint8_t)(_v>>16);                  \
+               (buf)[2]=(uint8_t)(_v>>8); (buf)[3]=(uint8_t)_v; (nn)=4; }  \
+    } while (0)
+
+    LEN(n, oct, oct_n);                                  /* OCTET STRING     */
+    size_t oct_total = 1 + oct_n + n;
+    size_t seq_content = sizeof OID_BASIC + oct_total;
+    LEN(seq_content, rb, rb_n);                          /* ResponseBytes    */
+    size_t rb_total = 1 + rb_n + seq_content;
+    LEN(rb_total, bytes_hdr, bytes_n);                   /* [0] EXPLICIT     */
+    size_t a0_total = 1 + bytes_n + rb_total;
+    size_t content = 3 + a0_total;                       /* ENUMERATED 0     */
+    LEN(content, outer, outer_n);
+    size_t total = 1 + outer_n + content;
+    if (cap < total) return 0;
+
+    uint8_t *c = out;
+    *c++ = 0x30; memcpy(c, outer, outer_n); c += outer_n;
+    *c++ = 0x0A; *c++ = 0x01; *c++ = 0x00;               /* successful       */
+    *c++ = 0xA0; memcpy(c, bytes_hdr, bytes_n); c += bytes_n;
+    *c++ = 0x30; memcpy(c, rb, rb_n); c += rb_n;
+    memcpy(c, OID_BASIC, sizeof OID_BASIC); c += sizeof OID_BASIC;
+    *c++ = 0x04; memcpy(c, oct, oct_n); c += oct_n;
+    memcpy(c, basic, n); c += n;
+#undef LEN
+    return (size_t)(c - out);
+}
+
+/* Compare a request serial against a database entry, ignoring leading zeros
+ * on both sides: DER adds one to keep a top-bit-set magnitude positive, and
+ * the operator typing the serial in hex will not have. */
+static int serial_eq(const uint8_t *a, size_t na, const uint8_t *b, size_t nb) {
+    while (na > 1 && a[0] == 0) { a++; na--; }
+    while (nb > 1 && b[0] == 0) { b++; nb--; }
+    return na == nb && memcmp(a, b, na) == 0;
+}
+
+static int cmd_ocsp_respond(int argc, char **argv) {
+    const char *module = "./libfreehsm-fips.so", *label = NULL;
+    const char *cacert_p = NULL, *db_p = NULL, *req_p = NULL, *out = NULL;
+    int slot = 0, days = 7;
+
+    for (int i = 2; i < argc; ++i) {
+        if      (!strcmp(argv[i],"--module")  && i+1<argc) module   = argv[++i];
+        else if (!strcmp(argv[i],"--label")   && i+1<argc) label    = argv[++i];
+        else if (!strcmp(argv[i],"--ca-cert") && i+1<argc) cacert_p = argv[++i];
+        else if (!strcmp(argv[i],"--db")      && i+1<argc) db_p     = argv[++i];
+        else if (!strcmp(argv[i],"--req")     && i+1<argc) req_p    = argv[++i];
+        else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
+        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]);
+        else if (!strncmp(argv[i],"--pin",5)) {
+            fprintf(stderr, "fhsm-ca: --pin is not accepted. Set FHSM_PIN instead:\n"
+                            "  an argument is visible in ps to every user on this machine.\n");
+            return 1;
+        }
+        else usage();
+    }
+    if (!label || !cacert_p || !db_p || !req_p) usage();
+    if (days <= 0) { fprintf(stderr, "fhsm-ca: --days must be positive.\n"); return 2; }
+
+    const char *pin = getenv("FHSM_PIN");
+    if (!pin || !*pin) { fprintf(stderr, "fhsm-ca: FHSM_PIN is not set.\n"); return 1; }
+
+    static uint8_t cabuf[262144]; size_t calen = 0;
+    { size_t n = 0; uint8_t *t = slurp(cacert_p, &n);
+      memcpy(cabuf, t, n); calen = n; }
+
+    X509 *ca = NULL;
+    { const uint8_t *p = cabuf; ca = d2i_X509(NULL, &p, (long)calen); }
+    if (!ca) { fprintf(stderr, "fhsm-ca: --ca-cert is not a certificate.\n"); return 2; }
+
+    OCSP_REQUEST *req = NULL;
+    { size_t n = 0; uint8_t *t = slurp(req_p, &n);
+      const uint8_t *p = t; req = d2i_OCSP_REQUEST(NULL, &p, (long)n); }
+    if (!req) { fprintf(stderr, "fhsm-ca: --req is not an OCSP request.\n"); return 2; }
+
+    int nreq = OCSP_request_onereq_count(req);
+    if (nreq <= 0) { fprintf(stderr, "fhsm-ca: the request asks about nothing.\n"); return 2; }
+
+    struct db d;
+    db_load(db_p, &d);
+
+    /* Times. OCSP uses GeneralizedTime throughout -- ASN1_TIME_set would give
+     * a UTCTime for any date before 2050, which is a different tag and a
+     * response no client will parse. */
+    time_t now = time(NULL);
+    ASN1_GENERALIZEDTIME *g_now = ASN1_GENERALIZEDTIME_set(NULL, now);
+    ASN1_GENERALIZEDTIME *g_nxt = ASN1_GENERALIZEDTIME_set(NULL, now + (time_t)days * 86400);
+    uint8_t *d_now = NULL, *d_nxt = NULL;
+    int n_now = i2d_ASN1_GENERALIZEDTIME(g_now, &d_now);
+    int n_nxt = i2d_ASN1_GENERALIZEDTIME(g_nxt, &d_nxt);
+    if (n_now <= 0 || n_nxt <= 0) { fprintf(stderr, "fhsm-ca: cannot encode the time.\n"); return 2; }
+
+    fhsm_composite_ocsp_single_t *singles = calloc((size_t)nreq, sizeof *singles);
+    uint8_t **cid_der = calloc((size_t)nreq, sizeof *cid_der);
+    uint8_t **rev_der = calloc((size_t)nreq, sizeof *rev_der);
+    if (!singles || !cid_der || !rev_der) { fprintf(stderr, "fhsm-ca: out of memory\n"); return 2; }
+
+    size_t n_ours = 0, n_revoked = 0, n_unknown = 0;
+    for (int i = 0; i < nreq; i++) {
+        OCSP_ONEREQ  *one = OCSP_request_onereq_get0(req, i);
+        OCSP_CERTID  *cid = OCSP_onereq_get0_id(one);
+        ASN1_OCTET_STRING *nh = NULL, *kh = NULL;
+        ASN1_INTEGER      *sn = NULL;
+        ASN1_OBJECT       *md_oid = NULL;
+
+        if (!OCSP_id_get0_info(&nh, &md_oid, &kh, &sn, cid)) {
+            fprintf(stderr, "fhsm-ca: malformed CertID in the request.\n"); return 2;
+        }
+        int len = i2d_OCSP_CERTID(cid, &cid_der[i]);
+        if (len <= 0) { fprintf(stderr, "fhsm-ca: cannot re-encode a CertID.\n"); return 2; }
+
+        singles[i].cert_id     = cid_der[i];
+        singles[i].cert_id_len = (size_t)len;
+        singles[i].this_upd    = d_now; singles[i].this_upd_len = (size_t)n_now;
+        singles[i].next_upd    = d_nxt; singles[i].next_upd_len = (size_t)n_nxt;
+        singles[i].reason      = -1;
+        singles[i].status      = FHSM_OCSP_UNKNOWN;
+
+        /* Is this question even about our CA? Rebuild the CertID we would
+         * have produced and compare. A responder that answered "good" for an
+         * issuer it knows nothing about would be asserting something it
+         * cannot know -- unknown is the honest answer and the RFC's. */
+        const EVP_MD *md = EVP_get_digestbyobj(md_oid);
+        if (!md) { n_unknown++; continue; }
+        OCSP_CERTID *mine = OCSP_cert_id_new(md, X509_get_subject_name(ca),
+                                              X509_get0_pubkey_bitstr(ca), sn);
+        int ours = mine && OCSP_id_issuer_cmp(mine, cid) == 0;
+        OCSP_CERTID_free(mine);
+        if (!ours) { n_unknown++; continue; }
+        n_ours++;
+
+        const uint8_t *sb = ASN1_STRING_get0_data(sn);
+        size_t sl = (size_t)ASN1_STRING_length(sn);
+        for (size_t k = 0; k < d.n; k++) {
+            if (!serial_eq(sb, sl, d.e[k].serial, d.e[k].serial_len)) continue;
+            int64_t t = 0;
+            (void)date_to_time(d.e[k].date, &t);          /* validated at load */
+            ASN1_GENERALIZEDTIME *gr = ASN1_GENERALIZEDTIME_set(NULL, (time_t)t);
+            int nr = gr ? i2d_ASN1_GENERALIZEDTIME(gr, &rev_der[i]) : 0;
+            ASN1_GENERALIZEDTIME_free(gr);
+            if (nr <= 0) { fprintf(stderr, "fhsm-ca: cannot encode a revocation date.\n"); return 2; }
+            singles[i].status         = FHSM_OCSP_REVOKED;
+            singles[i].revoked_at     = rev_der[i];
+            singles[i].revoked_at_len = (size_t)nr;
+            singles[i].reason         = d.e[k].reason;
+            n_revoked++;
+            break;
+        }
+        if (singles[i].status == FHSM_OCSP_UNKNOWN) singles[i].status = FHSM_OCSP_GOOD;
+    }
+
+    /* The nonce, echoed. RFC 8954: without it a recorded response can be
+     * replayed until its nextUpdate, which is precisely how a revoked
+     * certificate keeps being accepted after revocation. It is copied, never
+     * generated -- a nonce the responder chose proves nothing to the client
+     * that did not choose it. */
+    uint8_t *exts = NULL; size_t exts_len = 0;
+    {
+        int idx = OCSP_REQUEST_get_ext_by_NID(req, NID_id_pkix_OCSP_Nonce, -1);
+        if (idx >= 0) {
+            X509_EXTENSION *e = OCSP_REQUEST_get_ext(req, idx);
+            uint8_t *one = NULL;
+            int n = e ? i2d_X509_EXTENSION(e, &one) : 0;
+            if (n > 0) {
+                exts = malloc((size_t)n + 8);
+                if (!exts) { fprintf(stderr, "fhsm-ca: out of memory\n"); return 2; }
+                uint8_t hdr[4]; size_t hn;
+                if ((size_t)n < 0x80)      { hdr[0] = (uint8_t)n; hn = 1; }
+                else if (n <= 0xFF)        { hdr[0] = 0x81; hdr[1] = (uint8_t)n; hn = 2; }
+                else                       { hdr[0] = 0x82; hdr[1] = (uint8_t)(n >> 8);
+                                             hdr[2] = (uint8_t)n; hn = 3; }
+                exts[0] = 0x30; memcpy(exts + 1, hdr, hn);
+                memcpy(exts + 1 + hn, one, (size_t)n);
+                exts_len = 1 + hn + (size_t)n;
+            }
+            OPENSSL_free(one);
+        }
+    }
+
+    load_module(module);
+    CK_RV rv = p11.Initialize(NULL);
+    if (rv != CKR_OK) die("C_Initialize", rv);
+    CK_SESSION_HANDLE s = 0;
+    rv = p11.OpenSession((CK_SLOT_ID)slot, CKF_RW, NULL, NULL, &s);
+    if (rv != CKR_OK) die("C_OpenSession", rv);
+    rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
+    if (rv != CKR_OK) die("C_Login", rv);
+
+    CK_OBJECT_HANDLE hpriv = find_one(s, CKO_PRIVATE_KEY, label);
+    struct signer sg = { s, hpriv };
+
+    size_t cap = 16384 + calen + (size_t)nreq * 512 + exts_len;
+    uint8_t *basic = malloc(cap);
+    if (!basic) { fprintf(stderr, "fhsm-ca: out of memory\n"); return 2; }
+    size_t bn = cap;
+    fhsm_rv_t r = fhsm_composite_ocsp(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                       cabuf, calen, d_now, (size_t)n_now,
+                                       singles, (size_t)nreq, exts, exts_len,
+                                       p11_sign, &sg, basic, &bn);
+    if (r != FHSM_RV_OK) die("building the OCSP response", (CK_RV)r);
+
+    uint8_t *resp = malloc(bn + 64);
+    if (!resp) { fprintf(stderr, "fhsm-ca: out of memory\n"); return 2; }
+    size_t rn = wrap_response(basic, bn, resp, bn + 64);
+    if (!rn) { fprintf(stderr, "fhsm-ca: cannot wrap the response.\n"); return 2; }
+
+    FILE *f = out ? fopen(out, "wb") : stdout;
+    if (!f) { perror("fhsm-ca: open"); return 2; }
+    if (fwrite(resp, 1, rn, f) != rn) { perror("fhsm-ca: write"); return 2; }
+    if (out) fclose(f);
+
+    fprintf(stderr, "fhsm-ca: %d asked, %zu ours (%zu revoked), %zu unknown,"
+                    " valid %d days%s.\n",
+            nreq, n_ours, n_revoked, n_unknown, days,
+            exts_len ? ", nonce echoed" : ", no nonce");
+
+    for (int i = 0; i < nreq; i++) { OPENSSL_free(cid_der[i]); OPENSSL_free(rev_der[i]); }
+    free(cid_der); free(rev_der); free(singles); free(exts);
+    free(basic); free(resp); free(d.e);
+    OPENSSL_free(d_now); OPENSSL_free(d_nxt);
+    ASN1_GENERALIZEDTIME_free(g_now); ASN1_GENERALIZEDTIME_free(g_nxt);
+    OCSP_REQUEST_free(req); X509_free(ca);
+    p11.CloseSession(s);
+    p11.Finalize(NULL);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     p11_progname = "fhsm-ca";
     if (argc < 2) usage();
     if (!strcmp(argv[1], "issue"))  return cmd_issue(argc, argv);
     if (!strcmp(argv[1], "revoke")) return cmd_revoke(argc, argv);
     if (!strcmp(argv[1], "crl"))    return cmd_crl(argc, argv);
+    if (!strcmp(argv[1], "ocsp-respond")) return cmd_ocsp_respond(argc, argv);
     usage();
     return 1;
 }

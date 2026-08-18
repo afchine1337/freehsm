@@ -229,7 +229,7 @@ keys and reading a tenth that is absent is not. Whichever is chosen, the
 
 | # | Task | Effort | Status |
 |---|---|---|---|
-| #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h **+ ~8h** | 🟡 Composite ML-DSA conforming and PKCS#11-reachable; `fhsm-csr` (keygen, PKCS#10, self-signed root), `fhsm-ca issue` (proof of possession verified, CA-set extensions, random serials, `subjectAltName`, `cRLDistributionPoints` over HTTP and LDAP) and revocation (`revoke` + `crl`, hand-assembled `TBSCertList` checked byte for byte against OpenSSL) all ship — the revocation chain is now closed both in the code and to a third party, since a verifier can find the list. **Remaining: OCSP, which stays behind the network work in #111** |
+| #112 | PKI tool (`fhsm-ca`, `fhsm-csr`, cert lifecycle, OCSP) + PQC composite sigs | ~14h **+ ~8h** | 🟡 Composite ML-DSA conforming and PKCS#11-reachable; `fhsm-csr` (keygen, PKCS#10, self-signed root), `fhsm-ca issue` (proof of possession verified, CA-set extensions, random serials, `subjectAltName`, `cRLDistributionPoints` over HTTP and LDAP) and revocation (`revoke` + `crl`, hand-assembled `TBSCertList` checked byte for byte against OpenSSL) all ship — the revocation chain is now closed both in the code and to a third party, since a verifier can find the list. **OCSP ships too** (`ocsp-respond`, request file in, signed response out; `unknown` for a foreign issuer, nonce echoed per RFC 8954, checked byte for byte against OpenSSL on Ed25519). **Remaining: a delegated responder certificate, and anything that listens — both behind #111** |
 | #123 | Signing tool `fhsm-sign` L1+L2 (raw + CMS/PKCS#7), PQC-ready | ~10h | ✅ **shipped** — L1 detached raw signatures with streaming multipart, L2 detached CMS `SignedData` with signed attributes and a verifier that needs neither token nor key. Both assembled by hand where OpenSSL refuses a composite algorithm, and checked against its own output byte for byte |
 
 ### #112 — the composite signatures have to be built before the CA (2026-08-03)
@@ -258,9 +258,14 @@ nothing else can verify is worth less than no CA. So the order is:
    Appendix E test vectors remain to fetch. Roughly 8 hours, and it is the first
    thing that gets built.
 1. `fhsm-csr` and certificate issuance on top of it.
-2. Revocation, then OCSP — OCSP is a network service and #111 is deliberately
-   after the MVP, so CRL first. **CRLs now ship**; OCSP stays where it was,
-   behind the service work.
+2. Revocation, then OCSP. Both ship. OCSP was ordered behind #111 on the
+   assumption that it is a network service; it is not, or need not be. The
+   signed object is what OCSP is for, and `fhsm-ca ocsp-respond` produces it
+   from a request file. Serving it over HTTP is a separate concern that a web
+   server already solves, and keeping it separate meant OCSP did not have to
+   wait for the service work at all. **What still waits for #111 is a
+   responder that listens** — and a delegated responder certificate, which is
+   what keeps the CA key offline in a serious deployment.
 
    One thing found while building them, worth recording because it shapes any
    future structure signed with a composite algorithm: OpenSSL can be made to

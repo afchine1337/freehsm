@@ -351,6 +351,129 @@ it without guessing. The limitation stated above applies here too: OpenSSL
 parses the structure but cannot check the signature, because it has no
 implementation of Composite ML-DSA.
 
+---
+
+## OCSP
+
+A CRL answers "which certificates are revoked" for all of them at once. OCSP
+answers "is this one revoked" for the one a verifier actually asked about. Both
+read the same database.
+
+```bash
+# a verifier produces a request --- this is the client's job, not the CA's
+openssl ocsp -issuer ca.pem -cert leaf.pem -reqout req.der
+
+# the CA answers it
+fhsm-ca ocsp-respond --label ca --ca-cert ca.der --db ca.db \
+                     --req req.der --out resp.der
+```
+
+```
+fhsm-ca: 1 asked, 1 ours (1 revoked), 0 unknown, valid 7 days, nonce echoed.
+```
+
+`--days` sets `nextUpdate`, seven by default. A response is a statement with an
+expiry, not a permanent fact.
+
+### File in, file out
+
+There is no listening service. A responder that listens is a network service
+with its own concurrency, its own key lifetime and its own denial-of-service
+surface, and none of that is cryptography. `ocsp-respond` produces the signed
+object; serving it is your business, and a static file behind a web server is a
+legitimate way to do it for a small authority.
+
+### Three answers, and why `unknown` matters
+
+| Answer | When |
+|---|---|
+| `good` | the CertID names a certificate this CA issued, and the database has no revocation for that serial |
+| `revoked` | the database has an entry, with its date and reason |
+| `unknown` | the CertID names a certificate issued by somebody else |
+
+`unknown` is not an error. A responder that answered `good` for an issuer it
+knows nothing about would be asserting something it cannot know — and a
+verifier would believe it. RFC 6960 §2.2 has the same reading.
+
+To decide, the responder rebuilds the CertID it would have produced for that
+serial under this CA and compares. That means computing the hash the *client*
+chose, and OpenSSL's own client still chooses SHA-1 by default.
+
+**On that SHA-1.** It is not a signature. SP 800-131A withdraws SHA-1 for
+signature generation, not for identification, and a CertID identifies. It
+proves nothing about the certificate and nothing relies on it: the response's
+integrity comes from the composite signature over the whole of it. It is also
+OpenSSL's SHA-1, in the tool — the module's `fips-strict` profile is never
+asked for it and does not provide it.
+
+### The nonce
+
+If the request carries one, it is copied into the response. RFC 8954 exists for
+a reason: without a nonce, a recorded response can be replayed at a verifier
+until its `nextUpdate` passes, which is exactly how a revoked certificate keeps
+being accepted after revocation. The nonce is echoed, never generated — one the
+responder chose would prove nothing to the client that did not choose it.
+
+`openssl ocsp` sends a nonce unless you pass `-no_nonce`. Note that checking it
+requires giving the client the actual request:
+
+```bash
+openssl ocsp -reqin req.der -respin resp.der -resp_text -noverify
+```
+
+Without `-reqin`, the command builds a fresh request with a *new* nonce and
+then reports `Nonce Verify error` against a response that was perfectly
+correct.
+
+### What a verifier sees
+
+```
+$ openssl ocsp -respin resp.der -resp_text -noverify
+OCSP Response Status: successful (0x0)
+Response Type: Basic OCSP Response
+Produced At: Aug 18 13:17:05 2026 GMT
+Responses:
+  Certificate ID:
+    Hash Algorithm: sha1
+    Serial Number: 0324DDD0B2F325C3FFD8C8856B6061CB8C997DD1
+  Cert Status: revoked
+  Revocation Time: Aug 18 13:17:05 2026 GMT
+  Revocation Reason: keyCompromise (0x1)
+  This Update: Aug 18 13:17:05 2026 GMT
+  Next Update: Aug 25 13:17:05 2026 GMT
+Response Extensions:
+  OCSP Nonce:
+```
+
+Everything is readable. The signature is not checkable — `no signer key`,
+because OpenSSL cannot parse a composite public key, the same wall the
+certificates and the CRL run into.
+
+### A warning about scripting `openssl ocsp`
+
+Measured on OpenSSL 3.5.6: the command prints `<cert>: good` on standard output
+**even when verification failed** — with an unknown signature algorithm, and
+with a deliberately corrupted Ed25519 signature. The exit status is correct: 0
+when the signature verified, 1 when it did not.
+
+So read the exit status. A script that pipes the output through `grep good`
+accepts a forged response, and will do so silently.
+
+### Limitations
+
+**No delegated responder.** The CA's own key signs. RFC 6960 §4.2.2.2 allows a
+separate responder certificate carrying `id-kp-OCSPSigning`, which is what
+keeps the CA key offline in a serious deployment. Not implemented.
+
+**No `ocsp-verify`.** Nothing in this project verifies a composite OCSP
+response yet, and OpenSSL cannot. `fhsm-sign cms-verify` does the equivalent
+for CMS; the OCSP counterpart is not written. Until it is, a response's
+signature can be checked only by code you write against
+`fhsm_composite_verify`.
+
+**No archive cutoff, no `id-pkix-ocsp-nocheck`, no CRL entry extensions beyond
+the reason code.**
+
 **No OCSP.** Only CRLs. OCSP is a network service and belongs with the rest of
 the service work (#111), not with a set of command-line tools.
 
@@ -377,7 +500,6 @@ ignored; the CA sets `basicConstraints CA:FALSE`, `keyUsage`, and both key
 identifiers itself, so a request cannot talk the CA into issuing it a CA
 certificate. Serials are 20 random octets.
 
-Revocation and OCSP are not implemented.
 
 ---
 

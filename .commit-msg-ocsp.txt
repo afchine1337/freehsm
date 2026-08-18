@@ -1,0 +1,76 @@
+feat(ocsp): fhsm-ca ocsp-respond, and the composite BasicOCSPResponse under it
+
+A CRL answers "which certificates are revoked" for all of them at once. OCSP
+answers "is this one revoked" for the one a verifier actually asked about. Both
+read the same database.
+
+Request file in, signed response file out. There is no listening service, and
+that is what let OCSP arrive ahead of #111 rather than behind it: a responder
+that listens is a network service with its own concurrency, key lifetime and
+denial-of-service surface, and none of that is cryptography. The signed object
+is what OCSP is for; serving it is a problem a web server already solves.
+docs/ROADMAP.md is corrected accordingly -- it said OCSP was waiting on the
+service work, which turned out to be an assumption rather than a constraint.
+
+Three answers. `unknown`, not `good`, for any certificate whose issuer is not
+this CA: answering `good` for an issuer the responder knows nothing about would
+assert something it cannot know, and a verifier would believe it.
+
+The client's nonce is echoed when present (RFC 8954). Without one, a recorded
+response can be replayed at a verifier until its nextUpdate passes, which is
+exactly how a revoked certificate keeps being accepted after revocation. Echoed
+and never generated -- a nonce the responder chose proves nothing to the client
+that did not choose it.
+
+The library never hashes anything: the CertID is copied verbatim from the
+request, because RFC 6960 has the responder echo it and the hash inside it was
+the client's choice. Deciding *which* certificate that CertID names does
+require computing that hash, and OpenSSL's own client still chooses SHA-1. That
+computation lives in the tool, on OpenSSL's SHA-1, so the module's fips-strict
+profile is never asked for it. A CertID identifies; it does not sign. SP
+800-131A withdraws SHA-1 for signature generation, not for identification.
+
+--- What the differential test found ---------------------------------------
+
+tests/test_composite_ocsp.c compares our encoder against OpenSSL's on Ed25519,
+the algorithm both can produce. It found a defect on its first run.
+
+`good` and `unknown` were encoded as A0 00 and A2 00. OpenSSL writes 80 00 and
+82 00. IMPLICIT tagging replaces the tag but keeps the constructed bit of the
+type underneath -- and underneath both is NULL, which is primitive. The three
+revoked cases passed throughout, because RevokedInfo is a SEQUENCE.
+
+The wrong bytes had the right length and the right shape. They also made the
+response unreadable to every OCSP parser, including OpenSSL's: the CertStatus
+CHOICE decides on the tag, and A0 is not one of its alternatives. That was the
+second failure in the same run, and it had the same single cause.
+
+--- Measurements recorded in the code and the docs -------------------------
+
+OpenSSL parses a composite BasicOCSPResponse without complaint, including the
+3-octet length a 3373-octet signature forces. It cannot verify it -- no signer
+key, the same wall the certificates and the CRL run into.
+
+`openssl ocsp` prints `<cert>: good` on stdout even when verification failed:
+measured on 3.5.6 with an unknown algorithm and with a deliberately corrupted
+Ed25519 signature. The exit status is correct. Any script that greps the text
+instead of reading the status accepts a forged response, silently. Written down
+in docs/FHSM_CSR.md next to the command it concerns.
+
+i2d_re_X509_CRL_tbs is public; i2d_OCSP_RESPDATA is not, and OCSP_RESPDATA is
+opaque. The test therefore slices tbsResponseData out of the DER -- the first
+inner TLV, which is by construction what OpenSSL signed. No private header, no
+symbol that could vanish between releases.
+
+--- Verification -----------------------------------------------------------
+
+19 checks in the differential test, including the mutation that proves the
+comparison can fail. End to end with a real composite CA in a token: good,
+revoked with reason, unknown for a foreign issuer, and two questions in one
+request, all read back correctly by `openssl ocsp -resp_text`. 25/25 tests on
+fips-strict and on interop; all five binaries built in both. ASan clean.
+
+Not implemented, and said so in the docs: a delegated responder certificate
+(the CA's own key signs), and an ocsp-verify counterpart to `fhsm-sign
+cms-verify` -- until that exists, nothing in this project or outside it can
+check the signature on one of these responses.

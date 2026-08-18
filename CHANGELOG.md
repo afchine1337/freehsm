@@ -7,7 +7,52 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+* **OCSP (RFC 6960): `fhsm-ca ocsp-respond`.** A CRL answers "which
+  certificates are revoked" for all of them at once; OCSP answers "is this one
+  revoked" for the one a verifier asked about. Both read the same database.
+
+  Request in, signed response out. No listening service: a responder that
+  listens is a network service with its own concurrency, key lifetime and
+  denial-of-service surface, and none of that is cryptography.
+
+  `unknown` is returned -- not `good` -- for any certificate whose issuer is
+  not this CA. Answering `good` for an issuer the responder knows nothing about
+  would assert something it cannot know, and a verifier would believe it.
+
+  The client's nonce is echoed when present (RFC 8954). Without one, a recorded
+  response can be replayed until its `nextUpdate` passes, which is exactly how
+  a revoked certificate keeps being accepted after revocation. Echoed, never
+  generated: a nonce the responder chose proves nothing to the client that did
+  not choose it.
+
+  The library never hashes anything -- the CertID is copied verbatim from the
+  request. Deciding *which* certificate it names does require computing the
+  hash the client chose, and OpenSSL's client still chooses SHA-1; that
+  computation lives in the tool, using OpenSSL's SHA-1, so the module's
+  fips-strict profile is never asked to provide it. A CertID identifies, it
+  does not sign, and SP 800-131A withdraws SHA-1 for signature generation, not
+  for identification.
+
+  Verified against OpenSSL byte for byte on Ed25519, the algorithm both can
+  produce: 19 checks in `tests/test_composite_ocsp.c`, plus the mutation that
+  proves the comparison can fail. End to end with a real composite CA in a
+  token: good, revoked with reason, unknown for a foreign issuer, and two
+  questions in one request.
+
+  **The comparison earned its keep immediately.** `good` and `unknown` were
+  encoded as `A0 00` and `A2 00`. OpenSSL writes `80 00` and `82 00`: IMPLICIT
+  tagging replaces the tag but keeps the constructed bit of the type
+  underneath, and the type underneath both is NULL, which is primitive. The
+  `revoked` cases passed throughout, because `RevokedInfo` is a SEQUENCE. The
+  wrong bytes had the right length and the right shape, and made the response
+  unreadable to every OCSP parser -- the CHOICE decides on the tag, and `A0` is
+  not one of its alternatives.
+
 ### Fixed
+* **`docs/FHSM_CSR.md` said "Revocation and OCSP are not implemented".** The
+  revocation section was three hundred lines above it.
+
 * **`FHSM_RV_PIN_LEN_RANGE` was documented as `CKR_DEVICE_ERROR`.** Inserting
   the new constant pushed the trailing comment off `FHSM_RV_DEVICE_ERROR` and
   onto it, so the public header declared `0x000000A2` to be a "token hardware
