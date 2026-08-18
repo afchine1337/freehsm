@@ -1,7 +1,9 @@
-/* Combien de clients simultanes tient le module, et ou ca coince ?
+/* SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 Simorgh Labs
+ *
+ * Combien de clients simultanes tient le module, et ou ca coince ?
  * Deux modeles : une session par fil (le pool qu'un service tiendrait), et
  * une seule session partagee par tous (le cas ou le pool serait mal fait). */
-#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,7 +33,10 @@ static CK_OBJECT_HANDLE find_key(CK_SESSION_HANDLE s,const char*label){
     CK_ULONG cls=3;
     CK_ATTRIBUTE t[2]={{0,&cls,sizeof cls},{3,(void*)(size_t)label,(CK_ULONG)strlen(label)}};
     CK_OBJECT_HANDLE h=0; CK_ULONG n=0;
-    if(FOInit(s,t,2)) return 0; FO(s,&h,1,&n); FOFin(s); return n?h:0;
+    if (FOInit(s, t, 2)) return 0;
+    FO(s, &h, 1, &n);
+    FOFin(s);
+    return n ? h : 0;
 }
 
 static int K = 20;                 /* signatures par fil */
@@ -84,7 +89,8 @@ static void run(int nthreads){
     pthread_barrier_destroy(&g_bar);
 }
 
-int main(int argc,char**argv){
+int main(int argc, char **argv){
+    (void)argc;
     void*h=dlopen(argv[1],RTLD_NOW); if(!h){fprintf(stderr,"%s\n",dlerror());return 2;}
     *(void**)&Init=dlsym(h,"C_Initialize");*(void**)&Fin=dlsym(h,"C_Finalize");
     *(void**)&Open=dlsym(h,"C_OpenSession");*(void**)&Close=dlsym(h,"C_CloseSession");

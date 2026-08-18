@@ -1,4 +1,8 @@
-#define _GNU_SOURCE
+/* SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 Simorgh Labs
+ *
+ * Probe (#111). See README.md.
+ */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -9,7 +13,8 @@ static CK_RV(*Init)(void*);static CK_RV(*Open)(CK_SLOT_ID,CK_FLAGS,void*,void*,C
 static CK_RV(*Login)(CK_SESSION_HANDLE,CK_ULONG,CK_BYTE*,CK_ULONG);
 static CK_RV(*Close)(CK_SESSION_HANDLE);static CK_RV(*Fin)(void*);
 static CK_RV(*GetSI)(CK_SESSION_HANDLE,void*);
-int main(int argc,char**argv){
+int main(int argc, char **argv){
+    (void)argc;
     void*h=dlopen(argv[1],RTLD_NOW);
     *(void**)&Init=dlsym(h,"C_Initialize");*(void**)&Open=dlsym(h,"C_OpenSession");
     *(void**)&Login=dlsym(h,"C_Login");*(void**)&Close=dlsym(h,"C_CloseSession");

@@ -175,3 +175,7 @@ src/gen/.profile.stamp
 # Brouillons de messages de commit, jamais du contenu du depot.
 # Un de ces fichiers est parti dans b8ee63a faute de cette ligne.
 .commit-msg-*.txt
+
+# Sondes de mesure : les sources sont suivies, les binaires non.
+probes/*/0[0-9]_*
+!probes/*/0[0-9]_*.c

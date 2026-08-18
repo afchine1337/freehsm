@@ -1,7 +1,9 @@
-/* Les signatures produites par N fils sur UNE session sont-elles valides ?
+/* SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 Simorgh Labs
+ *
+ * Les signatures produites par N fils sur UNE session sont-elles valides ?
  * L'etat d'operation est partitionne par poignee de session ; partager une
  * poignee entre fils, c'est partager cet etat. */
-#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -42,7 +44,8 @@ static void *w(void*v){
     }
     return NULL;
 }
-int main(int argc,char**argv){
+int main(int argc, char **argv){
+    (void)argc;
     void*h=dlopen(argv[1],RTLD_NOW);
     *(void**)&Init=dlsym(h,"C_Initialize");*(void**)&Fin=dlsym(h,"C_Finalize");
     *(void**)&Open=dlsym(h,"C_OpenSession");*(void**)&Close=dlsym(h,"C_CloseSession");

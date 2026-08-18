@@ -1,4 +1,8 @@
-#define _GNU_SOURCE
+/* SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 Simorgh Labs
+ *
+ * Probe (#111). See README.md.
+ */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,7 +16,8 @@ static CK_RV (*Logout)(CK_SESSION_HANDLE); static CK_RV (*CloseSession)(CK_SESSI
 static CK_RV (*Finalize)(void*);
 static double ms(struct timespec a,struct timespec b){return (b.tv_sec-a.tv_sec)*1e3+(b.tv_nsec-a.tv_nsec)/1e6;}
 #define NOW(v) struct timespec v; clock_gettime(CLOCK_MONOTONIC,&v)
-int main(int argc,char**argv){
+int main(int argc, char **argv){
+    (void)argc;
     void*h=dlopen(argv[1],RTLD_NOW); if(!h){fprintf(stderr,"%s\n",dlerror());return 2;}
     *(void**)&Initialize=dlsym(h,"C_Initialize"); *(void**)&OpenSession=dlsym(h,"C_OpenSession");
     *(void**)&Login=dlsym(h,"C_Login"); *(void**)&Logout=dlsym(h,"C_Logout");

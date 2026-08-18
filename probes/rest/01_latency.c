@@ -1,7 +1,9 @@
-/* Combien coute une requete de signature, selon qu'on ouvre une session par
+/* SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 Simorgh Labs
+ *
+ * Combien coute une requete de signature, selon qu'on ouvre une session par
  * requete ou qu'on en garde une ouverte ? C'est le chiffre qui decide si une
  * API REST sans etat peut l'etre jusqu'au bout. */
-#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -53,6 +55,7 @@ static CK_OBJECT_HANDLE find_key(CK_SESSION_HANDLE s, const char *label) {
 }
 
 int main(int argc, char **argv) {
+    (void)argc;
     const char *mod = argc > 1 ? argv[1] : "./libfreehsm-fips.so";
     const char *label = argc > 2 ? argv[2] : "k";
     PIN = getenv("FHSM_PIN");
