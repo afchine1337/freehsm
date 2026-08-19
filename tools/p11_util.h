@@ -93,11 +93,101 @@ P11_MAYBE_UNUSED static void die(const char *what, CK_RV rv) {
     exit(2);
 }
 
+/* ---------------------------------------------------------------------------
+ * How a PKCS#11 module is actually loaded.
+ *
+ * This used to dlsym every C_* symbol by name and exit if one was missing.
+ * That works against our own module, which exports 62 of them, and against
+ * nothing else: the standard requires exactly ONE exported symbol,
+ * `C_GetFunctionList`, and most modules export only that. p11-kit-client.so
+ * exports one. So `fhsm-csr --module .../p11-kit-client.so` answered
+ * "C_Initialize missing from module" -- while the Makefile claimed the tool
+ * "drives any module implementing the mechanism, not only this one".
+ *
+ * The table's field order is fixed by PKCS#11 v2.40 §C.6, and getting an index
+ * wrong calls the wrong function silently. This project has already been bitten
+ * once (#61, C_CancelFunction missing, shifting everything after it). So the
+ * indices below are not recounted here: they are the ones assigned in
+ * src/fhsm_pkcs11.c, which were verified against OpenSC's pkcs11f.h, and
+ * tests/test_p11_loader.c asserts that both agree, pointer by pointer, on
+ * every build. A second copy of an ordering is safe only while something
+ * compares them.
+ * ------------------------------------------------------------------------- */
+enum {                          /* PKCS#11 v2.40 §C.6 slot numbers */
+    P11_SLOT_Initialize        = 0,
+    P11_SLOT_Finalize          = 1,
+    P11_SLOT_InitToken         = 9,
+    P11_SLOT_InitPIN           = 10,
+    P11_SLOT_OpenSession       = 12,
+    P11_SLOT_CloseSession      = 13,
+    P11_SLOT_GetTokenInfo      = 6,
+    P11_SLOT_Login             = 18,
+    P11_SLOT_GetAttributeValue = 24,
+    P11_SLOT_FindObjectsInit   = 26,
+    P11_SLOT_FindObjects       = 27,
+    P11_SLOT_FindObjectsFinal  = 28,
+    P11_SLOT_SignInit          = 42,
+    P11_SLOT_Sign              = 43,
+    P11_SLOT_SignUpdate        = 44,
+    P11_SLOT_SignFinal         = 45,
+    P11_SLOT_VerifyInit        = 48,
+    P11_SLOT_Verify            = 49,
+    P11_SLOT_VerifyUpdate      = 50,
+    P11_SLOT_VerifyFinal       = 51,
+    P11_SLOT_GenerateKeyPair   = 59,
+    P11_SLOT_GenerateRandom    = 64,
+    P11_SLOT_COUNT             = 68      /* C_Initialize .. C_WaitForSlotEvent */
+};
+
+struct p11_function_list {
+    unsigned char major, minor;
+    void *pfn[P11_SLOT_COUNT];
+};
+
 P11_MAYBE_UNUSED static void load_module(const char *path) {
     p11.h = dlopen(path, RTLD_NOW);
     if (!p11.h) { fprintf(stderr, "%s: cannot load %s: %s\n", p11_progname, path, dlerror()); exit(2); }
+
+    /* The conforming path first. */
+    CK_RV (*getlist)(struct p11_function_list **) = NULL;
+    *(void**)&getlist = dlsym(p11.h, "C_GetFunctionList");
+    if (getlist) {
+        struct p11_function_list *fl = NULL;
+        CK_RV rv = getlist(&fl);
+        if (rv != 0 || !fl) {
+            fprintf(stderr, "%s: C_GetFunctionList failed (0x%lx)\n",
+                    p11_progname, (unsigned long)rv);
+            exit(2);
+        }
+        #define T(f,slot) do { \
+            p11.f = (void*)0; \
+            *(void**)&p11.f = fl->pfn[slot]; \
+            if (!p11.f) { fprintf(stderr, "%s: the module leaves C_%s unimplemented\n", \
+                                   p11_progname, #f); exit(2); } } while (0)
+        T(Initialize, P11_SLOT_Initialize);   T(Finalize, P11_SLOT_Finalize);
+        T(OpenSession, P11_SLOT_OpenSession); T(CloseSession, P11_SLOT_CloseSession);
+        T(Login, P11_SLOT_Login);             T(GenerateKeyPair, P11_SLOT_GenerateKeyPair);
+        T(FindObjectsInit, P11_SLOT_FindObjectsInit);
+        T(FindObjects, P11_SLOT_FindObjects);
+        T(FindObjectsFinal, P11_SLOT_FindObjectsFinal);
+        T(GetAttributeValue, P11_SLOT_GetAttributeValue);
+        T(SignInit, P11_SLOT_SignInit);       T(Sign, P11_SLOT_Sign);
+        T(SignUpdate, P11_SLOT_SignUpdate);   T(SignFinal, P11_SLOT_SignFinal);
+        T(VerifyInit, P11_SLOT_VerifyInit);
+        T(VerifyUpdate, P11_SLOT_VerifyUpdate);
+        T(VerifyFinal, P11_SLOT_VerifyFinal);
+        T(InitToken, P11_SLOT_InitToken);     T(InitPIN, P11_SLOT_InitPIN);
+        T(GetTokenInfo, P11_SLOT_GetTokenInfo);
+        T(GenerateRandom, P11_SLOT_GenerateRandom);
+        #undef T
+        return;
+    }
+
+    /* No C_GetFunctionList. Not conforming, but some modules and test doubles
+     * export the functions directly, and refusing them buys nothing. */
     #define S(f,n) do { *(void**)&p11.f = dlsym(p11.h, n); \
-        if (!p11.f) { fprintf(stderr,"%s: %s missing from module\n", p11_progname, n); exit(2); } } while (0)
+        if (!p11.f) { fprintf(stderr,"%s: the module exports neither C_GetFunctionList nor %s\n", \
+                              p11_progname, n); exit(2); } } while (0)
     S(Initialize,"C_Initialize"); S(Finalize,"C_Finalize");
     S(OpenSession,"C_OpenSession"); S(CloseSession,"C_CloseSession");
     S(Login,"C_Login"); S(GenerateKeyPair,"C_GenerateKeyPair");

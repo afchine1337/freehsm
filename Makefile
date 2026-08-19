@@ -212,22 +212,33 @@ tools/freehsm-audit: tools/freehsm_audit.c
 	$(CC) -O2 -Wall -Wextra $(OPENSSL_CFLAGS) -o $@ $< $(OPENSSL_LDFLAGS)
 
 # fhsm-csr links only the composite encoder -- src/fhsm_composite.o stands
-# alone against libcrypto -- and loads the PKCS#11 module at runtime, so it
-# drives any module implementing the mechanism, not only this one.
-tools/fhsm-csr: tools/fhsm_csr.c $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $^ $(LDFLAGS) -ldl
+# alone against libcrypto -- and loads the PKCS#11 module at runtime through
+# C_GetFunctionList, the one symbol the standard requires.
+#
+# This comment used to claim the tool "drives any module implementing the
+# mechanism". It did not: load_module dlsym'd each C_* by name and exited if
+# one was missing, so it drove modules that export all of them -- ours -- and
+# nothing else. p11-kit-client.so exports exactly one symbol, and the tool
+# answered "C_Initialize missing from module".
+#
+# One limitation remains, and is not fixed here: --slot takes a raw
+# CK_SLOT_ID and defaults to 0. A module whose slot IDs are not small
+# integers cannot be addressed at all, because the tools never call
+# C_GetSlotList. See docs/ROADMAP.md.
+tools/fhsm-csr: tools/fhsm_csr.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
 
 # fhsm-ca signs for other people; fhsm-csr makes requests and its own root.
 # Separate binaries because they are separate authorities, usually separate
 # operators, and a single tool named for one of them would misname the other.
-tools/fhsm-ca: tools/fhsm_ca.c $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $^ $(LDFLAGS) -ldl
+tools/fhsm-ca: tools/fhsm_ca.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
 
-tools/fhsm-sign: tools/fhsm_sign.c $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $^ $(LDFLAGS) -ldl
+tools/fhsm-sign: tools/fhsm_sign.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
 
-tools/fhsm-token: tools/fhsm_token.c $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $^ $(LDFLAGS) -ldl
+tools/fhsm-token: tools/fhsm_token.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
 
 # ---------------------------------------------------------------------------
 # Code generation --- runs scripts/gen_p11_thunks.py to regenerate
@@ -428,6 +439,10 @@ tests/test_audit_backpressure: tests/test_audit_backpressure.c $(LIB_OBJ)
 tests/test_audit_verify: tests/test_audit_verify.c $(LIB_OBJ) tools/freehsm-audit
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+# -Itools: this test exercises the tools' real loader rather than a copy of it.
+tests/test_p11_loader: tests/test_p11_loader.c $(LIB)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(LDFLAGS) -ldl
+
 # Single-action driver for the real-TPM validation (#109). NOT part of `make
 # tests`: it needs a TPM, a provisioned parent handle, and a reboot between
 # phases -- see scripts/validate_tpm_sealing.sh.
@@ -522,7 +537,7 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 # beside the tokens, so any test that initialises the module writes there.
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
-tests: tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects
+tests: tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_tpm
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
@@ -541,6 +556,7 @@ tests: tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime test
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_key
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_backpressure
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_verify
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_p11_loader ./libfreehsm-fips.so
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_token_capacity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH=. ./tests/test_decrypt_null_args
