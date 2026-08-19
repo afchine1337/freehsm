@@ -8,6 +8,27 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **The tools enumerate slots instead of assuming slot 0.** `--slot` defaulted
+  to `0` and went straight to `C_OpenSession`. That is right for this module,
+  whose slots are `0..FHSM_MAX_SLOTS-1`, and wrong for every other: a
+  `CK_SLOT_ID` is an opaque identifier, not an index. Through p11-kit,
+  `C_OpenSession` answered `CKR_SLOT_ID_INVALID` for 0, 1, 2 and 3 — there was
+  no number an operator could have typed.
+
+  `p11_resolve_slot()` takes two `C_GetSlotList` enumerations — with and
+  without `tokenPresent` — and decides from the pair. `fhsm-csr`, `fhsm-ca` and
+  `fhsm-sign` require exactly one token and **refuse when there are several**,
+  listing them with their labels: picking one for the operator means signing
+  with a key they did not choose, and the mistake is invisible until someone
+  reads the certificate. `fhsm-token init` takes the lowest empty slot, which
+  is a guess whose worst case initialises nothing; when every slot is taken it
+  refuses. `fhsm-token info` is read-only and prints the slot it read.
+
+  `--slot` is now validated: `atoi` answered `0` for `abc`, and `0` used to be
+  the default, so a typo silently addressed slot 0.
+
+  `--slot N` naming a slot with no token now says so, rather than passing the
+  value through to a bare `CKR_SLOT_ID_INVALID`.
 * **The audit log is written.** `C_Initialize` opens it; the manuals had told
   the Security Officer to review it weekly since before v1.0. It lives at
   `{tokens_dir}/audit.log`, or wherever `FHSM_AUDIT_LOG` points.
@@ -38,6 +59,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **The five REST probes segfaulted against any conforming module.** They
+  dlsym'd each `C_*` by name and called whatever came back, so
+  `p11-kit-client.so` — which exports exactly one symbol, the only one PKCS#11
+  requires — produced a null-pointer call rather than a diagnostic. The four
+  tools carried the same defect and were fixed first; the probes were left
+  behind, and the first attempt to run `03_login_shared` through a `p11-kit
+  server` found it. They now share `probes/rest/p11_probe.h`, which loads
+  through `C_GetFunctionList` and enumerates the slot, and the probes'
+  Makefile names that header as a prerequisite — the omission of exactly that
+  line in the top-level Makefile is what made the tools' fix look inert.
+
 * **Five `fhsm_audit_event()` call sites were malformed, and none had ever
   run.** The dead guard did not merely make the log inert — it returned before
   the function read its arguments. One site passed an `int` where a `char *`

@@ -50,7 +50,7 @@ static void usage(void) {
       "  --cert FILE     the signer's certificate (DER or PEM), for cms\n"
       "  --cms FILE      the CMS structure to check\n"
       "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n"
-      "  --slot N        slot index (default 0)\n\n"
+      "  --slot N        slot to address. Default: the one slot holding a token.\n\n"
       "  The PIN is read from FHSM_PIN. There is no --pin option: an argument\n"
       "  is visible in ps to every user on the machine.\n\n"
       "  The signature is raw and detached -- the bytes, nothing around them.\n"
@@ -97,27 +97,28 @@ static void stream_into(FILE *in, CK_SESSION_HANDLE s, int verifying) {
 
 /* Open a session and log in. Shared so the two subcommands cannot drift on
  * the PIN policy. */
-static CK_SESSION_HANDLE open_session(const char *module, int slot) {
+static CK_SESSION_HANDLE open_session(const char *module, long slot) {
     const char *pin = getenv("FHSM_PIN");
     if (!pin || !*pin) { fprintf(stderr, "fhsm-sign: FHSM_PIN is not set.\n"); exit(1); }
     load_module(module);
     CK_RV rv = p11.Initialize(NULL);
     if (rv != CKR_OK) die("C_Initialize", rv);
     CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession((CK_SLOT_ID)slot, CKF_RW, NULL, NULL, &s);
+    rv = p11.OpenSession(p11_resolve_slot(slot, P11_SLOT_WITH_TOKEN),
+                          CKF_RW, NULL, NULL, &s);
     if (rv != CKR_OK) die("C_OpenSession", rv);
     rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
     if (rv != CKR_OK) die("C_Login", rv);
     return s;
 }
 
-struct opts { const char *module, *label, *in, *out, *sig, *cert, *cms; int slot; };
+struct opts { const char *module, *label, *in, *out, *sig, *cert, *cms; long slot; };
 
 static struct opts parse(int argc, char **argv) {
     struct opts o;
     o.module = "./libfreehsm-fips.so";
     o.label = o.in = o.out = o.sig = o.cert = o.cms = NULL;
-    o.slot = 0;
+    o.slot = -1;
     for (int i = 2; i < argc; ++i) {
         if      (!strcmp(argv[i],"--module") && i+1<argc) o.module = argv[++i];
         else if (!strcmp(argv[i],"--label")  && i+1<argc) o.label  = argv[++i];
@@ -126,7 +127,7 @@ static struct opts parse(int argc, char **argv) {
         else if (!strcmp(argv[i],"--sig")    && i+1<argc) o.sig    = argv[++i];
         else if (!strcmp(argv[i],"--cert")   && i+1<argc) o.cert   = argv[++i];
         else if (!strcmp(argv[i],"--cms")    && i+1<argc) o.cms    = argv[++i];
-        else if (!strcmp(argv[i],"--slot")   && i+1<argc) o.slot   = atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")   && i+1<argc) o.slot   = p11_slot_arg(argv[++i]);
         else if (!strncmp(argv[i],"--pin",5)) {
             fprintf(stderr, "fhsm-sign: --pin is not accepted. Set FHSM_PIN instead:\n"
                             "  an argument is visible in ps to every user on this machine.\n");

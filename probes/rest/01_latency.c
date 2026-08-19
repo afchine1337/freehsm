@@ -4,34 +4,9 @@
  * What does one signature request cost, opening a session per request versus
  * keeping one warm? That is the number that decides whether a stateless REST
  * API can be stateless all the way down. */
-#include <dlfcn.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+#include "p11_probe.h"
 #include <time.h>
 #include <pthread.h>
-
-typedef unsigned long CK_ULONG; typedef unsigned char CK_BYTE;
-typedef CK_ULONG CK_RV, CK_SLOT_ID, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_FLAGS;
-typedef struct { CK_ULONG mechanism; void *p; CK_ULONG len; } CK_MECHANISM;
-typedef struct { CK_ULONG type; void *pValue; CK_ULONG ulValueLen; } CK_ATTRIBUTE;
-
-static struct {
-    CK_RV (*Initialize)(void*);
-    CK_RV (*Finalize)(void*);
-    CK_RV (*OpenSession)(CK_SLOT_ID, CK_FLAGS, void*, void*, CK_SESSION_HANDLE*);
-    CK_RV (*CloseSession)(CK_SESSION_HANDLE);
-    CK_RV (*Login)(CK_SESSION_HANDLE, CK_ULONG, CK_BYTE*, CK_ULONG);
-    CK_RV (*Logout)(CK_SESSION_HANDLE);
-    CK_RV (*FindObjectsInit)(CK_SESSION_HANDLE, CK_ATTRIBUTE*, CK_ULONG);
-    CK_RV (*FindObjects)(CK_SESSION_HANDLE, CK_OBJECT_HANDLE*, CK_ULONG, CK_ULONG*);
-    CK_RV (*FindObjectsFinal)(CK_SESSION_HANDLE);
-    CK_RV (*SignInit)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE);
-    CK_RV (*Sign)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG, CK_BYTE*, CK_ULONG*);
-} p11;
-
-#define SYM(n) do { *(void**)(&p11.n) = dlsym(h, "C_" #n); \
-                    if (!p11.n) { fprintf(stderr, "C_" #n " absent\n"); exit(2);} } while(0)
 
 static double ms(struct timespec a, struct timespec b) {
     return (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6;
@@ -59,14 +34,12 @@ int main(int argc, char **argv) {
     const char *mod = argc > 1 ? argv[1] : "./libfreehsm-fips.so";
     const char *label = argc > 2 ? argv[2] : "k";
     PIN = getenv("FHSM_PIN");
-    void *h = dlopen(mod, RTLD_NOW);
-    if (!h) { fprintf(stderr, "%s\n", dlerror()); return 2; }
-    SYM(Initialize); SYM(Finalize); SYM(OpenSession); SYM(CloseSession);
-    SYM(Login); SYM(Logout); SYM(FindObjectsInit); SYM(FindObjects);
-    SYM(FindObjectsFinal); SYM(SignInit); SYM(Sign);
+    probe_load(mod);
 
     NOW(t0); if (p11.Initialize(NULL)) { fprintf(stderr,"init\n"); return 2; } NOW(t1);
     printf("  C_Initialize .............. %8.2f ms  (once per process)\n", ms(t0,t1));
+
+    CK_SLOT_ID slot = probe_slot();
 
     CK_BYTE data[32]; memset(data, 0x5A, sizeof data);
     static CK_BYTE sig[8192];
@@ -76,7 +49,7 @@ int main(int argc, char **argv) {
     const int N = 5;
     for (int i = 0; i < N; i++) {
         CK_SESSION_HANDLE s = 0;
-        NOW(a); p11.OpenSession(0, 6, NULL, NULL, &s); NOW(b);
+        NOW(a); p11.OpenSession(slot, 6, NULL, NULL, &s); NOW(b);
         p11.Logout(s); p11.Login(s, 1, (CK_BYTE*)(size_t)PIN, (CK_ULONG)strlen(PIN)); NOW(c);
         CK_OBJECT_HANDLE k = find_key(s, label); NOW(d);
         CK_MECHANISM m = { CKM_COMPOSITE, NULL, 0 };
@@ -99,7 +72,7 @@ int main(int argc, char **argv) {
     /* --- the path with a session kept open ---------------------------- */
     {
         CK_SESSION_HANDLE s = 0;
-        p11.OpenSession(0, 6, NULL, NULL, &s);
+        p11.OpenSession(slot, 6, NULL, NULL, &s);
         p11.Login(s, 1, (CK_BYTE*)(size_t)PIN, (CK_ULONG)strlen(PIN));
         CK_OBJECT_HANDLE k = find_key(s, label);
         CK_MECHANISM m = { CKM_COMPOSITE, NULL, 0 };

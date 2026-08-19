@@ -87,6 +87,22 @@ states worth knowing before anything else fails:
 * **locked** — shown only when the SO or user PIN has been locked out by
   failed attempts
 
+### Which slot
+
+`--slot` takes a `CK_SLOT_ID` as the module reports it through
+`C_GetSlotList`, not a position in a list. Omitted, the tools enumerate:
+
+* `fhsm-csr`, `fhsm-ca`, `fhsm-sign` use the slot holding a token, and
+  **refuse when several do**, listing them with their labels. Signing with a
+  key the operator did not choose is invisible until someone reads the
+  certificate.
+* `fhsm-token init` takes the lowest slot with no token. Where every slot
+  holds one it refuses, since any choice would destroy keys.
+* `fhsm-token info` prints the slot it read.
+
+So on a module with one token, `--slot` is never needed; on one with several,
+it is compulsory and the refusal tells you the values to choose from.
+
 A blank slot reports `initialised: no` rather than an error. That is
 deliberate on the module's side too: applications call `C_GetTokenInfo` before
 `C_InitToken` to discover whether a slot needs provisioning, so returning

@@ -19,6 +19,7 @@
 #include "fhsm_composite.h"
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,6 +80,7 @@ static struct {
     CK_RV (*InitPIN)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
     CK_RV (*GetTokenInfo)(CK_SLOT_ID,void*);
     CK_RV (*GenerateRandom)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
+    CK_RV (*GetSlotList)(unsigned char,CK_SLOT_ID*,CK_ULONG*);
 } p11;
 
 /* Set by each tool before anything can fail. Extracting this header from
@@ -116,6 +118,7 @@ P11_MAYBE_UNUSED static void die(const char *what, CK_RV rv) {
 enum {                          /* PKCS#11 v2.40 §C.6 slot numbers */
     P11_SLOT_Initialize        = 0,
     P11_SLOT_Finalize          = 1,
+    P11_SLOT_GetSlotList       = 4,
     P11_SLOT_InitToken         = 9,
     P11_SLOT_InitPIN           = 10,
     P11_SLOT_OpenSession       = 12,
@@ -179,6 +182,7 @@ P11_MAYBE_UNUSED static void load_module(const char *path) {
         T(InitToken, P11_SLOT_InitToken);     T(InitPIN, P11_SLOT_InitPIN);
         T(GetTokenInfo, P11_SLOT_GetTokenInfo);
         T(GenerateRandom, P11_SLOT_GenerateRandom);
+        T(GetSlotList, P11_SLOT_GetSlotList);
         #undef T
         return;
     }
@@ -201,6 +205,7 @@ P11_MAYBE_UNUSED static void load_module(const char *path) {
     S(InitToken,"C_InitToken"); S(InitPIN,"C_InitPIN");
     S(GetTokenInfo,"C_GetTokenInfo");
     S(GenerateRandom,"C_GenerateRandom");
+    S(GetSlotList,"C_GetSlotList");
     #undef S
 }
 
@@ -252,6 +257,204 @@ static fhsm_rv_t p11_rng(void *vctx, uint8_t *out, size_t n) {
     if (!s || !out) return FHSM_RV_ARGUMENTS_BAD;
     CK_RV rv = p11.GenerateRandom(*s, out, (CK_ULONG)n);
     return (rv == CKR_OK) ? FHSM_RV_OK : (fhsm_rv_t)rv;
+}
+
+/* ---------------------------------------------------------------------------
+ * Which slot holds the token.
+ *
+ * `--slot` used to default to 0 and go straight to C_OpenSession. That is
+ * right for our own module, whose slots are 0..FHSM_MAX_SLOTS-1, and wrong
+ * everywhere else: a CK_SLOT_ID is an opaque identifier, not an index. Through
+ * p11-kit, C_OpenSession answered CKR_SLOT_ID_INVALID for 0, 1, 2 and 3 --
+ * there was no number the operator could have typed.
+ *
+ * So: enumerate. C_GetSlotList's two-call convention returns however many
+ * there are, which is what a bound-free implementation needs -- four today,
+ * eight tomorrow, whatever a smart-card reader or a remote module reports.
+ *
+ * Two enumerations, not one: tokenPresent=1 gives the slots that hold a token,
+ * tokenPresent=0 gives every slot. Every rule below is a set operation on
+ * those two, so nothing here needs C_GetTokenInfo to decide -- only to print.
+ *
+ *   --slot given : the value must appear in the full enumeration. If it does
+ *                  not, say what does rather than pass it through to a bare
+ *                  CKR_SLOT_ID_INVALID.
+ *
+ *   --slot absent : the default depends on what the tool is about to do, which
+ *                   is why the intent is a parameter and not a boolean.
+ *
+ * P11_SLOT_WITH_TOKEN -- fhsm-csr, fhsm-ca, fhsm-sign. Exactly one token, or
+ * refuse and list them with their labels. Refusing on ambiguity rather than
+ * taking the first is deliberate: picking one of several tokens for the
+ * operator means signing with a key they did not choose, and the mistake is
+ * invisible until someone reads the certificate.
+ *
+ * P11_SLOT_FOR_INIT -- `fhsm-token init`, which addresses a slot precisely
+ * because it has no token yet. Asking for tokenPresent there would hide every
+ * slot the operator is allowed to initialise. The lowest EMPTY slot is chosen,
+ * which is a guess -- but a guess whose worst case is initialising an empty
+ * slot, and that destroys nothing. When every slot holds a token there is no
+ * harmless choice left, so it refuses.
+ *
+ * P11_SLOT_ANY -- `fhsm-token info`, which is read-only and prints the slot it
+ * read. One token -> that one; several -> refuse, because "info" on the wrong
+ * token is how an operator concludes a key is missing; no token at all -> the
+ * lowest slot, so that info can answer "not initialised" instead of failing.
+ * ------------------------------------------------------------------------- */
+enum p11_slot_intent {
+    P11_SLOT_WITH_TOKEN,
+    P11_SLOT_FOR_INIT,
+    P11_SLOT_ANY
+};
+P11_MAYBE_UNUSED
+static void p11_label_of(CK_SLOT_ID id, char out[33]) {
+    /* CK_TOKEN_INFO opens with label[32], blank-padded, not NUL-terminated.
+     * Reading the first 32 bytes needs no struct definition, which keeps a
+     * third copy of the layout out of this header. */
+    unsigned char ti[1024];
+    memset(ti, 0, sizeof ti);
+    memset(out, 0, 33);
+    if (!p11.GetTokenInfo || p11.GetTokenInfo(id, ti) != CKR_OK) {
+        snprintf(out, 33, "(unreadable)");
+        return;
+    }
+    memcpy(out, ti, 32);
+    for (int i = 31; i >= 0 && (out[i] == ' ' || out[i] == '\0'); i--) out[i] = '\0';
+    if (!out[0]) snprintf(out, 33, "(no label)");
+}
+
+/* `--slot` used to go through atoi, which answers 0 for "abc", for "" and for
+ * an overflowing number -- and 0 used to be the default, so a typo addressed
+ * slot 0 silently. Now that a slot is chosen by enumeration, an unparseable
+ * one has to be a refusal rather than a fallback. */
+P11_MAYBE_UNUSED
+static long p11_slot_arg(const char *s) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno || !*s || *end || v < 0) {
+        fprintf(stderr, "%s: --slot %s is not a slot identifier.\n", p11_progname, s);
+        exit(1);
+    }
+    return v;
+}
+
+/* One enumeration. `ids` is owned by the caller. */
+static CK_SLOT_ID *p11_enumerate(int token_present, CK_ULONG *out_n) {
+    CK_ULONG n = 0;
+    CK_RV rv = p11.GetSlotList((unsigned char)(token_present ? 1 : 0), NULL, &n);
+    if (rv != CKR_OK) die("C_GetSlotList", rv);
+    *out_n = n;
+    if (n == 0) return NULL;
+    CK_SLOT_ID *ids = calloc(n, sizeof *ids);
+    if (!ids) { fprintf(stderr, "%s: out of memory\n", p11_progname); exit(2); }
+    rv = p11.GetSlotList((unsigned char)(token_present ? 1 : 0), ids, &n);
+    /* n can only have shrunk between the two calls if a reader was removed;
+     * trust the second answer, which is the one describing the buffer. */
+    if (rv != CKR_OK) { free(ids); die("C_GetSlotList", rv); }
+    *out_n = n;
+    return ids;
+}
+
+static void p11_list_slots(FILE *f, const CK_SLOT_ID *ids, CK_ULONG n) {
+    for (CK_ULONG i = 0; i < n; i++) {
+        char lbl[33]; p11_label_of(ids[i], lbl);
+        fprintf(f, "    --slot %lu   %s\n", (unsigned long)ids[i], lbl);
+    }
+}
+
+/* `want` is the value of --slot, or -1 when the operator did not give one.
+ * Exits with a diagnostic rather than returning an error: every caller would
+ * do the same, and four copies of the same message is how they drift. */
+P11_MAYBE_UNUSED
+static CK_SLOT_ID p11_resolve_slot(long want, enum p11_slot_intent intent) {
+    CK_ULONG n_all = 0, n_tok = 0;
+    CK_SLOT_ID *all = p11_enumerate(0, &n_all);
+    CK_SLOT_ID *tok = p11_enumerate(1, &n_tok);
+    CK_SLOT_ID chosen = 0;
+
+    if (n_all == 0) {
+        fprintf(stderr, "%s: the module reports no slot at all.\n", p11_progname);
+        exit(3);
+    }
+
+    /* --slot given: it must exist. Checked against the full list even for the
+     * signing tools -- "slot 2 holds no token" is a better answer than "no
+     * slot 2", and the operator learns which of the two mistakes they made. */
+    if (want >= 0) {
+        int exists = 0, has_token = 0;
+        for (CK_ULONG i = 0; i < n_all; i++) if (all[i] == (CK_SLOT_ID)want) exists = 1;
+        for (CK_ULONG i = 0; i < n_tok; i++) if (tok[i] == (CK_SLOT_ID)want) has_token = 1;
+        if (!exists) {
+            fprintf(stderr, "%s: no slot %ld on this module. Available:\n",
+                    p11_progname, want);
+            p11_list_slots(stderr, all, n_all);
+            exit(3);
+        }
+        if (intent == P11_SLOT_WITH_TOKEN && !has_token) {
+            fprintf(stderr, "%s: slot %ld holds no initialised token.\n"
+                            "  `fhsm-token init --slot %ld` creates one.\n",
+                    p11_progname, want, want);
+            if (n_tok) {
+                fprintf(stderr, "  Slots that do hold one:\n");
+                p11_list_slots(stderr, tok, n_tok);
+            }
+            exit(3);
+        }
+        chosen = (CK_SLOT_ID)want;
+        goto done;
+    }
+
+    switch (intent) {
+    case P11_SLOT_WITH_TOKEN:
+        if (n_tok == 0) {
+            fprintf(stderr, "%s: no slot on this module holds an initialised token.\n"
+                            "  `fhsm-token init` creates one.\n", p11_progname);
+            exit(3);
+        }
+        if (n_tok > 1) {
+            fprintf(stderr, "%s: %lu slots hold a token; name one with --slot:\n",
+                    p11_progname, (unsigned long)n_tok);
+            p11_list_slots(stderr, tok, n_tok);
+            exit(3);
+        }
+        chosen = tok[0];
+        break;
+
+    case P11_SLOT_FOR_INIT: {
+        /* The lowest slot that holds nothing. */
+        int found = 0;
+        for (CK_ULONG i = 0; i < n_all && !found; i++) {
+            int taken = 0;
+            for (CK_ULONG k = 0; k < n_tok; k++) if (tok[k] == all[i]) taken = 1;
+            if (!taken) { chosen = all[i]; found = 1; }
+        }
+        if (!found) {
+            fprintf(stderr, "%s: every slot already holds a token, so there is no\n"
+                            "  empty one to initialise. Name the slot to re-initialise\n"
+                            "  with --slot, and note that doing so DESTROYS its keys:\n",
+                    p11_progname);
+            p11_list_slots(stderr, all, n_all);
+            exit(3);
+        }
+        break;
+    }
+
+    case P11_SLOT_ANY:
+        if (n_tok == 1) { chosen = tok[0]; break; }
+        if (n_tok > 1) {
+            fprintf(stderr, "%s: %lu slots hold a token; name one with --slot:\n",
+                    p11_progname, (unsigned long)n_tok);
+            p11_list_slots(stderr, tok, n_tok);
+            exit(3);
+        }
+        chosen = all[0];        /* none initialised: report on the first */
+        break;
+    }
+
+done:
+    free(all); free(tok);
+    return chosen;
 }
 
 #endif /* FHSM_TOOLS_P11_UTIL_H */

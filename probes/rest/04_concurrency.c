@@ -4,27 +4,10 @@
  * How many concurrent clients does the module take, and where does it bind?
  * Two models: one session per thread (the pool a service would hold), and one
  * session shared by all of them (the pool done wrong). */
-#include <dlfcn.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+#include "p11_probe.h"
 #include <time.h>
 #include <pthread.h>
 
-typedef unsigned long CK_ULONG; typedef unsigned char CK_BYTE;
-typedef CK_ULONG CK_RV,CK_SLOT_ID,CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_FLAGS;
-typedef struct { CK_ULONG mechanism; void*p; CK_ULONG len; } CK_MECHANISM;
-typedef struct { CK_ULONG type; void*pValue; CK_ULONG ulValueLen; } CK_ATTRIBUTE;
-
-static CK_RV(*Init)(void*); static CK_RV(*Fin)(void*);
-static CK_RV(*Open)(CK_SLOT_ID,CK_FLAGS,void*,void*,CK_SESSION_HANDLE*);
-static CK_RV(*Close)(CK_SESSION_HANDLE);
-static CK_RV(*Login)(CK_SESSION_HANDLE,CK_ULONG,CK_BYTE*,CK_ULONG);
-static CK_RV(*FOInit)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
-static CK_RV(*FO)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE*,CK_ULONG,CK_ULONG*);
-static CK_RV(*FOFin)(CK_SESSION_HANDLE);
-static CK_RV(*SignInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
-static CK_RV(*Sign)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
 
 static double ms(struct timespec a,struct timespec b){return (b.tv_sec-a.tv_sec)*1e3+(b.tv_nsec-a.tv_nsec)/1e6;}
 #define NOW(v) struct timespec v; clock_gettime(CLOCK_MONOTONIC,&v)
@@ -33,9 +16,9 @@ static CK_OBJECT_HANDLE find_key(CK_SESSION_HANDLE s,const char*label){
     CK_ULONG cls=3;
     CK_ATTRIBUTE t[2]={{0,&cls,sizeof cls},{3,(void*)(size_t)label,(CK_ULONG)strlen(label)}};
     CK_OBJECT_HANDLE h=0; CK_ULONG n=0;
-    if (FOInit(s, t, 2)) return 0;
-    FO(s, &h, 1, &n);
-    FOFin(s);
+    if (p11.FindObjectsInit(s, t, 2)) return 0;
+    p11.FindObjects(s, &h, 1, &n);
+    p11.FindObjectsFinal(s);
     return n ? h : 0;
 }
 
@@ -45,6 +28,7 @@ static CK_SESSION_HANDLE g_shared = 0;
 static CK_OBJECT_HANDLE  g_key = 0;
 static const char *g_pin, *g_label;
 static pthread_barrier_t g_bar;
+static CK_SLOT_ID g_slot;
 static double *g_lat;              /* every latency, for the percentiles */
 
 typedef struct { int id; } arg_t;
@@ -54,8 +38,8 @@ static void *worker(void *v){
     CK_SESSION_HANDLE s = g_shared;
     CK_OBJECT_HANDLE k = g_key;
     if (!shared_mode) {
-        Open(0,6,NULL,NULL,&s);
-        Login(s,1,(CK_BYTE*)(size_t)g_pin,(CK_ULONG)strlen(g_pin));
+        p11.OpenSession(g_slot,6,NULL,NULL,&s);
+        p11.Login(s,1,(CK_BYTE*)(size_t)g_pin,(CK_ULONG)strlen(g_pin));
         k = find_key(s,g_label);
     }
     CK_BYTE data[32]; memset(data,0x5A,sizeof data);
@@ -63,10 +47,10 @@ static void *worker(void *v){
     pthread_barrier_wait(&g_bar);
     for (int i=0;i<K;i++){
         CK_MECHANISM m={0x80004202,NULL,0}; CK_ULONG sl=sizeof sig;
-        NOW(x); SignInit(s,&m,k); Sign(s,data,sizeof data,sig,&sl); NOW(y);
+        NOW(x); p11.SignInit(s,&m,k); p11.Sign(s,data,sizeof data,sig,&sl); NOW(y);
         g_lat[a->id*K+i]=ms(x,y);
     }
-    if(!shared_mode) Close(s);
+    if(!shared_mode) p11.CloseSession(s);
     return NULL;
 }
 
@@ -91,16 +75,12 @@ static void run(int nthreads){
 
 int main(int argc, char **argv){
     (void)argc;
-    void*h=dlopen(argv[1],RTLD_NOW); if(!h){fprintf(stderr,"%s\n",dlerror());return 2;}
-    *(void**)&Init=dlsym(h,"C_Initialize");*(void**)&Fin=dlsym(h,"C_Finalize");
-    *(void**)&Open=dlsym(h,"C_OpenSession");*(void**)&Close=dlsym(h,"C_CloseSession");
-    *(void**)&Login=dlsym(h,"C_Login");*(void**)&FOInit=dlsym(h,"C_FindObjectsInit");
-    *(void**)&FO=dlsym(h,"C_FindObjects");*(void**)&FOFin=dlsym(h,"C_FindObjectsFinal");
-    *(void**)&SignInit=dlsym(h,"C_SignInit");*(void**)&Sign=dlsym(h,"C_Sign");
+    probe_load(argv[1]);
     g_pin=getenv("FHSM_PIN"); g_label=argv[2];
-    Init(NULL);
-    Open(0,6,NULL,NULL,&g_shared);
-    Login(g_shared,1,(CK_BYTE*)(size_t)g_pin,(CK_ULONG)strlen(g_pin));
+    p11.Initialize(NULL);
+    g_slot=probe_slot();
+    p11.OpenSession(g_slot,6,NULL,NULL,&g_shared);
+    p11.Login(g_shared,1,(CK_BYTE*)(size_t)g_pin,(CK_ULONG)strlen(g_pin));
     g_key=find_key(g_shared,g_label);
 
     printf("\n  One session per thread (the pool a service would hold):\n");
@@ -111,5 +91,5 @@ int main(int argc, char **argv){
     shared_mode=1;
     for(int n=1;n<=8;n*=2) run(n);
 
-    Close(g_shared); Fin(NULL); return 0;
+    p11.CloseSession(g_shared); p11.Finalize(NULL); return 0;
 }

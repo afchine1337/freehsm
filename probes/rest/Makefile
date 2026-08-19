@@ -16,6 +16,11 @@ PROBES = 01_latency 02_login_cost 03_login_shared 04_concurrency 05_session_race
 
 all: $(PROBES)
 
+# Named as a prerequisite because the loader lives there. The same omission in
+# the top-level Makefile made a fix to tools/p11_util.h look as though it had
+# not worked: the tools were never relinked.
+$(PROBES): p11_probe.h
+
 %: %.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
 

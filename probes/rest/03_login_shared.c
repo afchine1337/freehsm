@@ -3,35 +3,25 @@
  *
  * Probe (#111). See README.md.
  */
-#include <dlfcn.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-typedef unsigned long CK_ULONG; typedef unsigned char CK_BYTE;
-typedef CK_ULONG CK_RV,CK_SLOT_ID,CK_SESSION_HANDLE,CK_FLAGS;
-static CK_RV(*Init)(void*);static CK_RV(*Open)(CK_SLOT_ID,CK_FLAGS,void*,void*,CK_SESSION_HANDLE*);
-static CK_RV(*Login)(CK_SESSION_HANDLE,CK_ULONG,CK_BYTE*,CK_ULONG);
-static CK_RV(*Close)(CK_SESSION_HANDLE);static CK_RV(*Fin)(void*);
-static CK_RV(*GetSI)(CK_SESSION_HANDLE,void*);
+#include "p11_probe.h"
+
 int main(int argc, char **argv){
     (void)argc;
-    void*h=dlopen(argv[1],RTLD_NOW);
-    *(void**)&Init=dlsym(h,"C_Initialize");*(void**)&Open=dlsym(h,"C_OpenSession");
-    *(void**)&Login=dlsym(h,"C_Login");*(void**)&Close=dlsym(h,"C_CloseSession");
-    *(void**)&Fin=dlsym(h,"C_Finalize");*(void**)&GetSI=dlsym(h,"C_GetSessionInfo");
+    probe_load(argv[1]);
     const char*pin=getenv("FHSM_PIN");
-    Init(NULL);
+    p11.Initialize(NULL);
+    CK_SLOT_ID slot=probe_slot();
     CK_SESSION_HANDLE a=0,b=0;
-    Open(0,6,NULL,NULL,&a);
-    printf("  session A : C_Login -> 0x%lx\n", Login(a,1,(CK_BYTE*)(size_t)pin,strlen(pin)));
+    p11.OpenSession(slot,6,NULL,NULL,&a);
+    printf("  session A : C_Login -> 0x%lx\n", p11.Login(a,1,(CK_BYTE*)(size_t)pin,strlen(pin)));
     /* a SECOND session, as a second REST request would open */
-    Open(0,6,NULL,NULL,&b);
+    p11.OpenSession(slot,6,NULL,NULL,&b);
     printf("  session B : C_Login -> 0x%lx   (0x100 = CKR_USER_ALREADY_LOGGED_IN)\n",
-           Login(b,1,(CK_BYTE*)(size_t)pin,strlen(pin)));
+           p11.Login(b,1,(CK_BYTE*)(size_t)pin,strlen(pin)));
     /* Did B inherit A's role without having proved anything? */
     struct { CK_ULONG slot, state, flags, err; } si;
     memset(&si,0,sizeof si);
-    if (GetSI && GetSI(b,&si)==0)
+    if (p11.GetSessionInfo && p11.GetSessionInfo(b,&si)==0)
         printf("  session B : state=%lu  (3 or 4 = logged in as USER)\n", si.state);
-    Close(a); Close(b); Fin(NULL); return 0;
+    p11.CloseSession(a); p11.CloseSession(b); p11.Finalize(NULL); return 0;
 }

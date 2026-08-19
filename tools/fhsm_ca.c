@@ -304,7 +304,7 @@ static void usage(void) {
       "  --req FILE      an OCSP request in DER (ocsp-respond)\n"
       "  --days N        validity in days (issue: 365, crl: 30, ocsp: 7)\n"
       "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n"
-      "  --slot N        slot index (default 0)\n"
+      "  --slot N        slot to address. Default: the one slot holding a token.\n"
       "  --out FILE      output file (default stdout)\n"
       "  --pem           PEM instead of DER\n\n"
       "  The PIN is read from FHSM_PIN. There is no --pin option: an argument\n"
@@ -328,7 +328,7 @@ static int cmd_issue(int argc, char **argv) {
      * cannot separate these without an escaping rule nobody would remember. */
     const char *crl_urls[8];
     size_t      n_crl_urls = 0;
-    int pem = 0, slot = 0, days = 365;
+    int pem = 0, days = 365; long slot = -1;
 
     for (int i = 2; i < argc; ++i) {
         if      (!strcmp(argv[i],"--module")  && i+1<argc) module   = argv[++i];
@@ -346,7 +346,7 @@ static int cmd_issue(int argc, char **argv) {
             crl_urls[n_crl_urls++] = argv[++i];
         }
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
-        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = p11_slot_arg(argv[++i]);
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]);
         else if (!strcmp(argv[i],"--pem")) pem = 1;
         else if (!strncmp(argv[i],"--pin",5)) {
@@ -370,7 +370,8 @@ static int cmd_issue(int argc, char **argv) {
     CK_RV rv = p11.Initialize(NULL);
     if (rv != CKR_OK) die("C_Initialize", rv);
     CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession((CK_SLOT_ID)slot, CKF_RW, NULL, NULL, &s);
+    rv = p11.OpenSession(p11_resolve_slot(slot, P11_SLOT_WITH_TOKEN),
+                          CKF_RW, NULL, NULL, &s);
     if (rv != CKR_OK) die("C_OpenSession", rv);
     rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
     if (rv != CKR_OK) die("C_Login", rv);
@@ -492,7 +493,7 @@ static int cmd_revoke(int argc, char **argv) {
 static int cmd_crl(int argc, char **argv) {
     const char *module = "./libfreehsm-fips.so", *label = NULL;
     const char *cacert_p = NULL, *db_p = NULL, *out = NULL;
-    int pem = 0, slot = 0, days = 30;
+    int pem = 0, days = 30; long slot = -1;
 
     for (int i = 2; i < argc; ++i) {
         if      (!strcmp(argv[i],"--module")  && i+1<argc) module   = argv[++i];
@@ -500,7 +501,7 @@ static int cmd_crl(int argc, char **argv) {
         else if (!strcmp(argv[i],"--ca-cert") && i+1<argc) cacert_p = argv[++i];
         else if (!strcmp(argv[i],"--db")      && i+1<argc) db_p     = argv[++i];
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
-        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = p11_slot_arg(argv[++i]);
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]);
         else if (!strcmp(argv[i],"--pem")) pem = 1;
         else if (!strncmp(argv[i],"--pin",5)) {
@@ -548,7 +549,8 @@ static int cmd_crl(int argc, char **argv) {
     CK_RV rv = p11.Initialize(NULL);
     if (rv != CKR_OK) die("C_Initialize", rv);
     CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession((CK_SLOT_ID)slot, CKF_RW, NULL, NULL, &s);
+    rv = p11.OpenSession(p11_resolve_slot(slot, P11_SLOT_WITH_TOKEN),
+                          CKF_RW, NULL, NULL, &s);
     if (rv != CKR_OK) die("C_OpenSession", rv);
     rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
     if (rv != CKR_OK) die("C_Login", rv);
@@ -669,7 +671,7 @@ static int serial_eq(const uint8_t *a, size_t na, const uint8_t *b, size_t nb) {
 static int cmd_ocsp_respond(int argc, char **argv) {
     const char *module = "./libfreehsm-fips.so", *label = NULL;
     const char *cacert_p = NULL, *db_p = NULL, *req_p = NULL, *out = NULL;
-    int slot = 0, days = 7;
+    long slot = -1; int days = 7;
 
     for (int i = 2; i < argc; ++i) {
         if      (!strcmp(argv[i],"--module")  && i+1<argc) module   = argv[++i];
@@ -678,7 +680,7 @@ static int cmd_ocsp_respond(int argc, char **argv) {
         else if (!strcmp(argv[i],"--db")      && i+1<argc) db_p     = argv[++i];
         else if (!strcmp(argv[i],"--req")     && i+1<argc) req_p    = argv[++i];
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
-        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = p11_slot_arg(argv[++i]);
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]);
         else if (!strncmp(argv[i],"--pin",5)) {
             fprintf(stderr, "fhsm-ca: --pin is not accepted. Set FHSM_PIN instead:\n"
@@ -814,7 +816,8 @@ static int cmd_ocsp_respond(int argc, char **argv) {
     CK_RV rv = p11.Initialize(NULL);
     if (rv != CKR_OK) die("C_Initialize", rv);
     CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession((CK_SLOT_ID)slot, CKF_RW, NULL, NULL, &s);
+    rv = p11.OpenSession(p11_resolve_slot(slot, P11_SLOT_WITH_TOKEN),
+                          CKF_RW, NULL, NULL, &s);
     if (rv != CKR_OK) die("C_OpenSession", rv);
     rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
     if (rv != CKR_OK) die("C_Login", rv);

@@ -49,7 +49,7 @@ static void usage(void) {
       "  fhsm-csr csr    --label NAME --subject DN [--out FILE] [--pem] ...\n"
       "  fhsm-csr root   --label NAME --subject DN [--days N] [--serial N] ...\n\n"
       "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n"
-      "  --slot N        slot index (default 0)\n"
+      "  --slot N        slot to address. Default: the one slot holding a token.\n"
       "  --subject DN    e.g. \"/C=FR/O=Simorgh Labs/CN=example\"\n"
       "  --days N        validity in days for root (default 3650)\n"
       "  --serial N      certificate serial for root (default 1)\n"
@@ -69,14 +69,14 @@ int main(int argc, char **argv) {
     const char *cmd = argv[1];
     const char *module = "./libfreehsm-fips.so", *label = NULL, *subject = NULL;
     const char *out = NULL;
-    int pem = 0, slot = 0, days = 3650; long serial = 1;
+    int pem = 0, days = 3650; long serial = 1, slot = -1;
 
     for (int i = 2; i < argc; ++i) {
         if      (!strcmp(argv[i],"--module")  && i+1<argc) module  = argv[++i];
         else if (!strcmp(argv[i],"--label")   && i+1<argc) label   = argv[++i];
         else if (!strcmp(argv[i],"--subject") && i+1<argc) subject = argv[++i];
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out     = argv[++i];
-        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot    = atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot    = p11_slot_arg(argv[++i]);
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days    = atoi(argv[++i]);
         else if (!strcmp(argv[i],"--serial")  && i+1<argc) serial  = atol(argv[++i]);
         else if (!strcmp(argv[i],"--pem")) pem = 1;
@@ -99,7 +99,8 @@ int main(int argc, char **argv) {
     CK_RV rv = p11.Initialize(NULL);
     if (rv != CKR_OK) die("C_Initialize", rv);
     CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession((CK_SLOT_ID)slot, CKF_RW, NULL, NULL, &s);
+    rv = p11.OpenSession(p11_resolve_slot(slot, P11_SLOT_WITH_TOKEN),
+                          CKF_RW, NULL, NULL, &s);
     if (rv != CKR_OK) die("C_OpenSession", rv);
     rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
     if (rv != CKR_OK) die("C_Login", rv);

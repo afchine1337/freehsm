@@ -81,7 +81,7 @@ computed as SHA-1 of the composite public key (RFC 5280 §4.2.1.2 method 1).
 | Option | Meaning | Default |
 |---|---|---|
 | `--module PATH` | PKCS#11 module to load | `./libfreehsm-fips.so` |
-| `--slot N` | Slot index | `0` |
+| `--slot N` | Slot identifier, as reported by `C_GetSlotList` | the one slot holding a token |
 | `--label NAME` | Key label. Required by every command. | — |
 | `--subject DN` | Subject, OpenSSL one-line form: `/C=FR/O=…/CN=…` | — |
 | `--days N` | Validity in days (`root` only) | `3650` |

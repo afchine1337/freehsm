@@ -75,6 +75,7 @@ int main(int argc, char **argv)
     SAME(VerifyInit);       SAME(VerifyUpdate);  SAME(VerifyFinal);
     SAME(InitToken);        SAME(InitPIN);
     SAME(GetTokenInfo);     SAME(GenerateRandom);
+    SAME(GetSlotList);
     #undef SAME
 
     printf("\n  %d slots compared against dlsym", checked);
@@ -84,7 +85,7 @@ int main(int argc, char **argv)
     /* A module that exports its symbols is the only case where this comparison
      * is possible at all. If ours ever stops exporting them, the check goes
      * quiet rather than failing -- so say so instead of scoring it as a pass. */
-    ok(checked >= 20, "  enough slots were comparable for the check to mean something");
+    ok(checked >= 21, "  enough slots were comparable for the check to mean something");
 
     dlclose(h);
     printf("\n%s : %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);

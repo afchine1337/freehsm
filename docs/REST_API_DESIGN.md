@@ -64,6 +64,37 @@ to read client B's session.
 **And it does not close it as completely as we thought.** See the measurement
 below.
 
+### 2b. And PKCS#11 over the network is a separate question, not this one
+
+The objection that prompted this section: *most cryptographic applications
+speak PKCS#11, not REST.* True, and an operations API does not serve them —
+Apache, nginx, OpenSSL, a Java keystore and every smart-card-aware application
+want a `.so` to load, not a URL.
+
+Three things follow, and only the first is decided here.
+
+**p11-kit already remotes PKCS#11.** `p11-kit server` publishes a module on a
+unix socket and `p11-kit-client.so` is the provider an application loads; SSH
+forwards the socket. Nothing needs to be written for the transport, and writing
+our own would mean writing an RPC protocol for 68 entry points in C — the
+opposite of the argument that this module can be audited.
+
+**What it does not answer is the same finding as above.** A `p11-kit server`
+is one process, so it is one PKCS#11 application, so the first client to log in
+logs in the token for every client behind that socket. This has not been
+measured here and must be, on hardware where two clients can be run against one
+server: if p11-kit isolates them, it is a deployment option today; if it does
+not, it is a per-operator server or nothing.
+
+**Our own tools could not drive a conforming module.** They dlsym'd each `C_*`
+by name and exited when one was missing, so `--module .../p11-kit-client.so`
+answered *"C_Initialize missing"* against a module that is entirely correct —
+the standard requires exactly one exported symbol. The probes in
+`probes/rest/` had the same defect and segfaulted rather than reporting it.
+Both now load through `C_GetFunctionList` and enumerate slots with
+`C_GetSlotList`. That is a precondition for measuring anything through
+p11-kit, and it was found by asking the question, not by a test.
+
 ### 3. mTLS client certificates, not bearer tokens
 
 The identity for audit and for throttling comes from the certificate subject.
@@ -180,6 +211,11 @@ work.
 
 **Memory per held session**, unmeasured. The 2-core figures are a floor, not a
 capacity plan.
+
+**Whether `p11-kit server` isolates two clients' login state.** The measurement
+in §2b. It decides between "p11-kit is the PKCS#11 answer" and "a server per
+operator". It needs two clients against one server, which a single sandbox
+process cannot stage.
 
 ---
 

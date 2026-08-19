@@ -22,6 +22,28 @@ probes/rest/01_latency ./libfreehsm-fips.so k
 The composite mechanism is `interop`-only, so build the module with
 `PROFILE=interop`.
 
+Run each probe against a freshly provisioned token. `02_login_cost` ends by
+offering a wrong PIN twice — on purpose, that is the measurement — and leaves
+the token throttled, so a probe run after it in the same `FHSM_TOKENS_DIR`
+measures the throttle instead of what it meant to.
+
+## How the module is loaded
+
+Through `C_GetFunctionList`, in `p11_probe.h`, and no longer by dlsym'ing each
+`C_*` by name. Every probe here segfaulted against `p11-kit-client.so`, which
+exports exactly one symbol — the only one PKCS#11 requires. The crash was in
+the probe, calling a null pointer that `dlsym` had already declined to fill.
+
+The four tools had the same defect and it was fixed first; these were left
+behind, and the first attempt to run `03_login_shared` through a `p11-kit
+server` found it. Which matters beyond the bug: these probes exist to measure
+the module a REST service would sit on, and the question being measured is what
+happens when the client and the token are *not* in the same process.
+
+The slot is enumerated with `C_GetSlotList` for the same reason — slot 0 is a
+guess that happens to be right for our module and wrong through p11-kit.
+`FHSM_SLOT=N` overrides it when several tokens are present.
+
 ## What each one measures
 
 | | Question |

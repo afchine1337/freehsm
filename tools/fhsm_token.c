@@ -55,7 +55,8 @@ static void usage(void) {
       "  fhsm-token init [--label TEXT] [--slot N] [--module PATH]\n"
       "  fhsm-token info [--slot N] [--module PATH]\n\n"
       "  --label TEXT    token label, at most 32 characters (default \"freehsm\")\n"
-      "  --slot N        slot index (default 0)\n"
+      "  --slot N        slot to address. Default: the lowest empty slot for\n"
+      "                  init, the one initialised token for info.\n"
       "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n\n"
       "  init reads the Security Officer PIN from FHSM_SO_PIN and the user PIN\n"
       "  from FHSM_PIN. Neither can be passed as an argument: arguments are\n"
@@ -76,16 +77,17 @@ static void put_field(const char *name, const unsigned char *f, size_t n) {
     printf("  %-14s %.*s\n", name, (int)n, (const char *)f);
 }
 
-static int cmd_info(const char *module, int slot) {
+static int cmd_info(const char *module, long slot) {
     load_module(module);
     CK_RV rv = p11.Initialize(NULL);
     if (rv != CKR_OK) die("C_Initialize", rv);
+    CK_SLOT_ID sid = p11_resolve_slot(slot, P11_SLOT_ANY);
     struct tok_info ti;
     memset(&ti, 0, sizeof ti);
-    rv = p11.GetTokenInfo((CK_SLOT_ID)slot, &ti);
+    rv = p11.GetTokenInfo(sid, &ti);
     if (rv != CKR_OK) die("C_GetTokenInfo", rv);
 
-    printf("slot %d\n", slot);
+    printf("slot %lu\n", (unsigned long)sid);
     put_field("label",        ti.label,        sizeof ti.label);
     put_field("manufacturer", ti.manufacturerID, sizeof ti.manufacturerID);
     put_field("model",        ti.model,        sizeof ti.model);
@@ -103,7 +105,8 @@ static int cmd_info(const char *module, int slot) {
     return 0;
 }
 
-static int cmd_init(const char *module, int slot, const char *label, int force) {
+static int cmd_init(const char *module, long slot, const char *label, int force) {
+    CK_SLOT_ID sid = 0;
     const char *so   = getenv("FHSM_SO_PIN");
     const char *user = getenv("FHSM_PIN");
     if (!so || !*so) {
@@ -123,12 +126,19 @@ static int cmd_init(const char *module, int slot, const char *label, int force) 
      * PINs with CKR_PIN_LEN_RANGE, but a numeric code at the end of a command
      * is not an explanation -- and the first thing an operator does with a
      * placeholder PIN from a manual is paste it. */
+    load_module(module);
+    {
+        CK_RV irv = p11.Initialize(NULL);
+        if (irv != CKR_OK) die("C_Initialize", irv);
+    }
+    /* Resolved once, before anything is written. A slot the operator did not
+     * choose is the one mistake here that cannot be undone. */
+    sid = p11_resolve_slot(slot, P11_SLOT_FOR_INIT);
+
     {
         struct tok_info probe; memset(&probe, 0, sizeof probe);
         unsigned long lo = 4, hi = 64;
-        load_module(module);
-        if (p11.Initialize(NULL) == CKR_OK
-            && p11.GetTokenInfo((CK_SLOT_ID)slot, &probe) == CKR_OK
+        if (p11.GetTokenInfo(sid, &probe) == CKR_OK
             && probe.ulMinPinLen && probe.ulMinPinLen <= probe.ulMaxPinLen) {
             lo = (unsigned long)probe.ulMinPinLen;
             hi = (unsigned long)probe.ulMaxPinLen;
@@ -146,32 +156,31 @@ static int cmd_init(const char *module, int slot, const char *label, int force) 
             p11.Finalize(NULL);
             return 1;
         }
-        p11.Finalize(NULL);
     }
 
     if (strlen(label) > 32) {
         fprintf(stderr, "fhsm-token: --label is at most 32 characters "
                         "(PKCS#11 pads it to exactly that).\n");
+        p11.Finalize(NULL);
         return 1;
     }
 
-    CK_RV rv = p11.Initialize(NULL);
-    if (rv != CKR_OK) die("C_Initialize", rv);
+    CK_RV rv = CKR_OK;
 
     /* Refuse to wipe a live token by accident. C_InitToken destroys every
      * object, and an operator who typed `init` meaning `info` should not lose
      * a CA key to a four-character difference. */
     if (!force) {
         struct tok_info ti; memset(&ti, 0, sizeof ti);
-        if (p11.GetTokenInfo((CK_SLOT_ID)slot, &ti) == CKR_OK
+        if (p11.GetTokenInfo(sid, &ti) == CKR_OK
             && (ti.flags & CKF_TOKEN_INITIALIZED)) {
             size_t n = sizeof ti.label;
             while (n && ti.label[n-1] == ' ') n--;
             fprintf(stderr,
-              "fhsm-token: slot %d already holds an initialised token (\"%.*s\").\n"
+              "fhsm-token: slot %lu already holds an initialised token (\"%.*s\").\n"
               "  Re-initialising DESTROYS every key on it. If that is what you\n"
               "  want, pass --force. If you meant to look, use `fhsm-token info`.\n",
-              slot, (int)n, ti.label);
+              (unsigned long)sid, (int)n, ti.label);
             p11.Finalize(NULL);
             return 5;
         }
@@ -184,12 +193,12 @@ static int cmd_init(const char *module, int slot, const char *label, int force) 
     memset(lbl, ' ', sizeof lbl);
     memcpy(lbl, label, strlen(label));
 
-    rv = p11.InitToken((CK_SLOT_ID)slot, (CK_BYTE*)(uintptr_t)so,
+    rv = p11.InitToken(sid, (CK_BYTE*)(uintptr_t)so,
                         (CK_ULONG)strlen(so), lbl);
     if (rv != CKR_OK) die("C_InitToken", rv);
 
     CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession((CK_SLOT_ID)slot, CKF_RW, NULL, NULL, &s);
+    rv = p11.OpenSession(sid, CKF_RW, NULL, NULL, &s);
     if (rv != CKR_OK) die("C_OpenSession", rv);
     rv = p11.Login(s, CKU_SO, (CK_BYTE*)(uintptr_t)so, (CK_ULONG)strlen(so));
     if (rv != CKR_OK) die("C_Login (SO)", rv);
@@ -198,8 +207,9 @@ static int cmd_init(const char *module, int slot, const char *label, int force) 
 
     p11.CloseSession(s);
     p11.Finalize(NULL);
-    fprintf(stderr, "fhsm-token: slot %d initialised as \"%s\", user PIN set.\n"
-                    "  Next: fhsm-csr keygen --label NAME\n", slot, label);
+    fprintf(stderr, "fhsm-token: slot %lu initialised as \"%s\", user PIN set.\n"
+                    "  Next: fhsm-csr keygen --label NAME\n",
+            (unsigned long)sid, label);
     return 0;
 }
 
@@ -207,11 +217,11 @@ int main(int argc, char **argv) {
     p11_progname = "fhsm-token";
     if (argc < 2) usage();
     const char *module = "./libfreehsm-fips.so", *label = "freehsm";
-    int slot = 0, force = 0;
+    int force = 0; long slot = -1;
     for (int i = 2; i < argc; ++i) {
         if      (!strcmp(argv[i],"--module") && i+1<argc) module = argv[++i];
         else if (!strcmp(argv[i],"--label")  && i+1<argc) label  = argv[++i];
-        else if (!strcmp(argv[i],"--slot")   && i+1<argc) slot   = atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")   && i+1<argc) slot   = p11_slot_arg(argv[++i]);
         else if (!strcmp(argv[i],"--force")) force = 1;
         else if (!strncmp(argv[i],"--pin",5) || !strncmp(argv[i],"--so-pin",8)) {
             fprintf(stderr, "fhsm-token: PINs are not accepted as arguments. Set\n"
