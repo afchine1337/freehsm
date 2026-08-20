@@ -8,6 +8,30 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **The audit log's durable barrier is shared between concurrent writers.**
+  Every event still returns only after an `fsync` that covered its own write —
+  a signature must not reach a client before the record of it is on disk, and
+  `docs/AUDIT_DURABILITY.md` argues why that is not negotiable. What changed is
+  how many barriers it takes: one serves every write already in the file, so a
+  writer arriving while a barrier is in flight waits for the next one instead
+  of queueing its own.
+
+  In the module, with the log on a real file: 242 → **674 sig/s** at eight
+  concurrent signers, median latency 30.3 → 10.8 ms. The ceiling with no
+  durable write at all is 1145 sig/s, so this closed most of the gap and not
+  all of it.
+
+  **The ordering, not the waiting, is the delicate part.** The mutex is
+  released while the barrier runs, so another writer reads `g_prev_hmac` in the
+  middle of it — the chain has to advance *before* the barrier. Get that wrong
+  and two lines claim the same predecessor: every event still returns `OK`, the
+  log still looks well-formed, and only the verifier disagrees.
+
+  `tests/test_audit_concurrent.c` asserts the sharing happened (79 barriers for
+  320 events), that the chain verifies over the whole file, and that no line
+  was lost. Both mutations are caught by the assertion meant for them. Clean
+  under `SANITIZE=1` and under ThreadSanitizer.
+
 * **The tools enumerate slots instead of assuming slot 0.** `--slot` defaulted
   to `0` and went straight to `C_OpenSession`. That is right for this module,
   whose slots are `0..FHSM_MAX_SLOTS-1`, and wrong for every other: a

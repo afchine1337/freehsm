@@ -152,6 +152,12 @@ fhsm_rv_t fhsm_audit_key_provision(const char *dir, uint8_t key[32],
 
 void fhsm_audit_close(void);
 
+/* Events written, and durable barriers that took. Every event returns only
+ * after a barrier that covered its own write; concurrent events share one, so
+ * `barriers` is at most `events` and well below it under load. Diagnostics --
+ * the only way a test can observe that the sharing is happening. */
+void fhsm_audit_barrier_stats(uint64_t *events, uint64_t *barriers);
+
 /* Emit one event line. The variadic part is a NULL-terminated list of
  * (const char *key, const char *value) pairs that will be serialized
  * into the JSON "params" object. Values must be safe-ASCII (the

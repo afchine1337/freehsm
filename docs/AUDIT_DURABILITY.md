@@ -4,8 +4,7 @@ SPDX-FileCopyrightText: 2026 Simorgh Labs
 -->
 # The audit log's durability, and what it costs (#111)
 
-**Status: decided, not built** — except for one defect found on the way, which
-is fixed.
+**Status: decided and built.**
 
 The previous measurement left this as the largest open question in #111: one
 `fsync` per event caps the whole module at ~250 signatures/s, against ~1350
@@ -89,22 +88,60 @@ of not sharing the barrier.** The current code holds the audit mutex across the
    batching that lets a signature outrun its record. The asymmetry above is not
    a close call.
 2. **The barrier is shared.** `fhsm_audit_event` releases the audit mutex
-   across the `fsync` and lets concurrent writers be covered by a barrier
-   already in flight. The chain is unaffected: lines are written under the
-   mutex, so file order and HMAC order still agree — only the waiting moves
-   outside.
+   across the barrier and lets concurrent writers be covered by one already in
+   flight. Lines are still written under the mutex, so file order and HMAC
+   order still agree — but the chain is *not* simply unaffected, as this point
+   claimed before it was built: releasing the mutex means another writer reads
+   the chain head mid-barrier, so the head has to advance before the barrier
+   rather than after. See below.
 3. **`fdatasync` rather than `fsync`**, as the marginally cheaper call with the
    same meaning for an append-only file. Worth ~10 %, and free.
 4. **No preallocation.** Measured, did not help, and it would make the file
    size stop being a truthful indication of how much log there is.
 5. The single-writer regression is accepted. A tool signing one certificate
-   does not care about 0.2 ms; a service serving eight clients cares about a
-   factor of four.
+   does not care about a fraction of a millisecond; a service serving eight
+   clients cares about 242 → 674 sig/s.
 
-Not built. Point 2 is a real change to a file that latches the module into
-ERROR when it goes wrong, and it deserves its own task with a concurrency test
-— including one that asserts a writer cannot return before a barrier that
-covered it, which is the property the whole design rests on.
+### Built, and what it did to the module
+
+| threads | before | after | with no durable write at all |
+|---|---|---|---|
+| 1 | 199 sig/s | 222 sig/s | 558 sig/s |
+| 2 | 267 sig/s | 324 sig/s | 859 sig/s |
+| 4 | 247 sig/s | **493** sig/s | 1359 sig/s |
+| 8 | 242 sig/s | **674** sig/s | 1145 sig/s |
+
+2.8× at eight concurrent signers, and the median latency there fell from 30.3
+to 10.8 ms. The remaining gap to the third column is the rest of the module's
+locking plus the barriers that still have to happen — this closed most of the
+distance, not all of it.
+
+The single-writer figure came out slightly *better* here and slightly worse in
+the microbenchmark. Both are inside the run-to-run spread; the honest statement
+is that group commit does not measurably help one writer and may cost it a
+little, which is the trade named above.
+
+**The ordering is the delicate part, and it is not the waiting.** The mutex is
+released while the barrier runs, so another writer takes the lock and reads
+`g_prev_hmac` in the middle of it. The chain therefore has to advance *before*
+the barrier rather than after. Get that wrong and two lines claim the same
+predecessor: every event still returns `OK`, the log still looks well-formed,
+and only the verifier disagrees.
+
+`tests/test_audit_concurrent.c`, eight threads × forty events. It asserts that
+every event succeeded, that the barriers were shared (79 for 320, so the
+sharing is observable rather than assumed), that the **chain verifies over the
+whole file**, and that no line was lost. Two mutations, each caught by the
+assertion meant for it:
+
+* barrier back inside the lock → 320 barriers for 320 events, second assertion
+  fails;
+* chain advanced after the barrier → chain breaks at line 2, third assertion
+  fails while the first, second and fourth still pass.
+
+Clean under `SANITIZE=1`, and clean under ThreadSanitizer — which needs
+`setarch -R` in a container, otherwise TSAN aborts on the memory layout before
+it runs a single line.
 
 ---
 
@@ -138,10 +175,12 @@ removed.
 property of the disk, the filesystem and whether a write cache is honestly
 reporting. The ratios should hold; the absolutes will not.
 
-**Whether the module's own signing path can proceed during a barrier.** Group
-commit helps only if a thread can compute a signature while another is inside
-`fsync`. The audit mutex is not the only lock in the module, and the
-measurement above is of the log alone, not of the module.
+~~**Whether the module's own signing path can proceed during a barrier.**~~
+Measured after building it: partly. 242 → 674 sig/s at eight threads, against
+1145 with no durable write. So a signature can proceed during a barrier, and
+something else — the rest of the module's locking — still costs the remaining
+distance. Finding what is the next measurement, and it is now a normal
+performance question rather than a design one.
 
 ---
 

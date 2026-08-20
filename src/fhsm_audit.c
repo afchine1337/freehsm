@@ -49,6 +49,38 @@ static size_t          g_audit_key_len = 0;
 static uint64_t        g_audit_seq = 0;
 static uint8_t         g_prev_hmac[32];
 
+/* ---------------------------------------------------------------------------
+ * Group commit.
+ *
+ * Every event must be durable before the operation that caused it returns --
+ * a signature must not reach a client before the record of it is on disk.
+ * That is not negotiable and is argued in docs/AUDIT_DURABILITY.md.
+ *
+ * What IS negotiable is how many barriers it takes. One fsync serves every
+ * write already in the file, so a writer that arrives while a barrier is in
+ * flight can wait for the next one instead of queueing its own -- and still
+ * return only after a barrier that covered its own write. Measured at eight
+ * concurrent writers: 1469 lines/s against 363, 118 barriers for 480 lines,
+ * with the guarantee unchanged.
+ *
+ * `wanted` counts writes that have landed in the file and are waiting for a
+ * barrier. A syncer takes the current value as the generation it will cover,
+ * drops the mutex, calls fsync, and publishes that generation. A writer waits
+ * until `done` reaches its own number. Writes that land DURING a barrier get a
+ * higher number and are conservatively not counted as covered by it.
+ *
+ * `failed` is sticky: a barrier that fails latches the module into ERROR, and
+ * every writer waiting behind it must fail too rather than believe a barrier
+ * that did not happen.
+ * ------------------------------------------------------------------------- */
+static pthread_cond_t  g_sync_cv     = PTHREAD_COND_INITIALIZER;
+static unsigned long   g_sync_wanted = 0;
+static unsigned long   g_sync_done   = 0;
+static int             g_syncing     = 0;
+static int             g_sync_failed = 0;
+static uint64_t        g_stat_events   = 0;   /* diagnostics only */
+static uint64_t        g_stat_barriers = 0;
+
 static const char *event_name(fhsm_audit_event_t ev) {
     switch (ev) {
         case FHSM_EV_MODULE_INIT:      return "module_init";
@@ -335,10 +367,26 @@ fhsm_rv_t fhsm_audit_open(const char *path, fhsm_slice_t audit_key) {
 
 void fhsm_audit_close(void) {
     pthread_mutex_lock(&g_audit_mu);
+    /* A barrier runs with the mutex released and a copy of the descriptor. If
+     * we closed it here the fsync would land on a descriptor number the kernel
+     * may already have handed to something else. Wait for it. */
+    while (g_syncing) pthread_cond_wait(&g_sync_cv, &g_audit_mu);
     if (g_audit_fd >= 0) { close(g_audit_fd); g_audit_fd = -1; }
+    g_sync_wanted = g_sync_done = 0;
+    g_sync_failed = 0;
     fhsm_zeroize(g_audit_key, sizeof(g_audit_key));
     g_audit_key_len = 0;
     fhsm_zeroize(g_prev_hmac, sizeof(g_prev_hmac));
+    pthread_mutex_unlock(&g_audit_mu);
+}
+
+/* How many events were written and how many durable barriers that took.
+ * Diagnostics: it is what makes "the barrier is shared" observable from
+ * outside, and a test that cannot observe it cannot assert it. */
+void fhsm_audit_barrier_stats(uint64_t *events, uint64_t *barriers) {
+    pthread_mutex_lock(&g_audit_mu);
+    if (events)   *events   = g_stat_events;
+    if (barriers) *barriers = g_stat_barriers;
     pthread_mutex_unlock(&g_audit_mu);
 }
 
@@ -463,25 +511,53 @@ fhsm_rv_t fhsm_audit_event(fhsm_audit_event_t ev, int slot, int session,
         fhsm_state_latch_error("audit write failed");
         return FHSM_RV_FUNCTION_FAILED;
     }
-    /* fsync() so a power loss can't lose the chain -- and check it, which this
-     * did not. The write() above was checked and latched ERROR on failure; the
-     * fsync() below was called and its answer thrown away. On most filesystems
-     * a deferred write error is reported at fsync and nowhere else, so the one
-     * control the log has against losing entries was wired to the path that
-     * usually succeeds and not to the path that usually reports. The two
-     * fsyncs in the key-provisioning code above are both checked; this was the
-     * third and the only one that was not.
-     *
-     * A failed fsync means the line may not be on disk. The module must stop
-     * rather than keep signing with a log it cannot trust -- the same reasoning
-     * as the write path, and now the same behaviour. */
-    if (fsync(g_audit_fd) != 0) {
+    /* The chain advances BEFORE the barrier, and that ordering is the whole
+     * reason this is delicate. The mutex is released while the fsync runs, so
+     * another writer will take the lock and read g_prev_hmac -- if it still
+     * held the previous value the two lines would claim the same predecessor
+     * and the chain would be broken by the optimisation meant to be invisible.
+     * The line is already in the file, and a failed barrier stops the module,
+     * so advancing here costs nothing. */
+    memcpy(g_prev_hmac, h, 32);
+    g_stat_events++;
+
+    /* Wait for a barrier that covers this write. See the note on group commit
+     * where g_sync_wanted is declared. */
+    unsigned long need = ++g_sync_wanted;
+    while (g_sync_done < need && !g_sync_failed) {
+        if (!g_syncing) {
+            unsigned long covering = g_sync_wanted;
+            int fd = g_audit_fd;
+            g_syncing = 1;
+            pthread_mutex_unlock(&g_audit_mu);
+            /* fdatasync, not fsync: measured marginally cheaper and it means
+             * the same thing for an append-only file, where the size change is
+             * metadata the call has to flush anyway for the data to be
+             * retrievable. Worth ~10 % and free. */
+            int sr = fdatasync(fd);
+            pthread_mutex_lock(&g_audit_mu);
+            g_stat_barriers++;
+            g_syncing = 0;
+            if (sr != 0)                    g_sync_failed = 1;
+            else if (g_sync_done < covering) g_sync_done = covering;
+            pthread_cond_broadcast(&g_sync_cv);
+        } else {
+            pthread_cond_wait(&g_sync_cv, &g_audit_mu);
+        }
+    }
+    if (g_sync_failed) {
         pthread_mutex_unlock(&g_audit_mu);
         g_in_event = 0;
+        /* The write() above was checked and latched ERROR on failure; the
+         * fsync() was called and its answer thrown away. On most filesystems a
+         * deferred write error is reported at fsync and nowhere else, so the
+         * one control the log has against losing entries was wired to the call
+         * that usually succeeds and not to the one that usually reports. Both
+         * fsyncs in the key-provisioning code above are checked; this was the
+         * third and the only one that was not. */
         fhsm_state_latch_error("audit fsync failed");
         return FHSM_RV_FUNCTION_FAILED;
     }
-    memcpy(g_prev_hmac, h, 32);
     pthread_mutex_unlock(&g_audit_mu);
     g_in_event = 0;
     return FHSM_RV_OK;
