@@ -159,6 +159,31 @@ If you are running a build from before this correction and a token reports
 cooldown clears once the machine has been up as long as the boot that wrote it;
 upgrading and reloading the token clears it immediately.
 
+### 4.2b Where the audit log lives
+
+**Do not put the audit log on `tmpfs`, and check rather than assume.**
+
+The log's guarantee is that a line is durable before the operation it records
+returns — see `docs/AUDIT_DURABILITY.md`. On a volatile filesystem `fdatasync`
+returns immediately without a barrier, so the guarantee is silently absent:
+nothing errors, nothing is logged about it, and the log looks entirely normal
+until a power loss takes the last of it.
+
+This is easy to do by accident. `/tmp` is `tmpfs` by default on current Debian,
+and `FHSM_AUDIT_LOG` can point the log somewhere other than the tokens
+directory. The symptom is a log that is implausibly fast:
+
+```
+stat -f -c '%T' "$FHSM_TOKENS_DIR"      # or the directory FHSM_AUDIT_LOG names
+make tests/bench_audit_rate
+FHSM_TOKENS_DIR=/var/lib/freehsm LD_LIBRARY_PATH=. ./tests/bench_audit_rate
+```
+
+A durable barrier costs milliseconds. Microseconds mean no barrier happened —
+the benchmark says so in as many words, and prints the filesystem it measured.
+The same caution applies to a hypervisor that acknowledges barriers without
+honouring them; VirtualBox's host I/O cache does exactly that.
+
 ### 4.3 Audit log review
 
 > **The audit log is produced, and the chain is verifiable.** The warning that

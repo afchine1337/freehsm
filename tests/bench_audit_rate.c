@@ -54,7 +54,31 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <time.h>
+
+/* Which filesystem the log landed on, because that is the entire measurement.
+ * A run on tmpfs measures RAM: fdatasync returns without a barrier and reports
+ * three microseconds a line, a thousand times faster than a disk. That is not
+ * a fast disk, it is no durability at all -- and `mktemp -d` lands in /tmp,
+ * which is tmpfs by default on current Debian. */
+static const char *fs_name(const char *path, int *is_volatile)
+{
+    struct statfs sb;
+    *is_volatile = 0;
+    if (statfs(path, &sb) != 0) return "(unknown)";
+    switch ((unsigned long)sb.f_type) {
+    case 0x01021994UL: *is_volatile = 1; return "tmpfs";
+    case 0x858458f6UL: *is_volatile = 1; return "ramfs";
+    case 0xEF53UL:                       return "ext2/3/4";
+    case 0x58465342UL:                   return "xfs";
+    case 0x9123683EUL:                   return "btrfs";
+    case 0x2FC12FC1UL:                   return "zfs";
+    case 0x794c7630UL:                   return "overlayfs";
+    case 0x65735546UL:                   return "fuse";
+    default:                             return "(other)";
+    }
+}
 
 static double ms(struct timespec a, struct timespec b) {
     return (double)(b.tv_sec - a.tv_sec) * 1e3
@@ -92,18 +116,43 @@ int main(int argc, char **argv)
     double bytes_per_line = 0;
     if (stat(path, &st) == 0) bytes_per_line = (double)st.st_size / (double)(n + 1);
 
+    int is_volatile = 0;
+    const char *fs = fs_name(dir ? dir : "/tmp", &is_volatile);
+
     printf("audit log write cost\n\n");
     printf("  %d events            %8.2f ms total\n", n, total);
     printf("  per event            %8.3f ms\n", per);
     printf("  sustained rate       %8.0f events/s\n", 1000.0 / per);
     printf("  per line             %8.0f bytes\n", bytes_per_line);
+    printf("  filesystem           %8s\n", fs);
     printf("  at saturation        %8.1f MB/hour, %.1f GB/day\n",
            (1000.0 / per) * bytes_per_line * 3600.0 / 1e6,
            (1000.0 / per) * bytes_per_line * 86400.0 / 1e9);
-    printf("\n  Compare: a composite signature is 3.3-4.3 ms on this host, and\n"
-             "  signing sustains 310 sig/s at two threads. Every request writes\n"
-             "  at least one line, so this is the ceiling -- and a refusal, which\n"
-             "  is nearly free to provoke, costs the same as a signature.\n");
+    printf("\n  Compare: a composite signature ALONE is roughly 1 ms. The\n"
+             "  3.3-4.3 ms in probes/rest/README.md is the signature plus this\n"
+             "  line. So the record costs more than the cryptography it records,\n"
+             "  and a refusal -- nearly free to provoke -- costs more than a\n"
+             "  signature costs us.\n");
+
+    if (is_volatile || per < 0.1) {
+        printf("\n"
+          "  ==========================================================\n"
+          "   THIS RUN MEASURED NOTHING.\n"
+          "\n"
+          "   %s%s\n"
+          "\n"
+          "   No physical medium answers a barrier in %.3f ms. fdatasync\n"
+          "   returned without making anything durable, so the number above\n"
+          "   describes memory, not storage -- and the audit log's whole\n"
+          "   guarantee is absent for the same reason.\n"
+          "\n"
+          "   Point FHSM_TOKENS_DIR at the filesystem a deployment would\n"
+          "   actually write to and run it again.\n"
+          "  ==========================================================\n",
+          is_volatile ? "The log is on " : "The log is on ",
+          is_volatile ? fs : "a filesystem whose barrier costs nothing",
+          per);
+    }
 
     remove(path);
     return 0;
