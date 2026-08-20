@@ -170,10 +170,27 @@ removed.
 
 ## Not measured here
 
-**Any of this on real deployment storage.** Every number above comes from a
-2-core VM. The whole decision turns on the cost of one barrier, which is a
-property of the disk, the filesystem and whether a write cache is honestly
-reporting. The ratios should hold; the absolutes will not.
+**Confirmed on a second host, and here is what that took.** The figures above
+come from a 2-core sandbox. Re-measured on a Debian 13 VM over VirtualBox,
+ext4, five runs: **3.44 – 3.57 ms** per line, against 2.49 – 2.86 in the
+sandbox. Same order, ~25 % slower for a virtualised disk, and a tighter spread
+than the sandbox managed — 4 % across five runs. The ratio to the ~1 ms
+signature holds, so the decision holds.
+
+Getting there took one wrong turn worth recording. The first attempt on that VM
+reported **0.003 ms** per line — a thousand times faster, which is not a fast
+disk but no barrier at all. `mktemp -d` had landed in `/tmp`, which is `tmpfs`
+by default on current Debian, so `fdatasync` returned without making anything
+durable. The bench now names the filesystem it measured and refuses to let such
+a number stand; see `docs/AGD_OPE.md` §4.2b, because an operator can do the same
+thing to a real deployment by pointing `FHSM_AUDIT_LOG` at the wrong place, and
+nothing would report it.
+
+**Still not measured: storage a deployment would actually use.** Both hosts are
+virtual machines. A hypervisor that acknowledges barriers without honouring
+them produces the tmpfs result with none of the warning signs, and VirtualBox's
+host I/O cache does exactly that. The absolutes should be taken again on the
+hardware, or on something that has been proven to honour a barrier.
 
 ~~**Whether the module's own signing path can proceed during a barrier.**~~
 Measured after building it: partly. 242 → 674 sig/s at eight threads, against

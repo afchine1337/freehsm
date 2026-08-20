@@ -97,7 +97,11 @@ int main(int argc, char **argv)
     uint8_t key[32];
     memset(key, 0x42, sizeof key);
     if (fhsm_audit_open(path, FHSM_SLICE(key, 32)) != FHSM_RV_OK) {
-        printf("  cannot open %s\n", path);
+        fprintf(stderr,
+            "bench_audit_rate: cannot open %s\n"
+            "  FHSM_TOKENS_DIR must name a directory that exists and is\n"
+            "  writable by this user, on the storage a deployment would use.\n",
+            path);
         return 2;
     }
 
@@ -149,7 +153,7 @@ int main(int argc, char **argv)
           "   Point FHSM_TOKENS_DIR at the filesystem a deployment would\n"
           "   actually write to and run it again.\n"
           "  ==========================================================\n",
-          is_volatile ? "The log is on " : "The log is on ",
+          "The log is on ",
           is_volatile ? fs : "a filesystem whose barrier costs nothing",
           per);
     }
