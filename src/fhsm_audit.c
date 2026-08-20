@@ -463,8 +463,24 @@ fhsm_rv_t fhsm_audit_event(fhsm_audit_event_t ev, int slot, int session,
         fhsm_state_latch_error("audit write failed");
         return FHSM_RV_FUNCTION_FAILED;
     }
-    /* fsync() so a power loss can't lose the chain. */
-    fsync(g_audit_fd);
+    /* fsync() so a power loss can't lose the chain -- and check it, which this
+     * did not. The write() above was checked and latched ERROR on failure; the
+     * fsync() below was called and its answer thrown away. On most filesystems
+     * a deferred write error is reported at fsync and nowhere else, so the one
+     * control the log has against losing entries was wired to the path that
+     * usually succeeds and not to the path that usually reports. The two
+     * fsyncs in the key-provisioning code above are both checked; this was the
+     * third and the only one that was not.
+     *
+     * A failed fsync means the line may not be on disk. The module must stop
+     * rather than keep signing with a log it cannot trust -- the same reasoning
+     * as the write path, and now the same behaviour. */
+    if (fsync(g_audit_fd) != 0) {
+        pthread_mutex_unlock(&g_audit_mu);
+        g_in_event = 0;
+        fhsm_state_latch_error("audit fsync failed");
+        return FHSM_RV_FUNCTION_FAILED;
+    }
     memcpy(g_prev_hmac, h, 32);
     pthread_mutex_unlock(&g_audit_mu);
     g_in_event = 0;

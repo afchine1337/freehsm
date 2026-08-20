@@ -208,6 +208,15 @@ nothing else.
 
 ## Not measured here
 
+~~**The `fsync` policy.**~~ **Decided** — `docs/AUDIT_DURABILITY.md`. Keep a
+durable barrier before every return, because losing a delivered signature's
+record is the failure the log exists to prevent, while losing a record of an
+undelivered one is harmless. Share the barrier instead of batching it: at eight
+concurrent writers that is 1469 lines/s against 363, with 118 barriers instead
+of 480 and the guarantee unchanged. The plateau was never the price of
+durability, it was the price of not sharing. What follows below is what that
+section said while it was open:
+
 **The `fsync` policy — and it is now the largest open question in #111, not a
 detail.** One `fsync` per event is what makes each line durable before the next
 is written, and that is what makes the chain meaningful after a power loss. It

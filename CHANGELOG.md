@@ -59,6 +59,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **A failed `fsync` on the audit log was ignored.** `fhsm_audit_event()`
+  checked `write()` and latched ERROR when it failed, then called `fsync()` and
+  threw the answer away. On most filesystems a deferred write error is reported
+  at `fsync` and nowhere else — so the control that exists to stop the module
+  when the log cannot be written was wired to the call that usually succeeds
+  and not to the call that usually reports. Both `fsync` calls in the
+  key-provisioning code check their return; this was the third and the only one
+  that did not.
+
+  `tests/test_audit_fsync.c` stages the failure portably: `fsync` on a pipe
+  returns EINVAL while `write` to it succeeds, so the log is pointed at a FIFO
+  with a reader draining it. Two of its four assertions fail with the check
+  removed.
+
 * **A reboot turned a 500 ms PIN throttle into a 29.8-day lockout.** The
   throttle deadline was persisted in the token header in the `CLOCK_MONOTONIC`
   domain — chosen so that `date -s` could not shorten a cooldown, and right for
