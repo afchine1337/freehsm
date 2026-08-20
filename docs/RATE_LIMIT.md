@@ -121,10 +121,17 @@ a burst as a burst.
 
 ### 1. Fairness, which is the common case and is not an attack
 
-`probes/rest/04_concurrency` measured 310 sig/s at 2 threads, 315 at 4, 294 at
-8 on two cores: signing is CPU-bound and saturates at core count. The pool is
-therefore sized to cores, not to clients. One client issuing as many concurrent
-requests as there are pooled sessions starves every other client.
+This paragraph used to read "signing is CPU-bound and saturates at core count,
+so the pool is sized to cores". That was the audit log's `fsync`, not the CPU —
+corrected in `docs/REST_API_DESIGN.md` §Scaling, and the barrier is now shared
+(`docs/AUDIT_DURABILITY.md`). With the log on a real file the module does 222 /
+324 / 493 / 674 sig/s at 1 / 2 / 4 / 8 threads, so it *does* scale past core
+count and the pool is not sized to cores.
+
+**Which does not change what this control is for.** Whatever the pool's size,
+one client issuing as many concurrent requests as there are pooled sessions
+starves every other client. The cap is on how much of the pool one identity may
+hold, not on how big the pool is.
 
 The overwhelmingly likely cause is not malice but a retry loop in a client
 someone deployed on a Friday. A per-identity concurrency cap is what keeps one

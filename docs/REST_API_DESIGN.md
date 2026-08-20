@@ -4,9 +4,14 @@ SPDX-FileCopyrightText: 2026 Simorgh Labs
 -->
 # Network access over REST — the decision (#111)
 
-**Status: decided, not built.** Nothing in this document exists in code yet.
-It records what was chosen, what was measured, and what the measurements forced
-us to change our minds about.
+**Status: decided, not built.** No line of the *service* exists yet. It records
+what was chosen, what was measured, and what the measurements forced us to
+change our minds about.
+
+Two things it uncovered are built, because they were defects in the module
+rather than design of the service: `C_Login` honouring `ulPinLen`, and the
+audit log's durable barrier being shared between concurrent writers. Both are
+below, in the places where the measurement that found them is recorded.
 
 ---
 
@@ -230,12 +235,24 @@ composite signature costs roughly 1 ms, not the 3.3–4.3 ms recorded in
 `probes/rest/README.md`.
 
 **What follows for the design.** "Size the pool to cores" was reasoning from a
-CPU-bound premise that does not hold. The pool should be sized to what the log
-can absorb, and the log's durability policy — one `fsync` per event, or
-batched — is not a detail to settle later. It decides capacity by a factor of
-five, and it trades against the property that makes the chain meaningful after
-a power loss. `docs/RATE_LIMIT.md` records it as the open question it now
-plainly is.
+CPU-bound premise that does not hold.
+
+That open question is now closed and built — `docs/AUDIT_DURABILITY.md`. Every
+event keeps a durable barrier before the operation returns, because losing a
+delivered signature's record is the failure the log exists to prevent; but the
+barrier is *shared* between concurrent writers, which costs nothing in
+guarantee. With the log on a real file the module now does:
+
+| threads | before | after |
+|---|---|---|
+| 1 | 199 sig/s | 222 sig/s |
+| 2 | 267 sig/s | 324 sig/s |
+| 4 | 247 sig/s | **493** sig/s |
+| 8 | 242 sig/s | **674** sig/s |
+
+So it scales past core count after all, and the pool is sized to neither cores
+nor the log: it is sized to measurement, and the measurement now has to be
+taken on the storage a deployment actually writes to.
 
 The absolute numbers are from a 2-core VM and depend entirely on the storage
 underneath; the ratio is the finding.
