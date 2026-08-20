@@ -249,11 +249,10 @@ static uint32_t get_u32_le(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
          | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
-static uint64_t get_u64_le(const uint8_t *p) {
-    uint64_t v = 0;
-    for (int i = 0; i < 8; ++i) v |= (uint64_t)p[i] << (8*i);
-    return v;
-}
+/* No get_u64_le: nothing in the format is read back as a u64 any more. The
+ * only two u64 fields were the throttle deadlines, which are now derived from
+ * the failure count rather than stored -- see write_atomic(). put_u64_le stays
+ * because those offsets are still written, as zero, to keep the layout fixed. */
 
 /* ---------------------------------------------------------------------------
  * Object blob serialization. Each object is FHSM_OBJ_REC_SZ bytes :
@@ -657,8 +656,20 @@ static fhsm_rv_t write_atomic(const fhsm_token_t *t) {
     hdr[292] = (uint8_t)(t->user_initialized ? 1 : 0);
     put_u32_le(hdr + 293, t->failed_so);
     put_u32_le(hdr + 297, t->failed_user);
-    put_u64_le(hdr + 301, t->throttle_so_until_ms);
-    put_u64_le(hdr + 309, t->throttle_user_until_ms);
+    /* Offsets 301 and 309 are written as zero and ignored on load. They used
+     * to carry the throttle deadlines, which live in the CLOCK_MONOTONIC
+     * domain -- chosen so that `date -s` cannot bypass the throttle, and
+     * correct for that. But CLOCK_MONOTONIC restarts at boot while the file
+     * does not, so a deadline written after 30 days of uptime was still 30
+     * days in the future when read on the next boot: a 500 ms throttle became
+     * a month-long refusal of the correct PIN, reported as PIN_THROTTLED with
+     * nothing to explain it.
+     *
+     * The deadline is not independent state -- it is a function of the failure
+     * count, which IS persisted. So it is derived on load instead of stored,
+     * and cannot disagree with its source. */
+    put_u64_le(hdr + 301, 0);
+    put_u64_le(hdr + 309, 0);
 
     /* Encrypted objects blob : only append if we have the DEK in memory
      * (logged in) and at least one object exists. Otherwise the previous
@@ -834,8 +845,18 @@ fhsm_rv_t fhsm_token_load(const char *path, fhsm_token_t **out) {
     t->user_initialized      = buf[292] ? 1 : 0;
     t->failed_so             = get_u32_le(buf + 293);
     t->failed_user           = get_u32_le(buf + 297);
-    t->throttle_so_until_ms  = get_u64_le(buf + 301);
-    t->throttle_user_until_ms= get_u64_le(buf + 309);
+    /* Derived, never read from the file -- see the note in write_atomic().
+     * Re-imposed rather than cleared: a restart must not be a way to skip the
+     * wait a failure earned, and the exponential curve is bounded at
+     * FHSM_PIN_THROTTLE_MAX_MS, so the delay is at most a minute however long
+     * the machine had been up. */
+    {
+        uint64_t base = now_ms();
+        t->throttle_so_until_ms   = t->failed_so
+                                  ? base + throttle_delay_ms(t->failed_so)   : 0;
+        t->throttle_user_until_ms = t->failed_user
+                                  ? base + throttle_delay_ms(t->failed_user) : 0;
+    }
 
     /* Live DEK buffer is allocated lazily at login. */
     t->dek = NULL;
@@ -853,7 +874,8 @@ void fhsm_token_close(fhsm_token_t *t) {
     free(t);
 }
 
-fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role, const char *pin) {
+fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
+                            const char *pin, size_t pin_len) {
     if (!t || !pin) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
 
@@ -893,7 +915,7 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role, const char *pin) {
     /* PBKDF2-HMAC-SHA-256 (200000 iter) over the PIN. */
     uint8_t kek[32];
     fhsm_rv_t rv = fhsm_pbkdf2(FHSM_HASH_SHA256,
-                                FHSM_SLICE(pin, strlen(pin)),
+                                FHSM_SLICE(pin, pin_len),
                                 FHSM_SLICE(salt, 16),
                                 t->pbkdf2_iter, kek, sizeof(kek));
     if (rv != FHSM_RV_OK) {
@@ -1125,7 +1147,10 @@ fhsm_rv_t fhsm_token_set_pin(fhsm_token_t *t, fhsm_role_t role,
 
     /* Step 1 : verify old_pin via fhsm_token_login. This populates t->dek
      * with the unwrapped DEK if successful. */
-    fhsm_rv_t rv = fhsm_token_login(t, role, old_pin);
+    /* old_pin really is a C string here: it arrived through
+     * fhsm_copy_to_cstr in C_SetPIN. The length is computed where that is
+     * known to be true, rather than assumed one call deeper. */
+    fhsm_rv_t rv = fhsm_token_login(t, role, old_pin, strlen(old_pin));
     if (rv != FHSM_RV_OK) return rv;
 
     /* Step 2 : re-wrap the live DEK under the new PIN. */

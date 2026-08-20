@@ -59,6 +59,68 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **A reboot turned a 500 ms PIN throttle into a 29.8-day lockout.** The
+  throttle deadline was persisted in the token header in the `CLOCK_MONOTONIC`
+  domain — chosen so that `date -s` could not shorten a cooldown, and right for
+  that. `CLOCK_MONOTONIC` restarts at boot; the file does not. A deadline
+  written after thirty days of uptime was still thirty days in the future when
+  the next boot read it, and the correct PIN came back `PIN_THROTTLED` with
+  nothing to explain it:
+
+  ```
+  one wrong PIN            -> 0xa0
+  throttle remaining       -> 455 ms
+  after the reboot         -> 2574127916 ms  (29.8 days)
+  correct PIN now          -> 0x80000004   (PIN_THROTTLED)
+  cap the design intends   -> 60000 ms
+  ```
+
+  Fails closed, so not an opening — but the same shape as the unseal defect
+  fixed in v1.7.0: a routine event locking out an operator who had done
+  nothing wrong.
+
+  The deadline was never independent state. It is a function of the failure
+  count, which *is* persisted, so it is now derived on load and offsets
+  301/309 are written as zero. A restart still does not clear a delay that was
+  earned — it is re-imposed from the count — and `date -s` still changes
+  nothing, because the derived deadline is monotonic within its own boot.
+
+  `tests/test_throttle_reboot.c` plants a long-uptime deadline in the file and
+  reloads. Seven assertions, three of which fail with the defect put back —
+  including the one that would catch a "fix" that merely cleared the deadline
+  and let a restart skip the wait.
+
+* **`C_Login` ignored `ulPinLen` and read the PIN as a C string.** `pPin` is a
+  byte array of `ulPinLen`; PKCS#11 nowhere promises a terminator. The KEK was
+  derived over `FHSM_SLICE(pin, strlen(pin))`, so the module
+
+  * **read past the end of the caller's buffer.** A PIN ending on a page
+    boundary faults inside the module, on input the caller supplies. In the
+    network design of #111 that is a remote crash.
+  * **refused the correct PIN** whenever the byte after it was not zero —
+    which is every client that does not happen to hold a C string. Our four
+    tools pass a `getenv()` pointer, terminated by accident, so nothing local
+    ever showed it.
+  * **truncated a PIN containing a NUL** to its prefix, silently.
+
+  Found by trying to log in through `p11-kit server`, whose RPC unmarshals
+  into a buffer that is not terminated: `CKR_PIN_INCORRECT` for a PIN that
+  works directly, then `FHSM_RV_PIN_THROTTLED` because the attempt had been
+  counted as a failure.
+
+  `fhsm_token_login()` now takes the length; the callers that really do hold a
+  C string pass `strlen()` at the call site, where that is true.
+  `C_InitToken`, `C_InitPIN` and `C_SetPIN` already copied `ulPinLen` bytes
+  through `fhsm_copy_to_cstr` and were correct — **this was the fourth PIN
+  entry point and the only one that was not**, the same shape as #61 and #49:
+  a rule wired to some of the paths that reach a state and not the rest. The
+  three that set a PIN now also refuse one containing a NUL
+  (`CKR_PIN_INVALID`), so what is stored can always be matched faithfully.
+
+  `tests/test_pin_length.c`. Put the defect back and the guard-page case does
+  not report a failure, it **segfaults** — which is the point. Clean under
+  `SANITIZE=1`.
+
 * **The five REST probes segfaulted against any conforming module.** They
   dlsym'd each `C_*` by name and called whatever came back, so
   `p11-kit-client.so` — which exports exactly one symbol, the only one PKCS#11

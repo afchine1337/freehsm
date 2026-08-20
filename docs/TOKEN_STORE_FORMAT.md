@@ -46,8 +46,8 @@ round-trips, and minimal parser attack surface per CC EAL4+ ADV_TDS.3
 | 292 | 1 | `user_initialized` | 0/1 |
 | 293 | 4 | `failed_so` | LE u32, persisted so lockout survives restart |
 | 297 | 4 | `failed_user` | LE u32 |
-| 301 | 8 | `throttle_so_until_ms` | LE u64, CLOCK_MONOTONIC domain |
-| 309 | 8 | `throttle_user_until_ms` | LE u64 |
+| 301 | 8 | reserved, written as zero | was `throttle_so_until_ms`; see below |
+| 309 | 8 | reserved, written as zero | was `throttle_user_until_ms` |
 
 All multi-byte integers are **little-endian**.
 
@@ -109,9 +109,25 @@ different token fails authentication even if the PIN-derived keys match.
 * `FHSM_PIN_MAX_FAILED` = 5 → role locked (`FHSM_RV_PIN_LOCKED`).
 * Exponential throttle between failures: 500 ms × 2^(N−1), capped at
   60 000 ms, enforced **before** PBKDF2 so timing is useless as an oracle.
-* Counters and throttle deadlines are persisted in the header (plaintext
-  by design — they must be readable before login) and use
-  `CLOCK_MONOTONIC`, so `date -s` cannot bypass the throttle.
+* The **counter** is persisted in the header (plaintext by design — it must
+  be readable before login). The **deadline is not**: it is derived from the
+  counter on load, and offsets 301/309 are written as zero.
+
+  They used to be stored, in the `CLOCK_MONOTONIC` domain, so that `date -s`
+  could not bypass the throttle. That reasoning was right and its consequence
+  was not examined: `CLOCK_MONOTONIC` restarts at boot while the file does
+  not, so a deadline written after thirty days of uptime was still thirty days
+  in the future on the next boot. A 500 ms throttle became a 29.8-day refusal
+  of the correct PIN, reported as `PIN_THROTTLED` with nothing to explain it.
+  Measured, then fixed; `tests/test_throttle_reboot.c` plants a long-uptime
+  deadline in the file and asserts the reload stays within the cap.
+
+  The deadline was never independent state — it is a function of the counter.
+  Deriving it removes both the reboot trap and the possibility of the two
+  disagreeing. A restart does not clear the delay: it is re-imposed from the
+  counter, so restarting is not a way to skip a wait that was earned.
+* `date -s` still cannot bypass anything, for the same reason as before: the
+  derived deadline is monotonic within the boot that computed it.
 * Minimum PIN length: 8 (enforced at init/set).
 
 ## Optional sealing companion

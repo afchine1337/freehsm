@@ -83,7 +83,6 @@ fhsm_rv_t fhsm_session_close(unsigned long h) {
 
 fhsm_rv_t fhsm_session_login(unsigned long h, fhsm_role_t role,
                                const char *pin, size_t pin_len) {
-    (void)pin_len;
     if (h == 0 || h >= FHSM_MAX_SESSIONS) return FHSM_RV_SESSION_HANDLE_INVALID;
     pthread_mutex_lock(&g_sess_mu);
     fhsm_session_entry_t *s = &g_sessions[h];
@@ -96,7 +95,7 @@ fhsm_rv_t fhsm_session_login(unsigned long h, fhsm_role_t role,
     /* The token attach + login lives in fhsm_token_login; this function
      * is the boundary that the PKCS#11 façade calls. */
     if (!s->token) return FHSM_RV_TOKEN_NOT_PRESENT;
-    fhsm_rv_t rv = fhsm_token_login(s->token, role, pin);
+    fhsm_rv_t rv = fhsm_token_login(s->token, role, pin, pin_len);
     /* Set this session's role when the token is (already) logged in as
      * that role : CKR_USER_ALREADY_LOGGED_IN means the application is
      * authenticated, so this session must reflect it too (#125). */

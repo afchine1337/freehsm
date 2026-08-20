@@ -30,9 +30,9 @@ int main(int argc, char **argv){
   char path[512]; snprintf(path,sizeof path,"%s/t.tok",dir);
   fhsm_token_t *t=NULL;
   if (fhsm_token_init(path, "87654321", "bench", &t) != FHSM_RV_OK) return 2;
-  (void)fhsm_token_login(t, FHSM_ROLE_SO, "87654321");
+  (void)fhsm_token_login(t, FHSM_ROLE_SO, "87654321", strlen("87654321"));
   (void)fhsm_token_init_user_pin(t, "12345678");
-  (void)fhsm_token_login(t, FHSM_ROLE_USER, "12345678");
+  (void)fhsm_token_login(t, FHSM_ROLE_USER, "12345678", strlen("12345678"));
   static uint8_t key[1191];  /* taille d'une cle privee RSA-2048 */
   memset(key,0xA5,sizeof key);
   double t0=ms(); int made=0;

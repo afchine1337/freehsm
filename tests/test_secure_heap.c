@@ -50,11 +50,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "token_init failed\n"); return 2;
     }
     fhsm_rv_t lr;
-    if ((lr = fhsm_token_login(t, FHSM_ROLE_SO, "87654321")) != FHSM_RV_OK) {
+    if ((lr = fhsm_token_login(t, FHSM_ROLE_SO, "87654321", strlen("87654321"))) != FHSM_RV_OK) {
         fprintf(stderr, "SO login failed 0x%x\n", (unsigned)lr); return 2; }
     if ((lr = fhsm_token_init_user_pin(t, "12345678")) != FHSM_RV_OK) {
         fprintf(stderr, "init_user_pin failed 0x%x\n", (unsigned)lr); return 2; }
-    if ((lr = fhsm_token_login(t, FHSM_ROLE_USER, "12345678")) != FHSM_RV_OK) {
+    if ((lr = fhsm_token_login(t, FHSM_ROLE_USER, "12345678", strlen("12345678"))) != FHSM_RV_OK) {
         fprintf(stderr, "USER login failed 0x%x\n", (unsigned)lr); return 2; }
 
     static uint8_t payload[4096];

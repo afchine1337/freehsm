@@ -4,7 +4,7 @@ SPDX-FileCopyrightText: 2026 Simorgh Labs
 -->
 # Probes — what a network HSM would actually cost (#111)
 
-Five throwaway programs, kept because their numbers decided the design and
+Six throwaway programs, kept because their numbers decided the design and
 because a number without the program that produced it is an assertion.
 
 They are **not** part of `make all` or `make tests`: each needs a provisioned
@@ -53,6 +53,7 @@ guess that happens to be right for our module and wrong through p11-kit.
 | `03_login_shared` | Does a second session inherit the first one's login? |
 | `04_concurrency` | How does throughput and latency scale with concurrent signers? |
 | `05_session_race` | Is sharing one session between threads safe? |
+| `06_kit_isolation` | Does `p11-kit server` isolate two clients' login state? |
 
 ## The numbers, 2026-08-18
 
@@ -124,3 +125,31 @@ Memory per held session, behaviour past the point where the pool is smaller
 than the number of concurrent clients, and anything at all about the network:
 these all measure the module through `dlopen`, with no socket in sight. The
 2-core figure is a floor, not a capacity plan.
+
+## `06_kit_isolation`, and the defect it found
+
+It answers §2b of the ADR: two client processes on one `p11-kit server` socket,
+one logged in and holding, the other never logged in.
+
+```bash
+p11-kit server -f -n /tmp/fhsm.sock "pkcs11:" --provider $PWD/libfreehsm-fips.so &
+export P11_KIT_SERVER_ADDRESS="unix:path=/tmp/fhsm.sock"
+C=/usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so
+probes/rest/06_kit_isolation $C hold 14 k1 &
+sleep 5
+probes/rest/06_kit_isolation $C peek k1
+```
+
+Run `peek` against the module **directly** first. Two processes are two
+applications, so the answer there must be "no leak" — that is the control, and
+without it a "no leak" over the socket means nothing.
+
+The answer is that p11-kit isolates, because it forks a `p11-kit-remote` child
+per connection. Visible in `ps`, not in its documentation.
+
+Getting there took a fix in the module: `C_Login` derived the key over
+`strlen(pPin)` and ignored `ulPinLen`, so it refused the correct PIN through
+p11-kit — whose RPC does not terminate the buffer — and read past its end.
+The first run of this probe reported "no leak" while nobody was logged in at
+all. That number was as worthless as the 350 sig/s above, and for the same
+reason: it measured a configuration that was failing.

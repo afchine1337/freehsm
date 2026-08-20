@@ -137,7 +137,27 @@ Between attempts, `C_Login` may return `FHSM_RV_PIN_THROTTLED (0x80000004)` with
 2. Sleep for the indicated number of milliseconds.
 3. Retry exactly once.
 
-Repeatedly hammering through the throttle does not change the outcome ; the cooldown survives process restart (timestamps persisted in the token JSON).
+Repeatedly hammering through the throttle does not change the outcome. The
+failure **count** is persisted in the token file, so a restart does not reset
+it, and on load the delay is re-imposed from that count — restarting is not a
+way to skip a wait that was earned.
+
+The deadline itself is **not** persisted, and this is a correction. It used to
+be, in the `CLOCK_MONOTONIC` domain, so that `date -s` could not shorten a
+cooldown. That reasoning was sound; its consequence was not examined.
+`CLOCK_MONOTONIC` restarts at boot and the file does not, so a deadline written
+after thirty days of uptime was still thirty days in the future when the next
+boot read it: **a 500 ms cooldown became a 29.8-day refusal of the correct
+PIN**, reported as `PIN_THROTTLED` with nothing to explain it. The same shape as
+the unseal defect in §"TPM sealing" below — a routine event locking out an
+operator who had done nothing wrong. The delay is now derived from the count
+instead of stored, capped at 60 000 ms as documented, and `date -s` still
+changes nothing.
+
+If you are running a build from before this correction and a token reports
+`PIN_THROTTLED` for far longer than 60 seconds, that is this defect. The
+cooldown clears once the machine has been up as long as the boot that wrote it;
+upgrading and reloading the token clears it immediately.
 
 ### 4.3 Audit log review
 

@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
         fhsm_rv_t rv = fhsm_token_init(path, so_pin, "tpm-hw-validation", &t);
         if (rv == FHSM_RV_OK && t) {
             /* The SO must set the USER PIN before USER login is possible. */
-            rv = fhsm_token_login(t, FHSM_ROLE_SO, so_pin);
+            rv = fhsm_token_login(t, FHSM_ROLE_SO, so_pin, strlen(so_pin));
             if (rv == FHSM_RV_OK) rv = fhsm_token_init_user_pin(t, user_pin);
             fhsm_token_close(t);
         }
@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
             printf("RV=0x%08lx  (chargement du token impossible)\n", (unsigned long)rv);
             return 1;
         }
-        rv = fhsm_token_login(t, role, pin);
+        rv = fhsm_token_login(t, role, pin, strlen(pin));
         fhsm_token_close(t);
         return finish(rv, want);
     }

@@ -67,13 +67,13 @@ static int run_roundtrip(const char *path, uint32_t n_objects) {
     /* --- create + provision ------------------------------------------- */
     rv = fhsm_token_init(path, SO_PIN, "cap-test", &t);
     if (rv != FHSM_RV_OK) return fail("token_init", rv);
-    rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN);
+    rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN, strlen(SO_PIN));
     if (rv != FHSM_RV_OK) return fail("SO login", rv);
     rv = fhsm_token_init_user_pin(t, USER_PIN);
     if (rv != FHSM_RV_OK) return fail("init_user_pin", rv);
     fhsm_token_logout(t);
 
-    rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN);
+    rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN, strlen(USER_PIN));
     if (rv != FHSM_RV_OK) return fail("USER login (fresh)", rv);
 
     uint8_t key[32];
@@ -99,7 +99,7 @@ static int run_roundtrip(const char *path, uint32_t n_objects) {
     /* --- reload from disk : this is where the v1.4.0 bug fired --------- */
     rv = fhsm_token_load(path, &t);
     if (rv != FHSM_RV_OK) return fail("token_load (reload)", rv);
-    rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN);
+    rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN, strlen(USER_PIN));
     if (rv != FHSM_RV_OK)
         return fail("USER login after reload --- objects blob rejected? "
                     "(v1.4.0 capacity regression)", rv);
@@ -144,12 +144,12 @@ static int run_cert_roundtrip(const char *path) {
 
     rv = fhsm_token_init(path, SO_PIN, "cert-test", &t);
     if (rv != FHSM_RV_OK) return fail("token_init (cert)", rv);
-    rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN);
+    rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN, strlen(SO_PIN));
     if (rv != FHSM_RV_OK) return fail("SO login (cert)", rv);
     rv = fhsm_token_init_user_pin(t, USER_PIN);
     if (rv != FHSM_RV_OK) return fail("init_user_pin (cert)", rv);
     fhsm_token_logout(t);
-    rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN);
+    rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN, strlen(USER_PIN));
     if (rv != FHSM_RV_OK) return fail("USER login (cert)", rv);
 
     uint8_t *der = malloc(CERT_LEN);
@@ -176,7 +176,7 @@ static int run_cert_roundtrip(const char *path) {
 
     rv = fhsm_token_load(path, &t);
     if (rv != FHSM_RV_OK) { free(der); return fail("token_load (cert reload)", rv); }
-    rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN);
+    rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN, strlen(USER_PIN));
     if (rv != FHSM_RV_OK) { free(der); return fail("USER login after cert reload", rv); }
 
     const uint8_t *val = NULL; size_t val_len = 0;
@@ -210,10 +210,10 @@ static int run_store_full(const char *path) {
     fhsm_token_t *t = NULL; fhsm_rv_t rv; unlink(path);
     rv = fhsm_token_init(path, SO_PIN, "full-test", &t);
     if (rv != FHSM_RV_OK) return fail("token_init (full)", rv);
-    if ((rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN))) return fail("SO login (full)", rv);
+    if ((rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN, strlen(SO_PIN)))) return fail("SO login (full)", rv);
     if ((rv = fhsm_token_init_user_pin(t, USER_PIN)))     return fail("init_user_pin (full)", rv);
     fhsm_token_logout(t);
-    if ((rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN))) return fail("USER login (full)", rv);
+    if ((rv = fhsm_token_login(t, FHSM_ROLE_USER, USER_PIN, strlen(USER_PIN)))) return fail("USER login (full)", rv);
     uint8_t key[32] = {0}; char label[32]; uint32_t h;
     for (uint32_t i = 0; i < N_MAX; ++i) {
         snprintf(label, sizeof(label), "full-%03u", i);

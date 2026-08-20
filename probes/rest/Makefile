@@ -12,7 +12,8 @@ CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -std=c11 -D_GNU_SOURCE
 LDLIBS   = -ldl -lpthread
 
-PROBES = 01_latency 02_login_cost 03_login_shared 04_concurrency 05_session_race
+PROBES = 01_latency 02_login_cost 03_login_shared 04_concurrency 05_session_race \
+         06_kit_isolation
 
 all: $(PROBES)
 

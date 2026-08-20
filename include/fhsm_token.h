@@ -101,7 +101,13 @@ void fhsm_token_close(fhsm_token_t *t);
  * unwrapped DEK is kept in the token's secure-heap arena until
  * fhsm_token_logout() / fhsm_token_close() is called.
  */
-fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role, const char *pin);
+/* `pin` is ulPinLen bytes, NOT a C string. PKCS#11 never promised a
+ * terminator: C_Login used to derive the KEK over strlen(pPin), which read
+ * past the caller's buffer and refused the correct PIN whenever the byte
+ * after it was not zero. Every caller that does hold a C string passes
+ * strlen() explicitly, at the call site, where that fact is true. */
+fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
+                            const char *pin, size_t pin_len);
 
 /* End the current session: zeroize the in-memory DEK, increment audit
  * sequence number. The on-disk file is not touched. */

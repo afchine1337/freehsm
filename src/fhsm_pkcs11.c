@@ -734,6 +734,13 @@ CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
                        (userType == 1 /*CKU_USER*/) ? FHSM_ROLE_USER :
                        FHSM_ROLE_NONE;
     if (role == FHSM_ROLE_NONE) return FHSM_RV_ARGUMENTS_BAD;
+    /* ulPinLen, not strlen(pPin). pPin is a byte array and PKCS#11 does not
+     * terminate it: deriving over strlen() read past the caller's buffer and
+     * refused the correct PIN whenever the next byte was not zero -- which is
+     * every client that does not happen to hold a C string, p11-kit's RPC
+     * included. C_InitToken, C_InitPIN and C_SetPIN all honoured the length
+     * already; this was the fourth PIN entry point and the only one that did
+     * not. */
     fhsm_rv_t rv = fhsm_session_login(hSession, role, (const char*)pPin, ulPinLen);
     char rolename[8] = "NONE";
     if (role == FHSM_ROLE_SO)   memcpy(rolename, "SO",   3);
@@ -1282,6 +1289,16 @@ static int fhsm_copy_to_cstr(char *dst, size_t cap, const void *src, size_t n) {
     return 0;
 }
 
+/* A PIN is a byte array; the token stores it as a C string, so a PIN with a
+ * NUL inside it would be silently stored, and later matched, as its prefix --
+ * a shorter secret than the operator chose, with nothing said. The three
+ * entry points that SET a PIN refuse it instead. Refusing what cannot be
+ * stored faithfully is cheaper than a truncation nobody can see; C_Login does
+ * not need the check, because a PIN that could not be set cannot be matched. */
+static int fhsm_pin_has_embedded_nul(const void *p, size_t n) {
+    return memchr(p, 0, n) != NULL;
+}
+
 /* ---------------------------------------------------------------------------
  * C_InitToken --- create or re-initialize the token in `slotID`. The SO PIN
  * becomes the new SO PIN. Existing objects are destroyed.
@@ -1293,6 +1310,7 @@ CK_RV C_InitToken(CK_SLOT_ID slotID, CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen,
     if (!pPin) return FHSM_RV_ARGUMENTS_BAD;
     if (ulPinLen < FHSM_PIN_MIN_LEN || ulPinLen > FHSM_PIN_MAX_LEN)
         return FHSM_RV_PIN_LEN_RANGE;
+    if (fhsm_pin_has_embedded_nul(pPin, ulPinLen)) return 0x000000A1UL; /* CKR_PIN_INVALID */
     if (!pLabel) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_slot_table_init_once();
 
@@ -1334,6 +1352,7 @@ CK_RV C_InitPIN(CK_SESSION_HANDLE hSession, CK_UTF8CHAR_PTR pPin,
     if (!pPin) return FHSM_RV_ARGUMENTS_BAD;
     if (ulPinLen < FHSM_PIN_MIN_LEN || ulPinLen > FHSM_PIN_MAX_LEN)
         return FHSM_RV_PIN_LEN_RANGE;
+    if (fhsm_pin_has_embedded_nul(pPin, ulPinLen)) return 0x000000A1UL; /* CKR_PIN_INVALID */
     fhsm_token_t *t = fhsm_session_token(hSession);
     fhsm_role_t   r = fhsm_session_role(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -1359,6 +1378,8 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
     if (ulOldLen < FHSM_PIN_MIN_LEN || ulOldLen > FHSM_PIN_MAX_LEN
         || ulNewLen < FHSM_PIN_MIN_LEN || ulNewLen > FHSM_PIN_MAX_LEN)
         return FHSM_RV_PIN_LEN_RANGE;
+    if (fhsm_pin_has_embedded_nul(pOldPin, ulOldLen)
+        || fhsm_pin_has_embedded_nul(pNewPin, ulNewLen)) return 0x000000A1UL;
     fhsm_token_t *t = fhsm_session_token(hSession);
     fhsm_role_t   r = fhsm_session_role(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;

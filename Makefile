@@ -430,6 +430,12 @@ tests/test_composite_cms: tests/test_composite_cms.c $(LIB_OBJ)
 tests/test_composite_ocsp: tests/test_composite_ocsp.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+tests/test_pin_length: tests/test_pin_length.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
+tests/test_throttle_reboot: tests/test_throttle_reboot.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
 tests/test_audit_key: tests/test_audit_key.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
@@ -537,7 +543,7 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 # beside the tokens, so any test that initialises the module writes there.
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
-tests: tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects
+tests: tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_tpm
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
@@ -555,6 +561,8 @@ tests: tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime test
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_composite_ocsp
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_key
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_backpressure
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_pin_length
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_throttle_reboot
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_verify
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_p11_loader ./libfreehsm-fips.so
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_token_capacity

@@ -71,7 +71,8 @@ speak PKCS#11, not REST.* True, and an operations API does not serve them —
 Apache, nginx, OpenSSL, a Java keystore and every smart-card-aware application
 want a `.so` to load, not a URL.
 
-Three things follow, and only the first is decided here.
+Three things follow. The first was known; the other two were measured, and
+the third was not a p11-kit question at all.
 
 **p11-kit already remotes PKCS#11.** `p11-kit server` publishes a module on a
 unix socket and `p11-kit-client.so` is the provider an application loads; SSH
@@ -79,12 +80,33 @@ forwards the socket. Nothing needs to be written for the transport, and writing
 our own would mean writing an RPC protocol for 68 entry points in C — the
 opposite of the argument that this module can be audited.
 
-**What it does not answer is the same finding as above.** A `p11-kit server`
-is one process, so it is one PKCS#11 application, so the first client to log in
-logs in the token for every client behind that socket. This has not been
-measured here and must be, on hardware where two clients can be run against one
-server: if p11-kit isolates them, it is a deployment option today; if it does
-not, it is a per-operator server or nothing.
+**It does isolate the login, and the mechanism matters.** The worry was that a
+`p11-kit server` is one process, therefore one PKCS#11 application, therefore
+the first client to log in unlocks the token for everyone behind the socket.
+Measured with `probes/rest/06_kit_isolation`, two client processes on one
+socket:
+
+```
+[hold] slot 17, C_Login -> 0x0          (client A, logged in, holding)
+[peek] slot 17, state = 2  RW_PUBLIC    (client B, never logged in)
+[peek] private key "k1" is not visible
+```
+
+No leak. The reason is visible in `ps`: the server forks a `p11-kit-remote`
+child per connection, so each client gets its own process and therefore its own
+application-scoped login state.
+
+Two consequences follow from *how* it isolates, and they are not free. Each
+client pays a full `C_Initialize` — 203–288 ms of KATs and integrity check —
+and its own `C_Login` at 31–52 ms, because nothing is shared between the
+children. And the isolation is a property of p11-kit's process model, not a
+promise in its documentation that we can rely on across versions; the probe
+exists so the claim can be re-tested rather than assumed.
+
+Note also that the control matters here: run `06_kit_isolation peek` against
+the module directly first. Two processes are two applications, so it must
+report no leak. A peek that reports isolation over a socket without having
+reported the opposite in `03_login_shared` has proved nothing.
 
 **Our own tools could not drive a conforming module.** They dlsym'd each `C_*`
 by name and exited when one was missing, so `--module .../p11-kit-client.so`
@@ -94,6 +116,16 @@ the standard requires exactly one exported symbol. The probes in
 Both now load through `C_GetFunctionList` and enumerate slots with
 `C_GetSlotList`. That is a precondition for measuring anything through
 p11-kit, and it was found by asking the question, not by a test.
+
+**And asking the question found a defect in the module itself.** Once the
+tools could reach a remote module, `C_Login` refused the correct PIN through
+p11-kit and accepted it locally. `C_Login` derived the key over
+`strlen(pPin)`, ignoring `ulPinLen`: a read past the caller's buffer, which
+also refuses any PIN not followed by a zero byte. Locally our own callers
+passed `getenv()` pointers, terminated by accident. In the service this
+document describes, it is a remote crash on attacker-chosen input. Fixed, with
+`tests/test_pin_length.c`. Nothing in the design changed — but the design was
+resting on a login path that no non-local client could have used.
 
 ### 3. mTLS client certificates, not bearer tokens
 
@@ -105,9 +137,9 @@ travel. Coherent for a project that is a PKI.
 
 ## What the measurements changed
 
-Five probes, `probes/rest/`, measured on 2 cores with OpenSSL 3.5.6. The
+Six probes, `probes/rest/`, measured on 2 cores with OpenSSL 3.5.6. The
 numbers and the programs are in that directory's README; three findings changed
-a decision.
+a decision, and the sixth probe is the p11-kit measurement in §2b.
 
 ### A stateless API does not make the login stateless
 
@@ -200,10 +232,13 @@ nothing at all. A per-identity throttle at the service becomes the only real
 defence against guessing, and it needs to survive restart the way the token's
 does.
 
-**Where the token PIN comes from** for the daemon. It cannot be a request
-parameter — that was the reason `--pin` does not exist on any of the four
-tools. Options are an operator-entered secret at start, a TPM-sealed value, or
-a systemd credential; none is chosen.
+~~**Where the token PIN comes from** for the daemon.~~ **Decided** —
+`docs/DAEMON_PIN.md`. A machine-generated PIN (32 DRBG bytes, base64, 44
+characters, never seen by the operator), read by default from a systemd
+encrypted credential, zeroized as soon as `C_Login` returns. Our own
+`fhsm_tpm_seal` was the obvious candidate and is not the default: it binds PCRs
+0..7, so a kernel update would stop the service from starting. systemd's
+credential encryption binds no PCRs by default, which is the whole difference.
 
 **The delegated OCSP responder** (RFC 6960 §4.2.2.2) and anything that listens
 for OCSP, both of which were the parts of #112 that genuinely do wait for this
@@ -212,10 +247,10 @@ work.
 **Memory per held session**, unmeasured. The 2-core figures are a floor, not a
 capacity plan.
 
-**Whether `p11-kit server` isolates two clients' login state.** The measurement
-in §2b. It decides between "p11-kit is the PKCS#11 answer" and "a server per
-operator". It needs two clients against one server, which a single sandbox
-process cannot stage.
+**What a forked-per-client server costs at scale.** §2b settles the isolation
+question and opens a capacity one: every client pays its own `C_Initialize`
+and `C_Login`, and none of the pool work in this document applies across
+them.
 
 ---
 

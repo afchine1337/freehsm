@@ -228,7 +228,7 @@ static void test_tpm_failure_does_not_lock_token(void) {
         return;
     }
     ck("login works while the TPM is healthy",
-       fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN) == FHSM_RV_OK);
+       fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN, strlen(SO_PIN)) == FHSM_RV_OK);
     fhsm_token_logout(t);
 
     /* The firmware update. Every unseal from here fails. */
@@ -237,7 +237,7 @@ static void test_tpm_failure_does_not_lock_token(void) {
     int all_device_error = 1;
     const int attempts = FHSM_PIN_MAX_FAILED + 3;
     for (int i = 0; i < attempts; ++i) {
-        rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN);   /* correct PIN */
+        rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN, strlen(SO_PIN));   /* correct PIN */
         if (rv != FHSM_RV_DEVICE_ERROR) {
             printf("      attempt %d returned 0x%08x, expected DEVICE_ERROR\n",
                    i + 1, (unsigned)rv);
@@ -251,7 +251,7 @@ static void test_tpm_failure_does_not_lock_token(void) {
      * The operator's PIN was correct every single time; the token must
      * still be usable. Under the old code it locked after 5. */
     setenv("FHSM_TPM_FAKE_PCR", "boot-state-1", 1);
-    rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN);
+    rv = fhsm_token_login(t, FHSM_ROLE_SO, SO_PIN, strlen(SO_PIN));
     ck("token still opens once the TPM recovers -- no lockout", rv == FHSM_RV_OK);
     if (rv != FHSM_RV_OK)
         printf("      got 0x%08x (0x%08x would be PIN_LOCKED)\n",
@@ -261,7 +261,7 @@ static void test_tpm_failure_does_not_lock_token(void) {
      * TPM path from the counter must not have removed the counter. */
     fhsm_token_logout(t);
     ck("a wrong PIN is still rejected as a wrong PIN",
-       fhsm_token_login(t, FHSM_ROLE_SO, "wrongwrong") == FHSM_RV_PIN_INCORRECT);
+       fhsm_token_login(t, FHSM_ROLE_SO, "wrongwrong", strlen("wrongwrong")) == FHSM_RV_PIN_INCORRECT);
 
     fhsm_token_close(t);
     unlink(path);
