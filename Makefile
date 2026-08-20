@@ -385,6 +385,10 @@ tests/test_concurrency: tests/test_concurrency.c $(LIB)
 tests/bench_capacity: tests/bench_capacity.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+# Not part of `make tests`: a measurement, not an assertion. See the file.
+tests/bench_audit_rate: tests/bench_audit_rate.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
 tests/test_secure_heap: tests/test_secure_heap.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 

@@ -226,11 +226,17 @@ Refusals are the part of an API that ages well, so they are decided here.
 
 ## Still open
 
-**The throttle by identity.** The token's own anti-brute-force throttle counts
-failures per token, and after the first login of the process it protects
-nothing at all. A per-identity throttle at the service becomes the only real
-defence against guessing, and it needs to survive restart the way the token's
-does.
+~~**The throttle by identity.**~~ **Decided** — `docs/RATE_LIMIT.md`, which
+also corrects what was written here. There is nothing to guess: the client
+presents a certificate, not a secret. The control has three other jobs, and the
+measurement that shaped it is that **a refused request costs us nearly what a
+signature costs us** — 2.5–2.9 ms and 302 bytes of audit line, against 3.3–4.3
+ms of ML-DSA, ~10 GB/day at saturation. So the limit is enforced before the
+audit write rather than after, and a refused identity produces a handful of
+lines rather than one per request. It also says every throughput figure below
+was taken with the log absent and is optimistic by roughly a factor of two. And "survive
+restart the way the token's does" was itself a defect — see
+`tests/test_throttle_reboot.c`. Persist the count, derive the delay.
 
 ~~**Where the token PIN comes from** for the daemon.~~ **Decided** —
 `docs/DAEMON_PIN.md`. A machine-generated PIN (32 DRBG bytes, base64, 44
