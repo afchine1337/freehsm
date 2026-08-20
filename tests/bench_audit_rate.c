@@ -34,11 +34,18 @@
  * worth running more than once, and hence this comment: one run of this
  * program is not a measurement.
  *
- * For comparison, from probes/rest/README.md on the same host: a composite
- * signature is 3.3-4.3 ms, and signing sustains 310 sig/s at two threads. So
- * the audit line costs about as much as the signature it records. Every
- * request roughly doubles its own cost -- and a refusal, which is nearly free
- * to provoke, costs us almost what a signature costs us.
+ * For comparison: a composite signature ALONE costs roughly 1 ms on this host.
+ * The 3.3-4.3 ms in probes/rest/README.md is the signature plus its audit
+ * line, which was not understood when that table was written -- C_Initialize
+ * opens the log and C_Sign writes to it, so every probe figure already carried
+ * a durable write.
+ *
+ * So the audit line costs more than the cryptography it records, and a
+ * refusal -- which is nearly free to provoke -- costs us more than a signature
+ * costs us. Re-running the probes with FHSM_AUDIT_LOG=/dev/null puts four-
+ * thread throughput at 1359 sig/s against 247 with the log: the plateau that
+ * looked like CPU saturation was this fsync. See the last section of
+ * probes/rest/README.md.
  */
 #include "fhsm_common.h"
 #include "fhsm_audit.h"

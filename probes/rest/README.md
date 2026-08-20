@@ -66,12 +66,15 @@ present, `PROFILE=interop`, composite `MLDSA65-Ed25519-SHA512`.
 | `C_Login`, right PIN | 31–39 ms, **every time** — 200 000 PBKDF2 iterations |
 | `C_Login`, wrong PIN | 33.5 ms — same cost, so no timing oracle |
 | `C_Login`, 2nd wrong | 3.7 ms — the throttle refuses before the KDF |
-| composite signature | 3.3–4.3 ms |
+| composite signature **plus its audit line** | 3.3–4.3 ms |
 | fully stateless request | 43.5 ms → **23 req/s** |
 | warm session, 1 thread | 4.2 ms → **237 req/s** |
 | pool, 2 threads | 310 sig/s, median 5.6 ms, p95 9.6 ms |
 | pool, 4 threads | 315 sig/s, median 11.4 ms, p95 21.5 ms |
 | pool, 8 threads | 294 sig/s, median 23.5 ms, p95 52 ms |
+
+**Read every row above as "operation + one durable audit line".** That was not
+understood when the table was written; see the last section.
 
 Bare PBKDF2-HMAC-SHA-256, 200 000 iterations, measured separately on the same
 host: **31.9 ms**. That is the figure that showed `C_Login` was doing the full
@@ -153,3 +156,47 @@ p11-kit — whose RPC does not terminate the buffer — and read past its end.
 The first run of this probe reported "no leak" while nobody was logged in at
 all. That number was as worthless as the 350 sig/s above, and for the same
 reason: it measured a configuration that was failing.
+
+---
+
+## What the audit log costs, and what it does to every number above
+
+`C_Initialize` opens the audit log and `C_Sign` writes a line — 25 signatures
+produce 25 `sign` events, counted from the log after a run of `01_latency`. So
+every figure in this file was taken *with* a durable write in the path, and
+none of them said so. Two documents drew conclusions from them that do not
+survive knowing it.
+
+The control is one environment variable. `FHSM_AUDIT_LOG=/dev/null` still
+formats the line and computes the HMAC; only the durability goes away.
+
+```bash
+# with the log, as every number above was taken
+FHSM_TOKENS_DIR=$(mktemp -d) probes/rest/04_concurrency ./libfreehsm-fips.so k1
+
+# same thing, without making the line durable
+FHSM_TOKENS_DIR=$(mktemp -d) FHSM_AUDIT_LOG=/dev/null \
+    probes/rest/04_concurrency ./libfreehsm-fips.so k1
+```
+
+| | with the log | on `/dev/null` |
+|---|---|---|
+| one warm signature | 4.0–4.3 ms | 0.9–1.4 ms |
+| 1 thread | 199 sig/s | 558 sig/s |
+| 2 threads | 267 sig/s | 859 sig/s |
+| 4 threads | 247 sig/s | **1359 sig/s** |
+| 8 threads | 242 sig/s | 1145 sig/s |
+
+**The durable write is about 70 % of a request.** The composite signature costs
+roughly 1 ms; the 3.3–4.3 ms in the table above is signature plus audit line.
+
+**The plateau was never CPU saturation.** `docs/REST_API_DESIGN.md` read
+310/315/294 sig/s as "signing is CPU-bound, so size the pool to cores". Without
+the `fsync` the same probe scales past core count and reaches five times the
+throughput. The flat line was one `fsync` serialising the whole module. That
+conclusion is corrected there, and the `fsync` policy is recorded in
+`docs/RATE_LIMIT.md` as the open question it turned out to be.
+
+The absolute numbers come from a 2-core VM and depend entirely on the storage
+underneath. The ratio is the finding, and it should be re-measured on whatever
+a deployment actually writes to.

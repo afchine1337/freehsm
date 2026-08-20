@@ -199,12 +199,46 @@ was nearly reported as a result.
 
 `probes/rest/05_session_race.c` becomes a real test when the service exists.
 
-### Scaling
+### Scaling — and the conclusion that was wrong
 
-310 sig/s at 2 threads, 315 at 4, 294 at 8, on two cores. Signing is CPU-bound,
-so past core count you buy latency and nothing else: median 5.6 ms at two
-threads, 23.5 ms at eight. The pool should be sized to cores, not to clients,
-and the queue in front of it is what absorbs the difference.
+This section used to read:
+
+> 310 sig/s at 2 threads, 315 at 4, 294 at 8, on two cores. **Signing is
+> CPU-bound**, so past core count you buy latency and nothing else. The pool
+> should be sized to cores, not to clients.
+
+It is not CPU-bound. That plateau was the audit log.
+
+Every probe in `probes/rest/` runs against a module whose `C_Initialize` opens
+the log, and `C_Sign` writes a line — 25 signatures, 25 `sign` events, counted.
+So every number in this document already included a durable write, and none of
+them said so. Re-run with `FHSM_AUDIT_LOG=/dev/null`, which formats the line
+and computes the HMAC but does not make it durable:
+
+| threads | with the log | on `/dev/null` |
+|---|---|---|
+| 1 | 199 sig/s | 558 sig/s |
+| 2 | 267 sig/s | 859 sig/s |
+| 4 | 247 sig/s | **1359 sig/s** |
+| 8 | 242 sig/s | 1145 sig/s |
+
+The flat line at ~250 was the `fsync` serialising the whole module. The
+cryptography scales *past* core count on this host and reaches five times the
+throughput. A single warm signature is 4.0–4.3 ms with the log and 0.9–1.4 ms
+without it, so **the durable write is about 70 % of a request** and the
+composite signature costs roughly 1 ms, not the 3.3–4.3 ms recorded in
+`probes/rest/README.md`.
+
+**What follows for the design.** "Size the pool to cores" was reasoning from a
+CPU-bound premise that does not hold. The pool should be sized to what the log
+can absorb, and the log's durability policy — one `fsync` per event, or
+batched — is not a detail to settle later. It decides capacity by a factor of
+five, and it trades against the property that makes the chain meaningful after
+a power loss. `docs/RATE_LIMIT.md` records it as the open question it now
+plainly is.
+
+The absolute numbers are from a 2-core VM and depend entirely on the storage
+underneath; the ratio is the finding.
 
 ---
 

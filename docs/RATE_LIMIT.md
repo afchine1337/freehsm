@@ -51,8 +51,7 @@ Measured by `tests/bench_audit_rate.c` on the same 2-core host as
 | Sustained rate | **350 – 402 events/s** |
 | Line size | **302 bytes** |
 | At saturation | **~408 MB/hour, ~9.8 GB/day** |
-| A composite signature, for comparison | 3.3–4.3 ms |
-| Signing throughput at 2 threads | 310 sig/s |
+| A composite signature alone, for comparison | ~1 ms (see below) |
 
 **A note on how that range was arrived at.** The first run reported 3.735 ms
 and 268 events/s, and this section was originally written around it: the log is
@@ -64,16 +63,34 @@ shared-session figure in `probes/rest/README.md`.
 
 Three things follow, and they invert the obvious design.
 
-**A refusal costs us nearly what a signature costs us.** 2.5–2.9 ms of
-durable write against 3.3–4.3 ms of ML-DSA. There is no cheap "no": an attacker
-who cannot obtain a single signature can still make the service do comparable
-work to one that can, for the price of an HTTP request.
+**A refusal costs us more than a signature costs us.** 2.5–2.9 ms of durable
+write against roughly 1 ms of ML-DSA. There is no cheap "no": an attacker who
+cannot obtain a single signature can make the service do *more* durable work
+than one that can, for the price of an HTTP request.
 
-**Every request roughly doubles its own cost.** The audit line is not a rounding
-error on top of the signature, it is the same order of magnitude, and it is
-serialised on an `fsync`. Every capacity number in `probes/rest/README.md` was
-taken with the log absent, so all of them are optimistic by roughly a factor of
-two.
+**The audit line is most of the request, and this was measured badly twice
+before it was measured properly.** The claim first written here — that the
+numbers in `probes/rest/README.md` were taken with the log absent — is wrong.
+The log is opened by `C_Initialize` and `C_Sign` writes a line; 25 signatures
+produce 25 `sign` events, counted. Every probe figure already included a
+durable write and none of them said so.
+
+Re-running the probes with `FHSM_AUDIT_LOG=/dev/null`, which still formats the
+line and computes the HMAC but does not make it durable:
+
+| | with the log | on `/dev/null` |
+|---|---|---|
+| one warm signature | 4.0–4.3 ms | 0.9–1.4 ms |
+| 1 thread | 199 sig/s | 558 sig/s |
+| 2 threads | 267 sig/s | 859 sig/s |
+| 4 threads | 247 sig/s | **1359 sig/s** |
+| 8 threads | 242 sig/s | 1145 sig/s |
+
+So the durable write is **about 70 % of a request**, the composite signature
+costs roughly 1 ms rather than the 3.3–4.3 ms recorded in the probes README —
+that figure was signature *plus* audit line — and the flat ~250 sig/s that
+`docs/REST_API_DESIGN.md` read as CPU saturation was the `fsync` serialising
+the module. Corrected there.
 
 **Filling the disk is a way to stop the module.** The log latches `ERROR` when
 a write fails, by design — an HSM that cannot record what it did must not keep
@@ -191,17 +208,18 @@ nothing else.
 
 ## Not measured here
 
-**Whether the ~375 events/s ceiling should be raised rather than routed
-around.** Batching the `fsync` across events would lift it, at the cost of the
-property that each line is durable before the next one is written — which is
-what makes the chain meaningful after a power loss. That is a real trade and it
-is not made here.
+**The `fsync` policy — and it is now the largest open question in #111, not a
+detail.** One `fsync` per event is what makes each line durable before the next
+is written, and that is what makes the chain meaningful after a power loss. It
+also costs a factor of five in throughput and turns the whole module into a
+serialised writer: 247 sig/s against 1359 at four threads. Batching would buy
+that back and weaken exactly the property the log exists for.
 
-**What the throughput numbers become with the log switched on.** Every figure
-in `probes/rest/README.md` was taken with the audit log absent, and this
-measurement says they are optimistic by roughly a factor of two. Re-running
-`01_latency` and `04_concurrency` against a module with the log open is the
-next measurement, and it should happen before anyone sizes a deployment.
+Nothing here decides it. What has changed is that it can no longer be deferred
+as a tuning question: the pool size, the queue depth and the rate limit all
+follow from it. It should be decided before any of the three are written, and
+it needs a measurement on real deployment storage rather than a 2-core VM,
+because the whole trade is the cost of one `fsync`.
 
 **The queue in front of the pool.** It does not exist yet, and its depth is the
 difference between a rate limit and a wait.
