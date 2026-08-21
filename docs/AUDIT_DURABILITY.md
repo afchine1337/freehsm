@@ -168,6 +168,99 @@ removed.
 
 ---
 
+## One log per opening — the defect that only shows with two processes
+
+A hash chain has exactly one author by construction. Nothing here required it.
+Two processes each opened the log, each resumed the chain from the tail of the
+file, and from then on each believed itself the successor of the same line:
+
+```
+lines written by two processes : 60 (expected 60)
+chain verifies                : NO
+first broken line             : 2
+```
+
+Sequentially, the same two processes produce a chain that verifies. So it is
+the concurrency, not the resume. Found through `p11-kit server`, which forks a
+child per client and makes the situation systematic — but two `fhsm-sign`
+invocations in a script do the same thing, so this is not a p11-kit problem.
+
+Note what the group commit above does *not* do: it orders writers within one
+process. It says nothing about two processes, and looking at the wrong axis is
+why this was not seen while that work was being done.
+
+### Why not simply refuse the second opening
+
+That was the first instinct and it was wrong. `C_Initialize` opens the log, so
+an exclusive lock would make `fhsm-sign` fail while `fhsm-ca` is running.
+Concurrent tools are a Monday-morning script, not a corner case. Locking
+between processes instead would put a file lock on a path that already costs
+3 ms. So: **each opening creates its own file**, `base.NNNNNN`, with `O_EXCL`.
+Every file then has a single author from line 1 and needs no coordination at
+all — no lock, no restriction on concurrency, nothing on the hot path.
+
+`chain_resume()` went with it. Resuming existed only to share one file between
+openings; each log now starts at the chain head, and the function that made the
+sharing possible is the function that made it dangerous.
+
+### The numbering is not decoration
+
+With one file, deleting the middle breaks the chain and deleting the tail is
+undetectable — a gap already recorded. With per-file logs, deleting a whole
+file would remove a process's entire history while every remaining chain still
+verified. That would be a *new* way to erase history, and a worse one.
+
+Sequence numbers make it a hole between 6 and 8, which `freehsm-audit verify
+<directory>` reports and exits non-zero for. Deleting the highest-numbered
+files leaves no hole — the same end-of-log truncation a single file already
+permits. **The scheme reproduces the existing limit rather than adding one**,
+and that is what makes it acceptable.
+
+### What it costs the operator
+
+Two things, both real.
+
+*Ordering between files.* Within a file `seq` gives the order. Between files
+there is only `ts`, which is `CLOCK_REALTIME` and moves under `date -s`.
+"Review the log weekly" becomes "review the logs", merged on a clock an
+attacker with root can shift. Stated here rather than discovered.
+
+*One more file per start.* A daemon restarted three times leaves three logs.
+That is the honest consequence of one author per chain, and archival has to
+account for it.
+
+A base that already exists and is **not** a regular file — a FIFO, `/dev/null`,
+a character device — is opened as given, with no numbering and no chain to
+resume. It is a stream, not a log, and the operator asked for it by naming one.
+
+`fhsm_audit_current_path()` reports the file actually opened, because the caller
+passed a base and should not have to reconstruct the naming rule.
+`tests/test_audit_multiproc.c` asserts the three properties that matter: every
+file verifies alone, the numbering is contiguous, no line was lost. It fails on
+the first of those against the old single-file behaviour.
+
+---
+
+## Still open, and deliberately separate
+
+**Whether the audit log should be optional at all.** The cost measured here is
+real — a durable line costs more than the signature it records — and an
+operator whose threat model does not include "who asked for this" is paying for
+nothing. `FHSM_AUDIT_MANDATORY` already exists in `include/fhsm_common.h` as a
+constant set to 1, referenced in three comments and **enforced nowhere**;
+`docs/ROADMAP.md` calls it "a constant a comment describes as aspirational".
+
+Meanwhile `FHSM_AUDIT_LOG=/dev/null` switches the log off today: silently,
+undocumented, with the module still claiming a guarantee it is not providing.
+That is the worst of both.
+
+Making the switch real is a separate task, and its shape is already decided:
+**optional, and explicit.** Off must be loud — announced at start-up, visible
+in the token's flags, and never the accidental result of a path. The default
+stays on for `fips-strict`; whether `interop` differs is an open question.
+
+---
+
 ## Not measured here
 
 **Confirmed on a second host, and here is what that took.** The figures above

@@ -83,6 +83,44 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **Two processes sharing one audit log destroyed the chain.** A hash chain has
+  exactly one author by construction and nothing required it. Each process
+  opened the log, each resumed the chain from the tail of the file, and from
+  then on each believed itself the successor of the same line:
+
+  ```
+  lines written by two processes : 60 (expected 60)
+  chain verifies                : NO
+  first broken line             : 2
+  ```
+
+  Sequentially the same two processes produce a chain that verifies, so it is
+  the concurrency and not the resume. Found through `p11-kit server`, which
+  forks a child per client and makes it systematic — but two `fhsm-sign`
+  invocations in a script do the same thing.
+
+  Refusing the second opening was the first instinct and was wrong:
+  `C_Initialize` opens the log, so an exclusive lock would make concurrent
+  tools fail, which is normal use. **Each opening now creates its own file,
+  `base.NNNNNN`, with `O_EXCL`** — one author per chain, no lock, no
+  restriction on concurrency, nothing added to the hot path. `chain_resume()`
+  is gone with it: resuming existed only to share one file between openings.
+
+  The sequence number is load-bearing. Per-file logs would otherwise let a
+  whole file be deleted while every remaining chain verified; numbering makes
+  that a hole, which `freehsm-audit verify <directory>` reports and exits
+  non-zero for. Missing numbers at the end leave no hole — the same
+  end-of-log truncation a single file already permitted, so the scheme
+  reproduces the existing limit rather than adding one.
+
+  Costs, stated rather than discovered: a restart leaves a new file, and
+  between two files only the wall clock orders events. `AGD_OPE` §4.2c.
+
+  `tests/test_audit_multiproc.c` asserts every file verifies alone, the
+  numbering is contiguous, and no line was lost — and fails on the first
+  against the old behaviour. `fhsm_audit_current_path()` reports the file
+  actually opened. Clean under `SANITIZE=1` and ThreadSanitizer.
+
 * **A failed `fsync` on the audit log was ignored.** `fhsm_audit_event()`
   checked `write()` and latched ERROR when it failed, then called `fsync()` and
   threw the answer away. On most filesystems a deferred write error is reported

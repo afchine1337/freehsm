@@ -59,6 +59,8 @@
 #include <string.h>
 #include <time.h>
 #include <inttypes.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <openssl/evp.h>
 #include <openssl/core_names.h>
 #include <openssl/params.h>
@@ -288,9 +290,81 @@ static int verify_file(const char *path, const char *key_hex) {
 static int usage(const char *prog) {
     fprintf(stderr, "Usage:\n"
                      "  %s dump   <path.audit.log> [path...]\n"
-                     "  %s verify <path.audit.log> <audit_key_hex_64>\n",
-                     prog, prog);
+                     "  %s verify <path.audit.log> <audit_key_hex_64>\n"
+                     "  %s verify <directory>         <audit_key_hex_64>\n"
+                     "\n"
+                     "  A directory verifies every base.NNNNNN log in it and\n"
+                     "  reports holes in the numbering, which is how a removed\n"
+                     "  log becomes visible.\n",
+                     prog, prog, prog);
     return 2;
+}
+
+/* ---------------------------------------------------------------------------
+ * Verifying a directory.
+ *
+ * A hash chain has one author, so each opening of the log creates its own file
+ * `base.NNNNNN` -- see src/fhsm_audit.c. Reviewing a deployment therefore
+ * means verifying a set, not a file.
+ *
+ * The numbering is what makes the set auditable. Each chain verifies on its
+ * own, so deleting a whole file would remove a process's entire history while
+ * everything left still checked out. A hole between 6 and 8 says a file is
+ * gone. Deleting the highest-numbered ones leaves no hole -- the same
+ * end-of-log truncation that a single file already permits, and recorded as
+ * such rather than presented as new.
+ * ------------------------------------------------------------------------- */
+struct logfile { unsigned long seq; char path[512]; };
+
+static int by_seq(const void *a, const void *b) {
+    unsigned long x = ((const struct logfile*)a)->seq;
+    unsigned long y = ((const struct logfile*)b)->seq;
+    return x < y ? -1 : x > y;
+}
+
+static int verify_dir(const char *dir, const char *key_hex) {
+    DIR *d = opendir(dir);
+    if (!d) { perror(dir); return 1; }
+
+    static struct logfile f[4096];
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && n < (int)(sizeof f / sizeof f[0])) {
+        const char *dot = strrchr(e->d_name, '.');
+        if (!dot || strlen(dot) != 7) continue;
+        char *end = NULL;
+        unsigned long v = strtoul(dot + 1, &end, 10);
+        if (!end || *end) continue;
+        f[n].seq = v;
+        snprintf(f[n].path, sizeof f[n].path, "%s/%s", dir, e->d_name);
+        n++;
+    }
+    closedir(d);
+
+    if (n == 0) {
+        fprintf(stderr, "verify: no numbered audit file in %s\n", dir);
+        return 1;
+    }
+    qsort(f, (size_t)n, sizeof f[0], by_seq);
+
+    int rc = 0;
+    for (int i = 0; i < n; i++) {
+        printf("== %s\n", f[i].path);
+        if (verify_file(f[i].path, key_hex) != 0) rc = 1;
+        if (i && f[i].seq != f[i-1].seq + 1) {
+            fflush(stdout);   /* so the hole appears where it happened */
+            fprintf(stderr, "verify: MISSING log(s) between %06lu and %06lu"
+                             " -- a file was removed\n", f[i-1].seq, f[i].seq);
+            rc = 1;
+        }
+    }
+    printf("\nverify: %d log(s), sequence %06lu..%06lu%s\n",
+           n, f[0].seq, f[n-1].seq,
+           rc ? "" : ", contiguous, every chain intact");
+    if (f[0].seq != 1)
+        printf("verify: note -- the sequence starts at %06lu, not 000001;"
+                " earlier logs were archived or removed\n", f[0].seq);
+    return rc;
 }
 
 int main(int argc, char **argv) {
@@ -303,6 +377,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "verify") == 0) {
         if (argc != 4) return usage(argv[0]);
+        struct stat sb;
+        if (stat(argv[2], &sb) == 0 && S_ISDIR(sb.st_mode))
+            return verify_dir(argv[2], argv[3]);
         return verify_file(argv[2], argv[3]);
     }
     return usage(argv[0]);

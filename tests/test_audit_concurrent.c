@@ -98,7 +98,12 @@ int main(void)
        "concurrent events shared barriers instead of one each");
 
     /* 3. The chain is intact. This is the assertion that catches the ordering
-     *    mistake the optimisation invites, and nothing cheaper would. */
+     *    mistake the optimisation invites, and nothing cheaper would.
+     *
+     *    The path passed to fhsm_audit_open is a base; the opening created
+     *    base.NNNNNN. Ask for the real name before closing, because closing
+     *    forgets it. */
+    fhsm_audit_current_path(path, sizeof path);
     fhsm_audit_close();
     size_t broken = 0;
     fhsm_rv_t vr = fhsm_audit_verify(path, FHSM_SLICE(key, 32), &broken);

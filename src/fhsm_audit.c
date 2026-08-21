@@ -40,6 +40,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <stdlib.h>
 
 static pthread_mutex_t g_audit_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -80,6 +81,7 @@ static int             g_syncing     = 0;
 static int             g_sync_failed = 0;
 static uint64_t        g_stat_events   = 0;   /* diagnostics only */
 static uint64_t        g_stat_barriers = 0;
+static char            g_audit_path[600];   /* the file actually opened */
 
 static const char *event_name(fhsm_audit_event_t ev) {
     switch (ev) {
@@ -269,52 +271,74 @@ static int unhex32(const char *in, uint8_t out[32]) {
     return 1;
 }
 
-/* Recover seq and the chain head from the last complete line of an existing
- * log.
+/* chain_resume() lived here. It read the tail of an existing log and picked
+ * the chain up from the last line, which is what allowed two openings to share
+ * one file -- and what let two processes each believe they were the successor
+ * of the same line. Logs are now created per opening with O_EXCL, so every
+ * file starts at the chain head and there is nothing to resume. The function
+ * went with the reason for it. */
+
+/* ---------------------------------------------------------------------------
+ * One log per opening.
  *
- * Without this, every restart began a new chain in the same file: seq went
- * back to 1 and prev_hmac back to the init value, while O_APPEND kept writing
- * after the old entries. The header promises `"seq": monotonic, starts at 1`,
- * which was true only between two restarts, and a verifier walking the file
- * top to bottom broke at every boundary. Worse, truncating the log at a
- * restart boundary left a file that verified perfectly.
+ * A hash chain has exactly one author by construction, and nothing here
+ * required that. Two processes each opened the log, each resumed the chain
+ * from the tail of the file, and from then on each believed itself the
+ * successor of the same line. Their appends interleaved and the chain was
+ * destroyed -- not by an attacker, by two ordinary clients. Sixty lines,
+ * broken at the second. Run one after the other, the same two processes
+ * produce a chain that verifies, so it is the concurrency and not the resume.
  *
- * A tail that cannot be parsed is a refusal, not a fresh start: appending a
- * new chain to a log we do not understand produces exactly the shape this
- * function exists to prevent.
- */
-static fhsm_rv_t chain_resume(int fd, uint64_t *seq_out, uint8_t prev_out[32]) {
-    struct stat st;
-    if (fstat(fd, &st) != 0) return FHSM_RV_FUNCTION_FAILED;
-    if (st.st_size == 0) return FHSM_RV_CANCEL;          /* empty: fresh head */
+ * Found through `p11-kit server`, which forks a child per client and so makes
+ * the situation systematic; but two `fhsm-sign` invocations in a script do the
+ * same thing.
+ *
+ * Three answers were weighed (docs/AUDIT_DURABILITY.md). Refusing the second
+ * opening would have made concurrent tools fail, which is normal use. Locking
+ * between processes would put a file lock on a path that already costs 3 ms.
+ * So: each opening creates its own file, `base.NNNNNN`, with O_EXCL. Every
+ * file then has a single author from line 1 and needs no coordination at all.
+ *
+ * The sequence number is not decoration. With one file, deleting the middle
+ * breaks the chain and deleting the tail is undetectable -- a gap already
+ * recorded. With per-file logs, deleting a whole file would remove a process's
+ * entire history while every remaining chain still verified. Numbering makes
+ * that a hole between 6 and 8. Deleting the highest-numbered files leaves no
+ * hole, which is the same tail-truncation gap as before: the scheme reproduces
+ * the existing limit rather than adding one.
+ *
+ * A base that already exists and is NOT a regular file -- a FIFO, /dev/null, a
+ * character device -- is opened as given, with no numbering and no chain to
+ * resume. It is a stream, not a log, and the operator asked for it by naming
+ * one.
+ * ------------------------------------------------------------------------- */
+#define FHSM_AUDIT_SEQ_DIGITS 6
 
-    char tail[8192];
-    size_t want = (size_t)st.st_size < sizeof tail ? (size_t)st.st_size : sizeof tail;
-    off_t from = st.st_size - (off_t)want;
-    ssize_t got = pread(fd, tail, want, from);
-    if (got <= 0) return FHSM_RV_FUNCTION_FAILED;
+/* Highest NNNNNN already present for this base, or 0 if none. */
+static unsigned long audit_highest_seq(const char *base)
+{
+    char dirbuf[512];
+    snprintf(dirbuf, sizeof dirbuf, "%s", base);
+    char *slash = strrchr(dirbuf, '/');
+    const char *dirname, *leaf;
+    if (slash) { *slash = '\0'; dirname = dirbuf; leaf = slash + 1; }
+    else       { dirname = "."; leaf = dirbuf; }
 
-    /* The last complete line: everything after the second-to-last newline,
-     * given the file ends with one. A file that does not end in a newline was
-     * cut mid-write, which is a corrupt log, not a resumable one. */
-    if (tail[got - 1] != '\n') return FHSM_RV_FUNCTION_FAILED;
-    ssize_t start = got - 1;
-    while (start > 0 && tail[start - 1] != '\n') start--;
-
-    const char *line = tail + start;
-    size_t line_len = (size_t)(got - 1 - start);
-
-    const char *s = memmem(line, line_len, "\"seq\":", 6);
-    const char *h = memmem(line, line_len, "\"hmac\":\"", 8);
-    if (!s || !h) return FHSM_RV_FUNCTION_FAILED;
-    if ((size_t)(h + 8 + 64 - line) > line_len) return FHSM_RV_FUNCTION_FAILED;
-
-    unsigned long long v = strtoull(s + 6, NULL, 10);
-    if (v == 0) return FHSM_RV_FUNCTION_FAILED;
-    if (!unhex32(h + 8, prev_out)) return FHSM_RV_FUNCTION_FAILED;
-
-    *seq_out = (uint64_t)v;
-    return FHSM_RV_OK;
+    DIR *d = opendir(dirname);
+    if (!d) return 0;
+    size_t leaflen = strlen(leaf);
+    unsigned long best = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, leaf, leaflen) != 0) continue;
+        const char *rest = e->d_name + leaflen;
+        if (rest[0] != '.' || strlen(rest) != FHSM_AUDIT_SEQ_DIGITS + 1) continue;
+        char *end = NULL;
+        unsigned long v = strtoul(rest + 1, &end, 10);
+        if (end && *end == '\0' && v > best) best = v;
+    }
+    closedir(d);
+    return best;
 }
 
 fhsm_rv_t fhsm_audit_open(const char *path, fhsm_slice_t audit_key) {
@@ -323,34 +347,57 @@ fhsm_rv_t fhsm_audit_open(const char *path, fhsm_slice_t audit_key) {
         return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&g_audit_mu);
 
-    /* O_RDWR rather than O_WRONLY: resuming the chain means reading the tail.
-     * O_APPEND still governs every write, so concurrent appends stay atomic. */
-    int fd = open(path, O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+    int fd = -1;
+    int numbered = 1;
+    g_audit_path[0] = '\0';
+
+    /* A named stream is used as given -- see the note above. */
+    struct stat sb;
+    if (stat(path, &sb) == 0 && !S_ISREG(sb.st_mode)) {
+        numbered = 0;
+        fd = open(path, O_WRONLY | O_APPEND | O_CLOEXEC);
+        if (fd >= 0) snprintf(g_audit_path, sizeof g_audit_path, "%s", path);
+    } else {
+        /* O_EXCL is what makes this file ours alone. On a collision another
+         * process took the number between our scan and our create; step past
+         * it and try again rather than share. */
+        unsigned long next = audit_highest_seq(path) + 1;
+        for (int attempt = 0; attempt < 4096 && fd < 0; attempt++, next++) {
+            char cand[600];
+            snprintf(cand, sizeof cand, "%s.%0*lu", path,
+                     FHSM_AUDIT_SEQ_DIGITS, next);
+            fd = open(cand, O_RDWR | O_APPEND | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            if (fd >= 0) snprintf(g_audit_path, sizeof g_audit_path, "%s", cand);
+            if (fd < 0 && errno != EEXIST) break;
+        }
+    }
     if (fd < 0) {
         pthread_mutex_unlock(&g_audit_mu);
         return FHSM_RV_FUNCTION_FAILED;
     }
+    (void)numbered;
 
     memcpy(g_audit_key, audit_key.data, audit_key.len);
     g_audit_key_len = audit_key.len;
 
-    fhsm_rv_t rv = chain_resume(fd, &g_audit_seq, g_prev_hmac);
-    if (rv == FHSM_RV_CANCEL) {
-        /* New log. Chain head = HMAC(audit_key, "FHSM-AUDIT-INIT|seq=0").
-         *
-         * The length used to be 20 for a 21-character string, so the final
-         * '0' was cut and the head matched neither the comment above it nor
-         * the format the header documents. Nobody could notice: no log was
-         * ever written, and the verifier that would have disagreed was a stub
-         * returning OK. */
-        static const char INIT[] = "FHSM-AUDIT-INIT|seq=0";
-        size_t n = 32;
-        g_audit_seq = 0;
-        rv = fhsm_hmac(FHSM_HASH_SHA256,
-                        FHSM_SLICE(g_audit_key, g_audit_key_len),
-                        FHSM_SLICE(INIT, sizeof INIT - 1),
-                        g_prev_hmac, &n);
-    }
+    /* The chain always starts at its head. The file is either brand new,
+     * because O_EXCL created it, or a stream that cannot be read back. There
+     * is nothing to resume, which is why chain_resume no longer has a caller:
+     * resuming existed only to share one file between openings, and that is
+     * the thing this change removes.
+     *
+     * Chain head = HMAC(audit_key, "FHSM-AUDIT-INIT|seq=0"). The length used
+     * to be 20 for a 21-character string, so the final '0' was cut and the
+     * head matched neither the comment above it nor the format the header
+     * documents. Nobody could notice: no log was ever written, and the
+     * verifier that would have disagreed was a stub returning OK. */
+    static const char INIT[] = "FHSM-AUDIT-INIT|seq=0";
+    size_t nh = 32;
+    g_audit_seq = 0;
+    fhsm_rv_t rv = fhsm_hmac(FHSM_HASH_SHA256,
+                              FHSM_SLICE(g_audit_key, g_audit_key_len),
+                              FHSM_SLICE(INIT, sizeof INIT - 1),
+                              g_prev_hmac, &nh);
 
     if (rv != FHSM_RV_OK) {
         close(fd);
@@ -377,12 +424,26 @@ void fhsm_audit_close(void) {
     fhsm_zeroize(g_audit_key, sizeof(g_audit_key));
     g_audit_key_len = 0;
     fhsm_zeroize(g_prev_hmac, sizeof(g_prev_hmac));
+    g_audit_path[0] = '\0';
     pthread_mutex_unlock(&g_audit_mu);
 }
 
 /* How many events were written and how many durable barriers that took.
  * Diagnostics: it is what makes "the barrier is shared" observable from
  * outside, and a test that cannot observe it cannot assert it. */
+/* The file this process is writing to. Not the path handed to
+ * fhsm_audit_open: that is a base, and the opening picked the next free
+ * sequence number under it. An operator reviewing the log, and a test
+ * inspecting it, both need to be told which file it actually is rather than
+ * reconstruct the naming rule. */
+size_t fhsm_audit_current_path(char *out, size_t cap) {
+    pthread_mutex_lock(&g_audit_mu);
+    size_t n = strlen(g_audit_path);
+    if (out && cap) { snprintf(out, cap, "%s", g_audit_path); }
+    pthread_mutex_unlock(&g_audit_mu);
+    return n;
+}
+
 void fhsm_audit_barrier_stats(uint64_t *events, uint64_t *barriers) {
     pthread_mutex_lock(&g_audit_mu);
     if (events)   *events   = g_stat_events;

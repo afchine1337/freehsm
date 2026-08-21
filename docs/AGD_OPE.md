@@ -184,6 +184,34 @@ the benchmark says so in as many words, and prints the filesystem it measured.
 The same caution applies to a hypervisor that acknowledges barriers without
 honouring them; VirtualBox's host I/O cache does exactly that.
 
+### 4.2c The log is a set of files, not one file
+
+Each opening of the module creates its own log, `audit.log.NNNNNN`, because a
+hash chain has exactly one author: two processes sharing one file each resumed
+the chain from its tail and each believed itself the successor of the same
+line, which destroyed it. Two ordinary tools running at once were enough.
+
+For you this means:
+
+```
+freehsm-audit verify /var/lib/freehsm/audit  <audit_key_hex>
+```
+
+A directory verifies every numbered log in it, **and reports holes in the
+numbering**. A hole means a file was removed: each remaining chain still
+verifies on its own, so the numbering is the only thing that shows the
+deletion. Missing numbers at the *end* leave no hole — that is the same
+end-of-log truncation described in §4.3, not a new weakness.
+
+Two consequences to plan for:
+
+* **A restart leaves a new file.** A daemon restarted three times leaves three
+  logs. Archive the set, not the file.
+* **Between two files, only the timestamp orders events.** Inside a file `seq`
+  is authoritative; across files you are merging on `ts`, which is wall-clock
+  and can be moved by anyone who can set the clock. Take that into account when
+  reconstructing an incident across a restart.
+
 ### 4.3 Audit log review
 
 > **The audit log is produced, and the chain is verifiable.** The warning that

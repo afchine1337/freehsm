@@ -156,6 +156,12 @@ void fhsm_audit_close(void);
  * after a barrier that covered its own write; concurrent events share one, so
  * `barriers` is at most `events` and well below it under load. Diagnostics --
  * the only way a test can observe that the sharing is happening. */
+/* The path of the file this process is writing to, which is NOT the path
+ * passed to fhsm_audit_open(): that is a base name, and each opening creates
+ * `base.NNNNNN` with O_EXCL so that every chain has exactly one author. Copies
+ * into `out` if given and returns the length. Empty when the log is closed. */
+size_t fhsm_audit_current_path(char *out, size_t cap);
+
 void fhsm_audit_barrier_stats(uint64_t *events, uint64_t *barriers);
 
 /* Emit one event line. The variadic part is a NULL-terminated list of

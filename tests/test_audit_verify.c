@@ -49,6 +49,10 @@ static int make_log(void) {
     if (fhsm_audit_key_provision(g_dir, g_key, NULL) != FHSM_RV_OK) return 0;
     for (int i = 0; i < 32; i++) snprintf(g_keyhex + 2*i, 3, "%02x", g_key[i]);
     if (fhsm_audit_open(g_log, FHSM_SLICE(g_key, sizeof g_key)) != FHSM_RV_OK) return 0;
+    /* g_log was a base name; the opening created base.NNNNNN so that every
+     * chain has one author. Everything below reads, rewrites and verifies the
+     * file on disk, so from here on g_log must be the file that exists. */
+    fhsm_audit_current_path(g_log, sizeof g_log);
 
     if (fhsm_audit_event(FHSM_EV_MODULE_INIT, -1, -1, FHSM_ROLE_NONE,
                           FHSM_RV_OK, NULL) != FHSM_RV_OK) return 0;

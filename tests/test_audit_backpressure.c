@@ -50,6 +50,12 @@ int main(void)
     rv = fhsm_audit_open(logp, FHSM_SLICE(key, sizeof key));
     ok(rv == FHSM_RV_OK, "the log opens");
 
+    /* The path handed to fhsm_audit_open is a base: each opening creates
+     * base.NNNNNN with O_EXCL so that every chain has one author. Everything
+     * below inspects the file on disk, so it has to ask which one that is
+     * rather than assume the name it passed in. */
+    fhsm_audit_current_path(logp, sizeof logp);
+
     /* --- a normal record goes through, and the state does not move ------ */
     rv = fhsm_audit_event(FHSM_EV_MODULE_INIT, -1, -1, FHSM_ROLE_NONE,
                           FHSM_RV_OK, NULL);

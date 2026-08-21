@@ -105,6 +105,10 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    /* The path above is a base; the opening created base.NNNNNN. The size
+     * below is read off the file, so it has to be the real one. */
+    fhsm_audit_current_path(path, sizeof path);
+
     struct timespec a, b;
     clock_gettime(CLOCK_MONOTONIC, &a);
     for (int i = 0; i < n; i++)
