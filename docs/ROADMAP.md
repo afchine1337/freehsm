@@ -217,12 +217,21 @@ to the configuration layer.
 Every shipped key names a real concept, but all are compile-time constants or
 env vars: `secure_heap_kb` -> `FHSM_SECURE_HEAP_BYTES`, `pin_max_failed` ->
 `FHSM_PIN_MAX_FAILED`, `pbkdf2_iterations` -> a hardcoded 200 000,
-`tokens_dir` -> the `FHSM_TOKENS_DIR` env var, `audit_mandatory` -> a constant a
-comment describes as aspirational, `audit_dir` -> nothing at all.
+`tokens_dir` -> the `FHSM_TOKENS_DIR` env var, `audit_dir` -> nothing at all.
+
+`audit_mandatory` used to be listed here as "a constant a comment describes as
+aspirational", which it was. It is now enforced — `FHSM_AUDIT_MANDATORY`
+decides whether `FHSM_AUDIT=off` is honoured, and the module refuses to start
+when it is not (`docs/AUDIT_DURABILITY.md`). **It stays a build setting rather
+than becoming a config key**, and that is deliberate: it is the distributor's
+decision that nobody downstream may turn the record off, and a decision the
+operator can edit into a file is not the distributor's. So the count of dead
+keys is eight, not nine, and one of them was resolved by moving it out of the
+configuration layer rather than into it.
 
 Fix shape: a real config parser reading the keys we actually ship, or a shipped
-file containing only keys that exist. Either is defensible; shipping nine dead
-keys and reading a tenth that is absent is not. Whichever is chosen, the
+file containing only keys that exist. Either is defensible; shipping eight dead
+keys and reading a ninth that is absent is not. Whichever is chosen, the
 `mode`/`fips_strict` naming has to converge on one spelling.
 
 ## Phase 4 — v2.0.0-beta (target 2026-09-01) — **the MVP focus now**
