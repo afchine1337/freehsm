@@ -647,6 +647,21 @@ audit-switch:
 	LD_LIBRARY_PATH=. sh tests/audit_switch.sh optional
 	@echo "[audit-switch] both sides of FHSM_AUDIT_MANDATORY exercised"
 
+# The delegated responder's rules are rules of the tool, not of the library:
+# fhsm_composite_ocsp() signs whatever certificate it is handed. Which one it
+# is handed, and whether a verifier will accept it, is decided in fhsm-ca. So
+# this drives the tools rather than linking the library, like audit_switch.sh.
+# The composite mechanism is interop-only, so this cannot run against the
+# default build: fips-strict answers CKR_MECHANISM_INVALID and there is no
+# key to sign anything with. It therefore leaves an interop tree behind,
+# which is why CI rebuilds before uploading anything.
+.PHONY: ocsp-delegated
+ocsp-delegated:
+	$(MAKE) clean
+	$(MAKE) PROFILE=interop all
+	LD_LIBRARY_PATH=. sh tests/ocsp_delegated.sh
+	@echo "[ocsp-delegated] the tree is now a PROFILE=interop build"
+
 integrity: $(LIB)
 	@scripts/sign_module.sh $(LIB)
 	@echo "[integrity] $(LIB) signed ; readback :"

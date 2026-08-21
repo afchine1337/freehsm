@@ -21,7 +21,8 @@
 | Post-quantum support matrix (Kyber alias, Falcon, LMS, XMSS, HQC) | [`POST_QUANTUM.md`](POST_QUANTUM.md) | --- | ADV_FSP.4 |
 | Primacy audit — PQC composite claim (#118, verdict + competitor matrix) | [`PRIMACY_AUDIT_PQC_COMPOSITE.md`](PRIMACY_AUDIT_PQC_COMPOSITE.md) | --- | (marketing / positioning) |
 | Token store on-disk format (#108 + #110, byte-level spec + invariants) | [`TOKEN_STORE_FORMAT.md`](TOKEN_STORE_FORMAT.md) | --- | ADV_TDS.3 + ADV_FSP.4 |
-| `fhsm-csr` / `fhsm-ca` tools — composite requests, issuance and revocation (#112) | [`FHSM_CSR.md`](FHSM_CSR.md) | --- | AGD_OPE.1 |
+| `fhsm-csr` — composite keys, requests, and the CA's own certificate (#112) | [`FHSM_CSR.md`](FHSM_CSR.md) | --- | AGD_OPE.1 |
+| `fhsm-ca` — issuance, profiles, revocation, CRLs, OCSP and the delegated responder (#112) | [`FHSM_CA.md`](FHSM_CA.md) | --- | AGD_OPE.1 |
 | `fhsm-token` tool — provisioning a token | [`FHSM_TOKEN.md`](FHSM_TOKEN.md) | --- | AGD_OPE.1 |
 | `fhsm-sign` tool — detached signatures over arbitrary data (#123) | [`FHSM_SIGN.md`](FHSM_SIGN.md) | --- | AGD_OPE.1 |
 | Composite ML-DSA — spec gap, measurements, target OID (#112) | [`COMPOSITE_SIGS_GAP.md`](COMPOSITE_SIGS_GAP.md) | --- | ADV_FSP.4 |

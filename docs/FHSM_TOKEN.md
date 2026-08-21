@@ -123,7 +123,8 @@ deliberate on the module's side too: applications call `C_GetTokenInfo` before
 
 ## See also
 
-* [`FHSM_CSR.md`](FHSM_CSR.md) — requests, certificates, revocation lists
+* [`FHSM_CSR.md`](FHSM_CSR.md) — keys, requests and the CA's own certificate
+* [`FHSM_CA.md`](FHSM_CA.md) — issuing, revoking, revocation lists and OCSP
 * [`FHSM_SIGN.md`](FHSM_SIGN.md) — detached signatures over arbitrary data
 * [`AGD_OPE.md`](AGD_OPE.md) — operational guidance, including what
   `FHSM_INTEGRITY_ALLOW_UNSIGNED` is for and why it is forbidden in production

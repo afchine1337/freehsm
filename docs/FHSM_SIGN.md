@@ -237,6 +237,7 @@ inherit.
 
 ## See also
 
-* [`FHSM_CSR.md`](FHSM_CSR.md) — requests, certificates and revocation lists
+* [`FHSM_CSR.md`](FHSM_CSR.md) — keys, requests and the CA's own certificate
+* [`FHSM_CA.md`](FHSM_CA.md) — issuing, revoking, revocation lists and OCSP
 * [`COMPOSITE_SIGS_GAP.md`](COMPOSITE_SIGS_GAP.md) — what the composite
   implementation does and does not claim

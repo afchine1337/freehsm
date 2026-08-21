@@ -8,36 +8,35 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
-* **The audit log can be switched off — explicitly, and never in silence.**
-  It could be switched off before, in the worst way available:
-  `FHSM_AUDIT_LOG=/dev/null`, silent and undocumented, with the module going on
-  as though it were recording. Meanwhile `FHSM_AUDIT_MANDATORY` sat in
-  `include/fhsm_common.h` set to 1, was cited in three comments and enforced
-  nowhere — `docs/ROADMAP.md` called it "a constant a comment describes as
-  aspirational".
+* **A delegated OCSP responder, so the CA key can stay offline.** `fhsm-ca
+  issue --profile ocsp-responder` produces a certificate carrying
+  `extendedKeyUsage OCSPSigning` and non-critical `id-pkix-ocsp-nocheck`
+  (RFC 6960 §4.2.2.2); `fhsm-ca ocsp-respond --responder-cert FILE` then signs
+  answers with that certificate's key instead of the CA's, naming the delegate
+  as the responder ID and carrying it in the response's `certs` field.
 
-  Two parties, two decisions. **`FHSM_AUDIT_MANDATORY` is the build's**: at 1,
-  the default, the module refuses to start when asked to run without a log, so
-  a distribution packaged for an administration can settle the question for
-  everyone downstream. **`FHSM_AUDIT=off` is the operator's**, and has to be
-  typed.
+  **Validity is short by default and long only on request.** `ocsp-nocheck`
+  means a compromised responder certificate cannot be revoked in any way a
+  verifier will observe, so expiry is the only control left: the profile
+  defaults to 30 days rather than the end-entity year. `--days` still
+  overrides — an operator whose CA key is in a safe elsewhere may have no way
+  to reissue monthly, and that trade is theirs — but past 90 days the tool
+  prints a NOTE saying what is being traded away, and issues anyway. A warning
+  that also refused would be a policy pretending to be advice.
 
-  The constant means that and only that. It does not govern what happens when
-  a log that is *on* cannot be written — that is always fatal.
+  Two files are refused rather than signed with: one without the EKU, whose
+  answers no verifier would accept, and one issued by a different CA. **The
+  second check compares names, and a name is not a signature** — verifying that
+  this CA really issued the delegate means checking a composite signature,
+  which nothing off the shelf can do. It catches the wrong file, not a forgery,
+  and the message says so rather than implying more.
 
-  `/dev/null` still works, because refusing it would break a legitimate FIFO
-  target; what changed is that the module announces it as a stream and not a
-  log. Both notices go to stderr, so every tool shows them (`AGD_OPE` §4.2d).
-
-  The default is on in both profiles. `interop` was considered and rejected:
-  the profile governs which mechanisms are approved, not whether the module
-  records using them.
-
-  `tests/audit_switch.sh` takes the expected mode as an argument rather than
-  sniffing the build — a script that decides for itself what it is testing
-  passes either way — and `make audit-switch` builds both ways and runs both,
-  which is what `EXTRA_CFLAGS` was added for. `make tests` covers the default
-  side only, and that is stated rather than assumed.
+  `tests/ocsp_delegated.sh` drives the tools end to end (19 assertions,
+  `make ocsp-delegated`, wired into CI). Four mutations were tried and each is
+  caught by the assertion meant for it. It also asserts that OpenSSL verifies
+  *neither* a delegated nor a CA-signed response, and fails the same way —
+  decoding the signer's composite key — so the limit is never misread as a
+  fault in the delegation.
 
 * **The audit log's durable barrier is shared between concurrent writers.**
   Every event still returns only after an `fsync` that covered its own write —
@@ -114,6 +113,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **`ocsp-respond --responder-cert` segfaulted on an unparseable `--ca-cert`.**
+  The delegated block compares the responder's issuer against the CA's subject
+  name and did so before anything checked that the CA certificate had parsed.
+  Without `--responder-cert` the same bad file printed `--ca-cert is not a
+  certificate`; with it, `X509_get_subject_name(NULL)`. The recurring shape
+  again — a check wired to some of the paths that reach a state and not the
+  rest. Found while writing the test for the feature it belongs to.
+
+* **CI uploaded an artefact built in a configuration nobody asked for.** The
+  `libfreehsm-fips.so` attached to the build job was whatever was left on disk
+  after `make audit-switch`, which ends with an `FHSM_AUDIT_MANDATORY=0` tree
+  — so since the audit-switch step was added, the uploaded module was neither
+  the one `make integrity` signed nor the one its name claims. Adding
+  `make ocsp-delegated`, which leaves a `PROFILE=interop` tree, would have made
+  it worse. The job now rebuilds, re-signs and re-checks the shipping
+  configuration before uploading anything.
+
 * **Two processes sharing one audit log destroyed the chain.** A hash chain has
   exactly one author by construction and nothing required it. Each process
   opened the log, each resumed the chain from the tail of the file, and from

@@ -88,6 +88,36 @@ jobs:
           install -m 755 tests/test_smoke /tmp/smoke
           /tmp/smoke 2>&1 | head -30
 
+      # FHSM_AUDIT_MANDATORY has two sides and `make tests` only ever exercises
+      # the default one: it refuses FHSM_AUDIT=off, so the branch that HONOURS
+      # it is never reached. That is the same shape as the integrity check
+      # above, which shipped inert twice because every job set the bypass.
+      # `make audit-switch` builds both ways and runs the script against each.
+      - name: Audit switch, both sides of FHSM_AUDIT_MANDATORY
+        run: make audit-switch
+
+      # `make audit-switch` ends with a clean tree built the permissive way,
+      # so this rebuilds before driving the tools. The checks it runs are the
+      # ones that decide whether a response is acceptable to a verifier --
+      # a failure here means the responder produces answers nobody takes.
+      - name: Delegated OCSP responder, end to end
+        run: make ocsp-delegated
+
+      # Both steps above end with a tree built some other way -- audit-switch
+      # with FHSM_AUDIT_MANDATORY=0, ocsp-delegated with PROFILE=interop. The
+      # upload below took whatever was on disk, so from the moment the audit
+      # switch step was added this job has been shipping a libfreehsm-fips.so
+      # that was neither the configuration `make integrity` signed nor the one
+      # the artefact name claims. Rebuild, re-sign, and prove the result is
+      # the mandatory build before anything leaves this job.
+      - name: Rebuild and re-sign the shipping configuration
+        run: |
+          make clean
+          make 2>&1 | tee build.log
+          make integrity 2>&1 | tee integrity.log
+          make test-integrity
+          LD_LIBRARY_PATH=. sh tests/audit_switch.sh mandatory
+
       - name: Upload artifacts
         if: success()
         uses: actions/upload-artifact@v4

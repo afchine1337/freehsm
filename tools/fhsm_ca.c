@@ -278,13 +278,14 @@ static void usage(void) {
     fprintf(stderr,
       "fhsm-ca --- issue and revoke certificates with a composite PQ key\n\n"
       "  fhsm-ca issue  --label NAME --ca-cert FILE --csr FILE\n"
+      "                 [--profile end-entity|ocsp-responder]\n"
       "                 [--subject DN] [--san LIST] [--crl-url URL]...\n"
       "                 [--days N] [--out FILE] [--pem]\n"
       "  fhsm-ca revoke --db FILE --serial HEX [--reason NAME] [--date WHEN]\n"
       "  fhsm-ca crl    --label NAME --ca-cert FILE --db FILE\n"
       "                 [--days N] [--out FILE] [--pem]\n"
       "  fhsm-ca ocsp-respond --label NAME --ca-cert FILE --db FILE --req FILE\n"
-      "                 [--days N] [--out FILE]\n\n"
+      "                 [--responder-cert FILE] [--days N] [--out FILE]\n\n"
       "  --label NAME    label of the CA key inside the module\n"
       "  --ca-cert FILE  the CA's own certificate (DER or PEM)\n"
       "  --csr FILE      the request to sign (DER or PEM)\n"
@@ -302,7 +303,18 @@ static void usage(void) {
       "                  fetching a CRL over TLS can require a CRL, and the list\n"
       "                  is signed, so the transport protects nothing.\n"
       "  --req FILE      an OCSP request in DER (ocsp-respond)\n"
+      "  --responder-cert FILE\n"
+      "                  sign the response as a delegated responder rather\n"
+      "                  than as the CA (RFC 6960 4.2.2.2). --label then names\n"
+      "                  the delegate's key. Refused unless the certificate\n"
+      "                  carries extendedKeyUsage OCSPSigning and was issued by\n"
+      "                  the CA in --ca-cert.\n"
       "  --days N        validity in days (issue: 365, crl: 30, ocsp: 7)\n"
+      "  --profile P     end-entity (default), or ocsp-responder for a\n"
+      "                  delegated responder: extendedKeyUsage OCSPSigning\n"
+      "                  plus id-pkix-ocsp-nocheck (RFC 6960 4.2.2.2). Such a\n"
+      "                  certificate cannot be revoked in any way a verifier\n"
+      "                  will notice, so issue it short.\n"
       "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n"
       "  --slot N        slot to address. Default: the one slot holding a token.\n"
       "  --out FILE      output file (default stdout)\n"
@@ -328,7 +340,8 @@ static int cmd_issue(int argc, char **argv) {
      * cannot separate these without an escaping rule nobody would remember. */
     const char *crl_urls[8];
     size_t      n_crl_urls = 0;
-    int pem = 0, days = 365; long slot = -1;
+    int pem = 0, days = 365, days_given = 0; long slot = -1;
+    fhsm_cert_profile_t profile = FHSM_CERT_END_ENTITY;
 
     for (int i = 2; i < argc; ++i) {
         if      (!strcmp(argv[i],"--module")  && i+1<argc) module   = argv[++i];
@@ -347,7 +360,18 @@ static int cmd_issue(int argc, char **argv) {
         }
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
         else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = p11_slot_arg(argv[++i]);
-        else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]), days_given = 1;
+        else if (!strcmp(argv[i],"--profile") && i+1<argc) {
+            const char *v = argv[++i];
+            if      (!strcmp(v, "end-entity"))     profile = FHSM_CERT_END_ENTITY;
+            else if (!strcmp(v, "ocsp-responder")) profile = FHSM_CERT_OCSP_RESPONDER;
+            else {
+                fprintf(stderr, "fhsm-ca: --profile %s is not a profile.\n"
+                                "  end-entity      the default\n"
+                                "  ocsp-responder  a delegated OCSP responder\n", v);
+                return 1;
+            }
+        }
         else if (!strcmp(argv[i],"--pem")) pem = 1;
         else if (!strncmp(argv[i],"--pin",5)) {
             fprintf(stderr, "fhsm-ca: --pin is not accepted. Set FHSM_PIN instead:\n"
@@ -357,6 +381,21 @@ static int cmd_issue(int argc, char **argv) {
         else usage();
     }
     if (!label || !cacert_p || !csr_p) usage();
+
+    /* A delegated responder carries ocsp-nocheck, which tells a verifier not
+     * to ask about its revocation status. So it cannot be revoked in any way
+     * a verifier will notice, and a short validity is the only control left.
+     * The default makes that choice for an operator who did not think about
+     * it; an operator who did can say --days and is only warned. */
+    if (profile == FHSM_CERT_OCSP_RESPONDER && !days_given) days = 30;
+    if (profile == FHSM_CERT_OCSP_RESPONDER && days > 90) {
+        fprintf(stderr,
+            "fhsm-ca: NOTE -- %d days for a delegated responder.\n"
+            "  It carries id-pkix-ocsp-nocheck, so revoking it is not something\n"
+            "  a verifier will observe: for the whole of that period, whoever\n"
+            "  holds the key can answer for this CA. Short validity is the only\n"
+            "  control that remains. Issuing anyway.\n", days);
+    }
 
     const char *pin = getenv("FHSM_PIN");
     if (!pin || !*pin) { fprintf(stderr, "fhsm-ca: FHSM_PIN is not set.\n"); return 1; }
@@ -382,7 +421,7 @@ static int cmd_issue(int argc, char **argv) {
     static uint8_t der[32768]; size_t n = sizeof der;
     fhsm_rv_t r = fhsm_composite_issue(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
                                         cabuf, calen, csrbuf, csrlen,
-                                        subject, san, crl_urls, n_crl_urls,
+                                        subject, san, crl_urls, n_crl_urls, profile,
                                         days, p11_sign, &sg, p11_rng, &s,
                                         der, &n);
     if (r == FHSM_RV_SIGNATURE_INVALID) {
@@ -671,6 +710,7 @@ static int serial_eq(const uint8_t *a, size_t na, const uint8_t *b, size_t nb) {
 static int cmd_ocsp_respond(int argc, char **argv) {
     const char *module = "./libfreehsm-fips.so", *label = NULL;
     const char *cacert_p = NULL, *db_p = NULL, *req_p = NULL, *out = NULL;
+    const char *rcert_p = NULL;
     long slot = -1; int days = 7;
 
     for (int i = 2; i < argc; ++i) {
@@ -679,6 +719,7 @@ static int cmd_ocsp_respond(int argc, char **argv) {
         else if (!strcmp(argv[i],"--ca-cert") && i+1<argc) cacert_p = argv[++i];
         else if (!strcmp(argv[i],"--db")      && i+1<argc) db_p     = argv[++i];
         else if (!strcmp(argv[i],"--req")     && i+1<argc) req_p    = argv[++i];
+        else if (!strcmp(argv[i],"--responder-cert") && i+1<argc) rcert_p = argv[++i];
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
         else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = p11_slot_arg(argv[++i]);
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]);
@@ -701,7 +742,71 @@ static int cmd_ocsp_respond(int argc, char **argv) {
 
     X509 *ca = NULL;
     { const uint8_t *p = cabuf; ca = d2i_X509(NULL, &p, (long)calen); }
+    /* Checked here rather than after the block below, because that block
+     * compares against this certificate's subject name: a --ca-cert that did
+     * not parse reached X509_get_subject_name(NULL) before anything tested it.
+     * Without --responder-cert the tool printed this line; with it, the same
+     * bad file was a segfault. The recurring shape again -- a check wired to
+     * some of the paths that reach a state and not the rest. */
     if (!ca) { fprintf(stderr, "fhsm-ca: --ca-cert is not a certificate.\n"); return 2; }
+
+    /* ---- who signs this answer -------------------------------------------
+     *
+     * By default the CA answers for itself: one certificate, one identity.
+     * A delegated responder (RFC 6960 4.2.2.2) lets the CA key stay offline
+     * while something else answers, and a verifier accepts that only because
+     * the CA issued the delegate with extendedKeyUsage OCSPSigning.
+     *
+     * So both checks below are about what a verifier will do with the answer.
+     * Producing responses nobody accepts is a failure an operator discovers in
+     * production, and this is the desk where it can be caught instead.
+     */
+    static uint8_t rbuf[262144]; size_t rlen = 0;
+    const uint8_t *responder_der = cabuf; size_t responder_len = calen;
+    X509 *rc = NULL;
+    if (rcert_p) {
+        size_t n = 0; uint8_t *t = slurp(rcert_p, &n);
+        if (n > sizeof rbuf) { fprintf(stderr, "fhsm-ca: responder certificate too large.\n"); return 2; }
+        memcpy(rbuf, t, n); rlen = n;
+        const uint8_t *p = rbuf; rc = d2i_X509(NULL, &p, (long)rlen);
+        if (!rc) { fprintf(stderr, "fhsm-ca: --responder-cert does not parse as DER.\n"); return 2; }
+
+        /* 1. The EKU. Without it a verifier treats the answer as signed by
+         *    something with no authority to answer, and refuses it. */
+        EXTENDED_KEY_USAGE *eku = X509_get_ext_d2i(rc, NID_ext_key_usage, NULL, NULL);
+        int has_ocsp = 0;
+        for (int k = 0; eku && k < sk_ASN1_OBJECT_num(eku); k++)
+            if (OBJ_obj2nid(sk_ASN1_OBJECT_value(eku, k)) == NID_OCSP_sign) has_ocsp = 1;
+        if (eku) EXTENDED_KEY_USAGE_free(eku);
+        if (!has_ocsp) {
+            fprintf(stderr,
+                "fhsm-ca: %s does not carry extendedKeyUsage OCSPSigning.\n"
+                "  A verifier will refuse every response it signs, so signing them\n"
+                "  would only produce answers nobody accepts. Issue the responder\n"
+                "  with `fhsm-ca issue --profile ocsp-responder`.\n", rcert_p);
+            return 2;
+        }
+
+        /* 2. The same issuer. A delegate issued by some other CA has no
+         *    authority over these certificates whatever its EKU says.
+         *
+         *    This compares names, and a name is not a signature. Verifying
+         *    that this CA really issued the delegate would mean checking a
+         *    composite signature, which nothing off the shelf can do -- the
+         *    same limit recorded for CSRs and CRLs. So this catches the
+         *    ordinary mistake (the wrong file) and not a forgery, and says so
+         *    rather than implying more. */
+        if (X509_NAME_cmp(X509_get_issuer_name(rc), X509_get_subject_name(ca)) != 0) {
+            fprintf(stderr,
+                "fhsm-ca: %s was not issued by the CA in %s.\n"
+                "  Its issuer name does not match that CA's subject, so a verifier\n"
+                "  has no reason to accept it as speaking for this authority.\n",
+                rcert_p, cacert_p);
+            return 2;
+        }
+
+        responder_der = rbuf; responder_len = rlen;
+    }
 
     OCSP_REQUEST *req = NULL;
     { size_t n = 0; uint8_t *t = slurp(req_p, &n);
@@ -825,12 +930,12 @@ static int cmd_ocsp_respond(int argc, char **argv) {
     CK_OBJECT_HANDLE hpriv = find_one(s, CKO_PRIVATE_KEY, label);
     struct signer sg = { s, hpriv };
 
-    size_t cap = 16384 + calen + (size_t)nreq * 512 + exts_len;
+    size_t cap = 16384 + calen + rlen + (size_t)nreq * 512 + exts_len;
     uint8_t *basic = malloc(cap);
     if (!basic) { fprintf(stderr, "fhsm-ca: out of memory\n"); return 2; }
     size_t bn = cap;
     fhsm_rv_t r = fhsm_composite_ocsp(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
-                                       cabuf, calen, d_now, (size_t)n_now,
+                                       responder_der, responder_len, d_now, (size_t)n_now,
                                        singles, (size_t)nreq, exts, exts_len,
                                        p11_sign, &sg, basic, &bn);
     if (r != FHSM_RV_OK) die("building the OCSP response", (CK_RV)r);
