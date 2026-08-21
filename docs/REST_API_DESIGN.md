@@ -8,10 +8,11 @@ SPDX-FileCopyrightText: 2026 Simorgh Labs
 what was chosen, what was measured, and what the measurements forced us to
 change our minds about.
 
-Two things it uncovered are built, because they were defects in the module
-rather than design of the service: `C_Login` honouring `ulPinLen`, and the
-audit log's durable barrier being shared between concurrent writers. Both are
-below, in the places where the measurement that found them is recorded.
+Three things it uncovered are built, because they were defects in the module
+rather than design of the service: `C_Login` honouring `ulPinLen`, the audit
+log's durable barrier being shared between concurrent writers, and one audit
+log per opening so that a chain has a single author. Each is recorded below,
+next to the measurement that found it.
 
 ---
 
@@ -76,8 +77,9 @@ speak PKCS#11, not REST.* True, and an operations API does not serve them —
 Apache, nginx, OpenSSL, a Java keystore and every smart-card-aware application
 want a `.so` to load, not a URL.
 
-Three things follow. The first was known; the other two were measured, and
-the third was not a p11-kit question at all.
+Four things follow. The first was known; the rest were measured, and the last
+two turned out not to be p11-kit questions at all but defects of ours that
+p11-kit was simply the first thing to exercise.
 
 **p11-kit already remotes PKCS#11.** `p11-kit server` publishes a module on a
 unix socket and `p11-kit-client.so` is the provider an application loads; SSH
@@ -101,12 +103,35 @@ No leak. The reason is visible in `ps`: the server forks a `p11-kit-remote`
 child per connection, so each client gets its own process and therefore its own
 application-scoped login state.
 
-Two consequences follow from *how* it isolates, and they are not free. Each
-client pays a full `C_Initialize` — 203–288 ms of KATs and integrity check —
-and its own `C_Login` at 31–52 ms, because nothing is shared between the
-children. And the isolation is a property of p11-kit's process model, not a
-promise in its documentation that we can rely on across versions; the probe
-exists so the claim can be re-tested rather than assumed.
+Three consequences follow from *how* it isolates, and none is free.
+
+**It costs a full start-up per client.** `C_Initialize` at 203–288 ms of KATs
+and integrity check, plus a `C_Login` at 31–52 ms, because nothing is shared
+between the children. And the isolation is a property of p11-kit's process
+model, not a promise in its documentation that we can rely on across versions;
+the probe exists so the claim can be re-tested rather than assumed.
+
+**It broke the audit chain, and that is now fixed.** Each child loads the
+module, each module opened the same log, each resumed the chain from the tail
+of the file — so two children writing at once each believed themselves the
+successor of the same line. Sixty lines, broken at the second. The irony is
+exact: the fork-per-client that makes p11-kit safe for login is what destroyed
+the record. Fixed by giving each opening its own numbered log
+(`docs/AUDIT_DURABILITY.md`), which is a defect of ours that p11-kit merely
+made systematic — two `fhsm-sign` invocations in a script did it too.
+
+**And it distributes the token PIN to every client.** This one cannot be
+fixed, because it is the isolation. `06_kit_isolation` proved that a client
+which does not log in sees nothing; so to be useful every client logs in, with
+the PIN. p11-kit remoting does not distribute authorisations, it distributes
+the token's secret — the opposite of `docs/DAEMON_PIN.md`, whose whole point is
+that the operator never sees that value.
+
+> **So p11-kit is a transport for one operator, not a multi-client service.**
+> An administration workstation reaching its own HSM over SSH: yes, and nothing
+> needs to be written for it. N clients of an authority, each holding the PIN
+> that unlocks every key on the token: no. That distinction is what the REST
+> service exists for, and it was not stated here before.
 
 Note also that the control matters here: run `06_kit_isolation peek` against
 the module directly first. Two processes are two applications, so it must
