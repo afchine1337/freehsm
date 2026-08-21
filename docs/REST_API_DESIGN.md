@@ -284,6 +284,59 @@ underneath; the ratio is the finding.
 
 ---
 
+### What a held session costs, and what runs out first
+
+Measured with `tests/bench_session_mem`, which loads the shipped `.so` through
+`dlopen` and reads `/proc/self/statm` rather than the allocator — the state in
+question is not on the heap and `mallinfo` cannot see it.
+
+| | RSS |
+|---|---|
+| after `dlopen` | 1 404 KiB |
+| after `C_Initialize` | 7 844 KiB |
+| per session opened | **+29.3 KiB** |
+| per session logged in | +0 |
+| per session with an active digest | +0 |
+| 127 sessions held, all logged in, all operating | 11 624 KiB |
+
+Three of those numbers are worth more than the table.
+
+**The fixed cost is mostly not ours.** A bare program that links libcrypto and
+computes one SHA-256 through `EVP` goes from 3 080 to 6 120 KiB. So the ~6.4
+MiB `C_Initialize` adds is dominated by OpenSSL provider initialisation and the
+power-on self-tests; the secure heap accounts for about 150 KiB of it, and
+`secure_heap_kb` between 64 and 8192 moves the total by that much and no more.
+
+**A session holds almost nothing, and costs 29 KiB anyway.** The session table
+entry is about 40 bytes. The 29 KiB is five operation slots of ~4 992 bytes,
+which exist whether or not the session ever performs an operation: they are
+reserved in `.bss` at load and become resident when `C_OpenSession` zeroes them
+so a fresh handle cannot inherit a stale one. That is why an active digest then
+costs nothing further — the page is already there. For a service holding idle
+clients this is the wrong shape: ~24 KiB of per-session operation state that is
+idle almost all the time. Restructuring it is not in this document, but sizing
+a pool on the assumption that an idle session is cheap would be wrong by a
+factor of about seven hundred.
+
+**Logging in costs zero, and that is a constraint rather than good news.**
+PKCS#11 login state is per token per application; the second session's
+`C_Login` returns `CKR_USER_ALREADY_LOGGED_IN` and touches no per-session
+state. One process cannot hold two clients authenticated as different roles —
+which is §2b's isolation argument arriving from the other direction.
+
+**The cap is `FHSM_MAX_SESSIONS - 1`, 127 by default**, then `CKR_HOST_MEMORY`.
+It is a compile-time constant. Raising it is the obvious move for a service and
+was, until this measurement, unsafe: see the CHANGELOG entry for the four
+bounds that had to agree and did not. It is now one constant, checked by
+`_Static_assert`, and `tests/test_session_cap.c` asserts that the last handle
+the module is willing to issue can log in and work — the property no assertion
+about array sizes can express.
+
+Cost of the cap, if raised: ~24 KiB of reserved `.bss` per session. 128 costs
+~3 MiB, 512 costs ~12.5 MiB, held whether the sessions are working or idle.
+
+---
+
 ## What the service refuses
 
 Refusals are the part of an API that ages well, so they are decided here.
@@ -322,12 +375,11 @@ encrypted credential, zeroized as soon as `C_Login` returns. Our own
 0..7, so a kernel update would stop the service from starting. systemd's
 credential encryption binds no PCRs by default, which is the whole difference.
 
-**The delegated OCSP responder** (RFC 6960 §4.2.2.2) and anything that listens
-for OCSP, both of which were the parts of #112 that genuinely do wait for this
-work.
+~~**The delegated OCSP responder** (RFC 6960 §4.2.2.2)~~ **Built** — the
+certificate profile and `ocsp-respond --responder-cert`, `docs/FHSM_CA.md`.
+Anything that *listens* for OCSP still waits for this work.
 
-**Memory per held session**, unmeasured. The 2-core figures are a floor, not a
-capacity plan.
+~~**Memory per held session**, unmeasured.~~ **Measured** — see below.
 
 **What a forked-per-client server costs at scale.** §2b settles the isolation
 question and opens a capacity one: every client pays its own `C_Initialize`

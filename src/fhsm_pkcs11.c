@@ -548,14 +548,14 @@ CK_RV C_WaitForSlotEvent(CK_FLAGS flags, CK_SLOT_ID *pSlot,
  *
  * Closes every open session that belongs to the given slot. The module
  * is a single-slot software token (slotID must be 0) ; we iterate the
- * session-handle range (1 .. FHSM_MAX_SESSIONS = 256) and close each
+ * session-handle range (1 .. FHSM_MAX_SESSIONS) and close each
  * handle that resolves to a non-NULL token via fhsm_session_token.
  * C_CloseSession is idempotent on stale handles and returns
  * CKR_SESSION_HANDLE_INVALID which we silently consume here. */
 CK_RV C_CloseAllSessions(CK_SLOT_ID slotID) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (slotID != 0) return 0x00000003UL;   /* CKR_SLOT_ID_INVALID */
-    for (CK_SESSION_HANDLE h = 1; h <= 256; h++) {
+    for (CK_SESSION_HANDLE h = 1; h < FHSM_MAX_SESSIONS; h++) {
         if (fhsm_session_token(h) != NULL) {
             (void)C_CloseSession(h);
         }
@@ -1546,7 +1546,7 @@ typedef struct fhsm_find_state_s {
     size_t    next;
     int       active;
 } fhsm_find_state_t;
-static fhsm_find_state_t g_finds[FHSM_MAX_SLOTS * 32];   /* one slot per session */
+static fhsm_find_state_t g_finds[FHSM_MAX_SESSIONS];   /* one slot per session */
 
 /* Per-session active operation (Encrypt / Decrypt / Sign with key context). */
 typedef struct fhsm_op_s {
@@ -1597,8 +1597,8 @@ typedef struct fhsm_op_s {
      * SLH-DSA sign branch. */
     unsigned long pq_hedge;
 } fhsm_op_t;
-static fhsm_op_t g_op_enc[256];
-static fhsm_op_t g_op_dec[256];
+static fhsm_op_t g_op_enc[FHSM_MAX_SESSIONS];
+static fhsm_op_t g_op_dec[FHSM_MAX_SESSIONS];
 
 /* Post-fork reset. Declared far above, next to C_Initialize; defined here
  * because it clears g_slots / g_finds / g_op_* which are declared between the
@@ -1618,9 +1618,9 @@ static void fhsm_reset_after_fork(void) {
     fhsm_zeroize(g_op_enc, sizeof(g_op_enc));
     fhsm_zeroize(g_op_dec, sizeof(g_op_dec));
 }
-static fhsm_op_t g_op_sig[256];
-static fhsm_op_t g_op_dig[256];
-static fhsm_op_t g_op_ver[256];
+static fhsm_op_t g_op_sig[FHSM_MAX_SESSIONS];
+static fhsm_op_t g_op_dig[FHSM_MAX_SESSIONS];
+static fhsm_op_t g_op_ver[FHSM_MAX_SESSIONS];
 
 /* Declared far above, next to C_Login. Bounds-checked: the caller supplies the
  * session handle and these are fixed-size arrays. */
@@ -1631,7 +1631,7 @@ static int fhsm_session_has_active_op(CK_SESSION_HANDLE h) {
 }
 
 static fhsm_op_t *op_slot(fhsm_op_t *table, CK_SESSION_HANDLE h) {
-    if (h == 0 || h >= 256) return NULL;
+    if (h == 0 || h >= FHSM_MAX_SESSIONS) return NULL;
     return &table[h];
 }
 
@@ -4975,8 +4975,15 @@ typedef struct fhsm_session_oaep_s {
     uint8_t                   label_copy[64];   /* OAEP label is rarely > 64 */
     size_t                    label_len;
 } fhsm_session_oaep_t;
-static fhsm_session_oaep_t g_oaep_enc[256];
-static fhsm_session_oaep_t g_oaep_dec[256];
+/* Indexed by session handle, like the operation tables, and with no bound
+ * check of their own: C_EncryptInit reaches g_oaep_enc[hSession] on the
+ * strength of op_slot() having returned non-NULL. That made their size and
+ * op_slot()'s bound the same fact written twice. While both said 256 and no
+ * handle exceeded 127 it was invisible; sizing the operation tables from
+ * FHSM_MAX_SESSIONS and leaving these at 256 would have turned it into an
+ * out-of-bounds write the first time anyone raised the cap. */
+static fhsm_session_oaep_t g_oaep_enc[FHSM_MAX_SESSIONS];
+static fhsm_session_oaep_t g_oaep_dec[FHSM_MAX_SESSIONS];
 
 /* Reset ALL per-session cryptographic operation state (encrypt, decrypt,
  * sign, verify, digest, object-search, OAEP) for one session handle,
@@ -4989,8 +4996,22 @@ static fhsm_session_oaep_t g_oaep_dec[256];
  * TestOperationActive, #125). EVP_*_free(NULL) is a documented no-op, so
  * the frees are unconditional. Called on both C_OpenSession (so a fresh
  * handle starts clean) and C_CloseSession (so resources are released). */
+/* Every table indexed by a session handle has to have as many entries as
+ * there are handles. That was true four times over by coincidence -- three
+ * bounds written three ways, all >= the 128 the session table could issue --
+ * and stopped being true the moment the cap moved. Stated to the compiler so
+ * it cannot quietly stop being true again. */
+_Static_assert(sizeof(g_op_enc)   / sizeof(g_op_enc[0])   == FHSM_MAX_SESSIONS, "g_op_enc");
+_Static_assert(sizeof(g_op_dec)   / sizeof(g_op_dec[0])   == FHSM_MAX_SESSIONS, "g_op_dec");
+_Static_assert(sizeof(g_op_sig)   / sizeof(g_op_sig[0])   == FHSM_MAX_SESSIONS, "g_op_sig");
+_Static_assert(sizeof(g_op_dig)   / sizeof(g_op_dig[0])   == FHSM_MAX_SESSIONS, "g_op_dig");
+_Static_assert(sizeof(g_op_ver)   / sizeof(g_op_ver[0])   == FHSM_MAX_SESSIONS, "g_op_ver");
+_Static_assert(sizeof(g_finds)    / sizeof(g_finds[0])    == FHSM_MAX_SESSIONS, "g_finds");
+_Static_assert(sizeof(g_oaep_enc) / sizeof(g_oaep_enc[0]) == FHSM_MAX_SESSIONS, "g_oaep_enc");
+_Static_assert(sizeof(g_oaep_dec) / sizeof(g_oaep_dec[0]) == FHSM_MAX_SESSIONS, "g_oaep_dec");
+
 static void fhsm_session_ops_reset(CK_SESSION_HANDLE h) {
-    if (h == 0 || h >= 256) return;
+    if (h == 0 || h >= FHSM_MAX_SESSIONS) return;
     fhsm_op_t *tabs[] = { &g_op_enc[h], &g_op_dec[h], &g_op_sig[h],
                           &g_op_dig[h], &g_op_ver[h] };
     for (size_t i = 0; i < sizeof(tabs) / sizeof(tabs[0]); ++i) {

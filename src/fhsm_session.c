@@ -34,10 +34,6 @@
 #include <pthread.h>
 #include <string.h>
 
-#ifndef FHSM_MAX_SESSIONS
-#define FHSM_MAX_SESSIONS 128
-#endif
-
 typedef struct fhsm_session_s {
     int            in_use;
     unsigned long  slot;

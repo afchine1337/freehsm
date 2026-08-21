@@ -67,6 +67,7 @@ static struct {
     CK_RV (*FindObjects)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE*,CK_ULONG,CK_ULONG*);
     CK_RV (*FindObjectsFinal)(CK_SESSION_HANDLE);
     CK_RV (*GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
+    CK_RV (*DigestInit)(CK_SESSION_HANDLE,CK_MECHANISM*);
     CK_RV (*SignInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
     CK_RV (*Sign)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
     /* Multipart, for streaming a file too large to hold (#123). */
@@ -129,6 +130,7 @@ enum {                          /* PKCS#11 v2.40 §C.6 slot numbers */
     P11_SLOT_FindObjectsInit   = 26,
     P11_SLOT_FindObjects       = 27,
     P11_SLOT_FindObjectsFinal  = 28,
+    P11_SLOT_DigestInit        = 37,
     P11_SLOT_SignInit          = 42,
     P11_SLOT_Sign              = 43,
     P11_SLOT_SignUpdate        = 44,
@@ -174,6 +176,7 @@ P11_MAYBE_UNUSED static void load_module(const char *path) {
         T(FindObjects, P11_SLOT_FindObjects);
         T(FindObjectsFinal, P11_SLOT_FindObjectsFinal);
         T(GetAttributeValue, P11_SLOT_GetAttributeValue);
+        T(DigestInit, P11_SLOT_DigestInit);
         T(SignInit, P11_SLOT_SignInit);       T(Sign, P11_SLOT_Sign);
         T(SignUpdate, P11_SLOT_SignUpdate);   T(SignFinal, P11_SLOT_SignFinal);
         T(VerifyInit, P11_SLOT_VerifyInit);
@@ -198,6 +201,7 @@ P11_MAYBE_UNUSED static void load_module(const char *path) {
     S(FindObjectsInit,"C_FindObjectsInit"); S(FindObjects,"C_FindObjects");
     S(FindObjectsFinal,"C_FindObjectsFinal");
     S(GetAttributeValue,"C_GetAttributeValue");
+    S(DigestInit,"C_DigestInit");
     S(SignInit,"C_SignInit"); S(Sign,"C_Sign");
     S(SignUpdate,"C_SignUpdate"); S(SignFinal,"C_SignFinal");
     S(VerifyInit,"C_VerifyInit");

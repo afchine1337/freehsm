@@ -313,6 +313,35 @@ int fhsm_fips_mode(void);
 #define FHSM_PIN_MAX_FAILED       5
 #endif
 
+/* How many sessions one application may hold open at once, in one place.
+ *
+ * It used to be three places that had to agree and did not:
+ *
+ *   src/fhsm_session.c   #define FHSM_MAX_SESSIONS 128, local to that file
+ *                        and therefore invisible to the rest of the module
+ *   src/fhsm_pkcs11.c    five operation tables of [256], a bare literal 256
+ *                        in op_slot(), another in C_CloseAllSessions, and a
+ *                        comment asserting "FHSM_MAX_SESSIONS = 256"
+ *   src/fhsm_pkcs11.c    g_finds[FHSM_MAX_SLOTS * 32], which equals 128 only
+ *                        because there happen to be four slots
+ *
+ * 128 < 256 hid it: every handle the session table could issue landed inside
+ * every other bound. Raise the cap -- the first thing a service (#111) would
+ * do -- and it stopped hiding. Measured with -DFHSM_MAX_SESSIONS=512:
+ * 511 sessions opened, 511 accepted C_Login, and 255 could perform an
+ * operation. The rest answered CKR_SESSION_HANDLE_INVALID for handles the
+ * module had issued itself moments earlier.
+ *
+ * The cost of this constant is not free and should be visible before anyone
+ * raises it: the per-session operation state is five tables of ~4992 bytes,
+ * so ~24 KiB of reserved .bss per session, ~30 KiB resident once a session is
+ * opened (C_OpenSession zeroes its slots, faulting the pages in). At 128 that
+ * is ~3 MiB reserved; at 512 it would be ~12.5 MiB, held whether the sessions
+ * are working or idle. See docs/REST_API_DESIGN.md. */
+#ifndef FHSM_MAX_SESSIONS
+#define FHSM_MAX_SESSIONS         128
+#endif
+
 #ifdef __cplusplus
 }
 #endif

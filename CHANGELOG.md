@@ -8,6 +8,25 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **What a held session costs, measured (#111).**
+  `tests/bench_session_mem` loads the shipped module through `dlopen` and reads
+  `/proc/self/statm`: **29.3 KiB per session opened, 0 to log it in, 0 to give
+  it an active digest**, cap 127, everything held 11.6 MiB. The ~6.4 MiB
+  `C_Initialize` adds is mostly OpenSSL provider initialisation — a bare
+  program doing one `EVP` SHA-256 pays 3 MiB of it — and the secure heap is
+  ~150 KiB of it whatever `secure_heap_kb` says.
+
+  The 29.3 KiB is not state the session holds. It is five operation slots of
+  ~4 992 bytes each, faulted in because `C_OpenSession` zeroes them; the digest
+  then costs nothing because the pages are already resident. `docs/REST_API_DESIGN.md`
+  records what that means for pooling.
+
+  **The benchmark prints the curve, not an average**, because the average lied:
+  two builds gave 30 510 and 14 957 bytes per session for the same code. The
+  sampled version showed RSS climbing at 29.3 KiB per session and then going
+  flat at 256 — which was not a memory characteristic but a fourth stale bound,
+  below.
+
 * **A delegated OCSP responder, so the CA key can stay offline.** `fhsm-ca
   issue --profile ocsp-responder` produces a certificate carrying
   `extendedKeyUsage OCSPSigning` and non-critical `id-pkix-ocsp-nocheck`
@@ -113,6 +132,42 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **Four bounds on the same session-handle range, agreeing only by
+  coincidence.** `FHSM_MAX_SESSIONS` (128) lived inside `src/fhsm_session.c`,
+  invisible to the rest of the module. `src/fhsm_pkcs11.c` bounded the same
+  handles four other ways: five operation tables of `[256]`, a literal `256` in
+  `op_slot()`, another in `fhsm_session_ops_reset()`, and
+  `g_finds[FHSM_MAX_SLOTS * 32]` — which equals 128 only because there happen
+  to be four slots. Two more tables, `g_oaep_enc/dec[256]`, were indexed by
+  session handle with no bound check of their own at all, relying on
+  `op_slot()` having returned non-NULL.
+
+  All of them were >= 128, so the module was correct by accident. Raising the
+  cap — the first thing a service (#111) does — broke it. Measured with
+  `-DFHSM_MAX_SESSIONS=512`: **511 sessions opened, 511 accepted `C_Login`, and
+  255 could perform an operation.** The rest answered
+  `CKR_SESSION_HANDLE_INVALID` for handles the module had issued itself moments
+  earlier. Login hid it, because login state is per token per application and
+  never touches a per-session table.
+
+  Now one constant in `include/fhsm_common.h`, every table derived from it, and
+  eight `_Static_assert`s so a mismatch is a compile error rather than a
+  session that opens and cannot work. `.bss` fell from 7 008 560 to 3 808 560
+  bytes — the 3 MiB of operation tables no handle could ever reach.
+
+  **Widening one bound made the others dangerous**, and the benchmark caught
+  it: after the tables were sized from the constant but before
+  `fhsm_session_ops_reset()` and `g_oaep_*` were, handles above 255 were never
+  reset on open (the stale-`active` bug that function exists to prevent, back
+  again) and `g_oaep_enc[hSession]` would have been an out-of-bounds write. A
+  latent inconsistency turned into a memory-safety defect by a change that
+  looked like a cleanup.
+
+  `tests/test_session_cap.c` asserts the property no array-size assertion can:
+  that the last handle the module is willing to issue can log in and do work.
+  Two mutations, `op_slot()` bounded at 64 and off by one at the top; the
+  second is caught only by the assertion written for it.
+
 * **`ocsp-respond --responder-cert` segfaulted on an unparseable `--ca-cert`.**
   The delegated block compares the responder's issuer against the CA's subject
   name and did so before anything checked that the CA certificate had parsed.
