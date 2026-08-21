@@ -8,6 +8,37 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **The audit log can be switched off — explicitly, and never in silence.**
+  It could be switched off before, in the worst way available:
+  `FHSM_AUDIT_LOG=/dev/null`, silent and undocumented, with the module going on
+  as though it were recording. Meanwhile `FHSM_AUDIT_MANDATORY` sat in
+  `include/fhsm_common.h` set to 1, was cited in three comments and enforced
+  nowhere — `docs/ROADMAP.md` called it "a constant a comment describes as
+  aspirational".
+
+  Two parties, two decisions. **`FHSM_AUDIT_MANDATORY` is the build's**: at 1,
+  the default, the module refuses to start when asked to run without a log, so
+  a distribution packaged for an administration can settle the question for
+  everyone downstream. **`FHSM_AUDIT=off` is the operator's**, and has to be
+  typed.
+
+  The constant means that and only that. It does not govern what happens when
+  a log that is *on* cannot be written — that is always fatal.
+
+  `/dev/null` still works, because refusing it would break a legitimate FIFO
+  target; what changed is that the module announces it as a stream and not a
+  log. Both notices go to stderr, so every tool shows them (`AGD_OPE` §4.2d).
+
+  The default is on in both profiles. `interop` was considered and rejected:
+  the profile governs which mechanisms are approved, not whether the module
+  records using them.
+
+  `tests/audit_switch.sh` takes the expected mode as an argument rather than
+  sniffing the build — a script that decides for itself what it is testing
+  passes either way — and `make audit-switch` builds both ways and runs both,
+  which is what `EXTRA_CFLAGS` was added for. `make tests` covers the default
+  side only, and that is stated rather than assumed.
+
 * **The audit log's durable barrier is shared between concurrent writers.**
   Every event still returns only after an `fsync` that covered its own write —
   a signature must not reach a client before the record of it is on disk, and

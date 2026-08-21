@@ -241,23 +241,67 @@ the first of those against the old single-file behaviour.
 
 ---
 
-## Still open, and deliberately separate
+## Optional, and explicit — built
 
-**Whether the audit log should be optional at all.** The cost measured here is
-real — a durable line costs more than the signature it records — and an
-operator whose threat model does not include "who asked for this" is paying for
-nothing. `FHSM_AUDIT_MANDATORY` already exists in `include/fhsm_common.h` as a
-constant set to 1, referenced in three comments and **enforced nowhere**;
-`docs/ROADMAP.md` calls it "a constant a comment describes as aspirational".
+The cost measured here is real: a durable line costs more than the signature it
+records, and an operator whose threat model does not include "who asked for
+this" is paying for nothing. So the log can be switched off. What it cannot be
+is switched off quietly.
 
-Meanwhile `FHSM_AUDIT_LOG=/dev/null` switches the log off today: silently,
-undocumented, with the module still claiming a guarantee it is not providing.
-That is the worst of both.
+**Two parties, two decisions.**
 
-Making the switch real is a separate task, and its shape is already decided:
-**optional, and explicit.** Off must be loud — announced at start-up, visible
-in the token's flags, and never the accidental result of a path. The default
-stays on for `fips-strict`; whether `interop` differs is an open question.
+`FHSM_AUDIT_MANDATORY` is the *build's*. At 1 — the default — the module
+refuses to start when asked to run without a log. That is the right setting for
+a distribution packaged for an administration: the distributor decides that
+nobody downstream can turn the record off, and no environment variable can
+argue. At 0 the operator is allowed to.
+
+`FHSM_AUDIT=off` is the *operator's*, and it has to be typed. It is never the
+side effect of a path.
+
+The constant now means that and only that. It does **not** govern what happens
+when a log that is switched on cannot be written: that is always fatal. If you
+asked for a record, a record you cannot write stops the module.
+
+**What it looked like before.** The log could already be switched off, in the
+worst way available — `FHSM_AUDIT_LOG=/dev/null`, silent, undocumented, with
+the module going on as though it were recording. `FHSM_AUDIT_MANDATORY` sat in
+the header set to 1, was cited in three comments, and was enforced nowhere;
+`docs/ROADMAP.md` called it "a constant a comment describes as aspirational".
+
+`/dev/null` still works, because refusing it would break a legitimate FIFO
+target. What changed is that the module says what it is:
+
+```
+[freehsm-c] NOTE : the audit target /dev/null is not a regular
+  file. Lines are written to it, but nothing is made durable
+  and no chain can be verified afterwards. This is a stream,
+  not a log.
+```
+
+and, when the log is off:
+
+```
+[freehsm-c] NOTE : the audit log is OFF (FHSM_AUDIT=off).
+  Nothing this module does will be recorded: no signature, no
+  login, no failure. Weekly review as described in AGD_OPE 4.3
+  has nothing to review, and an incident afterwards has nothing
+  to reconstruct from.
+```
+
+**The default is on, in both profiles.** `interop` was considered and rejected:
+the profile governs which mechanisms are approved, not whether the module keeps
+a record of using them, and tying the two together would mean an operator loses
+the audit trail as a side effect of wanting RSA PKCS#1 v1.5.
+
+**Testing a two-sided rule.** `make tests` runs the default build, so it only
+ever exercises the refusal. `tests/audit_switch.sh` takes the expected mode as
+an argument rather than sniffing the build — a script that decides for itself
+what it is testing passes either way — and `make audit-switch` builds both ways
+and runs both. `EXTRA_CFLAGS` exists for that.
+
+That gap is named rather than assumed covered, which is the same discipline as
+the `pkcs11-check` probe that could not fail.
 
 ---
 

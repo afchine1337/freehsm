@@ -181,6 +181,14 @@ secure_heap_kb = 8192
 path the module never opened. None of them had any effect. An operator who
 hardened the module by editing that file changed nothing (#128).
 
+`audit_mandatory` is now real, but as a **build** setting rather than a
+configuration key: `-DFHSM_AUDIT_MANDATORY=0` at compile time decides whether
+this installation may run without an audit log at all, and the default is that
+it may not. That is deliberate — it is the distributor's decision, not the
+operator's, and a decision the operator could edit into a file would not be the
+distributor's. What the operator controls is `FHSM_AUDIT=off`, and only where
+the build allows it. See `docs/AUDIT_DURABILITY.md`.
+
 The remaining parameters are set at build time or through the environment :
 
 | Parameter | Where it is set |

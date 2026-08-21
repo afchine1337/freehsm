@@ -444,6 +444,11 @@ size_t fhsm_audit_current_path(char *out, size_t cap) {
     return n;
 }
 
+/* Whether this build lets the log be switched off. A compile-time decision
+ * that nothing could observe was the previous state of FHSM_AUDIT_MANDATORY,
+ * and it is how the constant stayed aspirational for so long. */
+int fhsm_audit_mandatory(void) { return FHSM_AUDIT_MANDATORY ? 1 : 0; }
+
 void fhsm_audit_barrier_stats(uint64_t *events, uint64_t *barriers) {
     pthread_mutex_lock(&g_audit_mu);
     if (events)   *events   = g_stat_events;

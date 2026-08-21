@@ -212,6 +212,33 @@ Two consequences to plan for:
   and can be moved by anyone who can set the clock. Take that into account when
   reconstructing an incident across a restart.
 
+### 4.2d Two notices that mean the log is not what you think
+
+Both are printed by `C_Initialize` on standard error, so any tool that loads
+the module shows them.
+
+```
+[freehsm-c] NOTE : the audit log is OFF (FHSM_AUDIT=off).
+```
+
+The operator asked for it, and this build permitted it. Nothing is recorded:
+no signature, no login, no failure. §4.3 below has nothing to review, and an
+incident afterwards has nothing to reconstruct from. If you did not intend it,
+unset `FHSM_AUDIT`.
+
+```
+[freehsm-c] NOTE : the audit target ... is not a regular file.
+```
+
+The log was pointed at a stream — `/dev/null`, a FIFO, a character device.
+Lines are written and nothing is durable or verifiable. This is a legitimate
+thing to ask for and an illegitimate thing to be given by accident; before this
+notice existed, `FHSM_AUDIT_LOG=/dev/null` switched the audit trail off in
+silence while the module went on as though it were recording.
+
+**Neither notice appears in a normal installation.** Seeing one on a machine
+that is supposed to keep a record is itself the finding.
+
 ### 4.3 Audit log review
 
 > **The audit log is produced, and the chain is verifiable.** The warning that

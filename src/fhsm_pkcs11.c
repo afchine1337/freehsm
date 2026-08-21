@@ -392,6 +392,35 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
         if (env && *env) snprintf(logp, sizeof logp, "%s", env);
         else             snprintf(logp, sizeof logp, "%s/audit.log", dir);
 
+        /* Switching the log off has to be asked for by name, and has to be
+         * loud. It used to be possible in the worst way -- FHSM_AUDIT_LOG
+         * pointing at /dev/null, silently, with the module still behaving as
+         * though it were recording. Whether it is possible at all is the
+         * build's decision (FHSM_AUDIT_MANDATORY); whether it happens is the
+         * operator's, and they say so in as many words. */
+        const char *sw = getenv("FHSM_AUDIT");
+        int want_off = sw && (strcmp(sw, "off") == 0 || strcmp(sw, "0") == 0);
+        if (want_off && FHSM_AUDIT_MANDATORY) {
+            fprintf(stderr,
+                "[freehsm-c] FATAL : FHSM_AUDIT=off is refused by this build.\n"
+                "  It was compiled with FHSM_AUDIT_MANDATORY=1, which means the\n"
+                "  module will not run without a record of what it did. That is\n"
+                "  the default and the intended setting where the audit trail is\n"
+                "  part of what the deployment has to show.\n"
+                "  To allow it, rebuild with -DFHSM_AUDIT_MANDATORY=0.\n");
+            fhsm_state_latch_error("audit switched off in a mandatory build");
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        if (want_off) {
+            fprintf(stderr,
+                "[freehsm-c] NOTE : the audit log is OFF (FHSM_AUDIT=%s).\n"
+                "  Nothing this module does will be recorded: no signature, no\n"
+                "  login, no failure. Weekly review as described in AGD_OPE 4.3\n"
+                "  has nothing to review, and an incident afterwards has nothing\n"
+                "  to reconstruct from. This build permits it because it was\n"
+                "  compiled with FHSM_AUDIT_MANDATORY=0.\n", sw);
+        } else {
+
         /* Create the directory if it is not there. On a fresh install nothing
          * has made it yet, and the alternative is a module that refuses to
          * start until the operator guesses which directory to mkdir. 0700:
@@ -423,6 +452,24 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
         }
         arv = fhsm_audit_open(logp, FHSM_SLICE(akey, sizeof akey));
         fhsm_zeroize(akey, sizeof akey);
+        if (arv == FHSM_RV_OK) {
+            /* A base that is not a regular file is used as given -- a FIFO, a
+             * character device, /dev/null. Lines are written and nothing is
+             * durable or verifiable, which is a legitimate thing to ask for
+             * and an illegitimate thing to be given by accident. The opening
+             * reports the file it actually took; if that is the name we
+             * handed it rather than a numbered log, it is a stream. */
+            char actual[600];
+            fhsm_audit_current_path(actual, sizeof actual);
+            if (strcmp(actual, logp) == 0) {
+                fprintf(stderr,
+                    "[freehsm-c] NOTE : the audit target %s is not a regular\n"
+                    "  file. Lines are written to it, but nothing is made durable\n"
+                    "  and no chain can be verified afterwards. This is a stream,\n"
+                    "  not a log. If that was not intended, name a directory on\n"
+                    "  persistent storage instead.\n", logp);
+            }
+        }
         if (arv != FHSM_RV_OK) {
             fprintf(stderr,
                     "[freehsm-c] FATAL : cannot open the audit log %s (rv=0x%x)\n"
@@ -433,6 +480,7 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
             fhsm_state_latch_error("audit log could not be opened");
             return arv;
         }
+        }   /* else: the log is on */
     }
 
     rv = fhsm_state_set(FHSM_STATE_INITIALIZED);

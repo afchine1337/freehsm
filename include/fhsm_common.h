@@ -260,9 +260,27 @@ typedef struct fhsm_slice_s {
 
 int fhsm_fips_mode(void);
 
-/* When 1, the audit log is mandatory: every C_* entry point emits an
- * event line, and refusal to write to the log file is a fatal error
- * (the module enters ERROR state). Default in shipping builds. */
+/* Whether the audit log may be switched off at all.
+ *
+ * This constant used to say "the audit log is mandatory", was referenced in
+ * three comments, and was enforced nowhere -- docs/ROADMAP.md called it "a
+ * constant a comment describes as aspirational". Meanwhile the log could be
+ * switched off in the worst possible way, by pointing FHSM_AUDIT_LOG at
+ * /dev/null: silently, undocumented, with the module still claiming a
+ * guarantee it was no longer providing.
+ *
+ * It now has one narrow meaning, and only one:
+ *
+ *   1 -- FHSM_AUDIT=off is REFUSED. The module will not start without a log.
+ *        This is the default, and the right setting for a build packaged for
+ *        an administration: the distributor decides that nobody downstream can
+ *        turn the record off.
+ *   0 -- FHSM_AUDIT=off is honoured, loudly. The operator must ask for it by
+ *        name; it is never the accidental result of a path.
+ *
+ * What it does NOT govern is what happens when a log that is switched ON
+ * cannot be written. That is always fatal, whatever this is set to: if you
+ * asked for a record, a record you cannot write stops the module. */
 #ifndef FHSM_AUDIT_MANDATORY
 #define FHSM_AUDIT_MANDATORY 1
 #endif

@@ -160,6 +160,11 @@ void fhsm_audit_close(void);
  * passed to fhsm_audit_open(): that is a base name, and each opening creates
  * `base.NNNNNN` with O_EXCL so that every chain has exactly one author. Copies
  * into `out` if given and returns the length. Empty when the log is closed. */
+/* Whether this build permits FHSM_AUDIT=off. 1 means the module refuses to
+ * start without a log, which is the default; see FHSM_AUDIT_MANDATORY in
+ * fhsm_common.h for what it does and does not govern. */
+int fhsm_audit_mandatory(void);
+
 size_t fhsm_audit_current_path(char *out, size_t cap);
 
 void fhsm_audit_barrier_stats(uint64_t *events, uint64_t *barriers);
