@@ -54,6 +54,38 @@ Everything lands between 2.5 and 3.3 ms. `fdatasync` is marginally cheaper than
 was slightly worse. The cost is the durability barrier itself, not the call
 used to request it. **There is no cheaper syscall.**
 
+### And almost none of it is ours
+
+The table above reads as though it were about the audit log. It is not.
+`tests/bench_fsync_floor` does one 300-byte append and one `fdatasync` with no
+FreeHSM code in the loop at all, on the same filesystem:
+
+```
+  filesystem   ext4 on /dev/sdc (/sessions)
+  min             2.058 ms
+  p50             2.553 ms
+  p90             3.155 ms
+  p99             4.165 ms
+  max             4.421 ms
+  mean            2.635 ms   -> 379 lines/s
+```
+
+That is one run of 300 samples. Five runs of 200 gave means of **2.360, 2.424,
+2.463, 2.562 and 2.420 ms** — an 8 % spread, so the floor is about 2.4–2.6 ms
+and no single decimal in it should be quoted on its own. The habit is deliberate:
+a first run of 3.735 ms was once taken as fact and turned out to be a cold-cache
+outlier.
+
+The module's 2.49–2.86 ms per line sits on that floor. **Formatting the line and
+computing its HMAC cost almost nothing next to the barrier**, which is the
+finding that matters for anyone tempted to optimise the log: there is nothing
+there to optimise. The same loop with the barrier removed runs at 0.000 ms; the
+barrier is the whole cost, and it belongs to the disk.
+
+It is worth reading the distribution rather than the mean, which is why the
+tool prints one. On the sandbox, one run of 200 samples had a maximum of
+**76.4 ms** against a median of 2.70. An operator feels the tail.
+
 ### Sharing the barrier buys almost everything
 
 The barrier is expensive and *the same barrier serves every write that is
@@ -241,67 +273,23 @@ the first of those against the old single-file behaviour.
 
 ---
 
-## Optional, and explicit — built
+## Still open, and deliberately separate
 
-The cost measured here is real: a durable line costs more than the signature it
-records, and an operator whose threat model does not include "who asked for
-this" is paying for nothing. So the log can be switched off. What it cannot be
-is switched off quietly.
+**Whether the audit log should be optional at all.** The cost measured here is
+real — a durable line costs more than the signature it records — and an
+operator whose threat model does not include "who asked for this" is paying for
+nothing. `FHSM_AUDIT_MANDATORY` already exists in `include/fhsm_common.h` as a
+constant set to 1, referenced in three comments and **enforced nowhere**;
+`docs/ROADMAP.md` calls it "a constant a comment describes as aspirational".
 
-**Two parties, two decisions.**
+Meanwhile `FHSM_AUDIT_LOG=/dev/null` switches the log off today: silently,
+undocumented, with the module still claiming a guarantee it is not providing.
+That is the worst of both.
 
-`FHSM_AUDIT_MANDATORY` is the *build's*. At 1 — the default — the module
-refuses to start when asked to run without a log. That is the right setting for
-a distribution packaged for an administration: the distributor decides that
-nobody downstream can turn the record off, and no environment variable can
-argue. At 0 the operator is allowed to.
-
-`FHSM_AUDIT=off` is the *operator's*, and it has to be typed. It is never the
-side effect of a path.
-
-The constant now means that and only that. It does **not** govern what happens
-when a log that is switched on cannot be written: that is always fatal. If you
-asked for a record, a record you cannot write stops the module.
-
-**What it looked like before.** The log could already be switched off, in the
-worst way available — `FHSM_AUDIT_LOG=/dev/null`, silent, undocumented, with
-the module going on as though it were recording. `FHSM_AUDIT_MANDATORY` sat in
-the header set to 1, was cited in three comments, and was enforced nowhere;
-`docs/ROADMAP.md` called it "a constant a comment describes as aspirational".
-
-`/dev/null` still works, because refusing it would break a legitimate FIFO
-target. What changed is that the module says what it is:
-
-```
-[freehsm-c] NOTE : the audit target /dev/null is not a regular
-  file. Lines are written to it, but nothing is made durable
-  and no chain can be verified afterwards. This is a stream,
-  not a log.
-```
-
-and, when the log is off:
-
-```
-[freehsm-c] NOTE : the audit log is OFF (FHSM_AUDIT=off).
-  Nothing this module does will be recorded: no signature, no
-  login, no failure. Weekly review as described in AGD_OPE 4.3
-  has nothing to review, and an incident afterwards has nothing
-  to reconstruct from.
-```
-
-**The default is on, in both profiles.** `interop` was considered and rejected:
-the profile governs which mechanisms are approved, not whether the module keeps
-a record of using them, and tying the two together would mean an operator loses
-the audit trail as a side effect of wanting RSA PKCS#1 v1.5.
-
-**Testing a two-sided rule.** `make tests` runs the default build, so it only
-ever exercises the refusal. `tests/audit_switch.sh` takes the expected mode as
-an argument rather than sniffing the build — a script that decides for itself
-what it is testing passes either way — and `make audit-switch` builds both ways
-and runs both. `EXTRA_CFLAGS` exists for that.
-
-That gap is named rather than assumed covered, which is the same discipline as
-the `pkcs11-check` probe that could not fail.
+Making the switch real is a separate task, and its shape is already decided:
+**optional, and explicit.** Off must be loud — announced at start-up, visible
+in the token's flags, and never the accidental result of a path. The default
+stays on for `fips-strict`; whether `interop` differs is an open question.
 
 ---
 
@@ -329,6 +317,24 @@ them produces the tmpfs result with none of the warning signs, and VirtualBox's
 host I/O cache does exactly that. The absolutes should be taken again on the
 hardware, or on something that has been proven to honour a barrier.
 
+**Which direction that is likely to move, from our own numbers.** The floor
+measurement above has a *minimum* of 2.058 ms. A minimum is the best the device
+ever did, and no flash device needs two milliseconds to answer a flush — that
+is the latency of rotating media or of a disk reached over a network. So the
+figures in this document are almost certainly pessimistic for the storage an
+authority would buy, and by a margin large enough to change what the log looks
+like it costs. How large is not something to guess at here; it is a command:
+
+```bash
+make tests/bench_fsync_floor
+./tests/bench_fsync_floor /var/lib/freehsm      # where the log will live
+```
+
+It names the filesystem it measured, prints the distribution, and **exits
+non-zero if the barrier returned too fast to have reached stable storage** —
+the tmpfs trap below, turned from a warning in prose into a failure the tool
+reports.
+
 ~~**Whether the module's own signing path can proceed during a barrier.**~~
 Measured after building it: partly. 242 → 674 sig/s at eight threads, against
 1145 with no durable write. So a signature can proceed during a barrier, and
@@ -343,6 +349,9 @@ performance question rather than a design one.
 * `docs/RATE_LIMIT.md` — where this was left open, and why it stopped being a
   tuning question.
 * `docs/REST_API_DESIGN.md` §Scaling — the plateau this explains.
-* `tests/bench_audit_rate.c` — the per-line cost.
+* `tests/bench_audit_rate.c` — the per-line cost, module included.
+* `tests/bench_fsync_floor.c` — the same cost with none of our code in the
+  loop, which is what most of it turns out to be. Run it on the storage the
+  log will live on before believing any absolute on this page.
 * `probes/rest/README.md` — the last section, on what the log does to every
   number in that file.

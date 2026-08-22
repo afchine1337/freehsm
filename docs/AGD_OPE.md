@@ -174,15 +174,41 @@ and `FHSM_AUDIT_LOG` can point the log somewhere other than the tokens
 directory. The symptom is a log that is implausibly fast:
 
 ```
-stat -f -c '%T' "$FHSM_TOKENS_DIR"      # or the directory FHSM_AUDIT_LOG names
-make tests/bench_audit_rate
-FHSM_TOKENS_DIR=/var/lib/freehsm LD_LIBRARY_PATH=. ./tests/bench_audit_rate
+make tests/bench_fsync_floor
+./tests/bench_fsync_floor /var/lib/freehsm       # where the log will live
 ```
 
-A durable barrier costs milliseconds. Microseconds mean no barrier happened —
-the benchmark says so in as many words, and prints the filesystem it measured.
+This is the shortest check and it involves no module: one append, one
+`fdatasync`, repeated. It names the filesystem it measured, prints the
+distribution, and **exits non-zero if the barrier returned too fast to have
+reached stable storage.** Use its exit status in a provisioning script; a
+message an operator has to read is a message an operator can miss.
+
+```
+  filesystem   ext4 on /dev/sdc (/sessions)
+  min             2.058 ms
+  p50             2.553 ms
+  ...
+```
+
+versus, on `tmpfs`:
+
+```
+  NOT A DURABILITY MEASUREMENT.
+  A barrier that returns in 0.000 ms did not reach stable storage -- this is
+  tmpfs, where fdatasync is a no-op.
+```
+
+A durable barrier costs milliseconds on the storage measured so far.
+Microseconds mean no barrier happened. `tests/bench_audit_rate` measures the
+same thing through the module if you want the log's own cost as well, but the
+floor tool is the one to run first — it fails for one reason only.
+
 The same caution applies to a hypervisor that acknowledges barriers without
-honouring them; VirtualBox's host I/O cache does exactly that.
+honouring them; VirtualBox's host I/O cache does exactly that, and **no tool
+here can see through it.** A hypervisor that lies produces a plausible
+millisecond figure and no warning of any kind. If the guarantee matters,
+the storage has to be trusted at a level below this module.
 
 ### 4.2c The log is a set of files, not one file
 
@@ -211,33 +237,6 @@ Two consequences to plan for:
   is authoritative; across files you are merging on `ts`, which is wall-clock
   and can be moved by anyone who can set the clock. Take that into account when
   reconstructing an incident across a restart.
-
-### 4.2d Two notices that mean the log is not what you think
-
-Both are printed by `C_Initialize` on standard error, so any tool that loads
-the module shows them.
-
-```
-[freehsm-c] NOTE : the audit log is OFF (FHSM_AUDIT=off).
-```
-
-The operator asked for it, and this build permitted it. Nothing is recorded:
-no signature, no login, no failure. §4.3 below has nothing to review, and an
-incident afterwards has nothing to reconstruct from. If you did not intend it,
-unset `FHSM_AUDIT`.
-
-```
-[freehsm-c] NOTE : the audit target ... is not a regular file.
-```
-
-The log was pointed at a stream — `/dev/null`, a FIFO, a character device.
-Lines are written and nothing is durable or verifiable. This is a legitimate
-thing to ask for and an illegitimate thing to be given by accident; before this
-notice existed, `FHSM_AUDIT_LOG=/dev/null` switched the audit trail off in
-silence while the module went on as though it were recording.
-
-**Neither notice appears in a normal installation.** Seeing one on a machine
-that is supposed to keep a record is itself the finding.
 
 ### 4.3 Audit log review
 

@@ -400,6 +400,10 @@ tests/bench_fork_client: tests/bench_fork_client.c tools/p11_util.h
 tests/test_fork_child: tests/test_fork_child.c tools/p11_util.h
 	$(CC) $(CFLAGS) -Itools -o $@ $< -ldl
 
+# No module, no libcrypto: the point is to have none of our code in the loop.
+tests/bench_fsync_floor: tests/bench_fsync_floor.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 # Not part of `make tests`: a measurement, not an assertion. See the file.
 tests/bench_audit_rate: tests/bench_audit_rate.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)

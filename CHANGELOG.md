@@ -8,6 +8,32 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **`tests/bench_fsync_floor` — the durability barrier with none of our code in
+  the loop, and what that changes.** One 300-byte append and one `fdatasync`,
+  no module, no libcrypto: **2.4–2.6 ms on the same ext4 the module was measured
+  on** (five runs, 8 % spread), against the module's 2.49–2.86 ms per line. So the figures in
+  `docs/AUDIT_DURABILITY.md` are not a measurement of the audit log — the
+  formatting and the HMAC cost almost nothing next to the barrier, and **there
+  is nothing in the log to optimise.**
+
+  It prints a distribution rather than a mean, because a mean of 3.25 ms once
+  hid a maximum of 76.4 ms against a median of 2.70, and the tail is what an
+  operator feels.
+
+  **It also says which way the published numbers are wrong.** The floor's
+  *minimum* is 2.058 ms — the best that device ever managed — and no flash
+  device needs two milliseconds to answer a flush. Both hosts measured so far
+  are virtual machines with rotational or network-backed disks, so the absolute
+  figures are pessimistic for the storage an authority would buy. By how much
+  is now a command rather than a guess.
+
+  The tmpfs trap that once put "0.003 ms per line" in a document is no longer a
+  warning in prose: the tool **exits non-zero** when the barrier returns too
+  fast to have been real, so a provisioning script can gate on it. `AGD_OPE.md`
+  §4.2b now leads with it, and says plainly what it cannot catch — a hypervisor
+  that acknowledges barriers without honouring them produces a plausible
+  millisecond figure and no warning at all.
+
 * **Nothing post-quantum crosses a `p11-kit server` socket, measured.**
   The module advertises 72 mechanisms directly and **20** through p11-kit
   0.24.0. The 52 that vanish are every post-quantum one — `CKM_ML_DSA`, the
