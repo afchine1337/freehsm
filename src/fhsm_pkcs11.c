@@ -1536,7 +1536,8 @@ static long fhsm_parse_unwrap_template(CK_ATTRIBUTE *tmpl, CK_ULONG n);
  *
  * The handle buffer is bounded by the store's capacity: a search cannot return
  * more objects than the token can hold. It used to be a literal 64, which was
- * FHSM_MAX_OBJECTS at the time; raising the store to 256 left this behind, so
+ * FHSM_MAX_OBJECTS at the time; raising the store (256 then, 1024 now) left
+ * that literal behind, so
  * C_FindObjects silently truncated every result set at 64 no matter how many
  * objects matched (#125 TestBulkOperations: 100 keys created, 64 found). A
  * constant duplicated as a literal is a constant that will drift. */
@@ -4543,7 +4544,8 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
      * reports the full match count. Iterating to `got` therefore read past the
      * buffer as soon as a token held more matches than prelim has slots, and
      * handed the stack garbage back to the caller as object handles. prelim was
-     * 64 while the store holds FHSM_MAX_OBJECTS = 256, so 65 matching objects
+     * 64 while the store held 256 -- it holds FHSM_MAX_OBJECTS, whatever that is
+     * on this build -- so 65 matching objects
      * were enough. Sizing prelim correctly is not on its own a fix -- it only
      * moves the threshold -- so the read is clamped to the buffer as well.
      * A bound enforced on the write and not on the read is not a bound. */

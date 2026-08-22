@@ -30,8 +30,10 @@
  *       (forcing the blob through write_atomic).
  *    3. Reloads the token from disk, logs USER back in (which decrypts
  *       and parses the blob), and asserts every object is found.
- *    4. Repeats the reload check at FHSM_MAX_OBJECTS (64) to pin the
- *       upper bound.
+ *    4. Repeats the reload check at FHSM_MAX_OBJECTS to pin the upper
+ *       bound. The value is not written here: it was "64" long after the
+ *       store held 1024, and a comment naming a bound is a second copy of
+ *       it.
  *
  *  Like test_smoke, this is an INTERNAL test linked against the
  *  library objects. It requires the OpenSSL provider used by

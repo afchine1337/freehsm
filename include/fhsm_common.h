@@ -202,7 +202,7 @@ void fhsm_state_latch_error(const char *reason);
  * ----------------------------------------------------------------------- */
 #ifndef FHSM_SECURE_HEAP_BYTES
 /* Secure-heap arena. Raised from 256 KiB for #127: sensitive object values now
- * live here, and FHSM_MAX_OBJECTS (1024) private keys of the largest kind the
+ * live here, and FHSM_MAX_OBJECTS private keys of the largest kind the
  * module generates -- ML-DSA-87, 4 962 B measured -- need 4.85 MiB. 8 MiB is
  * the next power of two (OpenSSL's arena asserts on anything else) and leaves
  * headroom for the DEKs. This guarantees the worst case: a token filled

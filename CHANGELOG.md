@@ -154,6 +154,24 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **`FHSM_MAX_OBJECTS` was defined twice, and the second copy was dead.**
+  `include/fhsm_token.h` and `src/fhsm_token.c` each carried
+  `#ifndef FHSM_MAX_OBJECTS / #define 1024`. They could not disagree — the
+  header is included first, so the guard in the `.c` never fired — which is a
+  quieter failure than divergence rather than a safer one: editing the number
+  in `src/fhsm_token.c` changed nothing, silently. Removed; the header owns it.
+
+  Checked rather than assumed: `-DFHSM_MAX_OBJECTS=32` does bind (the capacity
+  bench asked for 100 objects and got 32), and `-DFHSM_MAX_OBJECTS=4096` is a
+  compile error naming both knobs, from the `_Static_assert` tying the cap to
+  `FHSM_SECURE_HEAP_BYTES`.
+
+  Three comments naming a capacity the store had outgrown went with it — one
+  said `FHSM_MAX_OBJECTS = 256` in the present tense and one said `(64)`. The
+  file they sit in already records that "a constant duplicated as a literal is
+  a constant that will drift"; a constant duplicated in prose drifts the same
+  way and nothing compiles it.
+
 * **A forked child could not initialise the module at all.** `C_Initialize` in
   a child of an initialised parent returned `CKR_FUNCTION_FAILED`: the
   post-fork reset (#125) cleared sessions and objects and left the module

@@ -61,13 +61,16 @@
  * in production) ; the integration test exercises only the scalar
  * fields below.
  * ----------------------------------------------------------------------- */
-/* Per-token object capacity. Overridable at build time
- * (-DFHSM_MAX_OBJECTS=N) for general-purpose deployments that need a
- * larger store ; the fixed in-memory array trades RAM for simplicity
- * (constant-time, no allocator on the object hot path). */
-#ifndef FHSM_MAX_OBJECTS
-#define FHSM_MAX_OBJECTS    1024
-#endif
+/* Per-token object capacity comes from fhsm_token.h, included above.
+ *
+ * There used to be a second #ifndef/#define 1024 right here. It could not
+ * disagree with the header -- the header is included first, so the guard never
+ * fired and this copy was dead -- which is a quieter failure than divergence,
+ * not a safer one: editing the number here changed nothing at all, silently.
+ * The fixed in-memory array trades RAM for simplicity (constant time, no
+ * allocator on the object hot path); -DFHSM_MAX_OBJECTS=N still overrides it,
+ * and FHSM_SECURE_HEAP_BYTES is checked against it by the _Static_assert
+ * below rather than by hoping the two were updated together. */
 #define FHSM_OBJ_LABEL_LEN  64
 /* Value buffer sized to hold the largest supported key type :
  *   RSA-4096 PKCS#8 priv     ≈ 2400 bytes
