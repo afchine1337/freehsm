@@ -181,6 +181,11 @@ fhsm_rv_t fhsm_state_set(fhsm_module_state_t s);
 /* Latch ERROR state. Idempotent. Called by any service that detects an
  * integrity / KAT / RNG fault. All subsequent service calls return
  * FHSM_RV_FUNCTION_FAILED until the module is restarted. */
+/* Forcibly return the module to POWER_OFF, bypassing the transition table.
+ * The only caller is the post-fork reset in C_Initialize; see the definition
+ * for why ERROR survives it. */
+void fhsm_state_reset_after_fork(void);
+
 void fhsm_state_latch_error(const char *reason);
 
 /* ---------------------------------------------------------------------------

@@ -1597,12 +1597,28 @@ typedef struct fhsm_op_s {
      * SLH-DSA sign branch. */
     unsigned long pq_hedge;
 } fhsm_op_t;
+/* All five together, and above the post-fork reset rather than around it.
+ * Two were declared here and three below the reset, so the reset could only
+ * see two -- and zeroized exactly those. A declaration order decided which
+ * state survived a fork, which is not a decision anyone would have written
+ * down on purpose. */
 static fhsm_op_t g_op_enc[FHSM_MAX_SESSIONS];
 static fhsm_op_t g_op_dec[FHSM_MAX_SESSIONS];
+static fhsm_op_t g_op_sig[FHSM_MAX_SESSIONS];
+static fhsm_op_t g_op_dig[FHSM_MAX_SESSIONS];
+static fhsm_op_t g_op_ver[FHSM_MAX_SESSIONS];
+
+/* The OAEP tables are indexed by session handle too, so they cross a fork
+ * like the rest -- but their element type needs fhsm_oaep_params_t, which is
+ * declared much further down. Rather than drag that up, the reset calls this;
+ * it is defined next to the tables. The dependency is one forward
+ * declaration instead of a silent omission. */
+static void fhsm_oaep_reset_all(void);
 
 /* Post-fork reset. Declared far above, next to C_Initialize; defined here
- * because it clears g_slots / g_finds / g_op_* which are declared between the
- * two. See the comment on g_init_pid for why this exists. */
+ * because it clears g_slots / g_finds / g_op_* / g_oaep_*, all of which are
+ * declared between the two. See the comment on g_init_pid for why it
+ * exists. */
 static void fhsm_reset_after_fork(void) {
     /* Tokens first: this zeroizes each DEK and frees the heap-allocated object
      * values, so the child cannot reach the parent's key material. */
@@ -1615,13 +1631,28 @@ static void fhsm_reset_after_fork(void) {
     g_slots_initialized = 0;
     fhsm_session_reset_all();
     fhsm_zeroize(g_finds,  sizeof(g_finds));
+
+    /* All five operation tables, not two. g_op_sig, g_op_dig and g_op_ver
+     * used to survive the fork carrying the parent's md_ctx / mac_ctx
+     * pointers, and so did g_oaep_enc / g_oaep_dec. Nothing had reached them
+     * because C_Initialize failed in the child before it could -- the second
+     * defect hid the first. Zeroized rather than freed: after the fork these
+     * are the child's own copy-on-write pages, and the objects they name
+     * belong to a process still using them. */
     fhsm_zeroize(g_op_enc, sizeof(g_op_enc));
     fhsm_zeroize(g_op_dec, sizeof(g_op_dec));
-}
-static fhsm_op_t g_op_sig[FHSM_MAX_SESSIONS];
-static fhsm_op_t g_op_dig[FHSM_MAX_SESSIONS];
-static fhsm_op_t g_op_ver[FHSM_MAX_SESSIONS];
+    fhsm_zeroize(g_op_sig, sizeof(g_op_sig));
+    fhsm_zeroize(g_op_dig, sizeof(g_op_dig));
+    fhsm_zeroize(g_op_ver, sizeof(g_op_ver));
+    fhsm_oaep_reset_all();
 
+    /* And the state machine, which is why a child could not initialise at
+     * all: it inherited INITIALIZED, and INITIALIZED -> INITIALIZING is
+     * rightly not a legal transition. The reset covered the state #125 was
+     * about -- sessions and objects -- and not the rest of what crossed the
+     * fork. */
+    fhsm_state_reset_after_fork();
+}
 /* Declared far above, next to C_Login. Bounds-checked: the caller supplies the
  * session handle and these are fixed-size arrays. */
 static int fhsm_session_has_active_op(CK_SESSION_HANDLE h) {
@@ -4984,6 +5015,12 @@ typedef struct fhsm_session_oaep_s {
  * out-of-bounds write the first time anyone raised the cap. */
 static fhsm_session_oaep_t g_oaep_enc[FHSM_MAX_SESSIONS];
 static fhsm_session_oaep_t g_oaep_dec[FHSM_MAX_SESSIONS];
+
+/* Forward-declared above, for the post-fork reset. */
+static void fhsm_oaep_reset_all(void) {
+    fhsm_zeroize(g_oaep_enc, sizeof(g_oaep_enc));
+    fhsm_zeroize(g_oaep_dec, sizeof(g_oaep_dec));
+}
 
 /* Reset ALL per-session cryptographic operation state (encrypt, decrypt,
  * sign, verify, digest, object-search, OAEP) for one session handle,

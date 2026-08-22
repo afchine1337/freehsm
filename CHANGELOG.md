@@ -8,6 +8,28 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **What a process-per-client server costs, measured (#111).**
+  `tests/bench_fork_client` reports in PSS, not RSS — summing resident set over
+  N children counts one libcrypto N times. Serial setup for one client:
+  **41–47 ms** forked (8.7–15.0 ms `C_Initialize`, 32–35 ms `C_Login`), 140–280
+  ms forked and exec'd. Sixteen at once: ~60 connections/s forked, ~10 exec'd,
+  against 674 sig/s of signing — **connection setup is the ceiling of this
+  design, not cryptography.** Memory: 4 251 KiB per forked client, 2 174 KiB
+  per exec'd one.
+
+  The two models trade the same two resources in opposite directions, and the
+  benchmark measures the attribution rather than narrating it: a forked child
+  inherits OpenSSL's already-built providers (six times faster to initialise)
+  and pays in private dirty pages it inherits and then writes over (2.1× the
+  private memory). `p11-kit-remote` execs, so a deployment built on §2b's
+  isolation gets the slow, cheap column. `docs/REST_API_DESIGN.md`.
+
+  **The first version of this benchmark printed a per-client latency measured
+  under 16-way contention and divided 1000 by it to get "5 connections/s".**
+  That is not a rate, it is an artefact of sixteen processes sharing two cores;
+  the real aggregate was 60/s. It now reports serial cost and aggregate rate as
+  two different numbers and says which is which.
+
 * **What a held session costs, measured (#111).**
   `tests/bench_session_mem` loads the shipped module through `dlopen` and reads
   `/proc/self/statm`: **29.3 KiB per session opened, 0 to log it in, 0 to give
@@ -132,6 +154,37 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **A forked child could not initialise the module at all.** `C_Initialize` in
+  a child of an initialised parent returned `CKR_FUNCTION_FAILED`: the
+  post-fork reset (#125) cleared sessions and objects and left the module
+  state, so the child inherited `INITIALIZED` and `INITIALIZED ->
+  INITIALIZING` is — correctly — not a legal transition. A listener that
+  initialised once and forked per connection, which is the process-per-client
+  model #111 was about to cost out, could not work.
+
+  The same reset zeroized two of the five operation tables. The other three,
+  and both OAEP tables, crossed the fork carrying the parent's IVs, its GCM
+  additional data, its ML-DSA context strings and its EVP context pointers.
+  **The cause was declaration order**: two tables were declared above the reset
+  function and three below it, so the reset could only see two — and cleared
+  exactly those. Nothing had ever reached them, because the state defect
+  stopped every child first; fixing the first is what made the second
+  reachable.
+
+  `fhsm_state_reset_after_fork()` is the only bypass of the transition table
+  and says why in its own comment, including why **ERROR survives a fork**: a
+  fork is not a restart, so a child of a module that failed something it must
+  not fail inherits the refusal.
+
+  `tests/test_fork_child.c` — the first test in this repository that forks at
+  all; the property had only ever been checked by an external harness, which
+  is how the omissions survived. It is explicit that the operation-table
+  zeroizing is **not** among the things it proves: `C_OpenSession` clears the
+  slot it issues, so removing the fork-time clearing breaks no assertion. That
+  was checked rather than assumed. The clearing is a confidentiality measure,
+  and saying so is better than an assertion whose name promises more than its
+  mutation delivers.
+
 * **Four bounds on the same session-handle range, agreeing only by
   coincidence.** `FHSM_MAX_SESSIONS` (128) lived inside `src/fhsm_session.c`,
   invisible to the rest of the module. `src/fhsm_pkcs11.c` bounded the same

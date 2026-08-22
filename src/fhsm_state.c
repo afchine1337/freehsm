@@ -91,6 +91,31 @@ fhsm_rv_t fhsm_state_set(fhsm_module_state_t s) {
     return FHSM_RV_OK;
 }
 
+/* The one legal way out of the transition table, for the one caller that is
+ * not making a transition: a forked child, whose inherited g_state describes
+ * a module instance in another process.
+ *
+ * Without this, C_Initialize in a child returned CKR_FUNCTION_FAILED --
+ * INITIALIZED -> INITIALIZING is not in the white-list and should not be --
+ * so a listener that initialised the module and then forked per connection
+ * could not work at all. Measured before it was fixed: every child failed.
+ *
+ * POWER_OFF, so the child walks POWER_OFF -> INITIALIZING -> INITIALIZED and
+ * re-runs fhsm_crypto_init: integrity check and power-on self-tests, in its
+ * own address space. That is the point rather than the cost. A child is a new
+ * module instance and has to earn its own verdict.
+ *
+ * ERROR is NOT cleared. A latched error says this binary, in this
+ * environment, failed something it must not fail; a fork is not a restart,
+ * and inheriting the refusal is the fail-closed reading. A child of a healthy
+ * parent starts clean; a child of a broken one refuses, and the recovery path
+ * stays what it already was, which is starting the process again. */
+void fhsm_state_reset_after_fork(void) {
+    pthread_mutex_lock(&g_state_mu);
+    if (g_state != FHSM_STATE_ERROR) g_state = FHSM_STATE_POWER_OFF;
+    pthread_mutex_unlock(&g_state_mu);
+}
+
 void fhsm_state_latch_error(const char *reason) {
     int changed = 0;
     pthread_mutex_lock(&g_state_mu);

@@ -337,6 +337,69 @@ Cost of the cap, if raised: ~24 KiB of reserved `.bss` per session. 128 costs
 
 ---
 
+### What a process-per-client server costs
+
+Measured with `tests/bench_fork_client`, on two cores. Before any of it could
+be measured, a defect had to be fixed: **a child of an initialised parent could
+not call `C_Initialize` at all** — it inherited the parent's `INITIALIZED`
+state and `INITIALIZED -> INITIALIZING` is rightly not a legal transition, so
+every child got `CKR_FUNCTION_FAILED`. The model this section costs out did not
+work until this week.
+
+**Latency, one client with nothing competing:**
+
+| | fork | fork+exec |
+|---|---|---|
+| `C_Initialize` | 8.7–15.0 ms | most of the total |
+| `C_Login` (PBKDF2) | 32.0–35.6 ms | 32–35 ms |
+| before the first request | **41–47 ms** | **140–280 ms** |
+
+**Connection rate, 16 clients at once:** ~60/s forked, ~10/s forked and
+exec'd. Both plateau well below what the module can sign: 674 sig/s at eight
+threads. **Connection setup, not cryptography, is the ceiling of this design.**
+
+**Memory, in PSS** — proportional set size, so a page shared by seventeen
+processes counts as a seventeenth in each, and summing over the family gives
+what the family occupies. RSS would have counted one libcrypto seventeen times
+and answered a question nobody asked.
+
+| per client | fork | fork+exec |
+|---|---|---|
+| PSS | 4 251 KiB | 2 174 KiB |
+| private dirty | 4 011 KiB | 1 868 KiB |
+| shared clean (file-backed) | 2 952 KiB | 6 096 KiB |
+| 16 clients + listener | 71 MiB | 37 MiB |
+
+**The two models trade the same two resources in opposite directions**, and the
+breakdown says why rather than leaving it to be guessed. A forked child
+inherits an address space in which OpenSSL's providers are already built, so
+its `C_Initialize` re-runs the self-tests and little else — six times faster.
+It pays for that in private dirty pages: it inherits the parent's touched heap
+copy-on-write and then writes over much of it, ending with 2.1× the private
+memory of a child that started empty. An exec'd child builds everything from
+nothing, which is slow, and shares twice as much file-backed memory with its
+siblings, which is cheap.
+
+**p11-kit remoting is the exec'd column.** `p11-kit-remote` is a separate
+binary, so a deployment built on §2b's isolation gets ~10 connections/s and
+~2 MiB per client, not the forked figures.
+
+**What follows.** A process per client is affordable for a few dozen
+long-lived clients and not for short-lived ones: at 41 ms of setup, a client
+that connects to make one signature spends 97 % of its time not signing. If
+the service ever needs to serve many brief clients, the pool of §"The session
+pool is mandatory" is the design, and the isolation §2b requires has to come
+from somewhere other than a process boundary — which is a real tension this
+document should not pretend it has resolved.
+
+`C_Login` is three quarters of the setup cost, and that is deliberate: the
+PBKDF2 iteration count is a defence against an attacker with the token file.
+It should not be lowered to make connections faster. A server that logs in
+once and holds the session is the answer; a server that logs in per request is
+paying a password-hashing cost per request on purpose.
+
+---
+
 ## What the service refuses
 
 Refusals are the part of an API that ages well, so they are decided here.
@@ -381,10 +444,9 @@ Anything that *listens* for OCSP still waits for this work.
 
 ~~**Memory per held session**, unmeasured.~~ **Measured** — see below.
 
-**What a forked-per-client server costs at scale.** §2b settles the isolation
-question and opens a capacity one: every client pays its own `C_Initialize`
-and `C_Login`, and none of the pool work in this document applies across
-them.
+~~**What a forked-per-client server costs at scale.**~~ **Measured** — see
+above. Nothing in this document is now open that a measurement could close;
+what remains is building the service.
 
 ---
 
