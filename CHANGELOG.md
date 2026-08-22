@@ -8,6 +8,39 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **A patch to p11-kit, so post-quantum mechanisms cross the socket
+  (`contrib/p11-kit/`).** Not our code, kept here because we need it and
+  measured the problem. Three pieces:
+
+  the SHA-3 family and the post-quantum key-pair generators added to
+  `mechanism_has_no_parameters()` — safe by inspection, their wire form is the
+  empty byte array; a new `p11_rpc_mechanism_call_is_supported()` which asks
+  whether a *call* can be serialised rather than whether a *type* is known,
+  admitting any mechanism the caller invoked with no parameter at all; and
+  `C_GetMechanismList` no longer filtered, because after the second piece the
+  type alone can no longer decide and filtering hid 52 working mechanisms.
+
+  **`CKM_ML_DSA` and `CKM_SLH_DSA` are deliberately NOT in the parameterless
+  list.** They take an optional `CK_SIGN_ADDITIONAL_CONTEXT`, and listing them
+  there would encode a supplied context as absent — a signature made with an
+  empty context, valid-looking and wrong. A wrong signature is worse than a
+  refused one. The parameter-aware test carries them instead, and refuses the
+  call when a context is present. Demonstrated both ways: `CKM_ML_DSA` with no
+  parameter returns `CKR_OK` through the socket, with a parameter returns
+  `CKR_MECHANISM_INVALID` while the module itself accepts it.
+
+  Verified: **p11-kit's own suite, 525 tests, 525 pass**; 72 mechanisms
+  reported through the patched socket against 20 before; and a composite
+  ML-DSA-65 + Ed25519 signature made through the socket **verifies against the
+  module loaded directly**, with a corrupted copy refused so the verifier is
+  not simply agreeing. The patch applies cleanly to a pristine
+  `apt-get source` tree.
+
+  Not submitted, and against 0.24.0 rather than master. `contrib/p11-kit/README.md`
+  says what a real contribution still needs, including a test in their suite
+  and a separate argument for the third piece, which changes behaviour for
+  every existing user.
+
 * **`tests/bench_fsync_floor` — the durability barrier with none of our code in
   the loop, and what that changes.** One 300-byte append and one `fdatasync`,
   no module, no libcrypto: **2.4–2.6 ms on the same ext4 the module was measured

@@ -62,8 +62,14 @@ case for ours. Upstream master names `CKM_IBM_DILITHIUM`, `CKM_IBM_KYBER` and
 `CKM_IBM_SHA3_*` — vendor mechanisms contributed by IBM — and no standard
 post-quantum mechanism at all.
 
+**There is a patch.** `contrib/p11-kit/` carries a change that makes every
+parameterless mechanism cross, including ours: a composite signature made
+through the patched socket verifies against the module loaded directly, and
+p11-kit's own 525 tests still pass. It is not upstream and not submitted — read
+that directory before relying on it.
+
 Re-run the measurement rather than trusting this table, which was taken on
-p11-kit 0.24.0:
+unpatched p11-kit 0.24.0:
 
 ```bash
 probes/rest/07_kit_mechanisms ./libfreehsm-fips.so \
