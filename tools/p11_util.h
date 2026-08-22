@@ -82,6 +82,8 @@ static struct {
     CK_RV (*GetTokenInfo)(CK_SLOT_ID,void*);
     CK_RV (*GenerateRandom)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
     CK_RV (*GetSlotList)(unsigned char,CK_SLOT_ID*,CK_ULONG*);
+    CK_RV (*GetMechanismList)(CK_SLOT_ID,CK_ULONG*,CK_ULONG*);
+    CK_RV (*GetMechanismInfo)(CK_SLOT_ID,CK_ULONG,void*);
 } p11;
 
 /* Set by each tool before anything can fail. Extracting this header from
@@ -120,6 +122,8 @@ enum {                          /* PKCS#11 v2.40 §C.6 slot numbers */
     P11_SLOT_Initialize        = 0,
     P11_SLOT_Finalize          = 1,
     P11_SLOT_GetSlotList       = 4,
+    P11_SLOT_GetMechanismList  = 7,
+    P11_SLOT_GetMechanismInfo  = 8,
     P11_SLOT_InitToken         = 9,
     P11_SLOT_InitPIN           = 10,
     P11_SLOT_OpenSession       = 12,
@@ -186,6 +190,8 @@ P11_MAYBE_UNUSED static void load_module(const char *path) {
         T(GetTokenInfo, P11_SLOT_GetTokenInfo);
         T(GenerateRandom, P11_SLOT_GenerateRandom);
         T(GetSlotList, P11_SLOT_GetSlotList);
+        T(GetMechanismList, P11_SLOT_GetMechanismList);
+        T(GetMechanismInfo, P11_SLOT_GetMechanismInfo);
         #undef T
         return;
     }

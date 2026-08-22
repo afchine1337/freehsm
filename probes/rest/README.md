@@ -54,6 +54,7 @@ guess that happens to be right for our module and wrong through p11-kit.
 | `04_concurrency` | How does throughput and latency scale with concurrent signers? |
 | `05_session_race` | Is sharing one session between threads safe? |
 | `06_kit_isolation` | Does `p11-kit server` isolate two clients' login state? |
+| `07_kit_mechanisms` | Which mechanisms survive the transport, and which does p11-kit drop? |
 
 ## The numbers, 2026-08-18
 
@@ -149,6 +150,36 @@ without it a "no leak" over the socket means nothing.
 
 The answer is that p11-kit isolates, because it forks a `p11-kit-remote` child
 per connection. Visible in `ps`, not in its documentation.
+
+## `07_kit_mechanisms`, and the limit it found
+
+Isolation was the wrong thing to worry about first. Nothing post-quantum
+crosses the socket at all:
+
+```bash
+probes/rest/07_kit_mechanisms ./libfreehsm-fips.so \
+    /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so
+```
+
+```
+  ./libfreehsm-fips.so                            72
+  …/p11-kit-client.so                             20
+
+  dropped by the second: 52
+
+  CKM_COMPOSITE_MLDSA65_ED25519 (vendor)     present -> DROPPED
+  CKM_ML_DSA                                 present -> DROPPED
+  CKM_SHA3_256                               present -> DROPPED
+  CKM_SHA256                                 present -> present
+```
+
+p11-kit's RPC gates on an allow-list (`p11_rpc_mechanism_is_supported`), and a
+mechanism named in neither of its two tables cannot cross even if it takes no
+parameter. `docs/P11_KIT_REMOTING.md` has the detail and
+`docs/REST_API_DESIGN.md` §2b the consequence.
+
+Re-run it rather than citing the number: it is a property of the p11-kit on the
+machine, measured here on 0.24.0.
 
 Getting there took a fix in the module: `C_Login` derived the key over
 `strlen(pPin)` and ignored `ulPinLen`, so it refused the correct PIN through

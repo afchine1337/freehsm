@@ -5,6 +5,7 @@
 | Project overview         | [`../README.md`](../README.md) | [`../README.fr.md`](../README.fr.md) | ---           |
 | Architecture             | [`ARCHITECTURE.md`](ARCHITECTURE.md) | [`ARCHITECTURE.fr.md`](ARCHITECTURE.fr.md) | ADV_TDS.3 |
 | Network access (#111)    | [`REST_API_DESIGN.md`](REST_API_DESIGN.md) | — | decided, not built |
+| PKCS#11 over a socket with p11-kit — setup, and the two limits | [`P11_KIT_REMOTING.md`](P11_KIT_REMOTING.md) | — | AGD_OPE.1 |
 | FIPS 140-3 Security Policy | [`FIPS_140_3.md`](FIPS_140_3.md) | [`FIPS_140_3.fr.md`](FIPS_140_3.fr.md) | (FIPS) |
 | CC EAL4+ Target of Evaluation | [`EAL4_PLUS.md`](EAL4_PLUS.md) | [`EAL4_PLUS.fr.md`](EAL4_PLUS.fr.md) | ASE_*    |
 | Mechanism reference (auto-generated) | [`MECHANISMS.md`](MECHANISMS.md) | [`MECHANISMS.fr.md`](MECHANISMS.fr.md) | ADV_FSP.4 |

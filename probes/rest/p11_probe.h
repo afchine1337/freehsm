@@ -42,6 +42,8 @@ static struct {
     CK_RV (*Finalize)(void*);
     CK_RV (*GetSlotList)(unsigned char, CK_SLOT_ID*, CK_ULONG*);
     CK_RV (*GetTokenInfo)(CK_SLOT_ID, void*);
+    CK_RV (*GetMechanismList)(CK_SLOT_ID, CK_ULONG*, CK_ULONG*);
+    CK_RV (*GetMechanismInfo)(CK_SLOT_ID, CK_ULONG, void*);
     CK_RV (*OpenSession)(CK_SLOT_ID, CK_FLAGS, void*, void*, CK_SESSION_HANDLE*);
     CK_RV (*CloseSession)(CK_SESSION_HANDLE);
     CK_RV (*GetSessionInfo)(CK_SESSION_HANDLE, void*);
@@ -80,6 +82,7 @@ static void probe_load(const char *path)
         #define T(f,slot) *(void**)&p11.f = fl->pfn[slot]
         T(Initialize,0);       T(Finalize,1);
         T(GetSlotList,4);      T(GetTokenInfo,6);
+        T(GetMechanismList,7); T(GetMechanismInfo,8);
         T(OpenSession,12);     T(CloseSession,13);   T(GetSessionInfo,15);
         T(Login,18);           T(Logout,19);
         T(FindObjectsInit,26); T(FindObjects,27);    T(FindObjectsFinal,28);
@@ -90,6 +93,8 @@ static void probe_load(const char *path)
         #define S(f,n) *(void**)&p11.f = dlsym(h, n)
         S(Initialize,"C_Initialize");     S(Finalize,"C_Finalize");
         S(GetSlotList,"C_GetSlotList");   S(GetTokenInfo,"C_GetTokenInfo");
+        S(GetMechanismList,"C_GetMechanismList");
+        S(GetMechanismInfo,"C_GetMechanismInfo");
         S(OpenSession,"C_OpenSession");   S(CloseSession,"C_CloseSession");
         S(GetSessionInfo,"C_GetSessionInfo");
         S(Login,"C_Login");               S(Logout,"C_Logout");

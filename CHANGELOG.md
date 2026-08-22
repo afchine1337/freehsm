@@ -8,6 +8,29 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **Nothing post-quantum crosses a `p11-kit server` socket, measured.**
+  The module advertises 72 mechanisms directly and **20** through p11-kit
+  0.24.0. The 52 that vanish are every post-quantum one — `CKM_ML_DSA`, the
+  standard SHA-3 family, and the composite `0x80004202`. `C_SignInit` with the
+  composite answers `CKR_MECHANISM_INVALID` and the module never sees the call:
+  the server-side audit log records `login_ok` and nothing after it.
+
+  Not ours — `C_GetMechanismInfo` answers `CKR_OK` for all six probed
+  mechanisms directly and `CKR_MECHANISM_INVALID` through the socket for the
+  four post-quantum ones. Not a p11-kit bug either: `p11_rpc_mechanism_is_supported()`
+  is an allow-list, because a `CK_MECHANISM` parameter is a `void *` that
+  cannot be serialised generically. A mechanism in neither of its two tables
+  cannot cross **even if it takes no parameter**, which is our case. Upstream
+  master lists `CKM_IBM_DILITHIUM`, `CKM_IBM_KYBER` and `CKM_IBM_SHA3_*` —
+  vendor mechanisms contributed by IBM — and no standard PQ mechanism at all.
+  The route for ours therefore exists and is a patch to p11-kit, not a setting.
+
+  `probes/rest/07_kit_mechanisms` so the number can be re-measured when p11-kit
+  moves, and `docs/P11_KIT_REMOTING.md` for the setup with both limits stated
+  first. **§2b of `docs/REST_API_DESIGN.md` said "nothing needs to be written
+  for the transport"**, which was written before anyone tried to sign through
+  it; corrected.
+
 * **What a process-per-client server costs, measured (#111).**
   `tests/bench_fork_client` reports in PSS, not RSS — summing resident set over
   N children counts one libcrypto N times. Serial setup for one client:

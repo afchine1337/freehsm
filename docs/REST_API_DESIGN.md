@@ -81,11 +81,52 @@ Four things follow. The first was known; the rest were measured, and the last
 two turned out not to be p11-kit questions at all but defects of ours that
 p11-kit was simply the first thing to exercise.
 
-**p11-kit already remotes PKCS#11.** `p11-kit server` publishes a module on a
-unix socket and `p11-kit-client.so` is the provider an application loads; SSH
-forwards the socket. Nothing needs to be written for the transport, and writing
-our own would mean writing an RPC protocol for 68 entry points in C — the
-opposite of the argument that this module can be audited.
+**p11-kit already remotes PKCS#11 — the classical subset of it.**
+`p11-kit server` publishes a module on a unix socket and `p11-kit-client.so` is
+the provider an application loads; SSH forwards the socket. Writing our own
+would mean an RPC protocol for 68 entry points in C, the opposite of the
+argument that this module can be audited.
+
+This paragraph used to end "nothing needs to be written for the transport",
+which was written before anyone tried to sign through it. **Nothing
+post-quantum crosses the socket.** Measured with
+`probes/rest/07_kit_mechanisms` against p11-kit 0.24.0:
+
+| | mechanisms |
+|---|---|
+| the module, directly | 72 |
+| the same module through `p11-kit server` | **20** |
+
+The 52 that vanish are every post-quantum one: `CKM_ML_DSA` (0x1c, 0x1d), the
+standard SHA-3 family (0x2b0…), and our composite `0x80004202`. `C_SignInit`
+with the composite answers `CKR_MECHANISM_INVALID` and **the module never sees
+the call** — the server-side audit log records `login_ok` and nothing after it.
+What survives is RSA, ECDSA, SHA-1/2, AES and HMAC.
+
+It is not a defect of ours: `C_GetMechanismInfo` answers `CKR_OK` directly for
+all six mechanisms probed, and `CKR_MECHANISM_INVALID` through the socket for
+the four post-quantum ones. And it is not a bug of p11-kit's either.
+`rpc-message.c` gates every call on
+
+```c
+bool p11_rpc_mechanism_is_supported (CK_MECHANISM_TYPE mech)
+{
+        if (mechanism_has_no_parameters (mech) ||
+            mechanism_has_sane_parameters (mech))
+```
+
+— an allow-list, because a `CK_MECHANISM` parameter is a `void *` whose layout
+depends on the mechanism and cannot be serialised generically. A mechanism
+named in neither list cannot cross, **even one that takes no parameter at
+all**, which is the case for ours. On upstream master the list names
+`CKM_IBM_DILITHIUM`, `CKM_IBM_KYBER` and `CKM_IBM_SHA3_*` — vendor mechanisms
+contributed by IBM — and no standard post-quantum mechanism whatever.
+
+That last detail is the useful one: the list takes vendor mechanisms, so the
+route exists. Adding `0x80004202` to `mechanism_has_no_parameters()` is a
+handful of lines. `CKM_ML_DSA` with `CK_SIGN_ADDITIONAL_CONTEXT`, and ML-KEM,
+would need a serialiser of the kind written for `CKM_IBM_KYBER`. Either way it
+is a patch to p11-kit, not a setting.
 
 **It does isolate the login, and the mechanism matters.** The worry was that a
 `p11-kit server` is one process, therefore one PKCS#11 application, therefore
@@ -107,7 +148,9 @@ Three consequences follow from *how* it isolates, and none is free.
 
 **It costs a full start-up per client.** `C_Initialize` at 203–288 ms of KATs
 and integrity check, plus a `C_Login` at 31–52 ms, because nothing is shared
-between the children. And the isolation is a property of p11-kit's process
+between the children — `p11-kit-remote` is exec'd, so see the fork+exec column
+of "What a process-per-client server costs" below for the same cost measured
+directly. And the isolation is a property of p11-kit's process
 model, not a promise in its documentation that we can rely on across versions;
 the probe exists so the claim can be re-tested rather than assumed.
 
@@ -127,11 +170,14 @@ the PIN. p11-kit remoting does not distribute authorisations, it distributes
 the token's secret — the opposite of `docs/DAEMON_PIN.md`, whose whole point is
 that the operator never sees that value.
 
-> **So p11-kit is a transport for one operator, not a multi-client service.**
-> An administration workstation reaching its own HSM over SSH: yes, and nothing
-> needs to be written for it. N clients of an authority, each holding the PIN
-> that unlocks every key on the token: no. That distinction is what the REST
-> service exists for, and it was not stated here before.
+> **So p11-kit is a transport for one operator, for classical mechanisms, and
+> not a multi-client service.** An administration workstation reaching its own
+> HSM over SSH to do RSA or ECDSA work: yes, and nothing needs to be written
+> for it. The same workstation signing with the composite key that is the
+> reason this module exists: not today, and not without patching p11-kit. N
+> clients of an authority, each holding the PIN that unlocks every key on the
+> token: no, at any mechanism. That last distinction is what the REST service
+> exists for; the first two are why it cannot simply be replaced by p11-kit.
 
 Note also that the control matters here: run `06_kit_isolation peek` against
 the module directly first. Two processes are two applications, so it must
