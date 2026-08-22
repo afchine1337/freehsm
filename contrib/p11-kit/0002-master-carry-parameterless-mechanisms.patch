@@ -1,0 +1,158 @@
+diff --git a/p11-kit/rpc-client.c b/p11-kit/rpc-client.c
+index f59cf56..ff502f7 100644
+--- a/p11-kit/rpc-client.c
++++ b/p11-kit/rpc-client.c
+@@ -396,25 +396,25 @@ static void
+ mechanism_list_purge (CK_MECHANISM_TYPE_PTR mechs,
+                       CK_ULONG *n_mechs)
+ {
+-	CK_ULONG i;
+-
+ 	assert (mechs != NULL);
+ 	assert (n_mechs != NULL);
+ 
+-	/* Trim unsupported mechanisms at the end */
+-	for (; *n_mechs > 0 && !p11_rpc_mechanism_is_supported (mechs[*n_mechs - 1]); --*n_mechs)
+-		;
+-
+-	for (i = 0; i < *n_mechs; ++i) {
+-		if (!p11_rpc_mechanism_is_supported (mechs[i])) {
+-			/* Remove the mechanism from the list */
+-			memmove (&mechs[i], &mechs[i + 1],
+-				 (*n_mechs - (i + 1)) * sizeof (CK_MECHANISM_TYPE));
+-
+-			--(*n_mechs);
+-			--i;
+-		}
+-	}
++	/*
++	 * C_GetMechanismList used to be trimmed to the mechanisms this file
++	 * knows how to serialise. That was sound while the decision could be
++	 * taken from the type alone. It cannot be any more: whether a call can
++	 * be carried depends on whether the caller supplies a parameter, so a
++	 * mechanism this file has never heard of may be entirely usable.
++	 *
++	 * Trimming therefore hid working mechanisms. Measured against a module
++	 * offering post-quantum signatures: 72 advertised, 20 reported through
++	 * the socket, and the 52 hidden included every one the module existed
++	 * to provide.
++	 *
++	 * A mechanism that is advertised and then fails at C_*Init is ordinary
++	 * PKCS#11. A mechanism the module offers and the proxy makes invisible
++	 * is a false statement about the token.
++	 */
+ }
+ 
+ static CK_RV
+@@ -437,7 +437,7 @@ proto_write_mechanism (p11_rpc_message *msg,
+ 		return p11_buffer_failed (msg->output) ? CKR_HOST_MEMORY : CKR_OK;
+ 	}
+ 
+-	if (!p11_rpc_mechanism_is_supported (mech->mechanism))
++	if (!p11_rpc_mechanism_call_is_supported (mech))
+ 		return CKR_MECHANISM_INVALID;
+ 
+ 	/*
+@@ -683,9 +683,9 @@ proto_read_sesssion_info (p11_rpc_message *msg,
+ 	if (!p11_rpc_message_write_attribute_array (&_msg, (arr), (num))) \
+ 		{ _ret = CKR_HOST_MEMORY; goto _cleanup; }
+ 
++/* Carries a bare mechanism type, for C_GetMechanismInfo and friends:
++ * no parameter is serialised here, so there was nothing to protect. */
+ #define IN_MECHANISM_TYPE(val) \
+-	if(!p11_rpc_mechanism_is_supported (val)) \
+-		{ _ret = CKR_MECHANISM_INVALID; goto _cleanup; } \
+ 	if (!p11_rpc_message_write_ulong (&_msg, val)) \
+ 		{ _ret = CKR_HOST_MEMORY; goto _cleanup; }
+ 
+diff --git a/p11-kit/rpc-message.c b/p11-kit/rpc-message.c
+index 4abfc77..af5e58a 100644
+--- a/p11-kit/rpc-message.c
++++ b/p11-kit/rpc-message.c
+@@ -2578,6 +2578,26 @@ mechanism_has_no_parameters (CK_MECHANISM_TYPE mech)
+ 	case CKM_IBM_SHA3_512_HMAC:
+ 	case CKM_IBM_ED25519_SHA512:
+ 	case CKM_IBM_ED448_SHA3:
++	/* SHA-3 and the post-quantum key-pair generators: no parameter in any
++	 * mode, so nothing can be misencoded. NOT here: CKM_ML_DSA, CKM_SLH_DSA
++	 * and the CKM_HASH_* family, which take an optional
++	 * CK_SIGN_ADDITIONAL_CONTEXT -- listing those would encode a supplied
++	 * context as absent and return a signature made over an empty context. */
++	case CKM_SHA3_224:
++	case CKM_SHA3_224_HMAC:
++	case CKM_SHA3_224_KEY_GEN:
++	case CKM_SHA3_256:
++	case CKM_SHA3_256_HMAC:
++	case CKM_SHA3_256_KEY_GEN:
++	case CKM_SHA3_384:
++	case CKM_SHA3_384_HMAC:
++	case CKM_SHA3_384_KEY_GEN:
++	case CKM_SHA3_512:
++	case CKM_SHA3_512_HMAC:
++	case CKM_SHA3_512_KEY_GEN:
++	case CKM_ML_DSA_KEY_PAIR_GEN:
++	case CKM_ML_KEM_KEY_PAIR_GEN:
++	case CKM_SLH_DSA_KEY_PAIR_GEN:
+ 		return true;
+ 	default:
+ 		return false;
+@@ -2593,6 +2613,30 @@ p11_rpc_mechanism_is_supported (CK_MECHANISM_TYPE mech)
+ 	return false;
+ }
+ 
++/*
++ * Whether a particular CALL can be serialised, which is not the same question
++ * as whether the mechanism type is known.
++ *
++ * The allow-list exists because a CK_MECHANISM parameter is a void* whose
++ * layout depends on the mechanism. That reasoning does not reach a call which
++ * supplied no parameter at all: the encoding is the absent-parameter byte the
++ * decoder already understands for every mechanism, and there is nothing left
++ * to misencode.
++ *
++ * Safer than adding a mechanism with an OPTIONAL parameter to the list above:
++ * if a caller does supply a context to CKM_ML_DSA, this returns false and the
++ * call is refused, rather than the context being silently dropped.
++ */
++bool
++p11_rpc_mechanism_call_is_supported (const CK_MECHANISM *mech)
++{
++	if (mech == NULL)
++		return false;
++	if (p11_rpc_mechanism_is_supported (mech->mechanism))
++		return true;
++	return mech->pParameter == NULL && mech->ulParameterLen == 0;
++}
++
+ void
+ p11_rpc_buffer_add_mechanism (p11_buffer *buffer, const CK_MECHANISM *mech)
+ {
+@@ -2606,7 +2650,14 @@ p11_rpc_buffer_add_mechanism (p11_buffer *buffer, const CK_MECHANISM *mech)
+ 		return;
+ 	}
+ 
+-	assert (mechanism_has_sane_parameters (mech->mechanism));
++	/* A type this file does not recognise reached here only because the
++	 * call supplied no parameter -- see p11_rpc_mechanism_call_is_supported.
++	 * Encode it exactly as the absent-parameter case just below, which
++	 * p11_rpc_buffer_get_mechanism already reads back for any mechanism. */
++	if (!mechanism_has_sane_parameters (mech->mechanism)) {
++		p11_rpc_buffer_add_byte (buffer, 0);
++		return;
++	}
+ 
+ 	if (mech->pParameter == NULL && mech->ulParameterLen == 0) {
+ 		p11_rpc_buffer_add_byte (buffer, 0);
+diff --git a/p11-kit/rpc-message.h b/p11-kit/rpc-message.h
+index cb1d811..27e440a 100644
+--- a/p11-kit/rpc-message.h
++++ b/p11-kit/rpc-message.h
+@@ -512,6 +512,8 @@ bool             p11_rpc_buffer_get_byte_array_value     (p11_buffer *buffer,
+ 
+ bool             p11_rpc_mechanism_is_supported          (CK_MECHANISM_TYPE mech);
+ 
++bool             p11_rpc_mechanism_call_is_supported     (const CK_MECHANISM *mech);
++
+ void             p11_rpc_buffer_add_mechanism            (p11_buffer *buffer,
+ 							  const CK_MECHANISM *mech);
+ 

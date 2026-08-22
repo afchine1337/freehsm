@@ -102,18 +102,30 @@
  void
  p11_rpc_buffer_add_mechanism (p11_buffer *buffer, const CK_MECHANISM *mech)
  {
-@@ -1564,7 +1618,10 @@
- 	/* The mechanism type */
- 	p11_rpc_buffer_add_uint32 (buffer, mech->mechanism);
- 
--	if (mechanism_has_no_parameters (mech->mechanism)) {
-+	/* Either the type is known to take none, or this particular call
-+	 * supplied none. Both encode identically. */
-+	if (mechanism_has_no_parameters (mech->mechanism) ||
-+	    (mech->pParameter == NULL && mech->ulParameterLen == 0)) {
+@@ -1568,6 +1622,23 @@
  		p11_rpc_buffer_add_byte_array (buffer, NULL, 0);
  		return;
  	}
++
++	/* A type this file does not recognise reached here only because the
++	 * caller supplied no parameter -- see p11_rpc_mechanism_call_is_supported.
++	 * The empty byte array is the whole of it, and p11_rpc_buffer_get_mechanism
++	 * reads it back with the generic byte-array serialiser, so the two agree.
++	 *
++	 * This test MUST come after mechanism_has_sane_parameters and not before
++	 * it. A mechanism that HAS a registered serialiser still has to go through
++	 * that serialiser even when this particular call passes NULL, because the
++	 * decoder looks the serialiser up by type and cannot know the encoder took
++	 * a short cut. Testing the parameter first desynchronises the stream: it
++	 * passes p11-kit 0.24.0's suite and fails master's test-transport, where
++	 * every case after the first dies inside setup_mock_module. */
++	if (!mechanism_has_sane_parameters (mech->mechanism)) {
++		p11_rpc_buffer_add_byte_array (buffer, NULL, 0);
++		return;
++	}
+ 
+ 	assert (mechanism_has_sane_parameters (mech->mechanism));
+ 
 --- a/p11-kit/rpc-message.h
 +++ b/p11-kit/rpc-message.h
 @@ -450,6 +450,8 @@
