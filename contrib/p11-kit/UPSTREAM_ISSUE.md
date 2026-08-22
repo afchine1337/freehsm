@@ -83,9 +83,9 @@ export P11_KIT_SERVER_ADDRESS="unix:path=/tmp/p11.sock"
 ```
 
 A small probe that prints both lists and their difference is at
-<https://github.com/…/freehsm> in `probes/rest/07_kit_mechanisms.c`
-(Apache-2.0, no dependency on p11-kit); happy to reduce it to a self-contained
-file here if that is more useful.
+<https://github.com/afchine1337/freehsm> in
+`probes/rest/07_kit_mechanisms.c` (Apache-2.0, no dependency on p11-kit); happy
+to reduce it to a self-contained file here if that is more useful.
 
 ## What I am not asking for in this issue
 
