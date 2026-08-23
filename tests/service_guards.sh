@@ -1,0 +1,169 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Simorgh Labs
+#
+# The service's guards, driven through the socket an operator would use.
+#
+# Everything here is a refusal except two lines, which is the point: at this
+# stage the service performs no cryptography, so what there is to test is what
+# it turns away. docs/REST_API_DESIGN.md calls refusals "the part of an API
+# that ages well", and they are cheapest to get right before anything depends
+# on them.
+#
+# It drives the real binary over a real unix socket rather than calling the
+# parser directly. The parser is not the guard -- SO_PEERCRED is, and that
+# cannot be tested without a socket.
+#
+#   sh tests/service_guards.sh
+#
+# Needs `make service/fhsm-service` and a provisioned token.
+#
+# NOT COVERED HERE: the SO_PEERCRED check, which is the guard the whole design
+# rests on. Testing it needs a second uid connecting to the socket, and this
+# suite runs as one user. It is asserted by inspection and by the mutation
+# below being absent, which is not the same thing and is said rather than
+# glossed over. An integration test under two accounts would close it.
+set -u
+SVC="${SVC:-./service/fhsm-service}"
+TOK="${TOK:-./tools/fhsm-token}"
+fail=0
+
+say() { printf '  %-58s %s\n' "$1" "$2"; }
+ok()  { if [ "$1" = 0 ]; then say "$2" OK; else say "$2" FAIL; fail=$((fail+1)); fi; }
+
+[ -x "$SVC" ] || { echo "service_guards.sh: $SVC is not built -- run 'make service/fhsm-service'" >&2; exit 2; }
+[ -x "$TOK" ] || { echo "service_guards.sh: $TOK is not built -- run 'make all'" >&2; exit 2; }
+command -v python3 >/dev/null || { echo "service_guards.sh: python3 is needed to speak HTTP" >&2; exit 2; }
+
+export FHSM_INTEGRITY_ALLOW_UNSIGNED=1
+export FHSM_SO_PIN="${FHSM_SO_PIN:-sopin1234}"
+export FHSM_PIN="${FHSM_PIN:-userpin1234}"
+FHSM_TOKENS_DIR=$(mktemp -d); export FHSM_TOKENS_DIR
+SOCK=$(mktemp -u /tmp/fhsm-guards.XXXXXX.sock)
+trap 'kill $PID 2>/dev/null; rm -rf "$FHSM_TOKENS_DIR" "$SOCK"' EXIT
+
+"$TOK" init --label guards >/dev/null 2>&1
+
+echo "The service's guards"
+echo
+
+"$SVC" --socket "$SOCK" --proxy-uid "$(id -u)" >"$FHSM_TOKENS_DIR/svc.log" 2>&1 &
+PID=$!
+# Wait for the socket rather than sleeping a guessed amount: a fixed sleep is
+# how a suite becomes flaky on a loaded machine.
+i=0; while [ ! -S "$SOCK" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+[ -S "$SOCK" ] || { echo "service_guards.sh: the service never created its socket" >&2; cat "$FHSM_TOKENS_DIR/svc.log" >&2; exit 2; }
+
+# One request, one connection, first line of the response on stdout.
+req() {
+    python3 - "$SOCK" "$1" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5)
+try:
+    s.connect(sys.argv[1])
+    s.sendall(sys.argv[2].encode().decode('unicode_escape').encode('latin-1'))
+    print(s.recv(400).decode(errors='replace').split('\r\n')[0])
+except Exception as e:
+    print(f'NO RESPONSE ({e})')
+finally:
+    s.close()
+PY
+}
+
+H='X-FHSM-Client-Subject: CN=web01\r\n'
+
+r=$(req "GET /health HTTP/1.1\r\nHost: x\r\n${H}\r\n")
+echo "$r" | grep -q "200 OK"; ok $? "a valid request reaches /health"
+
+r=$(req "GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+echo "$r" | grep -q "403"; ok $? "no identity header is refused"
+
+r=$(req "GET /health HTTP/1.1\r\n${H}${H}\r\n")
+echo "$r" | grep -q "400"; ok $? "  and a repeated one too, rather than resolved"
+
+r=$(req "POST /sign HTTP/1.1\r\n${H}Content-Length: 3\r\n\r\nabc")
+echo "$r" | grep -q "501"; ok $? "/sign is named and answers 501, not 404"
+
+r=$(req "GET /nope HTTP/1.1\r\n${H}\r\n")
+echo "$r" | grep -q "404"; ok $? "an unknown route is 404"
+
+r=$(req "DELETE /health HTTP/1.1\r\n${H}\r\n")
+echo "$r" | grep -q "400"; ok $? "a method outside GET and POST is refused"
+
+r=$(req "GET /health HTTP/1.0\r\n${H}\r\n")
+echo "$r" | grep -q "400"; ok $? "HTTP/1.0 is refused rather than tolerated"
+
+r=$(req "POST /sign HTTP/1.1\r\n${H}Transfer-Encoding: chunked\r\n\r\n")
+echo "$r" | grep -q "400"; ok $? "chunked transfer is refused, not implemented"
+
+r=$(req "POST /sign HTTP/1.1\r\n${H}Content-Length: 999999999\r\n\r\n")
+echo "$r" | grep -q "413"; ok $? "an oversized body is refused before it is read"
+
+r=$(req "POST /sign HTTP/1.1\r\n${H}Content-Length: 3\r\nContent-Length: 4\r\n\r\nabc")
+echo "$r" | grep -q "400"; ok $? "two Content-Length headers are refused"
+
+r=$(req "GET /health HTTP/1.1\r\nX-FHSM-Client-Subject: CN=\"a\r\n\r\n")
+echo "$r" | grep -q "200\|400"; ok $? "a quote in the subject does not break the line"
+
+# SIGTERM, and then check the process actually went. Asserting only that
+# service_stop reached the log was not enough: under this script the daemon
+# happened to exit for other reasons even when it was ignoring the signal, so
+# the assertion passed against a build that a service manager would have had
+# to SIGKILL. Measured separately: with SA_RESTART the process is still alive
+# two seconds after SIGTERM and writes no stop line at all.
+kill -TERM $PID 2>/dev/null
+i=0; while kill -0 $PID 2>/dev/null && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done
+if kill -0 $PID 2>/dev/null; then
+    say "SIGTERM is obeyed" FAIL; fail=$((fail+1)); kill -9 $PID 2>/dev/null
+else
+    say "SIGTERM is obeyed" OK
+fi
+wait $PID 2>/dev/null
+
+# --- what the log kept -------------------------------------------------
+# The guards are only half the property. The other half is that every refusal
+# left a record naming a reason, because a service that turns requests away
+# silently is one nobody can operate.
+# Every log, not the first one. Each opening of the module creates its own
+# numbered file -- `fhsm-token init` made one and the service made another --
+# because a hash chain has exactly one author. A test that looked at
+# audit.log.000001 would be reading the provisioning tool's chain and
+# concluding the service logged nothing.
+LOG=$(grep -l '"event":"service_start"' "$FHSM_TOKENS_DIR"/audit.log* 2>/dev/null | head -1)
+[ -n "$LOG" ]; ok $? "the service opened an audit log of its own"
+
+if [ -n "$LOG" ]; then
+    n=$(grep -c '"event":"request_refused"' "$LOG" 2>/dev/null)
+    [ -n "$n" ] || n=0
+    [ "$n" -ge 8 ]; ok $? "every refusal was recorded ($n lines)"
+
+    grep -q '"event":"service_stop"' "$LOG"
+    ok $? "  and so is the stop, which means SIGTERM was seen"
+
+    # The actor is the point of the whole field: a refusal that happened
+    # before an identity was established must not claim one.
+    python3 - "$LOG" <<'PY' >/dev/null 2>&1
+import json, sys
+bad = 0
+for line in open(sys.argv[1]):
+    d = json.loads(line)
+    if d["event"] == "request_refused" and d["params"].get("reason") == "no_identity":
+        if d["actor"] != "":
+            bad += 1
+sys.exit(1 if bad else 0)
+PY
+    ok $? "  a refusal for no identity claims no actor"
+
+    python3 - "$LOG" <<'PY' >/dev/null 2>&1
+import json, sys
+ok_ = any(json.loads(l)["actor"] == "CN=web01"
+          for l in open(sys.argv[1])
+          if json.loads(l)["event"] == "request_accepted")
+sys.exit(0 if ok_ else 1)
+PY
+    ok $? "  an accepted request carries the certificate subject"
+fi
+
+echo
+if [ $fail -eq 0 ]; then echo "PASS : 0 failure(s)"; else echo "FAIL : $fail failure(s)"; fi
+exit $((fail > 0))

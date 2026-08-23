@@ -101,7 +101,19 @@ typedef enum fhsm_audit_event_e {
     FHSM_EV_SEAL_SUCCESS     = 70,
     FHSM_EV_SEAL_FAILURE     = 71,
     FHSM_EV_UNSEAL_SUCCESS   = 72,
-    FHSM_EV_UNSEAL_FAILURE   = 73
+    FHSM_EV_UNSEAL_FAILURE   = 73,
+    /* The network service (#111). Appended, never renumbered: the comment
+     * above is not decoration -- docs/FIPS_140_3.md lists these by value.
+     *
+     * REQUEST_REFUSED covers every guard the service applies before it will
+     * touch the module: no identity, a peer that is not the proxy, a body it
+     * will not parse. It is a separate event from a failed operation because
+     * the two answer different questions for a reviewer -- "who was turned
+     * away" and "what went wrong for someone who was let in". */
+    FHSM_EV_SERVICE_START    = 80,
+    FHSM_EV_SERVICE_STOP     = 81,
+    FHSM_EV_REQUEST_ACCEPTED = 82,
+    FHSM_EV_REQUEST_REFUSED  = 83
 } fhsm_audit_event_t;
 
 /* Open the audit log for a given token. Creates the file if absent,
@@ -151,6 +163,26 @@ fhsm_rv_t fhsm_audit_key_provision(const char *dir, uint8_t key[32],
                                     int *sealed);
 
 void fhsm_audit_close(void);
+
+/* Who the current thread is acting for, written into the "actor" field of
+ * every line this thread logs until it is cleared.
+ *
+ * CC EAL4+ FAU_GEN.2 asks for user identity association, and until the
+ * service existed there was no user to associate: every event was the
+ * module acting on its own behalf, and "actor" is empty for those. The
+ * service sets it from the client certificate subject the proxy passed,
+ * and clears it when the request ends.
+ *
+ * Thread-local on purpose. One session per concurrent request means one
+ * actor per thread, and a global here would attribute a signature to
+ * whoever happened to be served last -- a wrong entry in an audit log is
+ * worse than a missing one.
+ *
+ * `subject` is copied, truncated to FHSM_AUDIT_ACTOR_MAX-1, and filtered
+ * to safe ASCII exactly like a params value: it arrives in an HTTP header
+ * and is not to be trusted with the shape of a JSON line. NULL clears it. */
+#define FHSM_AUDIT_ACTOR_MAX 128
+void fhsm_audit_set_actor(const char *subject);
 
 /* Events written, and durable barriers that took. Every event returns only
  * after a barrier that covered its own write; concurrent events share one, so

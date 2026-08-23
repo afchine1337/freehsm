@@ -50,6 +50,11 @@ static size_t          g_audit_key_len = 0;
 static uint64_t        g_audit_seq = 0;
 static uint8_t         g_prev_hmac[32];
 
+/* See fhsm_audit_set_actor(). Thread-local: the service serves one request
+ * per thread, and attributing a line to the wrong client would be worse
+ * than not attributing it at all. */
+static _Thread_local char g_actor[FHSM_AUDIT_ACTOR_MAX];
+
 /* ---------------------------------------------------------------------------
  * Group commit.
  *
@@ -118,6 +123,10 @@ static const char *event_name(fhsm_audit_event_t ev) {
         case FHSM_EV_SEAL_FAILURE:     return "seal_failure";
         case FHSM_EV_UNSEAL_SUCCESS:   return "unseal_success";
         case FHSM_EV_UNSEAL_FAILURE:   return "unseal_failure";
+        case FHSM_EV_SERVICE_START:    return "service_start";
+        case FHSM_EV_SERVICE_STOP:     return "service_stop";
+        case FHSM_EV_REQUEST_ACCEPTED: return "request_accepted";
+        case FHSM_EV_REQUEST_REFUSED:  return "request_refused";
         default:                       return "unknown";
     }
 }
@@ -139,6 +148,23 @@ static int safe_ascii(const char *s) {
         if (*p < 0x20 || *p > 0x7e || *p == '"' || *p == '\\') return 0;
     }
     return 1;
+}
+
+/* Set the actor for this thread. See the header for why it is thread-local
+ * and why the input is treated as hostile: it arrives in an HTTP header, and
+ * a quote or a backslash in it would let the caller write JSON into a line
+ * that is supposed to describe them. Rejected wholesale rather than escaped
+ * -- an audit line saying INVALID is readable, one that has been repaired is
+ * a line whose meaning depends on the repair. */
+void fhsm_audit_set_actor(const char *subject) {
+    if (!subject) { fhsm_zeroize(g_actor, sizeof g_actor); return; }
+    char tmp[FHSM_AUDIT_ACTOR_MAX];
+    snprintf(tmp, sizeof tmp, "%s", subject);
+    if (!safe_ascii(tmp)) {
+        snprintf(g_actor, sizeof g_actor, "INVALID");
+        return;
+    }
+    memcpy(g_actor, tmp, sizeof tmp);
 }
 
 /* --- the chaining key -----------------------------------------------------
@@ -530,12 +556,13 @@ fhsm_rv_t fhsm_audit_event(fhsm_audit_event_t ev, int slot, int session,
 
     int line_len = snprintf(line, sizeof(line),
         "{\"seq\":%llu,\"ts\":%lld,\"event\":\"%s\","
-        "\"slot\":%d,\"session\":%d,\"role\":\"%s\","
+        "\"slot\":%d,\"session\":%d,\"role\":\"%s\",\"actor\":\"%s\","
         "\"result\":\"%s\",\"rv\":%u,\"params\":%s,\"prev_hmac\":\"%s\",",
         (unsigned long long)g_audit_seq, (long long)ts_ns,
         event_name(ev), slot, session,
         (role == FHSM_ROLE_SO ? "SO" :
          role == FHSM_ROLE_USER ? "USER" : "NONE"),
+        g_actor,
         (rv == FHSM_RV_OK ? "OK" : "FAIL"),
         (unsigned int)rv, params, prev_hex);
     if (line_len < 0 || line_len >= (int)sizeof(line)) {

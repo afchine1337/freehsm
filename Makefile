@@ -507,6 +507,12 @@ tests/test_tpm: tests/test_tpm.c $(OBJDIR)/tests/fhsm_tpm_testhooks.o $(LIB_OBJ)
 tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+# The service links the library objects rather than dlopen()ing the module:
+# it is the PKCS#11 application, and it needs fhsm_audit_set_actor(), which is
+# not part of PKCS#11 and is not exported from the shared object.
+service/fhsm-service: service/fhsm_service.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
 # Regression test for the objects-blob loader bound (#108) and the v2
 # variable-record blob (#110) : >11-object and certificate-sized
 # round-trips must survive close + reload. Same INTERNAL linking model
@@ -674,6 +680,13 @@ audit-switch:
 # default build: fips-strict answers CKR_MECHANISM_INVALID and there is no
 # key to sign anything with. It therefore leaves an interop tree behind,
 # which is why CI rebuilds before uploading anything.
+# The service's guards need the binary and a token, so they are their own
+# target rather than part of `make tests`, which links the library and never
+# opens a socket.
+.PHONY: service-guards
+service-guards: service/fhsm-service tools/fhsm-token
+	sh tests/service_guards.sh
+
 .PHONY: ocsp-delegated
 ocsp-delegated:
 	$(MAKE) clean
