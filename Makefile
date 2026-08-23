@@ -773,6 +773,11 @@ clean:
 	rm -rf $(OBJDIR)
 	rm -f $(LIB) tests/test_smoke tests/*.o
 	rm -f tools/freehsm-audit $(TOOLS)
+	# The service too. Leaving it behind meant a `make clean && make` handed
+	# back a binary from the previous build's flags -- a TSAN one, in the run
+	# that found this, which then refused to start and looked like a service
+	# defect rather than a stale artefact.
+	rm -f service/fhsm-service
 	rm -f freehsm-c-src.tar.xz freehsm-c-src.tar.xz.sha256
 	rm -rf out/
 

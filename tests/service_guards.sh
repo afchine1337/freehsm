@@ -43,11 +43,18 @@ SOCK=$(mktemp -u /tmp/fhsm-guards.XXXXXX.sock)
 trap 'kill $PID 2>/dev/null; rm -rf "$FHSM_TOKENS_DIR" "$SOCK"' EXIT
 
 "$TOK" init --label guards >/dev/null 2>&1
+# The service refuses to start without a PIN source (docs/DAEMON_PIN.md), and
+# a test rig is exactly the case --pin-file exists for. A deployment uses
+# LoadCredentialEncrypted= and never has this file.
+printf '%s\n' "$FHSM_PIN" > "$FHSM_TOKENS_DIR/pin"
+chmod 600 "$FHSM_TOKENS_DIR/pin"
 
 echo "The service's guards"
 echo
 
-"$SVC" --socket "$SOCK" --proxy-uid "$(id -u)" >"$FHSM_TOKENS_DIR/svc.log" 2>&1 &
+"$SVC" --socket "$SOCK" --proxy-uid "$(id -u)" \
+      --pin-file "$FHSM_TOKENS_DIR/pin" --workers 4 --pool-max 8 \
+      >"$FHSM_TOKENS_DIR/svc.log" 2>&1 &
 PID=$!
 # Wait for the socket rather than sleeping a guessed amount: a fixed sleep is
 # how a suite becomes flaky on a loaded machine.
@@ -83,6 +90,9 @@ echo "$r" | grep -q "400"; ok $? "  and a repeated one too, rather than resolved
 
 r=$(req "POST /sign HTTP/1.1\r\n${H}Content-Length: 3\r\n\r\nabc")
 echo "$r" | grep -q "501"; ok $? "/sign is named and answers 501, not 404"
+
+r=$(req "GET /token HTTP/1.1\r\n${H}\r\n")
+echo "$r" | grep -q "200 OK"; ok $? "/token reaches the module through a pooled session"
 
 r=$(req "GET /nope HTTP/1.1\r\n${H}\r\n")
 echo "$r" | grep -q "404"; ok $? "an unknown route is 404"
@@ -162,6 +172,9 @@ ok_ = any(json.loads(l)["actor"] == "CN=web01"
 sys.exit(0 if ok_ else 1)
 PY
     ok $? "  an accepted request carries the certificate subject"
+
+    grep -q '"event":"login_ok"' "$LOG"
+    ok $? "  the daemon logged in once, from the credential"
 fi
 
 echo
