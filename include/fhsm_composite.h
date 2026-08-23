@@ -498,12 +498,47 @@ fhsm_rv_t fhsm_composite_cms_verify(fhsm_composite_alg_t alg,
                                      const uint8_t *cms, size_t cms_len,
                                      const uint8_t *digest, size_t digest_len);
 
+/* What kind of certificate is being issued.
+ *
+ * The CA sets extensions, never the applicant, so the only way to obtain a
+ * certificate that means something other than "an end entity" is for the
+ * operator to say so here. That keeps the decision at the issuing desk rather
+ * than in a request somebody else wrote.
+ *
+ * FHSM_CERT_END_ENTITY      basicConstraints CA:FALSE, keyUsage
+ *                           digitalSignature + nonRepudiation. The default and
+ *                           what every certificate was until now.
+ *
+ * FHSM_CERT_OCSP_RESPONDER  the same, plus extendedKeyUsage OCSPSigning and
+ *                           id-pkix-ocsp-nocheck (RFC 6960 4.2.2.2). A
+ *                           delegated responder signs OCSP answers on the CA's
+ *                           behalf so the CA key can stay offline; a verifier
+ *                           accepts it only because the CA issued it with that
+ *                           EKU, which is why the EKU is the whole point and
+ *                           not decoration.
+ *
+ *                           `ocsp-nocheck` says: do not ask me for revocation
+ *                           status about this certificate. Without it a
+ *                           verifier checking the responder's own status has
+ *                           to ask the responder, which is the loop RFC 6960
+ *                           4.2.2.2.1 exists to cut. It also means a
+ *                           compromised responder certificate cannot be
+ *                           revoked in any way a verifier will notice, so a
+ *                           short validity is the only control left -- see
+ *                           docs/FHSM_CA.md.
+ */
+typedef enum {
+    FHSM_CERT_END_ENTITY     = 0,
+    FHSM_CERT_OCSP_RESPONDER = 1
+} fhsm_cert_profile_t;
+
 fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
                                 const uint8_t *ca_cert, size_t ca_cert_len,
                                 const uint8_t *csr, size_t csr_len,
                                 const char *subject_override,
                                 const char *san,
                                 const char *const *crl_urls, size_t n_crl_urls,
+                                fhsm_cert_profile_t profile,
                                 int days,
                                 fhsm_composite_sign_cb sign, void *sign_ctx,
                                 fhsm_composite_rng_cb rng, void *rng_ctx,

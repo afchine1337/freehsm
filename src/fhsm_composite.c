@@ -1133,6 +1133,7 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
                                 const char *subject_override,
                                 const char *san,
                                 const char *const *crl_urls, size_t n_crl_urls,
+                                fhsm_cert_profile_t profile,
                                 int days,
                                 fhsm_composite_sign_cb sign, void *sign_ctx,
                                 fhsm_composite_rng_cb rng, void *rng_ctx,
@@ -1258,6 +1259,36 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
                         && X509_add_ext(x, ku, -1) == 1;
         X509_EXTENSION_free(bc); X509_EXTENSION_free(ku);
         if (!ok) goto out;
+
+        /* A delegated OCSP responder (RFC 6960 4.2.2.2). Two extensions, and
+         * both have to be there: the EKU is what makes a verifier accept an
+         * answer signed by something other than the CA, and ocsp-nocheck cuts
+         * the loop it would otherwise have to enter to check the responder's
+         * own revocation status.
+         *
+         * ocsp-nocheck is a NULL-valued extension, and OpenSSL will not build
+         * it from a configuration string -- X509V3_EXT_conf_nid has no parser
+         * for a type whose value is empty. So it is assembled by hand: an
+         * ASN1_NULL as the extension's octet string. */
+        if (profile == FHSM_CERT_OCSP_RESPONDER) {
+            X509_EXTENSION *eku = X509V3_EXT_conf_nid(NULL, NULL,
+                                      NID_ext_key_usage, "OCSPSigning");
+            int ok2 = eku && X509_add_ext(x, eku, -1) == 1;
+            X509_EXTENSION_free(eku);
+            if (!ok2) goto out;
+
+            ASN1_OCTET_STRING *nul = ASN1_OCTET_STRING_new();
+            static const unsigned char DER_NULL[2] = { 0x05, 0x00 };
+            X509_EXTENSION *nc = NULL;
+            if (nul && ASN1_OCTET_STRING_set(nul, DER_NULL, 2) == 1) {
+                nc = X509_EXTENSION_create_by_NID(NULL,
+                        NID_id_pkix_OCSP_noCheck, 0, nul);
+            }
+            ok2 = nc && X509_add_ext(x, nc, -1) == 1;
+            X509_EXTENSION_free(nc);
+            ASN1_OCTET_STRING_free(nul);
+            if (!ok2) goto out;
+        }
     }
     /* subjectKeyIdentifier over the applicant's key; authorityKeyIdentifier
      * from the CA's own, so a verifier can find the issuer without guessing. */

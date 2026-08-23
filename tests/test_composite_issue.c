@@ -76,7 +76,7 @@ int main(void) {
 
     printf("\n[B] issuance\n");
     static uint8_t leaf[16384]; size_t ll = sizeof leaf;
-    rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, NULL, 0, 365,
+    rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, NULL, 0, FHSM_CERT_END_ENTITY, 365,
                                sg, &ca_s, t_rng, NULL, leaf, &ll);
     snprintf(d, sizeof d, "%zu bytes", ll);
     ck("a certificate is issued", rv == FHSM_RV_OK, d);
@@ -139,7 +139,7 @@ int main(void) {
         ck("the forged request was built (it is well-formed)", fr == FHSM_RV_OK, "");
 
         static uint8_t bad[16384]; size_t bl = sizeof bad;
-        fhsm_rv_t ir = fhsm_composite_issue(ALG, cacert, cl, forged, fl, NULL, NULL, NULL, 0, 365,
+        fhsm_rv_t ir = fhsm_composite_issue(ALG, cacert, cl, forged, fl, NULL, NULL, NULL, 0, FHSM_CERT_END_ENTITY, 365,
                                              sg, &ca_s, t_rng, NULL, bad, &bl);
         ck("issuance REFUSES it (CKR_SIGNATURE_INVALID)",
            ir == FHSM_RV_SIGNATURE_INVALID,
@@ -152,7 +152,7 @@ int main(void) {
         /* flip a byte inside the subject region, well before the signature */
         tampered[40] ^= 0x01;
         bl = sizeof bad;
-        fhsm_rv_t tr = fhsm_composite_issue(ALG, cacert, cl, tampered, rl, NULL, NULL, NULL, 0, 365,
+        fhsm_rv_t tr = fhsm_composite_issue(ALG, cacert, cl, tampered, rl, NULL, NULL, NULL, 0, FHSM_CERT_END_ENTITY, 365,
                                              sg, &ca_s, t_rng, NULL, bad, &bl);
         ck("a request altered after signing is refused", tr != FHSM_RV_OK, "");
     }
@@ -162,7 +162,7 @@ int main(void) {
         static uint8_t o[16384]; size_t ol = sizeof o;
         rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl,
                                    "/C=FR/O=Universite Exemple/CN=imposed.example",
-                                   NULL, NULL, 0, 365, sg, &ca_s, t_rng, NULL, o, &ol);
+                                   NULL, NULL, 0, FHSM_CERT_END_ENTITY, 365, sg, &ca_s, t_rng, NULL, o, &ol);
         ck("--subject replaces the requested subject", rv == FHSM_RV_OK, "");
         if (rv == FHSM_RV_OK) {
             const uint8_t *q = o; X509 *y = d2i_X509(NULL, &q, (long)ol);
@@ -173,12 +173,12 @@ int main(void) {
         }
         ol = sizeof o;
         ck("a zero validity is refused",
-           fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, NULL, 0, 0, sg, &ca_s, t_rng, NULL, o, &ol)
+           fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL, NULL, 0, FHSM_CERT_END_ENTITY, 0, sg, &ca_s, t_rng, NULL, o, &ol)
                == FHSM_RV_ARGUMENTS_BAD, "");
         ol = sizeof o;
         ck("garbage in place of a request is refused",
            fhsm_composite_issue(ALG, cacert, cl, (const uint8_t*)"not a csr", 9,
-                                 NULL, NULL, NULL, 0, 365, sg, &ca_s, t_rng, NULL, o, &ol)
+                                 NULL, NULL, NULL, 0, FHSM_CERT_END_ENTITY, 365, sg, &ca_s, t_rng, NULL, o, &ol)
                == FHSM_RV_ARGUMENTS_BAD, "");
     }
 
@@ -187,7 +187,7 @@ int main(void) {
         static uint8_t o[16384]; size_t ol = sizeof o;
         rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL,
                  "DNS:web01.exemple.fr,DNS:www.exemple.fr,IP:10.0.0.7,email:ca@exemple.fr",
-                 NULL, 0, 365, sg, &ca_s, t_rng, NULL, o, &ol);
+                 NULL, 0, FHSM_CERT_END_ENTITY, 365, sg, &ca_s, t_rng, NULL, o, &ol);
         ck("a certificate with four alternative names is issued",
            rv == FHSM_RV_OK, "");
         if (rv == FHSM_RV_OK) {
@@ -229,7 +229,7 @@ int main(void) {
         for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
             ol = sizeof o;
             fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL,
-                                                 bad[i].san, NULL, 0, 365, sg, &ca_s, t_rng, NULL, o, &ol);
+                                                 bad[i].san, NULL, 0, FHSM_CERT_END_ENTITY, 365, sg, &ca_s, t_rng, NULL, o, &ol);
             snprintf(d, sizeof d, "\"%s\" -- %s", bad[i].san, bad[i].why);
             ck("refused rather than silently dropped", br != FHSM_RV_OK, d);
         }
@@ -245,7 +245,7 @@ int main(void) {
         };
 
         rv = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
-                                   urls, 2, 365, sg, &ca_s, t_rng, NULL, o, &ol);
+                                   urls, 2, FHSM_CERT_END_ENTITY, 365, sg, &ca_s, t_rng, NULL, o, &ol);
         ck("a certificate carrying two distribution URIs is issued",
            rv == FHSM_RV_OK, "");
 
@@ -315,7 +315,7 @@ int main(void) {
             const char *one[] = { bad[i].url };
             ol = sizeof o;
             fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
-                                                 one, 1, 365, sg, &ca_s, t_rng, NULL, o, &ol);
+                                                 one, 1, FHSM_CERT_END_ENTITY, 365, sg, &ca_s, t_rng, NULL, o, &ol);
             snprintf(d, sizeof d, "%s", bad[i].why);
             ck("refused", br == FHSM_RV_ARGUMENTS_BAD, d);
         }
@@ -327,7 +327,7 @@ int main(void) {
             const char *holed[] = { "http://crl.exemple.fr/ca.crl", NULL };
             ol = sizeof o;
             fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
-                                                 holed, 2, 365, sg, &ca_s, t_rng, NULL, o, &ol);
+                                                 holed, 2, FHSM_CERT_END_ENTITY, 365, sg, &ca_s, t_rng, NULL, o, &ol);
             ck("refused", br == FHSM_RV_ARGUMENTS_BAD, "a NULL entry inside the array");
         }
 
@@ -336,7 +336,7 @@ int main(void) {
         {
             ol = sizeof o;
             fhsm_rv_t br = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
-                                                 NULL, 0, 365, sg, &ca_s, t_rng, NULL, o, &ol);
+                                                 NULL, 0, FHSM_CERT_END_ENTITY, 365, sg, &ca_s, t_rng, NULL, o, &ol);
             ck("omitting the extension entirely is still valid",
                br == FHSM_RV_OK, "no --crl-url given");
             if (br == FHSM_RV_OK) {
@@ -345,6 +345,75 @@ int main(void) {
                    y && X509_get_ext_by_NID(y, NID_crl_distribution_points, -1) < 0, "");
                 X509_free(y);
             }
+        }
+    }
+
+    /* ---- the delegated OCSP responder profile (RFC 6960 4.2.2.2) --------
+     *
+     * A delegated responder signs OCSP answers on the CA's behalf so the CA
+     * key can stay offline. A verifier accepts that only because the CA said
+     * so, and it said so with extendedKeyUsage OCSPSigning. Without the EKU
+     * the certificate is an ordinary end entity and every answer it signs is
+     * refused -- which is why this is checked rather than assumed.
+     */
+    {
+        printf("\n  the delegated OCSP responder profile\n");
+
+        uint8_t r[8192]; size_t rl2 = sizeof r;
+        fhsm_rv_t rr = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
+                                             NULL, 0, FHSM_CERT_OCSP_RESPONDER,
+                                             30, sg, &ca_s, t_rng, NULL, r, &rl2);
+        ck("a responder certificate is issued", rr == FHSM_RV_OK, "");
+
+        if (rr == FHSM_RV_OK) {
+            const uint8_t *q = r; X509 *y = d2i_X509(NULL, &q, (long)rl2);
+            ck("and parses", y != NULL, "");
+
+            /* The EKU, and only OCSPSigning in it. A responder certificate
+             * that also claimed serverAuth would be a web certificate that
+             * can vouch for revocation, which is not a thing to hand out. */
+            EXTENDED_KEY_USAGE *eku = y ? X509_get_ext_d2i(y, NID_ext_key_usage,
+                                                            NULL, NULL) : NULL;
+            int n_eku = eku ? sk_ASN1_OBJECT_num(eku) : -1;
+            int only_ocsp = (n_eku == 1) &&
+                OBJ_obj2nid(sk_ASN1_OBJECT_value(eku, 0)) == NID_OCSP_sign;
+            ck("carries extendedKeyUsage OCSPSigning", only_ocsp,
+               n_eku == 1 ? "" : "and nothing else");
+            if (eku) EXTENDED_KEY_USAGE_free(eku);
+
+            /* ocsp-nocheck, whose value is DER NULL. It is what stops a
+             * verifier asking the responder about the responder. */
+            int idx = y ? X509_get_ext_by_NID(y, NID_id_pkix_OCSP_noCheck, -1) : -1;
+            ck("carries id-pkix-ocsp-nocheck", idx >= 0, "");
+            if (idx >= 0) {
+                X509_EXTENSION *e = X509_get_ext(y, idx);
+                ASN1_OCTET_STRING *v = X509_EXTENSION_get_data(e);
+                ck("  whose value is DER NULL",
+                   v && ASN1_STRING_length(v) == 2
+                     && ASN1_STRING_get0_data(v)[0] == 0x05
+                     && ASN1_STRING_get0_data(v)[1] == 0x00, "05 00");
+                ck("  and which is not critical",
+                   X509_EXTENSION_get_critical(e) == 0,
+                   "RFC 6960 4.2.2.2.1 leaves it non-critical");
+            }
+            X509_free(y);
+        }
+
+        /* The mutation. Without this the two assertions above would pass
+         * against a build that set the extensions on every certificate, and
+         * the profile would be doing nothing. */
+        {
+            uint8_t e2[8192]; size_t el2 = sizeof e2;
+            fhsm_rv_t er = fhsm_composite_issue(ALG, cacert, cl, csr, rl, NULL, NULL,
+                                                 NULL, 0, FHSM_CERT_END_ENTITY,
+                                                 30, sg, &ca_s, t_rng, NULL, e2, &el2);
+            const uint8_t *q = e2; X509 *y = er == FHSM_RV_OK
+                                    ? d2i_X509(NULL, &q, (long)el2) : NULL;
+            ck("an end entity carries neither",
+               y && X509_get_ext_by_NID(y, NID_ext_key_usage, -1) < 0
+                 && X509_get_ext_by_NID(y, NID_id_pkix_OCSP_noCheck, -1) < 0,
+               "so the profile is what puts them there");
+            X509_free(y);
         }
     }
 
