@@ -8,6 +8,39 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **`POST /sign` — the service's first route that reaches a key (#111).**
+  Headers carry the identity and the key label (`X-FHSM-Client-Subject`,
+  `X-FHSM-Key`), the raw body is the message, the response body is the
+  signature. No JSON anywhere: a signature is bytes, and base64 around it would
+  buy nothing but a decoder to get wrong.
+
+  Authorisation is a tab-separated policy file of `SUBJECT<TAB>KEY-LABEL`
+  pairs, re-read on `SIGHUP` and applied at the next request. A reload that
+  fails to parse keeps the policy already in force, because the alternative —
+  an empty policy — fails open on the reload path.
+
+  **Every refusal is one answer, byte for byte.** A key the policy does not
+  grant, a key that does not exist, and a subject the policy does not know all
+  produce the identical 403. The route asks both questions before answering
+  either, so the answer cannot depend on which one failed first:
+
+  ```c
+  int permitted = policy_permits(r->subject, r->key);
+  unsigned long key = find_key(sess, r->key);
+  if (!permitted || key == 0) { ... }
+  ```
+
+  **This equalises the work, not the timing**, and the code says so. A search
+  that finds nothing walks the whole object store; one that finds a key stops
+  early. Constant-time object lookup is not something the service can impose on
+  the module, and claiming "in the same time" would be claiming more than is
+  true.
+
+* **`fhsm-service --profile`** prints the profile the binary was built with.
+  The service links the module's objects statically, so it carries a profile of
+  its own — a service built `fips-strict` cannot sign with the composite
+  mechanism whatever the separately built tools around it can do.
+
 * **A patch to p11-kit, so post-quantum mechanisms cross the socket
   (`contrib/p11-kit/`).** Not our code, kept here because we need it and
   measured the problem. Three pieces:
@@ -236,6 +269,61 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **The test suite ran against the wrong OpenSSL, silently.** Every test recipe
+  in the Makefile said `LD_LIBRARY_PATH=.`, which *replaces* the caller's rather
+  than extending it, so the binaries loaded whatever `libcrypto` the system
+  had — 3.0.2 here — instead of the 3.5 they were compiled and linked against.
+  The only symptom was the ML-DSA-65 boot KAT failing with a bare `[!]` and no
+  diagnostic; ML-DSA does not exist in 3.0, so that KAT could never have passed
+  under `make tests`. `OPENSSL_PREFIX` was wired into the build and not into the
+  run. Now `TEST_LD`, used by all 40 recipes.
+
+* **The service test asked the wrong binary whether it could sign.** Its
+  profile guard ran `fhsm-csr keygen`, a separately built tool, and passed while
+  the service under test was `fips-strict` and could not sign at all. It now
+  asks `fhsm-service --profile`.
+
+* **An assertion that held for the wrong reason.** The three refusals compared
+  for byte-identity all failed the *policy* check, so the branch equalising
+  "authorised but absent" with "not authorised" was never reached — a mutation
+  that answered 404 for a missing key passed the test. The policy now grants a
+  key that was never generated, and the mutation fails as it should.
+
+* **`GET /sign` answered 501.** True while the route was empty, a lie once it
+  was written; 404 would have been a different lie, denying a route that
+  exists. It is now 405.
+
+* **A `static` signature buffer shared by every worker thread**, and with it
+  **fifteen wrong signatures out of sixteen, each returned with `200 OK`.**
+  `do_sign()` held `static unsigned char sig[8192]`; sixteen concurrent
+  requests wrote into it at once, and each client received whatever was in the
+  buffer when its turn came to `write()` — a valid composite signature over
+  somebody else's message. Nothing refused, nothing logged, nothing visibly
+  wrong.
+
+  **The test did not find this. ThreadSanitizer under load did.** The only
+  signature the suite verified was made before the concurrent burst, so a
+  buffer shared between workers could not show up in it. `service_guards.sh`
+  now gives each of the sixteen threads a distinct message and verifies all
+  sixteen signatures against their own; restoring the `static` makes fifteen
+  of them fail.
+
+  This is the second buffer in this file born `static` in a single-threaded
+  draft and left that way once workers arrived — the first was the request
+  parser, below. The shape is worth naming: a buffer is not shared state until
+  something else can reach it, and the thing that made it reachable was three
+  slices away from the line that declared it.
+
+* **A `static` parse buffer shared by every worker thread** in `read_request()`,
+  introduced when the service was single-threaded and left behind when it was
+  not. Moved into the per-request struct.
+
+* **`404 unknown_route` overwrote the verdicts of routes that exist.** The
+  fallback was an unconditional statement after the route chain, which was
+  correct only while every branch ended in `return`. The moment `/sign` produced
+  a verdict and fell through, its 403 came out as "unknown route" — the wrong
+  status, and a lie in the audit line. It is now `else if (v.reason == NULL)`.
+
 * **`FHSM_MAX_OBJECTS` was defined twice, and the second copy was dead.**
   `include/fhsm_token.h` and `src/fhsm_token.c` each carried
   `#ifndef FHSM_MAX_OBJECTS / #define 1024`. They could not disagree — the
@@ -534,7 +622,6 @@ project adheres to [Semantic Versioning](https://semver.org/).
   unreadable to every OCSP parser -- the CHOICE decides on the tag, and `A0` is
   not one of its alternatives.
 
-### Fixed
 * **`docs/FHSM_CSR.md` said "Revocation and OCSP are not implemented".** The
   revocation section was three hundred lines above it.
 

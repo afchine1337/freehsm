@@ -24,6 +24,16 @@ OPENSSL_LDFLAGS = -L$(OPENSSL_PREFIX)/lib64 -L$(OPENSSL_PREFIX)/lib \
                   -lcrypto -ldl -pthread
 OPENSSL_CFLAGS  = -I$(OPENSSL_PREFIX)/include
 
+# Run-time search path for the test recipes. Every recipe used to say
+# $(TEST_LD) which *replaces* the caller's, not extends it: the tests
+# then loaded whatever libcrypto the system had, not the one the objects were
+# compiled and linked against. On a machine with OpenSSL 3.0 installed and
+# OPENSSL_PREFIX pointing at 3.5, the ML-DSA-65 boot KAT failed with no
+# diagnostic beyond a bare [!] -- OPENSSL_PREFIX was wired into the build and
+# not into the run, which is the same defect shape as a guard on some paths
+# and not the rest.
+TEST_LD = LD_LIBRARY_PATH=.:$(OPENSSL_PREFIX)/lib64:$(OPENSSL_PREFIX)/lib
+
 WARN_FLAGS = \
     -Wall -Wextra -Wpedantic -Werror \
     -Wstrict-prototypes -Wshadow -Wpointer-arith -Wcast-align \
@@ -585,55 +595,55 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
 tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tools/fhsm-token
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_smoke
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_tpm
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_smoke
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_tpm
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_cbc_pad_oracle
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_composite_mprime
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_composite_sign
+		$(TEST_LD) ./tests/test_cbc_pad_oracle
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_mprime
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_sign
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) \
-		LD_LIBRARY_PATH=. ./tests/test_composite_p11
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_composite_x509
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_composite_csr
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_composite_issue
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_composite_crl
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_composite_prehash
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_composite_cms
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_composite_ocsp
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_key
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_backpressure
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_pin_length
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_throttle_reboot
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_fsync
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_concurrent
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_multiproc
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_switch
-	LD_LIBRARY_PATH=. sh tests/audit_switch.sh mandatory
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_audit_verify
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_p11_loader ./libfreehsm-fips.so
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) LD_LIBRARY_PATH=. ./tests/test_token_capacity
+		$(TEST_LD) ./tests/test_composite_p11
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_x509
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_csr
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_issue
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_crl
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_prehash
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_cms
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_ocsp
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_key
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_backpressure
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_pin_length
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_throttle_reboot
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_fsync
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_concurrent
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_multiproc
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_switch
+	$(TEST_LD) sh tests/audit_switch.sh mandatory
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_verify
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_p11_loader ./libfreehsm-fips.so
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_token_capacity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_decrypt_null_args
+		$(TEST_LD) ./tests/test_decrypt_null_args
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_robustness_args
+		$(TEST_LD) ./tests/test_robustness_args
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_op_state
+		$(TEST_LD) ./tests/test_op_state
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_fips_digests
+		$(TEST_LD) ./tests/test_fips_digests
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_attributes
+		$(TEST_LD) ./tests/test_attributes
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_input_validation
+		$(TEST_LD) ./tests/test_input_validation
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_session_objects
+		$(TEST_LD) ./tests/test_session_objects
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_mech_advertise
+		$(TEST_LD) ./tests/test_mech_advertise
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_legacy_digest
+		$(TEST_LD) ./tests/test_legacy_digest
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_legacy_cipher
+		$(TEST_LD) ./tests/test_legacy_cipher
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
-		LD_LIBRARY_PATH=. ./tests/test_legacy_rsa
+		$(TEST_LD) ./tests/test_legacy_rsa
 
 # External behavioral harness (#125) : Denis Mingulov's pkcs11-check
 # (>100k vendor-neutral checks) against the built module. Findings are
@@ -666,10 +676,10 @@ pkcs11-check:
 audit-switch:
 	$(MAKE) clean
 	$(MAKE) all tests/test_audit_switch
-	LD_LIBRARY_PATH=. sh tests/audit_switch.sh mandatory
+	$(TEST_LD) sh tests/audit_switch.sh mandatory
 	$(MAKE) clean
 	$(MAKE) EXTRA_CFLAGS=-DFHSM_AUDIT_MANDATORY=0 all tests/test_audit_switch
-	LD_LIBRARY_PATH=. sh tests/audit_switch.sh optional
+	$(TEST_LD) sh tests/audit_switch.sh optional
 	@echo "[audit-switch] both sides of FHSM_AUDIT_MANDATORY exercised"
 
 # The delegated responder's rules are rules of the tool, not of the library:
@@ -691,7 +701,7 @@ service-guards: service/fhsm-service tools/fhsm-token
 ocsp-delegated:
 	$(MAKE) clean
 	$(MAKE) PROFILE=interop all
-	LD_LIBRARY_PATH=. sh tests/ocsp_delegated.sh
+	$(TEST_LD) sh tests/ocsp_delegated.sh
 	@echo "[ocsp-delegated] the tree is now a PROFILE=interop build"
 
 integrity: $(LIB)

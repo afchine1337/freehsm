@@ -491,8 +491,44 @@ Anything that *listens* for OCSP still waits for this work.
 ~~**Memory per held session**, unmeasured.~~ **Measured** — see below.
 
 ~~**What a forked-per-client server costs at scale.**~~ **Measured** — see
-above. Nothing in this document is now open that a measurement could close;
-what remains is building the service.
+above. Nothing in this document is now open that a measurement could close.
+
+~~**Whether the pool's growth path works**, never exercised.~~ **Exercised.**
+`/token` was too cheap to make two requests overlap; `/sign`, holding a session
+for the 3–4 ms of an ML-DSA signature, is not. Sixteen concurrent signatures in
+`tests/service_guards.sh` are served by **four distinct pooled sessions**, and
+the test prints that number rather than asserting on it — whether the pool
+grows depends on how the requests overlap, and an assertion would be demanding
+a race resolve a particular way.
+
+**What `/sign` equalises, and what it does not.** The three refusals — a key
+the policy does not grant, a key that does not exist, a subject the policy does
+not know — are one answer byte for byte, because the route asks both questions
+before answering either. That equalises **the work, not the timing**: a search
+that finds nothing walks the whole object store, one that finds a key stops
+early. Constant-time object lookup is not something this service can impose on
+the module, and `docs/RATE_LIMIT.md` is where the remaining exposure belongs.
+
+~~**The service has never been run under load with TSAN.**~~ **Run — and it
+found a real defect.** `make TSAN=1` plus `tests/service_guards.sh` under
+`setarch -R`: four data races, all one cause. `do_sign()` held a `static`
+signature buffer, so sixteen concurrent requests wrote into one 8 KB array and
+**fifteen of the sixteen clients received a valid signature over another
+client's message, with `200 OK`**. The suite was green throughout, because the
+only signature it verified was made before the concurrent burst.
+
+Two things follow, and they are the reason this is recorded here rather than
+only in the changelog:
+
+* **A sanitizer that serves zero requests proves nothing.** The earlier "TSAN
+  clean" verdict in this document was true and empty. Concurrency defects need
+  concurrency, and `/token` was too cheap to produce any.
+* **An end-to-end test that verifies one signature proves one signature.** The
+  assertion now gives each thread its own message and checks all sixteen.
+  Restoring the `static` buffer fails fifteen of them, which is what an
+  assertion earning its place looks like.
+
+TSAN is clean under the same load once the buffer is automatic.
 
 ---
 

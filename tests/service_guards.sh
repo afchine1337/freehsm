@@ -26,6 +26,8 @@
 set -u
 SVC="${SVC:-./service/fhsm-service}"
 TOK="${TOK:-./tools/fhsm-token}"
+CSR="${CSR:-./tools/fhsm-csr}"
+SIGN="${SIGN:-./tools/fhsm-sign}"
 fail=0
 
 say() { printf '  %-58s %s\n' "$1" "$2"; }
@@ -40,7 +42,9 @@ export FHSM_SO_PIN="${FHSM_SO_PIN:-sopin1234}"
 export FHSM_PIN="${FHSM_PIN:-userpin1234}"
 FHSM_TOKENS_DIR=$(mktemp -d); export FHSM_TOKENS_DIR
 SOCK=$(mktemp -u /tmp/fhsm-guards.XXXXXX.sock)
-trap 'kill $PID 2>/dev/null; rm -rf "$FHSM_TOKENS_DIR" "$SOCK"' EXIT
+PID=""   # set once the service starts; the trap runs before that on an
+         # early exit, and an unset variable there is an error under set -u
+trap 'if [ -n "$PID" ]; then kill $PID 2>/dev/null; fi; rm -rf "$FHSM_TOKENS_DIR" "$SOCK"' EXIT
 
 "$TOK" init --label guards >/dev/null 2>&1
 # The service refuses to start without a PIN source (docs/DAEMON_PIN.md), and
@@ -49,11 +53,35 @@ trap 'kill $PID 2>/dev/null; rm -rf "$FHSM_TOKENS_DIR" "$SOCK"' EXIT
 printf '%s\n' "$FHSM_PIN" > "$FHSM_TOKENS_DIR/pin"
 chmod 600 "$FHSM_TOKENS_DIR/pin"
 
+# Two keys and a policy that names exactly one of them. The second key exists
+# so that "not authorised" and "no such key" can be told apart -- or rather,
+# proved indistinguishable, which is what docs/RATE_LIMIT.md asks for.
+# Ask the binary under test, not a sibling. fhsm-csr is built separately and
+# can be interop while the service is fips-strict; the guard that consulted it
+# passed while /sign failed for exactly the reason the guard exists to catch.
+if [ "$("$SVC" --profile 2>/dev/null)" != "interop" ]; then
+    echo "service_guards.sh: $SVC was built fips-strict, which cannot sign" >&2
+    echo "  with the composite mechanism. Rebuild: make PROFILE=interop" >&2
+    exit 2
+fi
+"$CSR" keygen --label tls-web01 >/dev/null 2>&1 || {
+    echo "service_guards.sh: fhsm-csr cannot generate a composite key" >&2
+    exit 2; }
+"$CSR" keygen --label secret-ca >/dev/null 2>&1
+# ghost-key is permitted by the policy and was never generated. Without it
+# every refusal below fails on the policy check alone, and the branch that
+# equalises "authorised but absent" with "not authorised" is never taken --
+# a mutation distinguishing the two passed the test until this line existed.
+printf '# fhsm-service authorisation policy v1\n# SUBJECT\tKEY-LABEL\nCN=web01\ttls-web01\nCN=web01\tghost-key\n' \
+    > "$FHSM_TOKENS_DIR/policy"
+printf 'the quick brown fox' > "$FHSM_TOKENS_DIR/msg.bin"
+
 echo "The service's guards"
 echo
 
 "$SVC" --socket "$SOCK" --proxy-uid "$(id -u)" \
-      --pin-file "$FHSM_TOKENS_DIR/pin" --workers 4 --pool-max 8 \
+      --pin-file "$FHSM_TOKENS_DIR/pin" --policy "$FHSM_TOKENS_DIR/policy" \
+      --workers 4 --pool-max 8 \
       >"$FHSM_TOKENS_DIR/svc.log" 2>&1 &
 PID=$!
 # Wait for the socket rather than sleeping a guessed amount: a fixed sleep is
@@ -88,8 +116,11 @@ echo "$r" | grep -q "403"; ok $? "no identity header is refused"
 r=$(req "GET /health HTTP/1.1\r\n${H}${H}\r\n")
 echo "$r" | grep -q "400"; ok $? "  and a repeated one too, rather than resolved"
 
-r=$(req "POST /sign HTTP/1.1\r\n${H}Content-Length: 3\r\n\r\nabc")
-echo "$r" | grep -q "501"; ok $? "/sign is named and answers 501, not 404"
+r=$(req "GET /sign HTTP/1.1\r\n${H}\r\n")
+echo "$r" | grep -q "405"; ok $? "GET /sign is 405, neither 404 nor 501"
+
+r=$(req "POST /verify HTTP/1.1\r\n${H}Content-Length: 3\r\n\r\nabc")
+echo "$r" | grep -q "501"; ok $? "a route named but unwritten answers 501, not 404"
 
 r=$(req "GET /token HTTP/1.1\r\n${H}\r\n")
 echo "$r" | grep -q "200 OK"; ok $? "/token reaches the module through a pooled session"
@@ -121,6 +152,92 @@ echo "$r" | grep -q "200\|400"; ok $? "a quote in the subject does not break the
 # the assertion passed against a build that a service manager would have had
 # to SIGKILL. Measured separately: with SA_RESTART the process is still alive
 # two seconds after SIGTERM and writes no stop line at all.
+# --- /sign: the first route that reaches the module ---------------------
+python3 - "$SOCK" "$FHSM_TOKENS_DIR" > "$FHSM_TOKENS_DIR/sign.out" 2>&1 <<'SIGN_EOF'
+import socket, sys, threading
+SOCK, DIR = sys.argv[1], sys.argv[2]
+
+def req(key, subj, body):
+    s = socket.socket(socket.AF_UNIX); s.settimeout(20); s.connect(SOCK)
+    s.sendall(("POST /sign HTTP/1.1\r\nX-FHSM-Client-Subject: %s\r\n"
+               "X-FHSM-Key: %s\r\nContent-Length: %d\r\n\r\n"
+               % (subj, key, len(body))).encode() + body)
+    d = b""
+    while True:
+        c = s.recv(65536)
+        if not c: break
+        d += c
+    s.close(); return d
+
+body = open(DIR + "/msg.bin", "rb").read()
+r = req("tls-web01", "CN=web01", body)
+head, _, sig = r.partition(b"\r\n\r\n")
+print("STATUS", head.split(b"\r\n")[0].decode())
+print("SIGLEN", len(sig))
+open(DIR + "/msg.sig", "wb").write(sig)
+
+# The three refusals a caller would try to tell apart.
+a = req("secret-ca",   "CN=web01",    body)   # real key, not in the policy
+b = req("no-such-key", "CN=web01",    body)   # not in the policy, and absent
+c = req("tls-web01",   "CN=attacker", body)   # real and permitted, wrong caller
+d = req("ghost-key",   "CN=web01",    body)   # permitted by the policy, absent
+print("SAME", a == b == c == d)
+print("REFUSED", a.split(b"\r\n")[0].decode())
+
+# Sixteen at once, each holding a pooled session for the length of an ML-DSA
+# signature. This is the load /token was too cheap to produce.
+# Each thread signs a *different* message and its signature is kept, so that
+# a buffer shared between workers shows up as a signature over somebody else's
+# message. Verifying only the sequential signature above missed exactly that:
+# a static 8 KB buffer in do_sign(), found by ThreadSanitizer and not here.
+out = {}; bar = threading.Barrier(16)
+def go(i):
+    m = ("concurrent message %02d -- " % i).encode() + body
+    open("%s/c%02d.bin" % (DIR, i), "wb").write(m)
+    bar.wait()
+    try:
+        r = req("tls-web01", "CN=web01", m)
+        head, _, sg = r.partition(b"\r\n\r\n")
+        open("%s/c%02d.sig" % (DIR, i), "wb").write(sg)
+        out[i] = head.split(b"\r\n")[0].decode()
+    except Exception as e:
+        out[i] = "ERR " + str(e)
+ts = [threading.Thread(target=go, args=(i,)) for i in range(16)]
+[t.start() for t in ts]; [t.join() for t in ts]
+print("CONCURRENT", sum(1 for o in out.values() if "200" in o))
+SIGN_EOF
+
+grep -q "STATUS HTTP/1.1 200 OK" "$FHSM_TOKENS_DIR/sign.out"
+ok $? "/sign returns a signature for an authorised subject and key"
+
+n=$(sed -n 's/^SIGLEN //p' "$FHSM_TOKENS_DIR/sign.out")
+[ -n "$n" ] && [ "$n" -gt 3000 ]
+ok $? "  and the body is a composite signature, not an error page ($n bytes)"
+
+"$SIGN" verify --label tls-web01 --in "$FHSM_TOKENS_DIR/msg.bin" \
+        --sig "$FHSM_TOKENS_DIR/msg.sig" >/dev/null 2>&1
+ok $? "  which verifies against the module loaded directly"
+
+grep -q "^SAME True" "$FHSM_TOKENS_DIR/sign.out"
+ok $? "every refusal, absent key included, is one answer byte for byte"
+
+grep -q "REFUSED HTTP/1.1 403" "$FHSM_TOKENS_DIR/sign.out"
+ok $? "  and that answer is 403"
+
+grep -q "^CONCURRENT 16" "$FHSM_TOKENS_DIR/sign.out"
+ok $? "sixteen concurrent signatures all succeed"
+
+bad=0
+i=0
+while [ $i -lt 16 ]; do
+    f=$(printf '%s/c%02d' "$FHSM_TOKENS_DIR" $i)
+    "$SIGN" verify --label tls-web01 --in "$f.bin" --sig "$f.sig" >/dev/null 2>&1 \
+        || bad=$((bad+1))
+    i=$((i+1))
+done
+[ "$bad" = 0 ]
+ok $? "  and each verifies against its own message, not another's ($bad bad)"
+
 kill -TERM $PID 2>/dev/null
 i=0; while kill -0 $PID 2>/dev/null && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done
 if kill -0 $PID 2>/dev/null; then
@@ -175,6 +292,22 @@ PY
 
     grep -q '"event":"login_ok"' "$LOG"
     ok $? "  the daemon logged in once, from the credential"
+
+    # How many distinct pooled sessions signed. Not asserted to exceed one:
+    # whether the pool grows depends on how the sixteen requests overlap, and
+    # an assertion would be demanding a race resolve a particular way. Printed
+    # so that the number is visible when it changes.
+    npool=$(python3 - "$LOG" <<'POOL_EOF'
+import json, sys
+n = set()
+for line in open(sys.argv[1]):
+    d = json.loads(line)
+    if d.get("event") == "sign" and d.get("result") == "OK":
+        n.add(d.get("session"))
+print(len(n))
+POOL_EOF
+)
+    say "  distinct pooled sessions used for signing: $npool" "--"
 fi
 
 echo
