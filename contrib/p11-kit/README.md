@@ -111,13 +111,28 @@ choice is exactly what let the bug through.
 explicitly, so there is no short cut to get wrong. The 0.24.0 patch is kept for
 the record, not because anyone should apply it.
 
+## Where this stands upstream
+
+Submitted on 22 August 2026. The drafts are kept in `UPSTREAM_ISSUE.md` and
+`UPSTREAM_PR.md`; what was actually sent, and a later check of its claims, is
+in `UPSTREAM_COMMENTS.md`.
+
+* **Issue [#778](https://github.com/p11-glue/p11-kit/issues/778)** — the
+  problem, asserting nothing that cannot be checked from the source.
+* **PR [#779](https://github.com/p11-glue/p11-kit/issues/779)** — the change.
+  Open, no reviewer assigned, no maintainer response as of 27 August 2026.
+* **Overlap with [#745](https://github.com/p11-glue/p11-kit/issues/745)**
+  (mingulov, "Add basic PQC support"), open since March and covering much of
+  the same ground. Acknowledged on #779, and a technical objection raised on
+  #745: it puts `CKM_ML_DSA`, `CKM_SLH_DSA` and the `CKM_HASH_*` family on the
+  no-parameter list, where a supplied context would be silently dropped.
+
 ## What has not been done
 
-* **Not submitted.** No issue opened, no maintainer consulted. See
-  `UPSTREAM_ISSUE.md` and `UPSTREAM_PR.md`.
 * **No test added to p11-kit's suite.** A contribution should carry one: a mock
   module offering a vendor mechanism, asserted to cross without a parameter and
-  be refused with one.
+  be refused with one. Offered in the PR, not yet written — the maintainers
+  were asked which style they prefer, and have not answered.
 * **Piece 4 should be proposed separately.** Pieces 1–3 stand on their own.
 
 ## Applying it
