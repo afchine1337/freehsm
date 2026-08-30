@@ -399,6 +399,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **The release notes said OCSP does not ship, and did not mention the service
+  at all.** `RELEASE_v2.0.0-beta.md` carried "**OCSP.** Only CRLs. OCSP is a
+  network service and belongs with #111" under *Not in this release*, while
+  `fhsm-ca ocsp-respond` and `issue --profile ocsp-responder` have shipped for
+  a week — only the *listening* half belongs with #111. And `fhsm-service`,
+  four slices and a deployment guide, appeared nowhere: a reader of the release
+  notes would not have known it exists. Both corrected, with the service's
+  limits stated where someone deciding whether to deploy it will meet them:
+  it has never run behind a real reverse proxy, and the proxy is what the whole
+  identity model rests on.
+
 * **`test_audit_concurrent` asserted a performance property as if it were a
   correctness one, and failed on fast storage.** Group commit shares an `fsync`
   between writers that arrive while one is in flight -- a race whose outcome is

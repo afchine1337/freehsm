@@ -8,19 +8,20 @@ SPDX-License-Identifier: Apache-2.0
 **The PKI and signing tools, and the composite post-quantum signatures under
 them.**
 
-Four command-line tools on top of a Composite ML-DSA implementation that
-matches the draft's own Appendix D vectors byte for byte:
+Four command-line tools and a service, on top of a Composite ML-DSA
+implementation that matches the draft's own Appendix D vectors byte for byte:
 
 | Tool | What it does |
 |---|---|
 | `fhsm-token` | provisions a token: `init`, `info` |
 | `fhsm-csr` | key pairs, PKCS#10 requests, self-signed roots |
-| `fhsm-ca` | issues certificates, records revocations, publishes CRLs |
+| `fhsm-ca` | issues certificates, records revocations, publishes CRLs, signs OCSP responses |
 | `fhsm-sign` | detached signatures, raw or CMS, over data of any size |
+| `fhsm-service` | signs on request over a local socket, behind a reverse proxy — **new, and the least proven thing here** |
 
 ---
 
-## Read these three before deploying it
+## Read these four before deploying it
 
 ### The specification is not published
 
@@ -60,6 +61,25 @@ lost is the property the module's own DRBG was built for. Certificate serial
 numbers were on the same path and are fixed in this release; closing it for key
 generation needs a library context backed by `fhsm_drbg` and is not done.
 
+### The service has never run behind a real reverse proxy
+
+`fhsm-service` is new in this release and is the part to treat with the most
+suspicion. Its own guards are tested — `tests/service_guards.sh` and
+`tests/service_budget.sh`, both green, ThreadSanitizer clean under a saturating
+load — but **no deployment of it has been made or measured.** The nginx and
+Apache fragments in `docs/DEPLOYING_THE_SERVICE.md` are written from each
+server's documentation, not from a running system.
+
+That matters more than usual here, because **the service believes the identity
+the proxy puts in a header.** There is no signature on it and nothing to
+verify. A proxy that fails to set that header does not fail closed: the
+client's own header is then the only one, and the client is whoever it said it
+was. The daemon catches the case where both are present — that is a 400, not a
+choice between them — but it cannot catch a header it never receives.
+
+The deployment guide is written around that, and one of its four checks forges
+the header and must come back 400. **Run it before believing any of this.**
+
 ---
 
 ## What is new
@@ -84,6 +104,29 @@ signed attributes, carrying the signer's certificate — so `fhsm-sign
 cms-verify` needs no token, no PIN and no module. It is the only verification
 here a third party can run with the file, the data, and the tool.
 
+**A signing service (#111).** `fhsm-service` answers `POST /sign` on a UNIX
+socket: the certificate subject and the key label in headers, the message as
+the raw body, the signature as the raw response. A tab-separated policy file
+pairs subjects with key labels and is re-read on `SIGHUP`; a reload that fails
+to parse keeps the policy in force, because an empty one fails open. The PIN
+comes from a systemd encrypted credential, never an argument and never an
+inherited environment variable. `systemd/fhsm-service.service` and
+`docs/DEPLOYING_THE_SERVICE.md` ship with it.
+
+Two throttles, both measured rather than guessed. **Fairness**: while another
+identity is present each is held to one worker below the total, which took a
+saturated service from costing a second client 7.2x its latency down to 2.4x.
+**A refusal budget**: four authorisation refusals are free, then a delay that
+doubles from one second to sixty and decays by one every ten quiet minutes,
+with the count persisted so that a crash does not hand back a reset. Neither is
+ever a lock. `docs/RATE_LIMIT.md` has the numbers.
+
+**Refusals do not leak.** A key the policy does not grant, a key that does not
+exist and a subject the policy does not know produce one answer, byte for byte
+— the code equalises the work and says plainly that it cannot equalise the
+timing, because constant-time object lookup is not something a service can
+impose on a module.
+
 ---
 
 ## What no third party can do yet
@@ -100,7 +143,17 @@ than after it.
 
 ## Not in this release
 
-* **OCSP.** Only CRLs. OCSP is a network service and belongs with #111.
+* **An OCSP responder that listens.** Signing OCSP responses *does* ship —
+  `fhsm-ca ocsp-respond` takes a request file and returns a signed response,
+  and `issue --profile ocsp-responder` produces a delegated responder
+  certificate with `id-kp-OCSPSigning` and `id-pkix-ocsp-nocheck`. What is
+  missing is anything that answers on a port; `fhsm-service` has no `/ocsp`
+  route yet.
+* **`/verify` and `/certificates`.** Named by the service and answering 501.
+* **A queue with a depth.** Requests past the worker count wait in the kernel's
+  accept backlog, where the daemon can neither see nor reorder them. It is why
+  the fairness cap reduces the cost of a saturating client to 2.4x rather than
+  to nothing.
 * **Delta CRLs**, countersignatures, timestamps, certificate chains in CMS.
 * **`signingTime`** in CMS: OpenSSL adds it by default, this does not.
   Recording when a signature was made is a decision for the operator.
