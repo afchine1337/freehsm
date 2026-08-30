@@ -697,6 +697,13 @@ audit-switch:
 service-guards: service/fhsm-service tools/fhsm-token
 	sh tests/service_guards.sh
 
+# The budget test is separate from service-guards because it stops and starts
+# the daemon: the property it exists for -- a count that survives a restart --
+# cannot be seen by a suite that never restarts anything.
+.PHONY: service-budget
+service-budget: service/fhsm-service tools/fhsm-token tools/fhsm-csr
+	sh tests/service_budget.sh
+
 .PHONY: ocsp-delegated
 ocsp-delegated:
 	$(MAKE) clean

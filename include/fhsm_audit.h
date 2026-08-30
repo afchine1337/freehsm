@@ -123,7 +123,13 @@ typedef enum fhsm_audit_event_e {
      * a signature for the price of being turned away. The transition into the
      * limited state is logged, the refusals inside it are counted, and this
      * event closes the burst with the count and how long it lasted. */
-    FHSM_EV_IDENTITY_RESUMED = 84
+    FHSM_EV_IDENTITY_RESUMED = 84,
+    /* An identity crossed out of its free allowance of authorisation
+     * refusals. docs/RATE_LIMIT.md calls this the budget's real product: a
+     * stolen certificate is not detectable by content, since every request it
+     * makes is well-formed and authorised -- what changes is the rate and the
+     * shape. Written once per crossing, never per refusal. */
+    FHSM_EV_IDENTITY_LIMITED = 85
 } fhsm_audit_event_t;
 
 /* Open the audit log for a given token. Creates the file if absent,

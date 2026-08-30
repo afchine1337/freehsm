@@ -569,6 +569,219 @@ static void ident_leave(const char *subject, int served)
     pthread_mutex_unlock(&g_ident_mu);
 }
 
+/* --------------------------------------------------------------------------
+ * The refusal budget --- job 2 of docs/RATE_LIMIT.md
+ *
+ * An authorised client asking for keys it is not authorised for is mapping the
+ * token, and repetition is how that is done. What counts here is exactly the
+ * authorisation refusal -- a key the policy does not grant, a key that does
+ * not exist, a subject the policy does not know, the three that /sign answers
+ * identically. Not a malformed request, which says nothing about the token.
+ * Not a request already refused by this budget or by the fairness cap, because
+ * counting those would let the control tighten under its own refusals.
+ *
+ * PERSIST THE COUNT. DERIVE THE DELAY. The token bought that lesson: it once
+ * stored throttle deadlines in the CLOCK_MONOTONIC domain, and a 500 ms delay
+ * read back after a reboot became thirty days.
+ *
+ * Here it goes further -- **the count is the only thing on disk.** The decay
+ * needs elapsed time, and there is no clock that can be persisted honestly:
+ * CLOCK_MONOTONIC restarts at boot, CLOCK_REALTIME moves under `date -s`. So
+ * nothing else is stored, and on load the decay clock simply starts again. A
+ * restart *pauses* the decay; it never rewinds it. That direction is the one
+ * that matters: RATE_LIMIT.md requires that a crash -- which an attacker may
+ * be able to cause -- must not hand back a reset. The cost is that an honest
+ * client's recovery is delayed by a restart, bounded by the decay it would
+ * have earned meanwhile.
+ *
+ * WHEN IT IS WRITTEN. Not at shutdown: a crash is precisely the case this
+ * exists for. Not on every refusal either, when the count is still inside the
+ * free allowance, because losing a count that owes no delay costs nothing.
+ * Written on each increment at or past the allowance -- and the write rate is
+ * then bounded by the delay the count itself imposes, which is a pleasant
+ * property rather than a coincidence: at a count of 8 the client is held for
+ * 8 s, so it cannot force more than one write per 8 s.
+ *
+ * NEVER A PERMANENT LOCK. The delay escalates, is capped, and always expires.
+ * Only the operator suspends an identity, by revoking its certificate.
+ * ----------------------------------------------------------------------- */
+#define BUDGET_MAX     256   /* identities remembered; > any realistic client set */
+#define BUDGET_FREE      4   /* refusals that cost nothing -- a typo is not an attack */
+#define BUDGET_DECAY_S 600   /* one refusal forgiven per ten quiet minutes */
+#define BUDGET_CAP_S    60   /* the delay never exceeds this */
+
+typedef struct {
+    char     subject[FHSM_AUDIT_ACTOR_MAX];
+    unsigned count;
+    time_t   last;        /* monotonic; in-process only, never written */
+    int      used;
+    int      announced;   /* the crossing into "delayed" has been logged */
+} budget_t;
+
+static pthread_mutex_t g_budget_mu = PTHREAD_MUTEX_INITIALIZER;
+static budget_t        g_budget[BUDGET_MAX];
+static char            g_budget_path[512];
+
+/* Escalating, capped, and zero inside the free allowance. Doubling from one
+ * second: 5 -> 1 s, 6 -> 2, 7 -> 4, 8 -> 8, 9 -> 16, 10 -> 32, 11 -> 60. */
+static long budget_delay_s(unsigned n)
+{
+    if (n <= BUDGET_FREE) return 0;
+    unsigned k = n - BUDGET_FREE - 1;
+    if (k >= 20) return BUDGET_CAP_S;
+    long d = 1L << k;
+    return d > BUDGET_CAP_S ? BUDGET_CAP_S : d;
+}
+
+/* Caller holds g_budget_mu. */
+static unsigned budget_decayed(const budget_t *b, time_t now)
+{
+    if (b->count == 0) return 0;
+    long quiet = (long)(now - b->last);
+    if (quiet < 0) quiet = 0;
+    unsigned forgiven = (unsigned)(quiet / BUDGET_DECAY_S);
+    return forgiven >= b->count ? 0 : b->count - forgiven;
+}
+
+/* The whole table, rewritten. It is at most BUDGET_MAX short lines, and a
+ * partial file would be worse than a slow one: temp, fsync, rename. */
+static void budget_save_locked(void)
+{
+    if (g_budget_path[0] == '\0') return;
+    char tmp[600];
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp", g_budget_path);
+    if (n < 0 || (size_t)n >= sizeof tmp) return;
+
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "# fhsm-service refusal budget v1 -- count<TAB>subject\n");
+    for (int i = 0; i < BUDGET_MAX; i++) {
+        if (g_budget[i].used && g_budget[i].count > 0)
+            fprintf(f, "%u\t%s\n", g_budget[i].count, g_budget[i].subject);
+    }
+    if (fflush(f) != 0 || fsync(fileno(f)) != 0) { fclose(f); unlink(tmp); return; }
+    fclose(f);
+    if (rename(tmp, g_budget_path) != 0) unlink(tmp);
+}
+
+static void budget_load(const char *dir)
+{
+    if (!dir || !*dir) return;
+    int n = snprintf(g_budget_path, sizeof g_budget_path, "%s/budget", dir);
+    if (n < 0 || (size_t)n >= sizeof g_budget_path) { g_budget_path[0] = '\0'; return; }
+
+    FILE *f = fopen(g_budget_path, "r");
+    if (!f) return;                       /* no budget yet is not an error */
+    time_t now = mono_now();
+    char line[600];
+    int slot = 0;
+    while (fgets(line, sizeof line, f) && slot < BUDGET_MAX) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        char *tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = '\0';
+        char *subj = tab + 1;
+        size_t L = strlen(subj);
+        while (L && (subj[L-1] == '\n' || subj[L-1] == '\r')) subj[--L] = '\0';
+        if (L == 0 || L >= sizeof g_budget[0].subject) continue;
+        unsigned c = (unsigned)strtoul(line, NULL, 10);
+        if (c == 0) continue;
+        snprintf(g_budget[slot].subject, sizeof g_budget[slot].subject, "%s", subj);
+        g_budget[slot].count = c;
+        g_budget[slot].last  = now;   /* the decay clock starts now, not before */
+        g_budget[slot].used  = 1;
+        slot++;
+    }
+    fclose(f);
+    if (slot > 0)
+        fprintf(stderr, "fhsm-service: refusal budget restored for %d identity(ies)\n",
+                slot);
+}
+
+/* Is this identity inside the interval its last refusal earned? Returns the
+ * seconds remaining, or 0 to let the request through.
+ *
+ * THE DELAY IS AN INTERVAL BETWEEN ATTEMPTS, NOT A WINDOW OF REFUSAL. A window
+ * would be a lock wearing a different word: at a count of 8 the client would
+ * be shut out until the decay brought it back under the allowance, which is
+ * forty minutes. What the document asks for is that the delay "escalates, is
+ * capped, and always expires" -- so one attempt is admitted once the interval
+ * has passed, and if that attempt is legitimate the client is simply served.
+ *
+ * A refusal produced *by this function* does not touch `last`. Otherwise every
+ * retry would push the deadline forward and the client could never leave --
+ * the control tightening under its own refusals, which is the same defect the
+ * counting rule above avoids. */
+static long budget_retry_after(const char *subject)
+{
+    time_t now = mono_now();
+    long   wait = 0;
+    pthread_mutex_lock(&g_budget_mu);
+    for (int i = 0; i < BUDGET_MAX; i++) {
+        if (!g_budget[i].used || strcmp(g_budget[i].subject, subject) != 0) continue;
+        unsigned n = budget_decayed(&g_budget[i], now);
+        long need = budget_delay_s(n);
+        long since = (long)(now - g_budget[i].last);
+        if (since < 0) since = 0;
+        if (need > since) wait = need - since;
+        break;
+    }
+    pthread_mutex_unlock(&g_budget_mu);
+    return wait;
+}
+
+/* One authorisation refusal against this identity. Returns the count reached,
+ * and sets *announce when this is the crossing out of the free allowance --
+ * the event docs/RATE_LIMIT.md calls the budget's real product: not the
+ * refusal, but the record that an identity started behaving differently. */
+static unsigned budget_charge(const char *subject, int *announce)
+{
+    time_t now = mono_now();
+    *announce = 0;
+    pthread_mutex_lock(&g_budget_mu);
+
+    int slot = -1, spare = -1;
+    unsigned oldest = 0;
+    for (int i = 0; i < BUDGET_MAX; i++) {
+        if (!g_budget[i].used) { if (spare < 0) spare = i; continue; }
+        if (strcmp(g_budget[i].subject, subject) == 0) { slot = i; break; }
+        /* An entry decayed to nothing carries no information and is reusable.
+         * Preferring the emptiest keeps a busy attacker from evicting the
+         * record of a quieter one. */
+        unsigned d = budget_decayed(&g_budget[i], now);
+        if (d == 0 && (spare < 0 || d < oldest)) { spare = i; oldest = d; }
+    }
+    if (slot < 0) {
+        if (spare < 0) { pthread_mutex_unlock(&g_budget_mu); return 0; }
+        slot = spare;
+        snprintf(g_budget[slot].subject, sizeof g_budget[slot].subject, "%s", subject);
+        g_budget[slot].count     = 0;
+        g_budget[slot].announced = 0;
+        g_budget[slot].used      = 1;
+    }
+
+    unsigned before = budget_decayed(&g_budget[slot], now);
+    g_budget[slot].count = before + 1;
+    g_budget[slot].last  = now;
+
+    if (g_budget[slot].count > BUDGET_FREE) {
+        if (!g_budget[slot].announced) {
+            g_budget[slot].announced = 1;
+            *announce = 1;
+        }
+        /* Written here and not at shutdown: a crash is the case this exists
+         * for. Not written below the allowance either, where losing the count
+         * costs nothing -- and past it, the delay bounds how often a client
+         * can force a write. */
+        budget_save_locked();
+    } else {
+        g_budget[slot].announced = 0;
+    }
+    unsigned reached = g_budget[slot].count;
+    pthread_mutex_unlock(&g_budget_mu);
+    return reached;
+}
+
 static volatile sig_atomic_t g_stop = 0;
 static int g_stop_pipe[2] = { -1, -1 };
 
@@ -973,6 +1186,17 @@ static void serve(int fd, uid_t proxy_uid)
         else                      fhsm_audit_set_actor(r.subject);
     }
 
+    /* The budget first, before the fairness cap even counts this request as in
+     * flight: an identity inside the interval its refusals earned should not
+     * occupy a slot in either table. Rule 1 again -- decided before any audit
+     * write, so the control's own record cannot become the flood. */
+    long retry_after = 0;
+    if (v.reason == NULL) {
+        retry_after = budget_retry_after(r.subject);
+        if (retry_after > 0)
+            v = (verdict_t){ 429, "refusal_budget" };
+    }
+
     /* Before the route, before the pool, and -- per docs/RATE_LIMIT.md rule 1
      * -- before any audit write: a control whose own record can be flooded is
      * a control that hands the attacker the log. Nothing has been done on this
@@ -1070,6 +1294,29 @@ static void serve(int fd, uid_t proxy_uid)
         else if (v.reason == NULL) v = (verdict_t){ 404, "unknown_route" };
     }
 
+    /* An authorisation refusal, and only that one, is what the budget counts.
+     * v.reason is compared rather than the status: 403 is also what a missing
+     * identity and a non-proxy peer get, and neither says anything about the
+     * token. Charged after the verdict and outside every lock, because the
+     * announcement writes to the audit log. */
+    if (v.reason != NULL && strcmp(v.reason, "not_authorised") == 0) {
+        int announce = 0;
+        unsigned n = budget_charge(r.subject, &announce);
+        if (announce) {
+            char cnt[32], del[32];
+            snprintf(cnt, sizeof cnt, "%u", n);
+            snprintf(del, sizeof del, "%ld", budget_delay_s(n));
+            /* The budget's real product. A certificate stolen from a
+             * legitimate client is not detectable by content -- every request
+             * it makes is well-formed and authorised. What changes is the rate
+             * and the shape, so the line saying an identity started behaving
+             * differently is worth more than the refusal itself. */
+            (void)fhsm_audit_event(FHSM_EV_IDENTITY_LIMITED, -1, -1,
+                                    FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
+                                    "refusals", cnt, "delay_s", del, NULL);
+        }
+    }
+
     /* Every refusal is written except the inside of a throttled burst, whose
      * first line was already written by ident_enter() and whose remainder is
      * counted for the identity_resumed line. This is the weakening
@@ -1085,12 +1332,26 @@ static void serve(int fd, uid_t proxy_uid)
                                 "route", r.target[0] ? r.target : "-",
                                 NULL);
     }
-    /* Retry-After only on 429, and only because the header cannot say less.
-     * Its unit is seconds; the condition it describes clears when a worker
-     * finishes a signature, which is single-digit milliseconds. One second is
-     * the smallest lie available, and it is on the safe side. */
-    respond_with(fd, v.status, "refused\n",
-                 v.status == 429 ? "Retry-After: 1\r\n" : NULL);
+    /* Retry-After, on both kinds of 429 and with different honesty. From the
+     * budget it is the interval actually derived from the count. From the
+     * fairness cap it is one second, because the header's unit is seconds and
+     * the condition clears when a worker finishes a signature -- single-digit
+     * milliseconds, so one is the smallest overstatement available.
+     *
+     * Known and accepted: the two are distinguishable by their value, so a
+     * client can tell "you are being throttled for probing" from "the service
+     * is busy". docs/RATE_LIMIT.md asks that the refusal not say why, and it
+     * does not -- status and body are identical. Telling an attacker their
+     * probing was noticed is a deterrent; telling them which key exists would
+     * not be. */
+    char ra[64];
+    const char *extra = NULL;
+    if (v.status == 429) {
+        snprintf(ra, sizeof ra, "Retry-After: %ld\r\n",
+                 retry_after > 0 ? retry_after : 1L);
+        extra = ra;
+    }
+    respond_with(fd, v.status, "refused\n", extra);
 
     /* One exit, reached by every path, because the previous slice lost a
      * signature buffer to exactly this shape: per-request teardown repeated at
@@ -1326,6 +1587,11 @@ int main(int argc, char **argv)
     /* Set before any worker starts, read by every worker afterwards, never
      * written again -- so it needs no lock of its own. */
     g_workers  = (int)workers;
+
+    /* The refusal budget, from the same directory as the token and the audit
+     * log. Loaded before the socket exists, so no request can be served
+     * against an empty budget that a crash was supposed to preserve. */
+    budget_load(getenv("FHSM_TOKENS_DIR"));
 
     if (pipe(g_stop_pipe) != 0) { perror("fhsm-service: pipe"); return 1; }
 

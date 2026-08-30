@@ -8,6 +8,54 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **The refusal budget (#111, `docs/RATE_LIMIT.md` job 2).** An authorised
+  client asking for keys it is not authorised for is mapping the token, and
+  repetition is how that is done. What counts is exactly the authorisation
+  refusal -- a key the policy does not grant, a key that does not exist, a
+  subject it does not know, the three `/sign` answers identically. Not a
+  malformed request, which says nothing about the token; not one already
+  refused by the budget or the fairness cap, or the control would tighten under
+  its own refusals.
+
+  Four refusals are free -- a typo in a key label is not an attack. Past that
+  the delay doubles from one second and stops at sixty, and the count decays by
+  one every ten quiet minutes. Nothing resets it outright: a reset on a served
+  request, which is what the PIN throttle does, would let an attacker interleave
+  one legitimate request between probes. The PIN can afford that because there
+  is a secret to guess; here there is not.
+
+  **The delay is an interval between attempts, not a window of refusal**, and a
+  refusal produced by the budget does not push it forward. Otherwise retrying is
+  what keeps you out. Both were mutated to check the tests notice: with the
+  deadline pushed forward on every refusal, a client retrying every 100 ms never
+  got through in four seconds against a one-second delay.
+
+  **The count is the only thing on disk.** The decay needs elapsed time and no
+  clock can be persisted honestly -- `CLOCK_MONOTONIC` restarts at boot,
+  `CLOCK_REALTIME` moves under `date -s`, and the token bought that lesson when
+  a 500 ms throttle came back as thirty days. So a restart *pauses* the decay
+  and never rewinds it, which is the direction the document requires: a crash,
+  which an attacker may be able to cause, must not hand back a reset. Written on
+  each increment at or past the allowance rather than at shutdown, and the write
+  rate is then bounded by the delay the count itself imposes.
+
+  New audit event `identity_limited` (85) at the crossing, with the count and
+  the delay it earned. Once per crossing, never per refusal -- the document
+  calls this the budget's real product: a stolen certificate is not detectable
+  by content, since every request it makes is well-formed and authorised, so
+  what changes is the rate and the shape.
+
+  Recorded rather than left to be found: **the interval belongs to the identity,
+  not to the probing**, so after the crossing a legitimate request from that
+  subject waits too. That is what makes a stolen certificate cost its holder
+  something, and it means an attacker holding one can slow the real client down.
+  The answer stays revocation. And the two kinds of 429 are distinguishable by
+  their `Retry-After` while the refusal itself says nothing.
+
+  `tests/service_budget.sh`, and `make service-budget`. Separate from
+  `service_guards.sh` because it stops and restarts the daemon: the property
+  that matters most cannot be seen by a suite that never restarts anything.
+
 * **Fairness between identities, and the log compression that makes it work
   (#111).** `docs/RATE_LIMIT.md` asked for a cap on "how much of the pool one
   identity may hold". Measured against the service, **that cap could never

@@ -259,16 +259,72 @@ nothing else.
   with no cooldown, and **42392 refusals produced 2 lines** with it.
 * A burst still open at shutdown is flushed, so its count is not lost.
 
+**Job 2, the refusal budget, is implemented too**, in the same file and
+asserted in `tests/service_budget.sh` -- a separate script because it stops and
+restarts the daemon, and the property that matters most cannot be seen by a
+suite that never restarts anything.
+
+* **What counts is the authorisation refusal and nothing else**: a key the
+  policy does not grant, a key that does not exist, a subject the policy does
+  not know -- the three `/sign` answers identically. Not a malformed request,
+  which says nothing about the token. Not a request already refused by the
+  budget or the fairness cap, or the control would tighten under its own
+  refusals.
+* **Four refusals are free.** A typo in a key label is not an attack.
+* **The delay doubles from one second and stops at sixty**: 5 refusals -> 1 s,
+  6 -> 2, 7 -> 4, and so on.
+* **The delay is an interval between attempts, not a window of refusal.** A
+  window would be a lock wearing a different word: at a count of eight the
+  client would be shut out until the decay brought it back under the
+  allowance, forty minutes later. One attempt is admitted once the interval
+  has passed, and if it is legitimate the client is served.
+* **A refusal produced by the budget does not push the deadline forward.**
+  Otherwise retrying is what keeps you out. Measured with that mutation in
+  place: a client retrying every 100 ms never got through in four seconds
+  against a one-second delay.
+* **The count decays by one every ten quiet minutes.** Nothing resets it
+  outright: a reset on a served request -- which is what the PIN throttle does
+  -- would let an attacker interleave one legitimate request between probes and
+  the budget would never bite. The PIN can afford that because there is a
+  secret to guess; here there is not.
+
+### The count is the only thing on disk
+
+The decay needs elapsed time, and **there is no clock that can be persisted
+honestly**: `CLOCK_MONOTONIC` restarts at boot, `CLOCK_REALTIME` moves under
+`date -s`. So nothing else is written, and on load the decay clock starts
+again. A restart *pauses* the decay; it never rewinds it. That direction is the
+one the section above requires -- a crash, which an attacker may be able to
+cause, must not hand back a reset. The cost is that an honest client's recovery
+is delayed by a restart, bounded by the decay it would have earned meanwhile.
+
+It is written on each increment at or past the allowance, not at shutdown -- a
+crash is the case this exists for -- and not below it, where losing a count
+that owes no delay costs nothing. **The write rate is then bounded by the delay
+the count itself imposes**: at a count of eight the client is held for eight
+seconds, so it cannot force more than one write per eight seconds.
+
+### The uncomfortable half of the trade
+
+**The interval belongs to the identity, not to the probing.** After the
+crossing, a legitimate request from that same subject waits too. That is what
+makes a stolen certificate cost its holder something -- and it means an
+attacker holding one can slow the real client down. The answer this document
+already gives stands: only the operator suspends an identity, and they do it by
+revoking the certificate, with a CRL and an OCSP responder that exist.
+
 Two things this does *not* do, said plainly rather than discovered later:
 
 * **It does not make a saturated service fast for everyone.** ×2.4 is better
   than ×7.2, not 1.0. The remaining cost is the queue in the kernel's accept
   backlog, which this process cannot see or reorder. A real queue with a depth
   is the ADR's later slice.
-* **The refusal budget (job 2) is not built.** This is fairness only; nothing
-  here persists a count or escalates a delay. `Retry-After` is sent on the 429
-  because the header cannot say less than one second, not because a delay was
-  derived.
+* **The two kinds of 429 are distinguishable by their `Retry-After`.** From the
+  budget it is the derived interval; from the fairness cap it is always one
+  second. The refusal itself says nothing -- identical status, identical body,
+  as this document requires. Telling an attacker their probing was noticed is a
+  deterrent; telling them which key exists would not be. Recorded as a known
+  choice rather than left to be discovered.
 
 ---
 
