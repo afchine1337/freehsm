@@ -4,7 +4,10 @@
 |--------------------------|---------------------|------------------------|---------------|
 | Project overview         | [`../README.md`](../README.md) | [`../README.fr.md`](../README.fr.md) | ---           |
 | Architecture             | [`ARCHITECTURE.md`](ARCHITECTURE.md) | [`ARCHITECTURE.fr.md`](ARCHITECTURE.fr.md) | ADV_TDS.3 |
-| Network access (#111)    | [`REST_API_DESIGN.md`](REST_API_DESIGN.md) | — | decided, not built |
+| Network access — the design (#111) | [`REST_API_DESIGN.md`](REST_API_DESIGN.md) | — | decided, being built |
+| Network access — deploying it (#111) | [`DEPLOYING_THE_SERVICE.md`](DEPLOYING_THE_SERVICE.md) | — | AGD_OPE.1 |
+| The daemon's token PIN (#111) | [`DAEMON_PIN.md`](DAEMON_PIN.md) | — | AGD_OPE.1 |
+| Rate limiting by identity (#111) | [`RATE_LIMIT.md`](RATE_LIMIT.md) | — | decided and built |
 | PKCS#11 over a socket with p11-kit — setup, and the two limits | [`P11_KIT_REMOTING.md`](P11_KIT_REMOTING.md) | — | AGD_OPE.1 |
 | FIPS 140-3 Security Policy | [`FIPS_140_3.md`](FIPS_140_3.md) | [`FIPS_140_3.fr.md`](FIPS_140_3.fr.md) | (FIPS) |
 | CC EAL4+ Target of Evaluation | [`EAL4_PLUS.md`](EAL4_PLUS.md) | [`EAL4_PLUS.fr.md`](EAL4_PLUS.fr.md) | ASE_*    |

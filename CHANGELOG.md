@@ -8,6 +8,42 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **The service can be deployed (#111).** `systemd/fhsm-service.service` and
+  `docs/DEPLOYING_THE_SERVICE.md`. Built and tested is not the same as
+  installable, and the gap between them is where a beta is judged.
+
+  **The document leads with the thing that matters most: the service believes
+  `X-FHSM-Client-Subject`, and the proxy configuration is therefore part of the
+  security boundary.** Nothing in the daemon can catch a proxy that fails to
+  set the header at all -- a header it never receives is indistinguishable from
+  one the proxy wrote. Two of the three failure modes *are* caught, and the
+  document says exactly which: a client that sends its own alongside the
+  proxy's gets 400, because resolving an ambiguity about identity is how the
+  wrong answer becomes authoritative. The deployment checklist is written as
+  four commands to run, one of which forges the header and must come back 400.
+
+  **The subject format will not be what an operator expects.** The policy file
+  matches the string byte for byte, and nginx changed `$ssl_client_s_dn` in
+  1.11.6 to RFC 4514 -- `CN=web01,O=Example` -- while our own tools print
+  `/O=Example/CN=web01`. A policy in the wrong format does not fail loudly:
+  every request is refused as unauthorised, indistinguishably from an attack by
+  design. Documented with the four forms side by side and the advice to read
+  the `actor` field of the audit log rather than assume.
+
+  The unit needs **systemd 250** for `LoadCredentialEncrypted=`. On older
+  systemd the directive is not an error but an ignored unknown key, so the
+  service starts without its PIN -- verified against systemd 249, where
+  `systemd-analyze verify` says so in as many words. And `PrivateDevices=yes`
+  is deliberately absent, because the module seals the token's DEK through
+  `tpm2` against `/dev/tpmrm0`: hardening it away would disable sealing
+  silently, since #109 made a TPM failure report a device fault rather than
+  lock the token.
+
+  The PIN provisioning procedure is written out because there is no way around
+  the fact that the same PIN must reach both `fhsm-token init` and the
+  credential, so it exists in a shell once. `docs/DAEMON_PIN.md` chose the
+  credential but did not say how to create it.
+
 * **The refusal budget (#111, `docs/RATE_LIMIT.md` job 2).** An authorised
   client asking for keys it is not authorised for is mapping the token, and
   repetition is how that is done. What counts is exactly the authorisation

@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+#
+# fhsm-service --- the signing service behind a reverse proxy (#111).
+#
+# READ docs/DEPLOYING_THE_SERVICE.md BEFORE USING THIS FILE. In particular the
+# section on what the reverse proxy must do: this daemon believes the identity
+# in X-FHSM-Client-Subject, and the only thing standing between that trust and
+# a client choosing its own name is the proxy's configuration.
+#
+# Install:
+#   install -m 0644 systemd/fhsm-service.service /etc/systemd/system/
+#   systemctl daemon-reload
+
+[Unit]
+Description=FreeHSM signing service (PKCS#11 behind a local socket)
+Documentation=file:///usr/share/doc/freehsm/DEPLOYING_THE_SERVICE.md
+After=network.target
+# The token directory must be mounted before the daemon logs in. Without this
+# the service starts, fails C_Login, and restarts into the token's own throttle
+# -- which escalates, so a missing mount turns into a lockout that looks like a
+# credential problem.
+RequiresMountsFor=/var/lib/freehsm
+
+[Service]
+Type=exec
+User=freehsm
+Group=freehsm
+
+# The PIN. docs/DAEMON_PIN.md chose this over an argument (visible in ps), an
+# inherited environment variable (visible in /proc/PID/environ and inherited by
+# anything the daemon spawns), and our own fhsm_tpm_seal (which binds PCRs 0..7,
+# so a kernel update would stop the service from starting).
+#
+# systemd decrypts it into $CREDENTIALS_DIRECTORY/fhsm-pin, mode 0400, on a
+# tmpfs that is unmounted when the unit stops. The encryption is bound to the
+# host TPM when there is one and to /var/lib/systemd/credential.secret
+# otherwise, so the ciphertext is useless on any other machine.
+#
+# The source path is written out rather than left to systemd's credstore
+# search: the file is named .cred, and a bare `LoadCredentialEncrypted=fhsm-pin`
+# looks for a file called exactly `fhsm-pin`, so it would not be found and the
+# daemon would fail to start for a reason that reads as a missing credential
+# rather than a mismatched name.
+#
+# docs/DEPLOYING_THE_SERVICE.md has the procedure that creates it, including
+# the one moment when the PIN exists in a shell -- it has to reach both the
+# token and this credential.
+LoadCredentialEncrypted=fhsm-pin:/etc/credstore.encrypted/fhsm-pin.cred
+
+Environment=FHSM_TOKENS_DIR=/var/lib/freehsm/tokens
+ExecStart=/usr/libexec/fhsm-service \
+    --socket /run/fhsm/service.sock \
+    --policy /etc/freehsm/policy \
+    --proxy-uid 33 \
+    --workers 8 \
+    --pool-max 16
+
+# SIGHUP re-reads the policy at the next request. A reload that fails to parse
+# keeps the policy already in force -- the alternative, an empty policy, fails
+# open.
+ExecReload=/bin/kill -HUP $MAINPID
+
+# The socket lives here, owned by this unit and removed when it stops.
+#
+# THE PROXY USER MUST BE IN THE freehsm GROUP:
+#   usermod -aG freehsm www-data
+#
+# The directory is 0750 freehsm:freehsm, and the daemon binds the socket itself
+# under umask(0117), so it lands at 0660 freehsm:freehsm whatever UMask= below
+# says. Group membership is what lets the proxy traverse the one and open the
+# other. It is not the access control -- --proxy-uid is: a peer whose uid is
+# not the proxy's is refused by SO_PEERCRED before a single byte is read. The
+# permissions are the first door, the credential check is the lock.
+RuntimeDirectory=fhsm
+RuntimeDirectoryMode=0750
+StateDirectory=freehsm
+StateDirectoryMode=0700
+
+Restart=on-failure
+RestartSec=5s
+# Not "always": the daemon exits 2 for a configuration it will not accept -- an
+# unparseable policy, --pool-max below --workers -- and restarting into the
+# same file forever hides the message instead of showing it.
+SuccessExitStatus=0
+
+# --- Hardening ----------------------------------------------------------
+# A daemon that reads one directory, writes one log, and answers one local
+# socket has no business with most of the system. Each of these was chosen
+# because it is true of this service, not copied from a template.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+
+# PrivateDevices=yes is DELIBERATELY ABSENT, and this is the one directive
+# here that must be decided rather than copied.
+#
+# The module seals the token's data-encryption key to the TPM through the
+# `tpm2` tools, against /dev/tpmrm0 (src/fhsm_tpm.c). PrivateDevices=yes
+# replaces /dev with a minimal set that does not include it, so the sealing
+# would stop working -- and it would not stop loudly: #109 made a TPM failure
+# report a device fault rather than lock the token, which is right for a broken
+# TPM and indistinguishable from one this file hid.
+#
+# If the token is NOT sealed to a TPM, uncomment the first line and delete the
+# second. If it is, keep them as they are: /dev is private except for the one
+# device that has to be there.
+#PrivateDevices=yes
+DeviceAllow=/dev/tpmrm0 rw
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+
+# It listens on a UNIX socket and speaks to nothing over IP.
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+PrivateNetwork=yes
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @debug
+
+# Core dumps carry key material out of the secure heap and past every control
+# in this file.
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
