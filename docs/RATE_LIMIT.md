@@ -103,6 +103,14 @@ The naive order is: receive, authorise, log the refusal, return. That makes the
 control's own record the attack. The order is: receive, identify, **check the
 budget**, and only then decide and log.
 
+**Rule 1 is not a nicety, it is what makes rule 1's control work at all.**
+Measured with every refusal written: a throttled request cost **48.8 ms**, and
+391 refusals produced 391 audit lines. A worker "reserved" for another identity
+spent it writing refusal records for the identity being capped, so the cap
+fired and the starvation did not move. With the burst compressed the same
+refusal costs **1.17 ms**, and the starvation drops from ×7.2 to **×2.4**. The
+two rules below are one control; neither is worth building alone.
+
 ### Rule 2 — one line per refused request is a bug
 
 Log the *first* refusal from an identity, and log the transition into the
@@ -128,10 +136,20 @@ corrected in `docs/REST_API_DESIGN.md` §Scaling, and the barrier is now shared
 324 / 493 / 674 sig/s at 1 / 2 / 4 / 8 threads, so it *does* scale past core
 count and the pool is not sized to cores.
 
-**Which does not change what this control is for.** Whatever the pool's size,
-one client issuing as many concurrent requests as there are pooled sessions
-starves every other client. The cap is on how much of the pool one identity may
-hold, not on how big the pool is.
+**Which does not change what this control is for**, but it did change what the
+control counts. This paragraph used to say the cap is on "how much of the pool
+one identity may hold". **Measured against the service, that cap could never
+fire.** `main()` refuses to start with `--pool-max` below `--workers`, a worker
+serves one request at a time, and every path releases its session, so the
+sessions held at once are at most the worker count and the pool is never
+contended. Instrumenting the wait and firing 32 concurrent signatures gave
+**zero pool waits**, in `workers=4/pool=8` and `workers=8/pool=8` alike.
+
+The starvation is real; it is one layer down. With four workers, one identity
+saturating the service took another identity's median latency from **10.4 ms to
+75.1 ms — a factor of 7.2 — with the pool never once contended.** The scarce
+resource is the **worker thread**. So the count is of requests in flight per
+identity, and the cap is on those.
 
 The overwhelmingly likely cause is not malice but a retry loop in a client
 someone deployed on a Friday. A per-identity concurrency cap is what keeps one
@@ -172,7 +190,10 @@ this document, and should be read as re-opening it rather than extending it.
   domain. `CLOCK_MONOTONIC` breaks at reboot, as measured; `CLOCK_REALTIME`
   moves under `date -s`. Derived from the count, neither applies.
 * The concurrency cap (job 1) is in-process and needs no persistence: after a
-  restart the pool is empty, so there is nothing to be unfair about.
+  restart nothing is in flight, so there is nothing to be unfair about.
+* Its clock is `CLOCK_MONOTONIC`, which the bullet above rejects for the
+  budget. The objection there is that it breaks across a reboot; this table
+  does not outlive the process, so there is no reboot for it to survive.
 
 ---
 
@@ -210,6 +231,44 @@ question is which key was used, not which name was on it.
 distinguishes why — the same refusal for an exhausted budget, an unauthorised
 key and a key that does not exist. The client learns when to come back and
 nothing else.
+
+---
+
+## What is built, and what it cost to get right
+
+**Job 1 and rule 2 are implemented** in `service/fhsm_service.c`, asserted in
+`tests/service_guards.sh`. The shape:
+
+* An identity may use every worker **while it is the only one present**. A
+  single-client deployment is never capped, and nobody is refused while the
+  authority is idle.
+* While another identity is present, each is held to `workers - 1`, which
+  leaves a worker the other can always take.
+* **Presence is earned by being served, not by asking.** An identity whose
+  requests are all refused does not become present. Without that, one refused
+  request every 30 s would cost the legitimate client a worker indefinitely —
+  and it was not hypothetical: an existing test's `CN=attacker` probe, refused
+  by the policy, was capping the real client and turning 12 of its 16
+  concurrent signatures into 429s.
+* An identity stays present for 30 s after its last served request.
+* A burst is one `request_refused` line at the transition, a count in memory,
+  and one `identity_resumed` line carrying `suppressed` and `window_s`. It
+  closes after 5 s without a refusal, **not on the next admitted request** —
+  without that hysteresis a capped client is admitted and refused alternately
+  and each swing writes two lines. Measured: 9865 refusals produced 786 lines
+  with no cooldown, and **42392 refusals produced 2 lines** with it.
+* A burst still open at shutdown is flushed, so its count is not lost.
+
+Two things this does *not* do, said plainly rather than discovered later:
+
+* **It does not make a saturated service fast for everyone.** ×2.4 is better
+  than ×7.2, not 1.0. The remaining cost is the queue in the kernel's accept
+  backlog, which this process cannot see or reorder. A real queue with a depth
+  is the ADR's later slice.
+* **The refusal budget (job 2) is not built.** This is fairness only; nothing
+  here persists a count or escalates a delay. `Retry-After` is sent on the 429
+  because the header cannot say less than one second, not because a delay was
+  derived.
 
 ---
 

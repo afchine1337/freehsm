@@ -8,6 +8,52 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **Fairness between identities, and the log compression that makes it work
+  (#111).** `docs/RATE_LIMIT.md` asked for a cap on "how much of the pool one
+  identity may hold". Measured against the service, **that cap could never
+  fire**: `main()` refuses to start with `--pool-max` below `--workers`, a
+  worker serves one request at a time and releases its session on every path,
+  so the pool is never contended. Instrumented, 32 concurrent signatures
+  produced **zero pool waits**.
+
+  The starvation the document describes is real and one layer down: with four
+  workers, one identity saturating the service took another's median latency
+  from **10.4 ms to 75.1 ms, a factor of 7.2**, with the pool never contended.
+  The scarce resource is the worker thread, so the cap counts requests in
+  flight per identity.
+
+  An identity alone may use every worker; while another is present each is held
+  to `workers - 1`. **Presence is earned by being served, not by asking** — an
+  identity whose requests are all refused never becomes present, or one refused
+  request per window would cost the real client a worker indefinitely.
+
+  **The cap alone did nothing, and the measurement said why.** A written
+  refusal cost **48.8 ms** — a refusal is nearly as expensive as a signature,
+  as `RATE_LIMIT.md` had already measured — so the worker reserved for the
+  quiet identity spent it writing refusal records for the loud one. Rule 2 is
+  not a separate slice; it carries rule 1. With the burst compressed to one
+  line at the transition, a count in memory and one `identity_resumed` line
+  closing it: refusal **1.17 ms**, starvation **×2.4**, and **42392 refusals
+  produced 2 audit lines**.
+
+  The burst closes after 5 s without a refusal rather than on the next admitted
+  request: without that, a capped client alternates admitted and refused and
+  each swing writes two lines — 9865 refusals produced 786 lines before the
+  cooldown existed.
+
+  New audit event `identity_resumed` (84), carrying `suppressed` and
+  `window_s`. Bursts still open at shutdown are flushed rather than lost.
+
+  Not built here, and said in the document rather than left to be assumed: the
+  refusal budget of job 2 — nothing persists a count or derives a delay — and
+  ×2.4 is not 1.0, the remainder being the kernel accept backlog this process
+  cannot see.
+
+* **`serve()` has one exit.** Per-request teardown was repeated at each of five
+  returns, which is the shape that lost a signature buffer in the previous
+  slice: teardown written at every return is teardown that will be forgotten at
+  the next return added. The early returns are now `goto done`.
+
 * **`POST /sign` — the service's first route that reaches a key (#111).**
   Headers carry the identity and the key label (`X-FHSM-Client-Subject`,
   `X-FHSM-Key`), the raw body is the message, the response body is the
@@ -269,6 +315,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **`test_audit_concurrent` asserted a performance property as if it were a
+  correctness one, and failed on fast storage.** Group commit shares an `fsync`
+  between writers that arrive while one is in flight -- a race whose outcome is
+  a property of the filesystem, not of the code. Measured: on ext4 with `fsync`
+  at ~3 ms, 320 events take 77 barriers. Where `fsync` costs nothing -- a tmpfs
+  `/tmp`, which is where the suite puts its logs -- sharing becomes marginal
+  and unstable: on one reporter's machine the same run gave 320 barriers, then
+  296 a few minutes later, so the assertion is a coin flip rather than a
+  statement about the code. With a free barrier there is nothing to share and
+  nothing to save. The test now measures what one `fsync`
+  costs in the log's own directory, prints it, and asserts sharing only above
+  100 us -- below that it says so and moves on. The chain, the line count and
+  "every event had a barrier" stay unconditional, because those are
+  correctness.
+
 * **The test suite ran against the wrong OpenSSL, silently.** Every test recipe
   in the Makefile said `LD_LIBRARY_PATH=.`, which *replaces* the caller's rather
   than extending it, so the binaries loaded whatever `libcrypto` the system

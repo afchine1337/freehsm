@@ -113,7 +113,17 @@ typedef enum fhsm_audit_event_e {
     FHSM_EV_SERVICE_START    = 80,
     FHSM_EV_SERVICE_STOP     = 81,
     FHSM_EV_REQUEST_ACCEPTED = 82,
-    FHSM_EV_REQUEST_REFUSED  = 83
+    FHSM_EV_REQUEST_REFUSED  = 83,
+    /* One line for a burst of refusals, not one line per refusal.
+     * docs/RATE_LIMIT.md rule 2: a control whose own record can be flooded
+     * hands the attacker the log -- the audit latches the module into ERROR
+     * when a write fails, so ~10 GB/day of refusal lines makes that latch
+     * reachable by anyone who can be refused. Measured here: a throttled
+     * request cost 48.8 ms and produced one audit line, which is the price of
+     * a signature for the price of being turned away. The transition into the
+     * limited state is logged, the refusals inside it are counted, and this
+     * event closes the burst with the count and how long it lasted. */
+    FHSM_EV_IDENTITY_RESUMED = 84
 } fhsm_audit_event_t;
 
 /* Open the audit log for a given token. Creates the file if absent,

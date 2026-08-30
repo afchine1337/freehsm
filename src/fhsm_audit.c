@@ -127,6 +127,7 @@ static const char *event_name(fhsm_audit_event_t ev) {
         case FHSM_EV_SERVICE_STOP:     return "service_stop";
         case FHSM_EV_REQUEST_ACCEPTED: return "request_accepted";
         case FHSM_EV_REQUEST_REFUSED:  return "request_refused";
+        case FHSM_EV_IDENTITY_RESUMED: return "identity_resumed";
         default:                       return "unknown";
     }
 }

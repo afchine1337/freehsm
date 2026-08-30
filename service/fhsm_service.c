@@ -352,6 +352,223 @@ static void pool_close_all(void)
     pthread_mutex_unlock(&g_pool_mu);
 }
 
+/* --------------------------------------------------------------------------
+ * Per-identity concurrency --- fairness, and the resource it actually guards
+ *
+ * docs/RATE_LIMIT.md says "the cap is on how much of the pool one identity may
+ * hold". Measured against this service, that cap could never fire: main()
+ * refuses to start when --pool-max < --workers, a worker serves one request at
+ * a time, and every path releases its session, so the sessions held at once
+ * are at most the worker count and the pool is never contended. Instrumenting
+ * the wait and firing 32 concurrent signatures gave pool_waits = 0, in
+ * workers=4/pool=8 and in workers=8/pool=8 alike.
+ *
+ * The starvation the document describes is real; it happens one layer down.
+ * With four workers, one identity saturating the service took another
+ * identity's median latency from 10.4 ms to 75.1 ms -- a factor of 7.2, with
+ * zero pool contention. **The scarce resource is the worker thread.** So the
+ * count is of requests in flight per identity, not of pooled sessions.
+ *
+ * THE CAP APPLIES ONLY WHILE SOMEBODY ELSE IS USING THE SERVICE. One identity
+ * alone may use every worker; while another identity is also present, each is
+ * held to workers-1, which leaves a worker the other can always take. A
+ * service with a single client loses nothing, and nobody is refused while the
+ * service is idle -- refusing a client on an idle authority would be a worse
+ * failure than the one being prevented.
+ *
+ * "PRESENT" MEANS RECENTLY SEEN, NOT CURRENTLY IN FLIGHT, and the difference
+ * is the whole control. The first version of this counted only identities with
+ * a request in flight, which is circular and was measured to do nothing: a
+ * starved client spends its time in the kernel's accept backlog, where this
+ * process cannot see it. It is not in flight, so it caps nobody; it caps
+ * nobody, so it never gets a worker. Against a saturating identity the cap
+ * fired zero times and the starvation was unchanged.
+ *
+ * PRESENCE IS EARNED BY BEING SERVED, not by asking. An identity whose
+ * requests are all refused -- an unauthorised key, an unknown subject -- does
+ * not become present and does not tighten anyone else's cap. Found by the
+ * existing test: an earlier "CN=attacker" probe, refused by the policy, had
+ * marked itself present, which capped the legitimate client to workers-1 and
+ * turned 12 of its 16 concurrent signatures into 429s. Left alone it would
+ * also be an attack: one refused request every window, and the real client
+ * loses a worker for as long as the attacker keeps it up.
+ *
+ * So an identity stays present for IDENT_WINDOW_S after its last *served*
+ * request.
+ * The clock is CLOCK_MONOTONIC: docs/RATE_LIMIT.md rejects it for the refusal
+ * budget because it breaks across a reboot, which is exactly right there and
+ * irrelevant here -- this table is in-process and does not outlive the
+ * service, so there is no reboot for it to survive.
+ *
+ * A free entry always exists: the in_flight counts sum to at most the worker
+ * count, the table is larger than the largest legal worker count, so at least
+ * one entry is idle and can be taken -- the oldest, if none has expired.
+ * ----------------------------------------------------------------------- */
+#define IDENT_MAX      (POOL_MAX_LIMIT + 1)   /* > any legal --workers */
+#define IDENT_WINDOW_S 30   /* how long an identity stays "present" */
+/* How long an identity must go without a refusal before its burst is declared
+ * over. Without it the burst flaps: a saturating client is refused, admitted,
+ * refused again, and each swing writes two lines. Measured at zero cooldown,
+ * 9865 refusals produced 786 audit lines -- far better than one per refusal
+ * and still not the "handful" docs/RATE_LIMIT.md asks for. The burst is a
+ * property of a period, not of a single request. */
+#define BURST_COOLDOWN_S 5
+
+typedef struct {
+    char          subject[FHSM_AUDIT_ACTOR_MAX];
+    int           in_flight;
+    int           used;
+    time_t        last_seen;         /* CLOCK_MONOTONIC seconds */
+    int           limited;           /* inside a burst of refusals */
+    unsigned long suppressed;        /* refusals counted, not written */
+    time_t        limited_since;
+    time_t        last_refusal;
+} ident_t;
+
+/* What the caller must write to the log, decided under the lock and written
+ * outside it -- an audit write takes a durable barrier, and holding a mutex
+ * across one would serialise every identity behind the slowest disk. */
+typedef struct {
+    int           log_refusal;   /* this refusal is the transition into limited */
+    int           log_resume;    /* the burst just ended; close it */
+    unsigned long suppressed;    /* how many were counted and not written */
+    long          window_s;      /* how long the burst lasted */
+} ident_note_t;
+
+static time_t mono_now(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return ts.tv_sec;
+}
+
+static pthread_mutex_t g_ident_mu = PTHREAD_MUTEX_INITIALIZER;
+static ident_t         g_ident[IDENT_MAX];
+static int             g_workers  = 0;   /* set once, in main(), before threads */
+
+/* 0 admitted and counted, -1 refused. Refusing does not count: a request that
+ * was turned away never held a worker, and counting it would make the cap
+ * tighten under its own refusals. */
+static int ident_enter(const char *subject, ident_note_t *note)
+{
+    time_t now = mono_now();
+    memset(note, 0, sizeof *note);
+    pthread_mutex_lock(&g_ident_mu);
+
+    int mine = -1, spare = -1, others = 0;
+    time_t oldest = 0;
+    for (int i = 0; i < IDENT_MAX; i++) {
+        if (!g_ident[i].used) { if (spare < 0) spare = i; continue; }
+
+        int present = g_ident[i].in_flight > 0 ||
+                      (now - g_ident[i].last_seen) < IDENT_WINDOW_S;
+        if (strcmp(g_ident[i].subject, subject) == 0) { mine = i; continue; }
+        if (present) {
+            others++;
+        } else if (g_ident[i].in_flight == 0) {
+            /* Expired and idle: reusable. Prefer the least recently seen, so a
+             * burst of one-off identities does not evict an active client. */
+            if (spare < 0 || g_ident[i].last_seen < oldest) {
+                spare = i; oldest = g_ident[i].last_seen;
+            }
+        }
+    }
+
+    int cap = g_workers;
+    if (others > 0 && cap > 1) cap = g_workers - 1;
+
+    if (mine >= 0) {
+        if (g_ident[mine].in_flight >= cap) {
+            /* Refused, and last_seen is *not* touched: a client kept out must
+             * not be able to hold its own presence open by being refused.
+             *
+             * The first refusal of a burst is written, because an identity
+             * that starts being turned away is the event an operator needs.
+             * The rest are counted. */
+            if (!g_ident[mine].limited) {
+                g_ident[mine].limited       = 1;
+                g_ident[mine].limited_since = now;
+                g_ident[mine].suppressed    = 0;
+                note->log_refusal           = 1;
+            } else {
+                g_ident[mine].suppressed++;
+            }
+            g_ident[mine].last_refusal = now;
+            pthread_mutex_unlock(&g_ident_mu);
+            return -1;
+        }
+        if (g_ident[mine].limited &&
+            (now - g_ident[mine].last_refusal) >= BURST_COOLDOWN_S) {
+            /* Admitted, and quiet long enough that the burst is really over.
+             * Not "admitted once": a client at its cap is admitted and refused
+             * alternately, and closing on the first admission would write two
+             * lines per swing. */
+            note->log_resume  = 1;
+            note->suppressed  = g_ident[mine].suppressed;
+            note->window_s    = (long)(now - g_ident[mine].limited_since);
+            g_ident[mine].limited    = 0;
+            g_ident[mine].suppressed = 0;
+        }
+        g_ident[mine].in_flight++;
+        /* last_seen is not touched here: admission is not service. It is set
+         * by ident_leave(), and only for a request that was actually served. */
+    } else {
+        /* A brand-new identity is never refused: it holds nothing yet, and
+         * turning away a client's first request because others are busy is the
+         * starvation this exists to prevent, pointed the other way. */
+        if (spare < 0) { pthread_mutex_unlock(&g_ident_mu); return 0; }
+        snprintf(g_ident[spare].subject, sizeof g_ident[spare].subject,
+                 "%s", subject);
+        g_ident[spare].in_flight    = 1;
+        g_ident[spare].last_seen    = 0;   /* not present until it is served */
+        g_ident[spare].limited      = 0;
+        g_ident[spare].suppressed   = 0;
+        g_ident[spare].last_refusal = 0;
+        g_ident[spare].used         = 1;
+        pthread_mutex_unlock(&g_ident_mu);
+        return 0;
+    }
+    pthread_mutex_unlock(&g_ident_mu);
+    return 0;
+}
+
+/* A burst that never ended because the client stopped asking would otherwise
+ * take its count to the grave. Called once, after the workers have joined. */
+static void ident_flush_bursts(void)
+{
+    time_t now = mono_now();
+    for (int i = 0; i < IDENT_MAX; i++) {
+        if (!g_ident[i].used || !g_ident[i].limited) continue;
+        char n[32], w[32];
+        snprintf(n, sizeof n, "%lu", g_ident[i].suppressed);
+        snprintf(w, sizeof w, "%ld", (long)(now - g_ident[i].limited_since));
+        fhsm_audit_set_actor(g_ident[i].subject);
+        (void)fhsm_audit_event(FHSM_EV_IDENTITY_RESUMED, -1, -1,
+                                FHSM_ROLE_NONE, FHSM_RV_OK,
+                                "suppressed", n, "window_s", w,
+                                "ended", "shutdown", NULL);
+        fhsm_audit_set_actor(NULL);
+        g_ident[i].limited = 0;
+    }
+}
+
+/* `served` is what earns presence. A request that was refused for any reason
+ * decrements the in-flight count and nothing else. */
+static void ident_leave(const char *subject, int served)
+{
+    time_t now = mono_now();
+    pthread_mutex_lock(&g_ident_mu);
+    for (int i = 0; i < IDENT_MAX; i++) {
+        if (g_ident[i].used && g_ident[i].in_flight > 0 &&
+            strcmp(g_ident[i].subject, subject) == 0) {
+            g_ident[i].in_flight--;
+            if (served) g_ident[i].last_seen = now;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_ident_mu);
+}
+
 static volatile sig_atomic_t g_stop = 0;
 static int g_stop_pipe[2] = { -1, -1 };
 
@@ -385,13 +602,15 @@ static const verdict_t OK_VERDICT = { 200, NULL };
  * rig can ask the binary under test rather than infer from a sibling. */
 extern const int fhsm_build_fips_strict;
 
-static void respond(int fd, int status, const char *text)
+static void respond_with(int fd, int status, const char *text,
+                          const char *extra)
 {
     const char *phrase = status == 200 ? "OK"
                        : status == 400 ? "Bad Request"
                        : status == 403 ? "Forbidden"
                        : status == 404 ? "Not Found"
                        : status == 405 ? "Method Not Allowed"
+                       : status == 429 ? "Too Many Requests"
                        : status == 413 ? "Payload Too Large"
                        : status == 501 ? "Not Implemented"
                        : status == 503 ? "Service Unavailable"
@@ -402,10 +621,16 @@ static void respond(int fd, int status, const char *text)
         "Content-Type: text/plain\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
+        "%s"
         "\r\n%s",
-        status, phrase, strlen(text), text);
+        status, phrase, strlen(text), extra ? extra : "", text);
     if (n > 0 && (size_t)n < sizeof buf)
         (void)!write(fd, buf, (size_t)n);
+}
+
+static void respond(int fd, int status, const char *text)
+{
+    respond_with(fd, status, text, NULL);
 }
 
 /* Case-insensitive compare for a header name of known length. Header names
@@ -723,6 +948,7 @@ static void serve(int fd, uid_t proxy_uid)
 {
     verdict_t v = OK_VERDICT;
     request_t r;
+    int       counted = 0;      /* this request holds a slot in g_ident */
     memset(&r, 0, sizeof r);
 
     /* The peer first, before a single byte is read. Nothing this process does
@@ -747,14 +973,34 @@ static void serve(int fd, uid_t proxy_uid)
         else                      fhsm_audit_set_actor(r.subject);
     }
 
+    /* Before the route, before the pool, and -- per docs/RATE_LIMIT.md rule 1
+     * -- before any audit write: a control whose own record can be flooded is
+     * a control that hands the attacker the log. Nothing has been done on this
+     * request's behalf yet, so refusing here costs a worker one syscall. */
+    ident_note_t note;
+    memset(&note, 0, sizeof note);
+    if (v.reason == NULL) {
+        if (ident_enter(r.subject, &note) != 0)
+            v = (verdict_t){ 429, "too_many_in_flight" };
+        else
+            counted = 1;
+    }
+    if (note.log_resume) {
+        char n[32], w[32];
+        snprintf(n, sizeof n, "%lu", note.suppressed);
+        snprintf(w, sizeof w, "%ld", note.window_s);
+        (void)fhsm_audit_event(FHSM_EV_IDENTITY_RESUMED, -1, -1,
+                                FHSM_ROLE_NONE, FHSM_RV_OK,
+                                "suppressed", n, "window_s", w, NULL);
+    }
+
     if (v.reason == NULL) {
         if (strcmp(r.target, "/health") == 0 && strcmp(r.method, "GET") == 0) {
             (void)fhsm_audit_event(FHSM_EV_REQUEST_ACCEPTED, -1, -1,
                                     FHSM_ROLE_NONE, FHSM_RV_OK,
                                     "route", "/health", NULL);
             respond(fd, 200, "ok\n");
-            fhsm_audit_set_actor(NULL);
-            return;
+            goto done;
         }
         if (strcmp(r.target, "/token") == 0 && strcmp(r.method, "GET") == 0) {
             /* The only route that touches the module. It exists so the pool
@@ -784,14 +1030,13 @@ static void serve(int fd, uid_t proxy_uid)
                                             (int)sess, FHSM_ROLE_USER, FHSM_RV_OK,
                                             "route", "/token", NULL);
                     respond(fd, 200, body);
-                    fhsm_audit_set_actor(NULL);
-                    return;
+                    goto done;
                 }
             }
         }
         else if (strcmp(r.target, "/sign") == 0 && strcmp(r.method, "POST") == 0) {
             v = do_sign(fd, &r);
-            if (v.reason == NULL) { fhsm_audit_set_actor(NULL); return; }
+            if (v.reason == NULL) goto done;
         }
         else if (strcmp(r.target, "/sign") == 0) {
             /* /sign exists and the method is wrong -- the guard above admits
@@ -814,8 +1059,7 @@ static void serve(int fd, uid_t proxy_uid)
                                     "route", r.target, "state", "not_implemented",
                                     NULL);
             respond(fd, 501, "not implemented yet\n");
-            fhsm_audit_set_actor(NULL);
-            return;
+            goto done;
         }
         /* `else`, not a bare statement. It was unconditional, which was
          * correct only while every branch above ended in `return`: the moment
@@ -826,12 +1070,34 @@ static void serve(int fd, uid_t proxy_uid)
         else if (v.reason == NULL) v = (verdict_t){ 404, "unknown_route" };
     }
 
-    (void)fhsm_audit_event(FHSM_EV_REQUEST_REFUSED, -1, -1,
-                            FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
-                            "reason", v.reason,
-                            "route", r.target[0] ? r.target : "-",
-                            NULL);
-    respond(fd, v.status, "refused\n");
+    /* Every refusal is written except the inside of a throttled burst, whose
+     * first line was already written by ident_enter() and whose remainder is
+     * counted for the identity_resumed line. This is the weakening
+     * docs/RATE_LIMIT.md chooses deliberately: a log that can be flooded into
+     * ERROR records nothing at all, which is strictly worse than a log that
+     * records a burst as a burst. It is also what makes the cap do anything --
+     * measured, a written refusal cost 48.8 ms, so a worker "reserved" for
+     * another identity spent it writing refusals for the one being capped. */
+    if (v.status != 429 || note.log_refusal) {
+        (void)fhsm_audit_event(FHSM_EV_REQUEST_REFUSED, -1, -1,
+                                FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
+                                "reason", v.reason,
+                                "route", r.target[0] ? r.target : "-",
+                                NULL);
+    }
+    /* Retry-After only on 429, and only because the header cannot say less.
+     * Its unit is seconds; the condition it describes clears when a worker
+     * finishes a signature, which is single-digit milliseconds. One second is
+     * the smallest lie available, and it is on the safe side. */
+    respond_with(fd, v.status, "refused\n",
+                 v.status == 429 ? "Retry-After: 1\r\n" : NULL);
+
+    /* One exit, reached by every path, because the previous slice lost a
+     * signature buffer to exactly this shape: per-request teardown repeated at
+     * each return is teardown that will be forgotten at the next return added.
+     * The `goto`s above exist to make this the only place it happens. */
+done:
+    if (counted) ident_leave(r.subject, v.reason == NULL);
     fhsm_audit_set_actor(NULL);
 }
 
@@ -985,6 +1251,9 @@ static void usage(void)
       "                   line. Required. Reloaded on SIGHUP, taking effect\n"
       "                   on the next request; a failed reload keeps the\n"
       "                   rules already in force.\n"
+      "  Fairness: while another identity has a request in flight, each is\n"
+      "  held to --workers minus one, so a client cannot take every worker.\n"
+      "  A single client is never capped, and the refusal is 429.\n\n"
       "  --profile        print the profile this binary was built with and\n"
       "                   exit. The service links the module statically, so\n"
       "                   the answer is about this binary and no other.\n\n"
@@ -1054,6 +1323,9 @@ int main(int argc, char **argv)
         return 2;
     }
     g_pool_max = (int)pool_max;
+    /* Set before any worker starts, read by every worker afterwards, never
+     * written again -- so it needs no lock of its own. */
+    g_workers  = (int)workers;
 
     if (pipe(g_stop_pipe) != 0) { perror("fhsm-service: pipe"); return 1; }
 
@@ -1163,6 +1435,9 @@ int main(int argc, char **argv)
     free(tids);
 
     pool_close_all();
+    /* After the workers have joined, so no burst can still be growing. */
+    ident_flush_bursts();
+
     (void)fhsm_audit_event(FHSM_EV_SERVICE_STOP, -1, -1,
                             FHSM_ROLE_NONE, FHSM_RV_OK, NULL);
     (void)unlink(sock_path);

@@ -72,7 +72,7 @@ fi
 # every refusal below fails on the policy check alone, and the branch that
 # equalises "authorised but absent" with "not authorised" is never taken --
 # a mutation distinguishing the two passed the test until this line existed.
-printf '# fhsm-service authorisation policy v1\n# SUBJECT\tKEY-LABEL\nCN=web01\ttls-web01\nCN=web01\tghost-key\n' \
+printf '# fhsm-service authorisation policy v1\n# SUBJECT\tKEY-LABEL\nCN=web01\ttls-web01\nCN=web01\tghost-key\nCN=web02\ttls-web01\n' \
     > "$FHSM_TOKENS_DIR/policy"
 printf 'the quick brown fox' > "$FHSM_TOKENS_DIR/msg.bin"
 
@@ -198,13 +198,20 @@ def go(i):
     try:
         r = req("tls-web01", "CN=web01", m)
         head, _, sg = r.partition(b"\r\n\r\n")
-        open("%s/c%02d.sig" % (DIR, i), "wb").write(sg)
-        out[i] = head.split(b"\r\n")[0].decode()
+        st = head.split(b"\r\n")[0].decode()
+        # Only a served request produces a signature. A 429 body is "refused",
+        # and writing it to a .sig would fail verification for a reason that
+        # has nothing to do with the buffer this checks.
+        if "200" in st:
+            open("%s/c%02d.sig" % (DIR, i), "wb").write(sg)
+        out[i] = st
     except Exception as e:
         out[i] = "ERR " + str(e)
 ts = [threading.Thread(target=go, args=(i,)) for i in range(16)]
 [t.start() for t in ts]; [t.join() for t in ts]
-print("CONCURRENT", sum(1 for o in out.values() if "200" in o))
+served = sum(1 for o in out.values() if "200" in o)
+print("CONCURRENT", served)
+print("OTHERSTATUS", sum(1 for o in out.values() if "200" not in o and "429" not in o))
 SIGN_EOF
 
 grep -q "STATUS HTTP/1.1 200 OK" "$FHSM_TOKENS_DIR/sign.out"
@@ -224,19 +231,90 @@ ok $? "every refusal, absent key included, is one answer byte for byte"
 grep -q "REFUSED HTTP/1.1 403" "$FHSM_TOKENS_DIR/sign.out"
 ok $? "  and that answer is 403"
 
-grep -q "^CONCURRENT 16" "$FHSM_TOKENS_DIR/sign.out"
-ok $? "sixteen concurrent signatures all succeed"
+# Sixteen at once from one identity. They no longer all succeed, and that is
+# the fairness cap doing its job: the guard above deliberately made a request
+# under CN="a, which is served and therefore present, so CN=web01 is held to
+# --workers minus one. The contract asserted here is what remains true --
+# every answer is either a signature or a 429, several get through, and each
+# signature is over its own message.
+n=$(sed -n 's/^CONCURRENT //p' "$FHSM_TOKENS_DIR/sign.out")
+[ -n "$n" ] && [ "$n" -ge 3 ]
+ok $? "concurrent requests are served up to the fairness cap ($n of 16)"
+
+grep -q "^OTHERSTATUS 0" "$FHSM_TOKENS_DIR/sign.out"
+ok $? "  and the rest are 429, not some other failure"
 
 bad=0
 i=0
 while [ $i -lt 16 ]; do
     f=$(printf '%s/c%02d' "$FHSM_TOKENS_DIR" $i)
+    [ -f "$f.sig" ] || { i=$((i+1)); continue; }
     "$SIGN" verify --label tls-web01 --in "$f.bin" --sig "$f.sig" >/dev/null 2>&1 \
         || bad=$((bad+1))
     i=$((i+1))
 done
 [ "$bad" = 0 ]
-ok $? "  and each verifies against its own message, not another's ($bad bad)"
+ok $? "  and each signature is over its own message, not another's ($bad bad)"
+
+# --- fairness: one identity must not take every worker -------------------
+# The pool cannot be the contended resource here -- main() refuses to start
+# with --pool-max below --workers, so a session is always free. Measured with
+# the wait instrumented: zero pool waits under 32 concurrent requests. What
+# runs out is the worker, so the cap is on requests in flight per identity.
+python3 - "$SOCK" "$FHSM_TOKENS_DIR" > "$FHSM_TOKENS_DIR/fair.out" 2>&1 <<'FAIR_EOF'
+import socket, sys, threading, time
+SOCK, DIR = sys.argv[1], sys.argv[2]
+
+def req(subj):
+    s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(SOCK)
+    body = open(DIR + "/msg.bin", "rb").read()
+    s.sendall(("POST /sign HTTP/1.1\r\nX-FHSM-Client-Subject: %s\r\n"
+               "X-FHSM-Key: tls-web01\r\nContent-Length: %d\r\n\r\n"
+               % (subj, len(body))).encode() + body)
+    d = b""
+    while True:
+        c = s.recv(65536)
+        if not c: break
+        d += c
+    s.close(); return d.split(b"\r\n")[0].decode()
+
+# CN=web01 asks once so that it is a known identity; without this the cap
+# cannot apply, and that is deliberate -- a lone client is never capped.
+req("CN=web01")
+
+stop = threading.Event(); served = [0]; refused = [0]
+def hog():
+    while not stop.is_set():
+        try:
+            st = req("CN=web02")
+            if   "200" in st: served[0]  += 1
+            elif "429" in st: refused[0] += 1
+        except Exception: pass
+hs = [threading.Thread(target=hog) for _ in range(12)]
+[t.start() for t in hs]
+time.sleep(1.5)
+quiet = [req("CN=web01") for _ in range(6)]
+stop.set(); [t.join() for t in hs]
+
+print("HOGSERVED", served[0])
+print("HOGREFUSED", refused[0])
+print("QUIET429", sum(1 for q in quiet if "429" in q))
+print("QUIET200", sum(1 for q in quiet if "200" in q))
+FAIR_EOF
+
+n=$(sed -n 's/^HOGREFUSED //p' "$FHSM_TOKENS_DIR/fair.out")
+[ -n "$n" ] && [ "$n" -gt 0 ]
+ok $? "a saturating identity is capped and refused ($n refusals)"
+
+grep -q "^QUIET429 0" "$FHSM_TOKENS_DIR/fair.out"
+ok $? "  while the other identity is never refused"
+
+grep -q "^QUIET200 6" "$FHSM_TOKENS_DIR/fair.out"
+ok $? "  and is served throughout"
+
+n=$(sed -n 's/^HOGSERVED //p' "$FHSM_TOKENS_DIR/fair.out")
+[ -n "$n" ] && [ "$n" -gt 0 ]
+ok $? "  the capped identity is throttled, not locked out ($n served)"
 
 kill -TERM $PID 2>/dev/null
 i=0; while kill -0 $PID 2>/dev/null && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done
@@ -292,6 +370,31 @@ PY
 
     grep -q '"event":"login_ok"' "$LOG"
     ok $? "  the daemon logged in once, from the credential"
+
+    # docs/RATE_LIMIT.md rule 2: a burst of refusals must produce a handful of
+    # lines, not one per refusal. Measured before this was written: a written
+    # refusal cost 48.8 ms, so the log was both the flood and the reason the
+    # cap did nothing. Asserted as "at most a handful" rather than an exact
+    # count, because how many bursts open depends on timing.
+    nref=$(grep -c '"reason":"too_many_in_flight"' "$LOG")
+    nres=$(grep -c '"event":"identity_resumed"' "$LOG")
+    nhog=$(sed -n 's/^HOGREFUSED //p' "$FHSM_TOKENS_DIR/fair.out")
+    [ "$nref" -ge 1 ] && [ "$nref" -le 4 ]
+    ok $? "  $nhog refusals wrote $nref line(s), not one each"
+
+    [ "$nres" -ge 1 ]
+    ok $? "  and the burst was closed by an identity_resumed line ($nres)"
+
+    python3 - "$LOG" <<'SUP_EOF'
+import json, sys
+tot = 0
+for line in open(sys.argv[1]):
+    d = json.loads(line)
+    if d.get("event") == "identity_resumed":
+        tot += int(d.get("params", {}).get("suppressed", 0))
+sys.exit(0 if tot > 0 else 1)
+SUP_EOF
+    ok $? "  carrying the count of what it stood for"
 
     # How many distinct pooled sessions signed. Not asserted to exceed one:
     # whether the pool grows depends on how the sixteen requests overlap, and
