@@ -252,7 +252,20 @@ curl ... -H 'X-FHSM-Key: no-such-key' ... # a key nobody owns
 Both must be **403**, byte for byte identical. A difference between them is a
 map of the token, one request at a time.
 
-**4. The audit log names the actor.**
+**4. A signature can be checked without our tools.**
+
+```bash
+SIG=$(stat -c%s sig.bin)
+cat sig.bin message.bin | curl --cert client.pem --key client.key \
+     https://ca.example/verify -H 'X-FHSM-Key: tls-web01' \
+     -H "X-FHSM-Signature-Length: $SIG" --data-binary @- -o /dev/null -w '%{http_code}\n'
+```
+
+**200** and nothing else means it verified. Anything other than 200 — including
+422, which is an invalid signature — means it did not. Check the status, not
+the body: that is the way round this route was built.
+
+**5. The audit log names the actor.**
 
 ```bash
 freehsm-audit verify /var/lib/freehsm/tokens/audit.log.NNNNNN
@@ -293,8 +306,8 @@ job, and the way to do it is to revoke the certificate.
   of that is the proxy's. If the proxy does not check the CRL or ask an OCSP
   responder, a revoked certificate keeps working; `fhsm-ca crl` and
   `fhsm-ca ocsp-respond` exist to be pointed at.
-* **`/verify`, `/certificates` and `/ocsp` answer 501.** Only `/health`,
-  `/token` and `POST /sign` are implemented.
+* **`/certificates` and `/ocsp` answer 501.** Implemented: `/health`,
+  `/token`, `POST /sign` and `POST /verify`.
 * **No queue with a depth.** Requests beyond the worker count wait in the
   kernel's accept backlog, where the daemon can neither see nor reorder them.
   `docs/REST_API_DESIGN.md` records this as a later slice, and it is why one

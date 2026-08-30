@@ -12,8 +12,11 @@ about claims made in this file.
 `service/fhsm_service.c` now exists, in four slices: the guards with no
 cryptography, then worker threads with a lazily grown session pool and a login
 from a systemd credential, then `POST /sign`, then fairness between identities
-and the refusal budget of `docs/RATE_LIMIT.md`. What is *not* built is named at
-the end of this file rather than left to be inferred.
+and the refusal budget of `docs/RATE_LIMIT.md`. `POST /verify` follows, for the reason
+`RELEASE_v2.0.0-beta.md` gives: nothing off the shelf verifies a composite
+signature, so a verifier is either our tool on the module's own machine, or
+this. What is *not* built is named at the end of this file rather than left to
+be inferred.
 
 Three things this document uncovered were built earlier, because they were
 defects in the module rather than design of the service: `C_Login` honouring

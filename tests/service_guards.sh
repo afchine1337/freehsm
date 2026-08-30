@@ -119,7 +119,7 @@ echo "$r" | grep -q "400"; ok $? "  and a repeated one too, rather than resolved
 r=$(req "GET /sign HTTP/1.1\r\n${H}\r\n")
 echo "$r" | grep -q "405"; ok $? "GET /sign is 405, neither 404 nor 501"
 
-r=$(req "POST /verify HTTP/1.1\r\n${H}Content-Length: 3\r\n\r\nabc")
+r=$(req "POST /certificates HTTP/1.1\r\n${H}Content-Length: 3\r\n\r\nabc")
 echo "$r" | grep -q "501"; ok $? "a route named but unwritten answers 501, not 404"
 
 r=$(req "GET /token HTTP/1.1\r\n${H}\r\n")
@@ -255,6 +255,79 @@ while [ $i -lt 16 ]; do
 done
 [ "$bad" = 0 ]
 ok $? "  and each signature is over its own message, not another's ($bad bad)"
+
+# --- /verify: the only way to check a composite signature without our tools
+python3 - "$SOCK" "$FHSM_TOKENS_DIR" > "$FHSM_TOKENS_DIR/ver.out" 2>&1 <<'VER_EOF'
+import socket, sys
+SOCK, DIR = sys.argv[1], sys.argv[2]
+msg = open(DIR + "/msg.bin", "rb").read()
+
+def call(path, hdrs, body, subj="CN=web01"):
+    s = socket.socket(socket.AF_UNIX); s.settimeout(30); s.connect(SOCK)
+    h = "POST %s HTTP/1.1\r\nX-FHSM-Client-Subject: %s\r\n" % (path, subj)
+    for k, v in hdrs:
+        h += "%s: %s\r\n" % (k, v)
+    h += "Content-Length: %d\r\n\r\n" % len(body)
+    s.sendall(h.encode() + body)
+    d = b""
+    while True:
+        c = s.recv(65536)
+        if not c: break
+        d += c
+    s.close()
+    head, _, payload = d.partition(b"\r\n\r\n")
+    return head.split(b"\r\n")[0].decode(), payload
+
+st, sig = call("/sign", [("X-FHSM-Key", "tls-web01")], msg)
+L = [("X-FHSM-Key", "tls-web01"), ("X-FHSM-Signature-Length", str(len(sig)))]
+
+print("VALID", call("/verify", L, sig + msg)[0])
+
+bad = bytearray(sig); bad[100] ^= 1
+print("FLIPPED", call("/verify", L, bytes(bad) + msg)[0])
+print("OTHERMSG", call("/verify", L, sig + b"a different message")[0])
+
+# Malformed splits first, and refusals last. Three refusals push CN=web01 out
+# of the budget's free allowance, and everything after that comes back 429 --
+# which is the budget working, and would have made these assertions read as
+# failures of /verify. Ordering a test around another control's state is worth
+# saying out loud, because the next assertion added here will hit it too.
+print("NOLEN", call("/verify", [("X-FHSM-Key", "tls-web01")], sig + msg)[0])
+print("COVERS", call("/verify", [("X-FHSM-Key", "tls-web01"),
+      ("X-FHSM-Signature-Length", str(len(sig) + len(msg)))], sig + msg)[0])
+print("ZERO", call("/verify", [("X-FHSM-Key", "tls-web01"),
+      ("X-FHSM-Signature-Length", "0")], sig + msg)[0])
+
+# The refusals must stay one answer here too, or /verify becomes the oracle
+# /sign refuses to be.
+a = call("/verify", [("X-FHSM-Key", "secret-ca"),
+                     ("X-FHSM-Signature-Length", str(len(sig)))], sig + msg)
+b = call("/verify", [("X-FHSM-Key", "no-such-key"),
+                     ("X-FHSM-Signature-Length", str(len(sig)))], sig + msg)
+c = call("/verify", L, sig + msg, subj="CN=attacker")
+print("SAMEREFUSAL", a == b == c, a[0])
+VER_EOF
+
+grep -q "^VALID HTTP/1.1 200 OK" "$FHSM_TOKENS_DIR/ver.out"
+ok $? "/verify accepts a signature this service just made"
+
+grep -q "^FLIPPED HTTP/1.1 422" "$FHSM_TOKENS_DIR/ver.out"
+ok $? "  one flipped bit is 422, not 200"
+
+grep -q "^OTHERMSG HTTP/1.1 422" "$FHSM_TOKENS_DIR/ver.out"
+ok $? "  and so is the same signature over another message"
+
+grep -q "^SAMEREFUSAL True HTTP/1.1 403" "$FHSM_TOKENS_DIR/ver.out"
+ok $? "  its refusals are one answer too: /verify is not an oracle"
+
+grep -q "^NOLEN HTTP/1.1 400" "$FHSM_TOKENS_DIR/ver.out"
+ok $? "  a body with no X-FHSM-Signature-Length is refused"
+
+grep -q "^COVERS HTTP/1.1 400" "$FHSM_TOKENS_DIR/ver.out"
+ok $? "  a split that leaves no message is refused"
+
+grep -q "^ZERO HTTP/1.1 400" "$FHSM_TOKENS_DIR/ver.out"
+ok $? "  and so is a zero-length signature"
 
 # --- fairness: one identity must not take every worker -------------------
 # The pool cannot be the contended resource here -- main() refuses to start

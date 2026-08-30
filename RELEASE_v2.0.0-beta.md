@@ -121,6 +121,20 @@ doubles from one second to sixty and decays by one every ten quiet minutes,
 with the count persisted so that a crash does not hand back a reset. Neither is
 ever a lock. `docs/RATE_LIMIT.md` has the numbers.
 
+**`POST /verify`, which matters more than it sounds.** This release says
+elsewhere that nothing off the shelf verifies a composite signature — OpenSSL
+3.5 prints the algorithm as a bare OID. Until that changes, checking one means
+running `fhsm-sign cms-verify` on a machine that has the module. `/verify`
+makes it a request: the body is the signature followed by the message, split by
+`X-FHSM-Signature-Length`, and **200 comes back only when it verifies**, 422
+when it does not — so a caller that reads the status and ignores the body is
+right by default.
+
+It takes the same authorisation as `/sign`, which limits it to clients already
+in the policy file. That is deliberate: verification needs no secret, so
+leaving it open is tempting, and it would turn the key label into an oracle a
+caller could use to learn which keys exist.
+
 **Refusals do not leak.** A key the policy does not grant, a key that does not
 exist and a subject the policy does not know produce one answer, byte for byte
 — the code equalises the work and says plainly that it cannot equalise the
@@ -149,7 +163,7 @@ than after it.
   certificate with `id-kp-OCSPSigning` and `id-pkix-ocsp-nocheck`. What is
   missing is anything that answers on a port; `fhsm-service` has no `/ocsp`
   route yet.
-* **`/verify` and `/certificates`.** Named by the service and answering 501.
+* **`/certificates`.** Named by the service and answering 501.
 * **A queue with a depth.** Requests past the worker count wait in the kernel's
   accept backlog, where the daemon can neither see nor reorder them. It is why
   the fairness cap reduces the cost of a saturating client to 2.4x rather than

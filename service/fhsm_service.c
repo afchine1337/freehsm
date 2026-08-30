@@ -81,6 +81,9 @@ extern unsigned long C_FindObjects(unsigned long, unsigned long *, unsigned long
                                     unsigned long *);
 extern unsigned long C_FindObjectsFinal(unsigned long);
 extern unsigned long C_SignInit(unsigned long, void *, unsigned long);
+extern unsigned long C_VerifyInit(unsigned long, void *, unsigned long);
+extern unsigned long C_Verify(unsigned long, unsigned char *, unsigned long,
+                               unsigned char *, unsigned long);
 extern unsigned long C_Sign(unsigned long, unsigned char *, unsigned long,
                              unsigned char *, unsigned long *);
 
@@ -100,6 +103,7 @@ struct tok_info {
 #define CKF_RW_SESSION_    0x00000002UL
 #define CKF_SERIAL_SESSION 0x00000004UL
 #define CKU_USER_          1UL
+#define CKO_PUBLIC_KEY_    2UL
 #define CKO_PRIVATE_KEY_   3UL
 #define CKA_CLASS_         0UL
 #define CKA_LABEL_         3UL
@@ -114,6 +118,11 @@ struct tok_info {
  * the mechanism would put the algorithm agility in the least trustworthy
  * place in the system. */
 #define KEY_HEADER   "x-fhsm-key"
+/* /verify carries two byte strings in one body. The alternatives were worse:
+ * base64 would add a decoder to get wrong, for a route whose whole argument is
+ * that a signature is bytes; a multipart body would add a parser. A length and
+ * a concatenation need neither. */
+#define SIGLEN_HEADER "x-fhsm-signature-length"
 
 /* Bounds. Every one of them exists to make the parser's worst case small and
  * stated, rather than large and discovered. */
@@ -823,6 +832,7 @@ static void respond_with(int fd, int status, const char *text,
                        : status == 403 ? "Forbidden"
                        : status == 404 ? "Not Found"
                        : status == 405 ? "Method Not Allowed"
+                       : status == 422 ? "Unprocessable Content"
                        : status == 429 ? "Too Many Requests"
                        : status == 413 ? "Payload Too Large"
                        : status == 501 ? "Not Implemented"
@@ -876,6 +886,9 @@ typedef struct {
     int    have_subject;
     int    subject_repeated;
     int    have_key;
+    int    have_siglen;
+    int    siglen_repeated;
+    long   siglen;
     int    key_repeated;
     long   content_length;
     int    saw_transfer_encoding;
@@ -988,6 +1001,19 @@ static verdict_t read_request(int fd, request_t *r)
                 r->subject[vlen] = '\0';
                 r->have_subject = 1;
             }
+        } else if (name_eq(p, nlen, SIGLEN_HEADER)) {
+            if (r->have_siglen) { r->siglen_repeated = 1; }
+            char tmp[32];
+            if (vlen == 0 || vlen >= sizeof tmp)
+                return (verdict_t){ 400, "bad_signature_length" };
+            memcpy(tmp, v, vlen); tmp[vlen] = '\0';
+            char *tail = NULL;
+            errno = 0;
+            long n = strtol(tmp, &tail, 10);
+            if (errno != 0 || !tail || *tail || n <= 0 || n > (long)MAX_BODY)
+                return (verdict_t){ 400, "bad_signature_length" };
+            r->siglen = n;
+            r->have_siglen = 1;
         } else if (name_eq(p, nlen, KEY_HEADER)) {
             if (r->have_key) { r->key_repeated = 1; }
             else if (vlen == 0 || vlen >= sizeof r->key) {
@@ -1063,9 +1089,13 @@ static verdict_t read_request(int fd, request_t *r)
  * the system -- and would be PKCS#11 leaking through an API that exists not to
  * expose it (ADR §2).
  * ----------------------------------------------------------------------- */
-static unsigned long find_key(unsigned long sess, const char *label)
+/* `cls` because /sign wants the private half and /verify the public one, and
+ * a lookup that always answered CKO_PRIVATE_KEY made every verification fail
+ * with the module refusing the handle -- found by running the route rather
+ * than by reading it. */
+static unsigned long find_key(unsigned long sess, const char *label,
+                               unsigned long cls)
 {
-    unsigned long cls = CKO_PRIVATE_KEY_;
     struct { unsigned long type; void *pValue; unsigned long len; } tmpl[2] = {
         { CKA_CLASS_, &cls, sizeof cls },
         { CKA_LABEL_, (void *)(uintptr_t)label, (unsigned long)strlen(label) }
@@ -1106,7 +1136,7 @@ static verdict_t do_sign(int fd, request_t *r)
      * the module, and claiming "in the same time" would be claiming more than
      * is true. */
     int permitted = policy_permits(r->subject, r->key);
-    unsigned long key = find_key(sess, r->key);
+    unsigned long key = find_key(sess, r->key, CKO_PRIVATE_KEY_);
 
     if (!permitted || key == 0) {
         pool_release(sess);
@@ -1151,6 +1181,90 @@ static verdict_t do_sign(int fd, request_t *r)
         (void)!write(fd, hdr, (size_t)n);
         (void)!write(fd, sig, siglen);
     }
+    return OK_VERDICT;
+}
+
+/* --------------------------------------------------------------------------
+ * POST /verify --- the only way to check a composite signature without our
+ * tools.
+ *
+ * `RELEASE_v2.0.0-beta.md` says it plainly: nothing off the shelf verifies one.
+ * OpenSSL 3.5 prints the algorithm as a bare OID. Until that changes, a
+ * verifier is either `fhsm-sign cms-verify` on the same machine as the module,
+ * or this.
+ *
+ * THE BODY IS THE SIGNATURE FOLLOWED BY THE MESSAGE, split by
+ * X-FHSM-Signature-Length. No base64 -- the route's whole argument is that a
+ * signature is bytes -- and no multipart, which would be a parser.
+ *
+ * SAME AUTHORISATION AS /sign, and the same equalised refusal. Verification
+ * needs no secret, so it is tempting to leave it open; that would make the key
+ * label an oracle. A caller could ask about a label it does not hold and learn
+ * from the answer whether the key exists, which is the map of the token that
+ * do_sign() spends its comments preventing. The cost is that this route is
+ * useful only to clients already in the policy file.
+ * ----------------------------------------------------------------------- */
+static verdict_t do_verify(int fd, request_t *r)
+{
+    if (!r->have_key)     return (verdict_t){ 400, "no_key_header" };
+    if (r->key_repeated)  return (verdict_t){ 400, "key_repeated" };
+    if (!r->have_siglen)  return (verdict_t){ 400, "no_signature_length" };
+    if (r->siglen_repeated) return (verdict_t){ 400, "signature_length_repeated" };
+    if (r->body_len == 0) return (verdict_t){ 400, "empty_body" };
+
+    /* The split has to leave something on both sides. A signature with no
+     * message would verify nothing, and this is cheaper to refuse here than to
+     * discover as a zero-length buffer three calls down. */
+    if ((size_t)r->siglen >= r->body_len)
+        return (verdict_t){ 400, "signature_length_covers_body" };
+
+    unsigned long sess = 0;
+    if (pool_acquire(&sess) != 0) return (verdict_t){ 503, "pool_unavailable" };
+
+    /* Both questions before either answer, exactly as /sign does, so that the
+     * three refusals stay one answer. */
+    int permitted = policy_permits(r->subject, r->key);
+    unsigned long key = find_key(sess, r->key, CKO_PUBLIC_KEY_);
+    if (!permitted || key == 0) {
+        pool_release(sess);
+        return (verdict_t){ 403, "not_authorised" };
+    }
+
+    unsigned long mech_type = CKM_COMPOSITE_;
+    struct { unsigned long mechanism; void *p; unsigned long len; } mech =
+        { mech_type, NULL, 0 };
+
+    unsigned long rv = C_VerifyInit(sess, &mech, key);
+    if (rv == 0)
+        rv = C_Verify(sess,
+                      r->body + r->siglen, (unsigned long)(r->body_len - (size_t)r->siglen),
+                      r->body,             (unsigned long)r->siglen);
+    pool_release(sess);
+
+    /* CKR_SIGNATURE_INVALID is a result, not a failure of the request. Any
+     * other non-zero is the module refusing for a reason the caller cannot fix
+     * -- a wrong key type, a mechanism the profile forbids -- and that is a
+     * 500, not a verdict on the signature. */
+    int valid   = (rv == 0);
+    int invalid = (rv == FHSM_RV_SIGNATURE_INVALID);
+    if (!valid && !invalid) {
+        (void)fhsm_audit_event(FHSM_EV_VERIFY, (int)g_slot_id, (int)sess,
+                                FHSM_ROLE_USER, FHSM_RV_FUNCTION_FAILED,
+                                "key", r->key, NULL);
+        return (verdict_t){ 500, "verify_failed" };
+    }
+
+    (void)fhsm_audit_event(FHSM_EV_VERIFY, (int)g_slot_id, (int)sess,
+                            FHSM_ROLE_USER,
+                            valid ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID,
+                            "key", r->key,
+                            "result", valid ? "valid" : "invalid", NULL);
+
+    /* 200 ONLY WHEN IT VERIFIES. A client that checks the status and ignores
+     * the body is then correct by default; the opposite arrangement -- 200 with
+     * "invalid" in the body -- makes the careless reading say yes. 422 is the
+     * request being well-formed and the content not being what it claims. */
+    respond(fd, valid ? 200 : 422, valid ? "valid\n" : "invalid\n");
     return OK_VERDICT;
 }
 
@@ -1271,8 +1385,14 @@ static void serve(int fd, uid_t proxy_uid)
              * 405 is the one answer that is neither. */
             v = (verdict_t){ 405, "wrong_method" };
         }
-        else if (strcmp(r.target, "/verify")       == 0 ||
-            strcmp(r.target, "/certificates") == 0 ||
+        else if (strcmp(r.target, "/verify") == 0 && strcmp(r.method, "POST") == 0) {
+            v = do_verify(fd, &r);
+            if (v.reason == NULL) goto done;
+        }
+        else if (strcmp(r.target, "/verify") == 0) {
+            v = (verdict_t){ 405, "wrong_method" };
+        }
+        else if (strcmp(r.target, "/certificates") == 0 ||
             strcmp(r.target, "/ocsp")         == 0) {
             /* Named, refused, and audited as accepted: the request passed
              * every guard, and the only reason it does nothing is that the
@@ -1525,10 +1645,15 @@ static void usage(void)
       "  The PIN is never taken from an argument or an inherited environment\n"
       "  variable -- see docs/DAEMON_PIN.md for why the environment is as bad\n"
       "  as the command line here.\n\n"
+      "  POST /verify checks a signature against the same key, with the body\n"
+      "  carrying the signature followed by the message and\n"
+      "  X-FHSM-Signature-Length saying where to cut. 200 only when it\n"
+      "  verifies, 422 when it does not -- so a caller that reads the status\n"
+      "  and ignores the body is right by default.\n\n"
       "  /token reads the token's public description; POST /sign signs a\n"
       "  request body with the key named by X-FHSM-Key, if the policy file\n"
-      "  pairs it with the caller's subject. /verify, /certificates and\n"
-      "  /ocsp answer 501.\n");
+      "  pairs it with the caller's subject. /certificates and /ocsp answer\n"
+      "  501.\n");
     exit(2);
 }
 

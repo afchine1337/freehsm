@@ -8,6 +8,38 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **`POST /verify` (#111).** The route matters because of something this
+  project already documents: nothing off the shelf verifies a composite
+  signature, so checking one meant running `fhsm-sign cms-verify` on a machine
+  that has the module. Now it is a request.
+
+  The body is the **signature followed by the message**, split by
+  `X-FHSM-Signature-Length`. Not base64 — the route's own argument is that a
+  signature is bytes, and an encoding would add a decoder to get wrong — and
+  not multipart, which would add a parser.
+
+  **200 only when it verifies; 422 when it does not.** A caller that checks the
+  status and ignores the body is then correct by default. The opposite
+  arrangement, 200 with `invalid` in the body, makes the careless reading say
+  yes — and the careless reading is the one that ships.
+
+  It takes **the same authorisation as `/sign`**, and its three refusals are
+  the same single answer. Verification needs no secret, so leaving it open is
+  tempting; it would make the key label an oracle, which is precisely what
+  `do_sign()` spends its comments preventing. The cost is stated rather than
+  hidden: the route is useful only to clients already in the policy file.
+
+  Found by running it rather than reading it: `find_key()` hardcoded
+  `CKO_PRIVATE_KEY`, which is right for signing and wrong for verifying, so
+  every verification came back 500 — including the valid one. It now takes the
+  class as a parameter.
+
+  One thing about the test worth recording: the `/verify` assertions had to be
+  ordered around the refusal budget. Three refusals push the test's identity
+  out of its free allowance, after which everything is 429 — the budget working
+  correctly, and enough to make the next assertion added there read as a
+  failure of `/verify`.
+
 * **The service can be deployed (#111).** `systemd/fhsm-service.service` and
   `docs/DEPLOYING_THE_SERVICE.md`. Built and tested is not the same as
   installable, and the gap between them is where a beta is judged.
