@@ -65,8 +65,12 @@ post-quantum mechanism at all.
 **There is a patch.** `contrib/p11-kit/` carries a change that makes every
 parameterless mechanism cross, including ours: a composite signature made
 through the patched socket verifies against the module loaded directly, and
-p11-kit's own 525 tests still pass. It is not upstream and not submitted — read
-that directory before relying on it.
+p11-kit's own suite still passes -- 44/44 on master; the 525 figure was 0.24.0,
+where the patch had a bug that master's suite caught. **Submitted on
+2026-08-22**: issue [#778](https://github.com/p11-glue/p11-kit/issues/778) and
+PR [#779](https://github.com/p11-glue/p11-kit/issues/779). It is not upstream --
+no maintainer has responded as of 2026-08-30 -- so read that directory before
+relying on it.
 
 Re-run the measurement rather than trusting this table, which was taken on
 unpatched p11-kit 0.24.0:

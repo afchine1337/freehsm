@@ -26,8 +26,17 @@ Legend: ✅ done · 🟡 partial · ⏳ pending · ♻ continuous
 * **FreeHSM** — the HSM *library* (`libfreehsm-fips.so`), PKCS#11 v3.2, built
   to FIPS 140-3 / CC EAL4+ requirements and documented with their evidence
   methodologies. Not certified. Apache-2.0.
-* **Simorgh PKI** — planned tooling on top: CA + signing tool + operator + IaC
-  modules (#112). **Not built.** Do not describe it as existing.
+* **The command-line tools** — `fhsm-token`, `fhsm-csr`, `fhsm-ca`,
+  `fhsm-sign`, and the `fhsm-service` daemon. These **ship**, as part of
+  FreeHSM and under the same licence. They are what #112 and #123 built.
+* **Simorgh PKI** — the *product* on top: an operator, IaC modules, packaging,
+  support. **Not built. Do not describe it as existing.**
+
+  The distinction is worth keeping sharp in both directions. Saying the PKI
+  product exists would be a claim about something nobody can download; saying
+  the tooling does not exist has become equally untrue, and this line said
+  exactly that until 2026-08-30 — after `fhsm-ca` had issued certificates,
+  published CRLs and signed OCSP responses for weeks.
 * Anti-pattern to avoid (study): do **not** blur HSM and KMS. KMS-like features
   (policy engine, cross-cloud key sync, FPE) are a **post-v2.0** tier.
 

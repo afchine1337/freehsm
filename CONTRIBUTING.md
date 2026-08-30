@@ -114,7 +114,7 @@ Do NOT open a public issue for a security vulnerability. Follow the process in [
 
 If you become a maintainer :
 
-- Review code with the CC evaluator's eyes : every change to a TSF (Target Security Function) potentially triggers re-evaluation per `docs/ALC_FLR.md`.
+- Review code with the CC evaluator's eyes : every change to a TSF (Target Security Function) potentially triggers re-evaluation. (The flaw-remediation procedure, ALC_FLR, is not written yet — this line used to cite a `docs/ALC_FLR.md` that does not exist.)
 - Never merge a security fix without a coordinated disclosure timeline agreed with the reporter.
 - Tag releases with GPG-signed annotated tags (`git tag -s v<x.y.z>`).
 - Append every change to `CHANGELOG.md` under Keep-a-Changelog conventions.

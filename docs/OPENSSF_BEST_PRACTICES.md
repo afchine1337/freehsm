@@ -137,13 +137,13 @@ additional items:
 | `governance` | `CONTRIBUTING.md` §Governance — single maintainer model, voting in §RFC. |
 | `roles_responsibilities` | `CONTRIBUTING.md` §Roles. |
 | `access_continuity` | GPG key escrow + GitHub org with bus-factor mitigation. |
-| `bus_factor` | Single maintainer documented + recovery procedure in `docs/BUS_FACTOR.md`. |
-| `documentation_roadmap` | `docs/ROADMAP.md` (to be written before silver). |
+| `bus_factor` | Single maintainer documented in `CONTRIBUTING.md` §Governance. **No recovery procedure is written** — this criterion is not met, and citing a `docs/BUS_FACTOR.md` that does not exist was worse than admitting it. |
+| `documentation_roadmap` | `docs/ROADMAP.md`, which exists and is current. |
 | `documentation_architecture` | `docs/ARCHITECTURE.md` exists + bilingual. |
 | `documentation_security` | `docs/FIPS_140_3.md` + `docs/EAL4_PLUS.md` cover the threat model. |
 | `documentation_quick_start` | `README.md` §Quick start. |
 | `documentation_current` | Bi-monthly review cycle documented in `CONTRIBUTING.md`. |
-| `documentation_achievements` | `docs/VALIDATION.md` lists CAVP + KAT coverage. |
+| `documentation_achievements` | The KAT coverage is in `docs/ATE_FUN.md` and the boot self-test prints all 62 vectors. **`docs/VALIDATION.md` does not exist**; it was cited here before it was written. |
 | `accessibility_best_practices` | Markdown docs ; no images without alt text. |
 | `internationalization` | Bilingual EN/FR ; UTF-8 throughout. |
 | `crypto_used_network` | N/A — module exposes no network interface. |
@@ -151,7 +151,7 @@ additional items:
 | `crypto_certificate_verification` | N/A. |
 | `hardened_site` | N/A — no project website beyond GitHub. |
 | `installation_common` | Documented via `make install DESTDIR=/`. |
-| `external_dependencies` | `docs/DEPENDENCIES.md` lists openssl, liboqs, tpm2-tools versions. |
+| `external_dependencies` | `docs/DEPENDENCIES.md`. Note that the earlier wording here listed `liboqs`, which **this project does not use and never linked** — the post-quantum algorithms come from OpenSSL 3.5's default provider. |
 | `dependency_monitoring` | Dependabot enabled on GitHub. |
 | `updateable_reused_components` | All deps are `apt` packages or pinned via Dockerfile. |
 | `interfaces_current` | PKCS#11 v3.2 is current — module covers all approved mechanisms. |
@@ -159,7 +159,7 @@ additional items:
 | `regression_tests_added50` | Every fix ships with a regression test. |
 | `test_statement_coverage80` | lcov target ≥ 80%. |
 | `test_policy_mandatory` | CI fails if a new file lands without a test. |
-| `tests_documented` | `tests/README.md` (to be written). |
+| `tests_documented` | **Not met.** `tests/README.md` is still unwritten; the suite is described in `docs/ATE_FUN.md` instead. |
 | `vulnerabilities_critical_fixed` | Same as passing. |
 | `signed_commits` | `git config commit.gpgsign true` ; tags + commits Ed25519-signed. |
 | `version_tags_signed` | `v1.1.0` is GPG-signed annotated tag. |

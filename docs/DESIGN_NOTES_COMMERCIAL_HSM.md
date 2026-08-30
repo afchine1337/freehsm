@@ -1,6 +1,6 @@
 # Design Notes from Commercial HSM Experience
 
-*Captured 2026-07-04 by Afchine Madjlessi (Simorgh Labs) based on hands-on experience with commercial HSM products. It informs design decisions for the FreeHSM library, and for the PKI tooling planned as #112 — which is not built yet. Nothing here should be read as describing shipped functionality.*
+*Captured 2026-07-04 by Afchine Madjlessi (Simorgh Labs) based on hands-on experience with commercial HSM products. It informs design decisions for the FreeHSM library and for the tooling built as #112. Nothing here should be read as describing shipped functionality: this is a study of what commercial products do, not a description of what FreeHSM does. The command-line tools now ship — see `RELEASE_v2.0.0-beta.md` for what they actually do — while **Simorgh PKI, the product, is not built.***
 
 **Scope of this study** :
 
@@ -219,7 +219,7 @@ paths openly is a differentiator worth claiming *if* someone checks whether
 comparable projects already do it. The earlier draft of this line said Simorgh
 was "the only sovereign crypto stack" to do so — an exclusivity claim of exactly
 the kind scrubbed from the repo in the "first OSS PKI" cleanup, about a product
-that does not exist yet (#112). Any published version needs a survey behind it
+that does not exist as a product (#112 built the tools; the operator, the IaC modules and the packaging are not built). Any published version needs a survey behind it
 and has to describe what is built, not what is planned.
 
 ### Release cadence : one version every 2 years, no CVE patches

@@ -399,6 +399,57 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **The OpenSSF self-assessment cited three documents that do not exist, and a
+  dependency the project never used.** `docs/OPENSSF_BEST_PRACTICES.md`
+  justified `bus_factor` by a `docs/BUS_FACTOR.md`, `documentation_achievements`
+  by a `docs/VALIDATION.md`, and `external_dependencies` by a
+  `docs/DEPENDENCIES.md` — none of which had been written — and listed `liboqs`
+  among the dependencies, which appears nowhere in the code or the Makefile.
+  For a project whose argument is that its claims can be checked, an
+  assessment against an external standard is the worst place to have that.
+
+  `docs/DEPENDENCIES.md` is now written, derived from the build rather than
+  remembered: `-lcrypto -ldl -lpthread`, OpenSSL **3.5** and not negotiable
+  because the post-quantum algorithms come from its default provider, plus
+  `tpm2-tools` and systemd 250 as optional run-time helpers. The other two
+  criteria are marked **not met**, which is what they are.
+
+* **Three more copies of "not built" and "not submitted".**
+  `docs/P11_KIT_REMOTING.md` still said the patch was not submitted and quoted
+  525 passing tests; `docs/ROADMAP.md` and
+  `docs/DESIGN_NOTES_COMMERCIAL_HSM.md` still said the PKI tooling was not
+  built, four command-line tools after it was. The tooling and the *product*
+  are now separated in the ROADMAP: `fhsm-ca`, `fhsm-csr`, `fhsm-sign` and
+  `fhsm-service` ship as part of FreeHSM; **Simorgh PKI — the operator, the IaC
+  modules, the packaging — is not built and must not be described as
+  existing.** The distinction is kept sharp in both directions, because saying
+  the tooling does not exist had become as untrue as claiming the product does.
+
+* **`CONTRIBUTING.md` cited a `docs/ALC_FLR.md`** that does not exist.
+
+### Added
+* **`scripts/doc_audit.py` — the documentation checked against the repository
+  it describes.** Five stale claims were found by accident in one afternoon,
+  which is a poor way to find the sixth. Three checks: every `--option` cited
+  beside one of our tools must appear in that tool's own `--help` (this is what
+  would have caught `fhsm-token --gen-pin`, written into a deployment procedure
+  and non-existent); every repository path cited in backticks must exist,
+  excluding build products and other projects; and a reading list of "not
+  built" / "not submitted" claims for a human, because that one cannot be
+  decided by machine.
+
+  It also skips any line that admits the file is missing — the honest fix for a
+  broken citation is often to say "this does not exist", and a checker that
+  flags the honesty pushes people back towards the lie.
+
+  **Its first run reports what this commit does not fix:** the Common Criteria
+  evidence documents cite test files and scripts that are not there —
+  `tests/test_token_interop.c` ten times across `ATE_FUN` and `ARCHITECTURE`,
+  plus `tests/kat_report.c`, `tests/test_drbg.c`, `tests/test_audit.c` (since
+  split into seven), `scripts/validate_cavp.py`, `scripts/coverage.sh` and
+  `scripts/freeze_apt_versions.sh`. Whether each claim survives being rewritten
+  around what exists is a judgement about evidence, not a rename.
+
 * **The release notes said OCSP does not ship, and did not mention the service
   at all.** `RELEASE_v2.0.0-beta.md` carried "**OCSP.** Only CRLs. OCSP is a
   network service and belongs with #111" under *Not in this release*, while
