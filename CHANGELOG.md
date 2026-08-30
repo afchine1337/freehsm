@@ -8,6 +8,45 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **A second, anonymous listener (#111).** `docs/REST_API_DESIGN.md` refuses
+  requests with no client identity — "not 'anonymous read-only'" — and names
+  `/ocsp` and `/certificates` among the routes. Those two cannot both be true.
+  An OCSP responder answers **relying parties**, and a relying party has no
+  client certificate to present; a responder that demanded one would be a
+  responder nobody could query. `/certificates` is what an AIA `caIssuers`
+  pointer resolves to.
+
+  Resolved with **two sockets rather than one rule with an exception**, because
+  the rule's force came from having none. `--public-socket` requires no
+  identity, applies no policy and no refusal budget, takes **its own workers**
+  so anonymous traffic cannot starve the authenticated side, and **writes no
+  audit line per request** — a durable barrier costs milliseconds, an OCSP
+  responder answers as often as clients open connections, and one line per
+  query would hand the flood to anyone who can reach the socket. The start line
+  records that the surface exists; nothing routine after.
+
+  It serves `GET /certificates` (from `--ca-cert`, read once at start, typed
+  `application/pkix-cert` and cacheable) and `GET /health`. `POST /ocsp`
+  answers 501 with the reason in the source: assembling a response is in the
+  library, but parsing the OCSPRequest and looking the serial up live in
+  `tools/fhsm_ca.c`, and the service must **share** that code rather than
+  mirror it — a mirror that drifts is the hazard
+  `docs/FIPS_140_3_SECURITY_TARGET.md` already names for the fuzz harnesses.
+  Signing and verifying are absent from that surface entirely, answering 404
+  rather than 403 or 501, because a route that answers anything invites a
+  second look.
+
+  Three configurations are refused at start rather than half-served:
+  `--ca-cert` without `--public-socket` (a certificate nobody could fetch), an
+  unreadable certificate, and a `--pool-max` below the **total** worker count —
+  counted now so the bound is not silently wrong the day `/ocsp` starts
+  borrowing sessions.
+
+  `tests/service_public.sh` and `make service-public`. Twelve assertions,
+  including that an identity offered to the public socket changes nothing: it
+  is ignored rather than believed, or a caller could put a string of its
+  choosing into the record.
+
 * **`POST /verify` (#111).** The route matters because of something this
   project already documents: nothing off the shelf verifies a composite
   signature, so checking one meant running `fhsm-sign cms-verify` on a machine

@@ -704,6 +704,12 @@ service-guards: service/fhsm-service tools/fhsm-token
 service-budget: service/fhsm-service tools/fhsm-token tools/fhsm-csr
 	sh tests/service_budget.sh
 
+# The public listener needs its own script for the same reason: it starts the
+# daemon three times expecting refusals, then once expecting success.
+.PHONY: service-public
+service-public: service/fhsm-service tools/fhsm-token tools/fhsm-csr
+	sh tests/service_public.sh
+
 .PHONY: ocsp-delegated
 ocsp-delegated:
 	$(MAKE) clean

@@ -461,6 +461,23 @@ paying a password-hashing cost per request on purpose.
 Refusals are the part of an API that ages well, so they are decided here.
 
 * **A request with no client identity.** Not "anonymous read-only" — refused.
+
+  This still holds, and it is why there are now **two sockets rather than one
+  rule with an exception**. An OCSP responder answers relying parties, and a
+  relying party is anonymous by construction: a TLS client checking a
+  certificate has no client certificate of its own. `/certificates` is the same
+  — it is what an AIA `caIssuers` pointer resolves to. Demanding identity there
+  would produce a responder nobody can query; carving an exception into this
+  line would weaken a rule whose force came from having none.
+
+  So `--public-socket` serves those, with no identity, no policy, no refusal
+  budget, **its own workers** so anonymous traffic cannot starve the
+  authenticated side, and **no audit line per request** — a durable barrier
+  costs milliseconds and an OCSP responder answers as often as clients open
+  connections, so one line per query would hand the flood to anyone who can
+  reach it. What is recorded is that the listener exists, at start. Signing and
+  verifying are simply absent from that surface, answering 404 rather than 403
+  or 501: a route that answers anything invites a second look.
 * **A connection whose peer credentials do not match the proxy's uid.**
 * **Any request naming a key the certificate subject is not authorised for.**
   Authorisation is a decision, not the absence of a denial.

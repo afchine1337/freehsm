@@ -791,6 +791,55 @@ static unsigned budget_charge(const char *subject, int *announce)
     return reached;
 }
 
+/* --------------------------------------------------------------------------
+ * The public listener --- what a relying party may ask without a certificate
+ *
+ * docs/REST_API_DESIGN.md says, under what the service refuses: "A request
+ * with no client identity. Not 'anonymous read-only' -- refused." That rule is
+ * right for every operation the authenticated socket offers, and it cannot
+ * hold for the two the ADR also names. An OCSP responder answers relying
+ * parties, and a relying party is anonymous by construction: a TLS client
+ * checking a certificate has no client certificate of its own to present.
+ * Demanding one would produce a responder nobody can query. `/certificates`
+ * is the same -- it is what an AIA caIssuers pointer resolves to.
+ *
+ * So there are two sockets, not one rule with an exception. The authenticated
+ * socket keeps its invariant untouched; this one has a different threat model
+ * and says so:
+ *
+ *   - No identity, no policy, no refusal budget. There is nobody to charge.
+ *   - **Its own workers.** Sharing them would let anonymous traffic starve
+ *     the authenticated side, which is the exact failure docs/RATE_LIMIT.md
+ *     was written about -- and here there is no identity to be fair between.
+ *   - **No audit line per request.** A durable barrier costs milliseconds;
+ *     an OCSP responder answers as often as clients open connections. Writing
+ *     one line per query is the flood the burst compression was built to stop,
+ *     handed to anyone who can reach the socket. What is recorded is that the
+ *     listener exists, at start, and nothing routine after.
+ *   - Read-only. Nothing here reaches a private key except through a signature
+ *     the CA has already authorised by holding the key -- and today, nothing
+ *     here signs at all.
+ *
+ * The peer check stays. --proxy-uid is not about identity; it is about who may
+ * open the socket, and that is still the proxy.
+ * ----------------------------------------------------------------------- */
+#define CA_CERT_MAX 65536
+
+static unsigned char g_ca_cert[CA_CERT_MAX];
+static size_t        g_ca_cert_len = 0;
+
+static int ca_cert_load(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t n = fread(g_ca_cert, 1, sizeof g_ca_cert, f);
+    int over = !feof(f);
+    fclose(f);
+    if (n == 0 || over) { g_ca_cert_len = 0; return -1; }
+    g_ca_cert_len = n;
+    return 0;
+}
+
 static volatile sig_atomic_t g_stop = 0;
 static int g_stop_pipe[2] = { -1, -1 };
 
@@ -1573,7 +1622,73 @@ static int login_once(unsigned long slot, const char *pin_file_override)
  * the end. accept() on one listening socket from several threads is safe on
  * Linux and needs no lock of ours.
  * ----------------------------------------------------------------------- */
-typedef struct { int lfd; int stopfd; uid_t proxy_uid; } worker_arg_t;
+/* The public half of the daemon. Deliberately short: everything the
+ * authenticated path does -- identity, policy, budget, fairness, per-request
+ * audit -- is absent here, and each absence is a decision recorded above
+ * rather than an omission. */
+static void serve_public(int fd, uid_t proxy_uid)
+{
+    request_t r;
+    memset(&r, 0, sizeof r);
+
+    struct ucred cr;
+    socklen_t crlen = sizeof cr;
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &crlen) != 0 ||
+        cr.uid != proxy_uid) {
+        respond(fd, 403, "refused\n");
+        return;
+    }
+
+    verdict_t v = read_request(fd, &r);
+    if (v.reason != NULL) { respond(fd, v.status, "refused\n"); return; }
+
+    /* No identity is required, and one offered is ignored rather than
+     * believed. A caller could otherwise set X-FHSM-Client-Subject here and
+     * see it appear in an audit line, which would put a string it chose into
+     * the record. */
+    if (strcmp(r.target, "/health") == 0 && strcmp(r.method, "GET") == 0) {
+        respond(fd, 200, "ok\n");
+        return;
+    }
+
+    if (strcmp(r.target, "/certificates") == 0 && strcmp(r.method, "GET") == 0) {
+        if (g_ca_cert_len == 0) {
+            /* Configured without --ca-cert. 404 rather than 500: the resource
+             * is genuinely not here, and the operator's mistake is theirs to
+             * see in the startup message, not the relying party's to decode. */
+            respond(fd, 404, "no certificate configured\n");
+            return;
+        }
+        char hdr[256];
+        int n = snprintf(hdr, sizeof hdr,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/pkix-cert\r\n"
+            "Content-Length: %zu\r\n"
+            "Cache-Control: public, max-age=86400\r\n"
+            "Connection: close\r\n\r\n", g_ca_cert_len);
+        if (n > 0 && (size_t)n < sizeof hdr) {
+            (void)!write(fd, hdr, (size_t)n);
+            (void)!write(fd, g_ca_cert, g_ca_cert_len);
+        }
+        return;
+    }
+
+    if (strcmp(r.target, "/ocsp") == 0) {
+        /* Named and unwritten, and the reason is worth stating rather than
+         * leaving as a bare 501. Assembling a response is in the library
+         * (`fhsm_composite_ocsp`), but parsing the OCSPRequest and looking the
+         * serial up in the revocation database live in tools/fhsm_ca.c. The
+         * service must share that code, not mirror it: a mirror that drifts is
+         * the hazard docs/FIPS_140_3_SECURITY_TARGET.md already names for the
+         * fuzz harnesses. Factoring it out is its own slice. */
+        respond(fd, 501, "not implemented yet\n");
+        return;
+    }
+
+    respond(fd, 404, "refused\n");
+}
+
+typedef struct { int lfd; int stopfd; uid_t proxy_uid; int is_public; } worker_arg_t;
 
 /* Each worker waits on the listening socket AND on a stop pipe, rather than
  * blocking in accept().
@@ -1607,8 +1722,12 @@ static void *worker(void *argp)
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
             break;
         }
-        policy_reload_if_asked();
-        serve(cfd, a->proxy_uid);
+        if (a->is_public) {
+            serve_public(cfd, a->proxy_uid);
+        } else {
+            policy_reload_if_asked();
+            serve(cfd, a->proxy_uid);
+        }
         close(cfd);
     }
     return NULL;
@@ -1617,7 +1736,7 @@ static void *worker(void *argp)
 static void usage(void)
 {
     fprintf(stderr,
-      "fhsm-service --- the REST service's guards (#111), no operations yet\n\n"
+      "fhsm-service --- signs and verifies over a local socket (#111)\n\n"
       "  fhsm-service --socket PATH --proxy-uid N\n\n"
       "  --socket PATH    unix socket to listen on. Created with mode 0660;\n"
       "                   put the proxy in the group and nobody else.\n"
@@ -1635,6 +1754,18 @@ static void usage(void)
       "  Fairness: while another identity has a request in flight, each is\n"
       "  held to --workers minus one, so a client cannot take every worker.\n"
       "  A single client is never capped, and the refusal is 429.\n\n"
+      "  --public-socket PATH\n"
+      "                   a second socket that requires no identity, for the\n"
+      "                   things a relying party asks anonymously: GET\n"
+      "                   /certificates, and /ocsp once it is written. No\n"
+      "                   policy, no refusal budget, no audit line per\n"
+      "                   request -- see the notes in the source for why each\n"
+      "                   is absent. Off unless given.\n"
+      "  --public-workers N   threads for it (default 2). Separate from\n"
+      "                   --workers so anonymous traffic cannot starve the\n"
+      "                   authenticated side.\n"
+      "  --ca-cert FILE   the certificate GET /certificates returns. Only\n"
+      "                   meaningful with --public-socket.\n\n"
       "  --profile        print the profile this binary was built with and\n"
       "                   exit. The service links the module statically, so\n"
       "                   the answer is about this binary and no other.\n\n"
@@ -1661,6 +1792,8 @@ int main(int argc, char **argv)
 {
     const char *sock_path = NULL, *pin_file = NULL, *policy_file = NULL;
     long proxy_uid = -1, workers = 4, pool_max = 32;
+    const char *pub_path = NULL, *ca_cert_path = NULL;
+    long pub_workers = 2;
 
     for (int i = 1; i < argc; i++) {
         char *e = NULL;
@@ -1680,9 +1813,29 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--pool-max") && i + 1 < argc) {
             pool_max = strtol(argv[++i], &e, 10);
             if (!e || *e || pool_max < 1 || pool_max > POOL_MAX_LIMIT) usage();
+        } else if (!strcmp(argv[i], "--public-socket") && i + 1 < argc) {
+            pub_path = argv[++i];
+        } else if (!strcmp(argv[i], "--public-workers") && i + 1 < argc) {
+            pub_workers = strtol(argv[++i], &e, 10);
+            if (!e || *e || pub_workers < 1 || pub_workers > 256) usage();
+        } else if (!strcmp(argv[i], "--ca-cert") && i + 1 < argc) {
+            ca_cert_path = argv[++i];
         } else usage();
     }
     if (!sock_path || proxy_uid < 0 || !policy_file) usage();
+    if (ca_cert_path && !pub_path) {
+        fprintf(stderr, "fhsm-service: --ca-cert without --public-socket.\n"
+                        "  The certificate is only served on the public\n"
+                        "  listener, so this asks for something nobody could\n"
+                        "  fetch. Refused rather than loaded and ignored.\n");
+        return 2;
+    }
+    if (ca_cert_path && ca_cert_load(ca_cert_path) != 0) {
+        fprintf(stderr, "fhsm-service: cannot read a certificate from %s\n"
+                        "  (missing, empty, or larger than %d bytes).\n",
+                ca_cert_path, CA_CERT_MAX);
+        return 2;
+    }
     snprintf(g_policy_path, sizeof g_policy_path, "%s", policy_file);
     {
         int n = policy_load(g_policy_path);
@@ -1695,6 +1848,15 @@ int main(int argc, char **argv)
             return 1;
         }
         fprintf(stderr, "fhsm-service: policy loaded, %d rule(s)\n", n);
+    }
+    /* The public workers borrow pooled sessions too, once /ocsp signs. Counting
+     * them now costs nothing and stops the bound being wrong later, silently,
+     * on the day that route is written. */
+    if (pool_max < workers + (pub_path ? pub_workers : 0)) {
+        fprintf(stderr, "fhsm-service: --pool-max (%ld) is below the total\n"
+                        "  worker count (%ld + %ld public).\n",
+                pool_max, workers, pub_path ? pub_workers : 0);
+        return 2;
     }
     if (pool_max < workers) {
         /* Refused rather than silently raised. A pool smaller than the worker
@@ -1798,9 +1960,38 @@ int main(int argc, char **argv)
      * gets the connection. The losers must not block in accept(). */
     (void)fcntl(lfd, F_SETFL, fcntl(lfd, F_GETFL, 0) | O_NONBLOCK);
 
+    int pfd = -1;
+    if (pub_path) {
+        struct sockaddr_un pa;
+        memset(&pa, 0, sizeof pa);
+        pa.sun_family = AF_UNIX;
+        if (strlen(pub_path) >= sizeof pa.sun_path) {
+            fprintf(stderr, "fhsm-service: --public-socket path is too long\n");
+            return 2;
+        }
+        memcpy(pa.sun_path, pub_path, strlen(pub_path));
+        unlink(pub_path);
+        pfd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (pfd < 0) { perror("fhsm-service: socket"); return 1; }
+        mode_t pold = umask(0117);       /* 0660, as on the other one */
+        if (bind(pfd, (struct sockaddr *)&pa, sizeof pa) != 0) {
+            perror("fhsm-service: bind (public)"); umask(pold); return 1;
+        }
+        umask(pold);
+        if (listen(pfd, 64) != 0) { perror("fhsm-service: listen (public)"); return 1; }
+        (void)fcntl(pfd, F_SETFL, fcntl(pfd, F_GETFL, 0) | O_NONBLOCK);
+    }
+
+    /* Recorded once, at start, and never per request on the public side --
+     * see the note above serve_public(). An operator reading the log should be
+     * able to tell that an anonymous surface exists; they should not have to
+     * read a line for every relying party that ever asked a question. */
     (void)fhsm_audit_event(FHSM_EV_SERVICE_START, -1, -1,
                             FHSM_ROLE_NONE, FHSM_RV_OK,
-                            "socket", sock_path, NULL);
+                            "socket", sock_path,
+                            "public_socket", pub_path ? pub_path : "-",
+                            "certificate", g_ca_cert_len ? "loaded" : "-",
+                            NULL);
     fprintf(stderr, "fhsm-service: listening on %s, uid %ld only,"
                     " %ld workers, pool ceiling %ld\n",
             sock_path, proxy_uid, workers, pool_max);
@@ -1808,7 +1999,21 @@ int main(int argc, char **argv)
     /* One thread short of the requested count runs the accept loop here, so
      * that a signal lands on a thread that is in accept() and the process can
      * be told to stop. The workers are detached from that concern. */
-    worker_arg_t warg = { lfd, g_stop_pipe[0], (uid_t)proxy_uid };
+    worker_arg_t warg  = { lfd, g_stop_pipe[0], (uid_t)proxy_uid, 0 };
+    worker_arg_t pwarg = { pfd, g_stop_pipe[0], (uid_t)proxy_uid, 1 };
+    pthread_t *ptids = NULL;
+    if (pub_path) {
+        ptids = calloc((size_t)pub_workers, sizeof *ptids);
+        if (!ptids) { fprintf(stderr, "fhsm-service: out of memory\n"); return 1; }
+        for (long i = 0; i < pub_workers; i++) {
+            if (pthread_create(&ptids[i], NULL, worker, &pwarg) != 0) {
+                fprintf(stderr, "fhsm-service: cannot start public worker\n");
+                return 1;
+            }
+        }
+        fprintf(stderr, "fhsm-service: public listener on %s, %ld worker(s),"
+                        " no identity required\n", pub_path, pub_workers);
+    }
     pthread_t *tids = calloc((size_t)workers - 1, sizeof *tids);
     if (!tids && workers > 1) { fprintf(stderr, "fhsm-service: out of memory\n"); return 1; }
     for (long i = 0; i < workers - 1; i++) {
@@ -1822,7 +2027,12 @@ int main(int argc, char **argv)
     /* The stop pipe already woke them; joining is only waiting for the
      * request each was in the middle of. */
     for (long i = 0; i < workers - 1; i++) (void)pthread_join(tids[i], NULL);
+    if (ptids) {
+        for (long i = 0; i < pub_workers; i++) (void)pthread_join(ptids[i], NULL);
+        free(ptids);
+    }
     close(lfd);
+    if (pfd >= 0) { close(pfd); unlink(pub_path); }
     free(tids);
 
     pool_close_all();
