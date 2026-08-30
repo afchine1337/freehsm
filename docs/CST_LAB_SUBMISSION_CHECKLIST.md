@@ -48,9 +48,9 @@ The lab will require **published CAVP certificates** for every approved mechanis
 
 ## D. Self-Test Evidence
 
-- [ ] **Boot self-test** : Logs showing `fhsm_kat_results` after `C_Initialize` for every approved mechanism (use `tests/kat_report.c`) on the tested OE
+- [ ] **Boot self-test** : Logs showing `fhsm_kat_results` after `C_Initialize` for every approved mechanism on the tested OE. `tests/test_smoke` prints all 62 vectors and is the driver to use — a `tests/kat_report.c` was named here and never written
 - [ ] **Integrity verification** : Demonstrate that an artificially corrupted `.text` section causes `C_Initialize` to return `FHSM_RV_INTEGRITY_FAILED`
-- [ ] **DRBG continuous test** : Code path exercise log (`tests/test_drbg.c` to be created)
+- [ ] **DRBG continuous test** : Code path exercise log. The stuck-output check runs inside the boot KAT (`CTR_DRBG-AES-256 stuck-check`); a dedicated `tests/test_drbg.c` is still to be created, and this box cannot be ticked from the boot KAT alone
 - [ ] **Pair-wise consistency** : KAT log for `C_GenerateKeyPair` showing the sign+verify post-keygen
 
 ---

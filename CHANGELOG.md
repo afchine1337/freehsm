@@ -399,6 +399,52 @@ project adheres to [Semantic Versioning](https://semver.org/).
   log. Also stated in AGD_OPE §4.3.
 
 ### Fixed
+* **The README claimed byte-for-byte token interoperability with the Python
+  POC, and `docs/TOKEN_STORE_FORMAT.md` said in the same repository that there
+  is none.** `README.fr.md` §"Compatibilité avec le POC Python" promised a JSON
+  store identical byte for byte, a slot written by one implementation opened by
+  the other, and a migration by swapping the shared library. The store is
+  **fixed-layout binary, not JSON**, and `TOKEN_STORE_FORMAT.md` states it
+  plainly: *"There is no byte-level interop with POC token files — migration is
+  by re-importing objects, not by copying `.tok` files."* The correction was
+  made there when that document was written, and never carried back to the
+  README or to `ARCHITECTURE.md`, which repeated the claim twice in each
+  language.
+
+  What survives is the half that is true: the PKCS#11 API is the same, so an
+  application does not change. The token files do.
+
+* **`ATE_FUN.md` contradicted itself about its own coverage.** The layer table
+  presented `tests/test_token_interop.c` as the L4 integration level; the gap
+  table, sixty lines below, listed the same file as a known gap. The file has
+  never existed and the Makefile never expected it. The L4 row now says the
+  level does not exist, and the gap is **withdrawn rather than rescheduled** —
+  its resolution path was byte-level interop with the POC, which
+  `TOKEN_STORE_FORMAT.md` rules out by design. The gap that *was* real, an
+  audit chain verifier that was "a stub", is marked closed: it shipped on
+  2026-08-18 and is checked against mutations.
+
+* **The CC and FIPS evidence cited test drivers and scripts that do not
+  exist.** `tests/kat_report.c` in `AGD_PRE.fr.md` and the CST checklist —
+  `tests/test_smoke` is the driver and prints all 62 vectors.
+  `tests/test_drbg.c` for the DRBG continuous test, which runs inside the boot
+  KAT but has no dedicated driver, so that box cannot be ticked.
+  `scripts/validate_cavp.py` and `scripts/coverage.sh` in `ALC_CMC` — the
+  cross-validation is manual and **no gate enforces the coverage thresholds**
+  the document names. `scripts/freeze_apt_versions.sh` in
+  `REPRODUCIBLE_BUILD`. Each is now described as what it is rather than cited
+  as if it were there.
+
+  These are the documents whose purpose is to be checkable by an evaluator, and
+  an evaluator would have started there.
+
+* **`scripts/doc_audit.py` learned to read French and to recognise honesty.**
+  It skipped a line admitting a file was missing, but only in English, so the
+  bilingual half of the corrected documentation came back as findings. It also
+  now excludes absolute paths, the `.fr.md` tail of a markdown link, and the
+  two files belonging to pkcs11-check's own tree. The run is down from 48
+  reported paths to 19, and the 19 need a judgement rather than a rename.
+
 * **The OpenSSF self-assessment cited three documents that do not exist, and a
   dependency the project never used.** `docs/OPENSSF_BEST_PRACTICES.md`
   justified `bus_factor` by a `docs/BUS_FACTOR.md`, `documentation_achievements`

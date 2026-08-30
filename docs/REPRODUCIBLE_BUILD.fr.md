@@ -91,7 +91,7 @@ La CI utilise `diffoscope` comme fallback quand les digests divergent, exposant 
 À chaque release qui exige une mise à jour de toolchain :
 
 1. Mettre à jour `ARG OPENSSL_VERSION` et `ARG OPENSSL_SHA256` dans `Dockerfile.build`.
-2. Mettre à jour les pins de version apt (lancer `scripts/freeze_apt_versions.sh` dans un container Debian propre).
+2. Mettre à jour les pins de version apt (lancer *(à la main — un `scripts/freeze_apt_versions.sh` a été nommé ici et n'existe pas ; `scripts/build_reproducible.sh` et `scripts/verify_reproducibility.sh`, eux, existent)* dans un container Debian propre).
 3. Bumper `FHSM_VERSION_STRING` dans `include/fhsm_common.h`.
 4. Lancer `make dist-verify` localement pour confirmer la reproductibilité sur la nouvelle toolchain.
 5. Publier le nouveau digest d'image et le SHA-256 du `libfreehsm-fips.so` résultant dans les release notes.

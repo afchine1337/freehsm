@@ -53,7 +53,14 @@ HISTORICAL = ("CHANGELOG.md", "RELEASE_v1")
 # Cited in issue drafts and gap analyses; they belong to other projects.
 FOREIGN = re.compile(
     r"^(raw/|_probes/|src/pkcs11_check/|src/algParams|src/testvectors|"
-    r"doc/files\.md$|rpc-message\.c$|output_length\.py$|/etc/)")
+    r"doc/files\.md$|rpc-message\.c$|output_length\.py$|"
+    # Absolute paths belong to the host, not to us.
+    r"/|"
+    # A bare `.fr.md` is the tail of `[X](X.fr.md)` caught by the pattern, not
+    # a citation. Guarding the extractor is cheaper than reading the noise.
+    r"\.fr\.md$|"
+    # pkcs11-check's own tree, quoted in issue and PR drafts aimed at it.
+    r"docs/providers\.md$|tests/test_wrap_context_cache\.py$)")
 
 STATUS = re.compile(
     r"not (yet )?(built|implemented|written|submitted|shipped|done)"
@@ -134,8 +141,16 @@ def check_paths(root):
     # matters more than it sounds: the honest fix for a broken citation is often
     # to say "this does not exist", and a checker that then flags the honesty
     # pushes people back towards the lie.
-    admits = re.compile(r"does not exist|is not written|unwritten|not met|"
-                        r"to be written|will be created|does not ship", re.I)
+    admits = re.compile(
+        # English
+        r"does not exist|is not written|unwritten|not met|to be written|"
+        r"will be created|does not ship|never (been )?written|was named here|"
+        r"not built|has never existed|withdrawn|"
+        # Français -- the docs are bilingual, and a filter that only reads
+        # English flags the honest French half.
+        r"n'existe pas|n'a jamais (été écrit|existé)|jamais écrit|"
+        r"a été nommé ici|non construit|à la main|procédure manuelle",
+        re.I)
     bad = []
     for f in doc_files(root):
         for n, line in enumerate(open(f, encoding="utf-8", errors="replace"), 1):

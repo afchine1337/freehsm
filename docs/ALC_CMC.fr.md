@@ -43,7 +43,7 @@ où `tag` suit semantic versioning `vMAJOR.MINOR.PATCH` et correspond à `FHSM_V
 | Tag release              | Release Manager | Tag doit être GPG-signé par la clé de release |
 | Publier le bundle release| Release Manager | Règle deux-personnes : RM signe le tar, second mainteneur signe le manifeste de digest |
 | Modifier les pins apt `Dockerfile.build` | Build Engineer | Exige passage `dist-verify` CI + relance ATE manuelle |
-| Modifier un vecteur CAVP | Crypto Engineer | Exige script de cross-validation `scripts/validate_cavp.py` |
+| Modifier un vecteur CAVP | Crypto Engineer | Exige script de cross-validation *(procédure manuelle — un `scripts/validate_cavp.py` a été nommé ici et n'existe pas)* |
 
 ### 2.3 Automatisation
 
@@ -55,7 +55,7 @@ Le CM est entièrement automatisé. Chaque push déclenche :
 4. `make tests` — smoke + dispatch + runner CAVP.
 5. `make dist-verify` — second build, assertion d'égalité byte.
 6. `make integrity` — signer le `.so` ; vérifier le digest embarqué.
-7. `scripts/coverage.sh` — gcov + lcov ; fail si couverture lignes < 95 % ou branches < 90 %.
+7. *(non automatisé — un `scripts/coverage.sh` a été nommé ici et n'existe pas)* — gcov + lcov ; fail si couverture lignes < 95 % ou branches < 90 %.
 
 Un tag release déclenche en plus :
 

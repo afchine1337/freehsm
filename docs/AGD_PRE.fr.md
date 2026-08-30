@@ -316,7 +316,7 @@ for (size_t i = 0; i < n; ++i)
     printf("%-20s %s\n", r[i].algorithm, r[i].passed ? "PASS" : "FAIL");
 ```
 
-Le binaire de référence (`tests/kat_report.c`) est livré dans la distribution. En production, le rapport est aussi écrit dans le journal d'audit sous l'événement `FHSM_EV_KAT_REPORT` avec une signature HMAC du chaînage — pas besoin d'appeler le harnais.
+Le rapport est produit par `tests/test_smoke`, livré dans la distribution. (Un `tests/kat_report.c` était nommé ici ; il n'a jamais été écrit.) En production, le rapport est aussi écrit dans le journal d'audit sous l'événement `FHSM_EV_KAT_REPORT` avec une signature HMAC du chaînage — pas besoin d'appeler le harnais.
 
 ### 7.7 Compatibilité ABI PKCS#11
 

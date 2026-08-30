@@ -230,9 +230,13 @@ Légende : ✅ implémenté · 🟡 partiel/scaffold · ⏳ à faire
 
 ## Compatibilité avec le POC Python
 
-Le format JSON sur disque est **byte-pour-byte identique** entre le POC Python et le TOE C : un slot créé par l'un peut être ouvert, modifié, et re-fermé par l'autre. Le test `tests/test_token_interop.c` vérifie qu'un token init en Python ouvre correctement sous C et inversement, et que les ciphertexts AES-GCM produits sont identiques bit-à-bit.
+**L'API est compatible ; les fichiers de token ne le sont pas.**
 
-Cela permet une **migration sans interruption de service** : on substitue `libfreehsm.so` (Python) par `libfreehsm-fips.so` (C) avec le même SONAME, et les applications n'ont rien à modifier.
+Une application PKCS#11 qui parlait au POC Python parle au module C sans changer une ligne : même interface, même `SONAME`. C'est la moitié qui tient.
+
+En revanche il n'y a **aucune interopérabilité au niveau des octets**. Le POC utilisait une disposition JSON ; le module C utilise un format binaire à champs fixes, pour une analyse en temps constant, sans allocation sur le chemin chaud et avec une surface d'analyse minimale — voir `docs/TOKEN_STORE_FORMAT.md`, qui fait foi. **Un `.tok` produit par le POC ne s'ouvre pas ici.** La migration se fait en réimportant les objets, pas en copiant les fichiers.
+
+*Ce paragraphe affirmait le contraire jusqu'au 2026-08-30 : une identité « byte-pour-byte » en JSON, garantie par un `tests/test_token_interop.c` qui n'a jamais existé, et une migration par simple substitution de bibliothèque. `docs/TOKEN_STORE_FORMAT.md` disait déjà l'inverse ; la correction n'avait été portée que là.*
 
 -
 

@@ -16,9 +16,9 @@ The test suite is organized in four layers that mirror the architectural decompo
 | L1 Smoke         | `tests/test_smoke.c`                   | End-to-end : C_Initialize → POST + KAT → AES-GCM round-trip → tamper detection → C_Finalize |
 | L2 Unit          | `tests/test_dispatch.c`                | Per-handler : weak/strong override, table sortedness, FIPS profile gates|
 | L3 KAT / CAVP    | `kat/fhsm_kat_rsp.c` + `kat/cavp/*.rsp`| 83 cross-validated vectors over AES-GCM, SHA-2/3, HMAC, PBKDF2          |
-| L4 Integration   | `tests/test_token_interop.c`           | Format-level interop with the Python reference POC                     |
+| ~~L4 Integration~~ | *(not built)*                        | **This level does not exist.** It was described as format-level interop with the Python POC, and `docs/TOKEN_STORE_FORMAT.md` says there is none by design: the POC stored JSON, this module a fixed-layout binary. See §Known gaps |
 
-Each layer is **invoked independently** from the others so that a failure pinpoints a single subsystem. The full suite is executed under three configurations during a release :
+L1, L2 and L3 exist and were verified present on 2026-08-30, with their vectors: `kat/cavp/*.rsp` holds the AES-GCM, DRBG and SHA sets. Each layer is **invoked independently** from the others so that a failure pinpoints a single subsystem. The full suite is executed under three configurations during a release :
 
 1. **Debug** : `make tests` with `-g3 -O2` and ASan instrumentation.
 2. **Release** : `make tests CFLAGS+=-O3 -DNDEBUG` (the build the evaluator receives).
@@ -51,7 +51,7 @@ The required mapping is *Security Functional Requirements → TSFI → test*. We
 | **FPT_RCV.1**   | Manual restart only        | non-functional, doc-only requirement       | --- |
 | **FTA_SSL.4**   | Logout zeroize             | smoke calls C_Logout then introspects token state                 | --- |
 
-The matrix is regenerated automatically from a YAML descriptor at every release ; the YAML descriptor lives in `docs/sfr_to_test.yaml` (to be added).
+The matrix above is maintained by hand. A YAML descriptor at `docs/sfr_to_test.yaml` was planned so it could be regenerated at every release; it has not been written, and until it is, "regenerated automatically" describes an intention rather than a procedure.
 
 ### 2.1 Coverage metric
 
@@ -120,8 +120,8 @@ OVERALL : OK
 
 | Gap                                          | Resolution path                                 |
 |----------------------------------------------|-------------------------------------------------|
-| Audit chain verifier `tests/test_audit_verify.c` is a stub  | Walker over `.audit.log` with HMAC recomputation, fixture in `tests/fixtures/audit/` |
-| Token interop test (`tests/test_token_interop.c`) | Python-produced token consumed in C, byte-for-byte equality check on objects_blob |
+| ~~Audit chain verifier is a stub~~ **Closed 2026-08-18.** `tests/test_audit_verify.c` walks the log, recomputes the chain, and is checked against mutations — an altered, deleted and duplicated record each fail at the right line, and the `freehsm-audit` tool agrees with the library on all of them | — |
+| Token interop test | **Withdrawn 2026-08-30, not scheduled.** The resolution path read "Python-produced token consumed in C, byte-for-byte equality check on objects_blob", and it cannot be walked: `docs/TOKEN_STORE_FORMAT.md` states there is no byte-level interop with POC token files and that migration is by re-importing objects. The gap was real; the *goal* was not. What would be worth building is an API-level conformance run against the POC, which is a different test |
 | Negative tests for invalid PKCS#11 args (`CKR_ARGUMENTS_BAD` paths) | Parametric harness from a YAML table of malformed inputs |
 | Coverage on `fhsm_integrity.c::find_section_offset` ELF parser | Crafted ELF inputs with edge-cases (empty section table, etc.) |
 

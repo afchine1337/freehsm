@@ -6,7 +6,7 @@
 
 Ce document décrit l'architecture interne de la réimplémentation C de FreeHSM. L'objectif principal est de rendre la frontière cryptographique auditable en isolation, ce qui est requis à la fois par FIPS 140-3 (frontière unique, interfaces bien définies) et par CC EAL4+ (ADV_TDS.3 conception modulaire de base, ADV_FSP.4 spécification fonctionnelle complète).
 
-Le POC Python reste l'**implémentation de référence** pour la conformité comportementale : la suite C re-utilise le même format de token sur disque et les mêmes traces PKCS#11, donc les deux implémentations interopèrent byte-pour-byte (cf. `tests/test_token_interop.c`).
+Le POC Python reste l'**implémentation de référence** pour la conformité comportementale au niveau de l'**API** : la suite C rejoue les mêmes traces PKCS#11. Ce n'est **pas** une référence de format sur disque — le POC utilisait du JSON, ce module utilise un store binaire à champs fixes, et un `.tok` du POC ne s'ouvre pas ici. `docs/TOKEN_STORE_FORMAT.md` fait foi, et le disait déjà pendant que cette ligne revendiquait une identité octet pour octet garantie par un `tests/test_token_interop.c` qui n'a jamais existé.
 
 ## 2. Gâteau en couches
 
@@ -105,8 +105,8 @@ Aucun lock n'est détenu en traversant la frontière du provider OpenSSL. Le pro
 | KAT                 | `kat/fhsm_kat_vectors.c`              | Chaque primitive approuvée à l'init     |
 | Smoke               | `tests/test_smoke.c`                  | End-to-end encrypt/decrypt + tamper     |
 | Dispatch            | `tests/test_dispatch.c`               | Override weak/strong, table triée       |
-| Audit               | `tests/test_audit.c`                  | Vérification de chaîne                  |
-| Interop token       | `tests/test_token_interop.c`          | Identique bit-à-bit avec POC Python     |
+| Audit               | `tests/test_audit_verify.c` et six voisins | Vérification de chaîne, rejet d'injection, contre-pression, group commit, multi-processus |
+| Interop token       | *(aucun)*                             | **Non construit.** Voir `docs/ATE_FUN.md` §Known gaps — l'interop au niveau des octets avec le POC n'est pas un objectif : les formats diffèrent par choix |
 | Fuzzing             | `tests/fuzz/` + AFL++                 | Parseur token, parseur args PKCS#11     |
 | Couverture          | `make coverage`                       | Cible gcov/lcov ≥ 95% lignes, 90% branches |
 
@@ -119,7 +119,7 @@ Le TOE C lit et écrit le **format JSON de token exact** du POC Python. Une orga
 3. Démarrer le service C.
 4. Tous les slots, toutes les clés, tous les compteurs PIN, toutes les chaînes d'audit sont conservés.
 
-Ceci est vérifié par `tests/test_token_interop.c`, qui génère un token sous Python, l'ouvre sous C, effectue un round-trip encrypt/decrypt, et vérifie que les ciphertexts AES-GCM produits sont identiques bit-à-bit.
+**Rien ne le vérifie, parce que ce n'est pas vrai du format sur disque.** Un test de cette forme était décrit ici et dans `docs/ATE_FUN.md` comme le niveau d'intégration L4 ; il n'a jamais été écrit, et l'écrire échouerait, puisque le store JSON du POC et le store binaire de ce module sont deux formats différents à dessein. Ce qui est partagé, c'est l'API PKCS#11 et le comportement derrière.
 
 ## 11. Ajouts couches v1.1.0
 

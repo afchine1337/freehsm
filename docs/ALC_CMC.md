@@ -46,7 +46,7 @@ where `tag` follows semantic versioning `vMAJOR.MINOR.PATCH` and matches `FHSM_V
 | Tag release             | Release Manager | Tag must be GPG-signed by the listed release key |
 | Publish release bundle  | Release Manager | Two-person rule : RM signs the tar, second maintainer signs the digest manifest |
 | Modify `Dockerfile.build` apt pins | Build Engineer | Requires `dist-verify` CI pass + manual ATE rerun |
-| Modify a CAVP vector    | Crypto Engineer | Requires cross-validation script `scripts/validate_cavp.py` to confirm with an independent implementation |
+| Modify a CAVP vector    | Crypto Engineer | Requires cross-validation against an independent implementation before the vector is accepted. **The procedure is manual**: a `scripts/validate_cavp.py` was named here and does not exist |
 
 ### 2.3 Automation
 
@@ -58,7 +58,7 @@ The CM is fully automated. Every push triggers :
 4. `make tests` — smoke + dispatch + CAVP runner.
 5. `make dist-verify` — second build, byte-equality assertion.
 6. `make integrity` — sign the .so ; verify the embedded digest matches the externally computed one.
-7. `scripts/coverage.sh` — gcov + lcov ; fail if line coverage < 95 % or branch coverage < 90 %.
+7. Coverage — gcov + lcov, with the same thresholds in mind (line ≥ 95 %, branch ≥ 90 %). **Not automated**: a `scripts/coverage.sh` was listed here and does not exist, so no gate enforces those numbers today.
 
 A release tag additionally triggers :
 

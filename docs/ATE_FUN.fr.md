@@ -16,7 +16,7 @@ La suite de tests est organisée en quatre couches qui reflètent la décomposit
 | L1 Smoke          | `tests/test_smoke.c`                   | End-to-end : C_Initialize → POST + KAT → AES-GCM round-trip → tamper → C_Finalize |
 | L2 Unitaire       | `tests/test_dispatch.c`                | Par handler : override weak/strong, table triée, gates profil FIPS      |
 | L3 KAT / CAVP     | `kat/fhsm_kat_rsp.c` + `kat/cavp/*.rsp`| 83 vecteurs cross-validés sur AES-GCM, SHA-2/3, HMAC, PBKDF2            |
-| L4 Intégration    | `tests/test_token_interop.c`           | Interop format-level avec le POC Python                                 |
+| ~~L4 Intégration~~ | *(non construit)* | **Ce niveau n'existe pas.** Il était décrit comme de l'interopérabilité de format avec le POC Python, et `docs/TOKEN_STORE_FORMAT.md` dit qu'il n'y en a aucune par choix : le POC stockait du JSON, ce module un binaire à champs fixes. Voir §lacunes connues |
 
 Un test est considéré comme réussi seulement si **les trois configurations** (debug, release, reproducible) sortent en code 0.
 
@@ -85,7 +85,7 @@ OVERALL : OK
 | Gap                                          | Voie de résolution                              |
 |----------------------------------------------|-------------------------------------------------|
 | Audit chain verifier `tests/test_audit_verify.c` est un stub | Walker sur `.audit.log` avec recomputation HMAC |
-| Test interop token (`tests/test_token_interop.c`) | Token Python consommé en C, égalité byte-pour-byte |
+| Test interop token | **Retiré le 2026-08-30, non planifié.** Le chemin de résolution — « token Python consommé en C, égalité octet pour octet sur objects_blob » — ne peut pas être suivi : `docs/TOKEN_STORE_FORMAT.md` établit qu'il n'y a pas d'interop au niveau des octets et que la migration se fait en réimportant les objets. La lacune était réelle ; l'*objectif* ne l'était pas. Ce qui vaudrait d'être construit, c'est une conformité au niveau de l'API contre le POC, qui est un autre test |
 | Tests négatifs args PKCS#11 invalides (`CKR_ARGUMENTS_BAD`) | Harness paramétrique depuis table YAML d'inputs malformés |
 | Couverture `fhsm_integrity.c::find_section_offset` (parseur ELF) | ELF crafted avec edge-cases |
 
