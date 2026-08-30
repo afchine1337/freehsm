@@ -8,7 +8,9 @@
  *  docs/REST_API_DESIGN.md decided the shape. The guards came first and the
  *  cryptography after, because refusals are the part of an API that ages
  *  worst when they are added late. POST /sign is now real; /verify,
- *  /certificates and /ocsp still answer 501.
+ *  /certificates and /ocsp live on the public listener instead, because a
+ *  relying party has no identity to present; on this socket they answer
+ *  404 and name the one that has them.
  *
  *  WHAT IT ENFORCES
  *
@@ -1442,18 +1444,22 @@ static void serve(int fd, uid_t proxy_uid)
             v = (verdict_t){ 405, "wrong_method" };
         }
         else if (strcmp(r.target, "/certificates") == 0 ||
-            strcmp(r.target, "/ocsp")         == 0) {
-            /* Named, refused, and audited as accepted: the request passed
-             * every guard, and the only reason it does nothing is that the
-             * operation is not written. Recording it as a refusal would make
-             * the log lie about who was turned away. */
-            (void)fhsm_audit_event(FHSM_EV_REQUEST_ACCEPTED, -1, -1,
-                                    FHSM_ROLE_NONE, FHSM_RV_OK,
-                                    "route", r.target, "state", "not_implemented",
-                                    NULL);
-            respond(fd, 501, "not implemented yet\n");
+                 strcmp(r.target, "/ocsp")         == 0) {
+            /* Both live on the public listener, and neither belongs here: a
+             * relying party asking for the CA certificate or a revocation
+             * status has no identity to present, which is why --public-socket
+             * exists. 501 said "we have not written this", which stopped being
+             * true for /certificates the moment the public side served it. 404
+             * is the honest answer on *this* socket, and the header names the
+             * one that has it. */
+            respond_with(fd, 404, "not here; see the public listener\n",
+                         "Link: </certificates>; rel=\"alternate\"\r\n");
             goto done;
         }
+        /* There is no 501 branch on this socket any more. Every route the
+         * authenticated side names is now either written or is served by the
+         * public listener; a branch kept alive by `if (0)` to hold a comment
+         * would be the dead code this file objects to elsewhere. */
         /* `else`, not a bare statement. It was unconditional, which was
          * correct only while every branch above ended in `return`: the moment
          * one of them produced a verdict and fell through -- /sign refusing an
@@ -1783,8 +1789,8 @@ static void usage(void)
       "  and ignores the body is right by default.\n\n"
       "  /token reads the token's public description; POST /sign signs a\n"
       "  request body with the key named by X-FHSM-Key, if the policy file\n"
-      "  pairs it with the caller's subject. /certificates and /ocsp answer\n"
-      "  501.\n");
+      "  pairs it with the caller's subject. /certificates and /ocsp are on\n"
+      "  the public listener, not here.\n");
     exit(2);
 }
 

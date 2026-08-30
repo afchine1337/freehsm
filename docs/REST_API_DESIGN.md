@@ -478,6 +478,17 @@ Refusals are the part of an API that ages well, so they are decided here.
   reach it. What is recorded is that the listener exists, at start. Signing and
   verifying are simply absent from that surface, answering 404 rather than 403
   or 501: a route that answers anything invites a second look.
+
+  The authenticated socket answers **404** for `/certificates` and `/ocsp`,
+  not 501, and names the other listener in a `Link:` header. 501 would say
+  "this route exists here and is unwritten", which stopped being true the
+  moment they moved; 404 is what a route that is not on this socket is.
+
+  The code both listeners reach is one implementation, in
+  `src/fhsm_revocation.c`: the revocation database, the CertID matching and
+  the response assembly, shared with `fhsm-ca` rather than mirrored. Two
+  copies would agree on the day they were written, and the one that drifted
+  would answer `good` for a certificate the CA revoked.
 * **A connection whose peer credentials do not match the proxy's uid.**
 * **Any request naming a key the certificate subject is not authorised for.**
   Authorisation is a decision, not the absence of a denial.

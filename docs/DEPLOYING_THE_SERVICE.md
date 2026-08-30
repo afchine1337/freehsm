@@ -306,8 +306,12 @@ job, and the way to do it is to revoke the certificate.
   of that is the proxy's. If the proxy does not check the CRL or ask an OCSP
   responder, a revoked certificate keeps working; `fhsm-ca crl` and
   `fhsm-ca ocsp-respond` exist to be pointed at.
-* **`/certificates` and `/ocsp` answer 501.** Implemented: `/health`,
-  `/token`, `POST /sign` and `POST /verify`.
+* **`/certificates` and `/ocsp` are on the public listener, not this one.**
+  The authenticated socket answers 404 for both, with a `Link:` header naming
+  where they live, because a relying party has no identity to present. On the
+  public socket `GET /certificates` is served and `POST /ocsp` still answers
+  501. Implemented on the authenticated socket: `/health`, `/token`,
+  `POST /sign` and `POST /verify`.
 * **No queue with a depth.** Requests beyond the worker count wait in the
   kernel's accept backlog, where the daemon can neither see nor reorder them.
   `docs/REST_API_DESIGN.md` records this as a later slice, and it is why one

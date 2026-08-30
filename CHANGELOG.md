@@ -7,6 +7,53 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+* **The revocation database and the OCSP responder move into the library
+  (#163).** Both lived in `tools/fhsm_ca.c`, reached only by
+  `fhsm-ca ocsp-respond`. `fhsm-service` has to answer the same question on a
+  socket, and copying the code would have produced two implementations of "is
+  this serial revoked" — agreeing on the day they were written, and drifting
+  after. A responder that has drifted answers `good` for a certificate the CA
+  revoked, which is the one wrong answer OCSP exists to prevent.
+
+  They are now `include/fhsm_revocation.h` and `src/fhsm_revocation.c`,
+  linked into `fhsm-ca` and `fhsm-service` and **deliberately not into the
+  module**: the file pulls in OpenSSL's OCSP parser and computes SHA-1 for
+  CertID matching, and `fips-strict` has no business carrying either.
+
+  Two things a tool may do and a daemon may not were removed on the way.
+  `exit()` on a malformed database line — in a service that is one request to
+  refuse, not a reason to stop answering the rest; every function now returns a
+  status and writes its diagnostic into the caller's buffer, and `fhsm-ca`
+  prints it and exits exactly as before. And the `static` file buffer, which is
+  fine for one operator and is the data race that gave fifteen of sixteen
+  concurrent clients another client's signature earlier in #111. The database
+  also grows instead of allocating all 100 000 entries per load: 8 MB once per
+  run is affordable, 8 MB per request is not.
+
+* **`/certificates` and `/ocsp` answer 404 on the authenticated socket, not
+  501 (#111).** 501 says "this route exists here and is unwritten", which
+  stopped being true when both moved to the public listener. The answer carries
+  `Link: </certificates>; rel="alternate"`, so it names where they went rather
+  than leaving the caller to read the ADR.
+
+### Fixed
+* **The same certificate could be revoked twice (#163).** `fhsm-ca revoke`
+  compared serials byte for byte; the responder compared them ignoring leading
+  zeros, which is what DER's sign padding requires. So `004A3B2C1D` was
+  accepted as new when `4A3B2C1D` was already recorded, and the certificate
+  appeared twice in every CRL after that. The two comparisons were in different
+  functions and nothing asked them the same question — putting both in one file
+  is what made the difference visible. `revoke` now uses the responder's
+  comparison.
+
+* **The revocation database had no test.** The CRL encoder had a differential
+  test against OpenSSL and the delegated responder had twenty assertions, but
+  the file both of them read was exercised only incidentally. `make
+  revocation-db` (`tests/revocation_db.sh`) covers recording, the leading-zero
+  case above, the four refusals, and that a malformed line stops the whole read
+  with the file left untouched. Reverting the fix fails three of its assertions.
+
 ### Added
 * **A second, anonymous listener (#111).** `docs/REST_API_DESIGN.md` refuses
   requests with no client identity — "not 'anonymous read-only'" — and names

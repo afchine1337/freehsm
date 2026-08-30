@@ -59,9 +59,23 @@ chmod 600 "$FHSM_TOKENS_DIR/pin"
 # Ask the binary under test, not a sibling. fhsm-csr is built separately and
 # can be interop while the service is fips-strict; the guard that consulted it
 # passed while /sign failed for exactly the reason the guard exists to catch.
-if [ "$("$SVC" --profile 2>/dev/null)" != "interop" ]; then
-    echo "service_guards.sh: $SVC was built fips-strict, which cannot sign" >&2
-    echo "  with the composite mechanism. Rebuild: make PROFILE=interop" >&2
+# The profile the binary carries, not the profile the tree was generated for.
+#
+# This used to read `[ "$("$SVC" --profile)" != "interop" ]` and print "was
+# built fips-strict" for anything that was not the word `interop` -- including
+# the empty string you get when the binary does not run at all. Under a TSAN
+# build that cannot map its shadow memory, that is exactly what happens, and
+# the message sent the reader to rebuild a profile that was already correct.
+# An absence in the output is not a value in the world; separate the two.
+p=$("$SVC" --profile 2>/dev/null) || true
+if [ -z "$p" ]; then
+    echo "service_guards.sh: $SVC did not run. Its own output:" >&2
+    "$SVC" --profile >&2 2>&1 || true
+    exit 2
+fi
+if [ "$p" != "interop" ]; then
+    echo "service_guards.sh: $SVC was built $p, which cannot sign with the" >&2
+    echo "  composite mechanism. Rebuild: make PROFILE=interop" >&2
     exit 2
 fi
 "$CSR" keygen --label tls-web01 >/dev/null 2>&1 || {
@@ -105,6 +119,25 @@ finally:
 PY
 }
 
+# The same, but the whole head. req() keeps only the status line, which is what
+# nearly every assertion here wants; an assertion about a header needs the rest,
+# and reading it out of req() would have been reading a line that was thrown
+# away -- as one of these did, silently, until the response was printed raw.
+reqh() {
+    python3 - "$SOCK" "$1" <<'PYH'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5)
+try:
+    s.connect(sys.argv[1])
+    s.sendall(sys.argv[2].encode().decode('unicode_escape').encode('latin-1'))
+    print(s.recv(4000).decode(errors='replace').split('\r\n\r\n')[0])
+except Exception as e:
+    print(f'NO RESPONSE ({e})')
+finally:
+    s.close()
+PYH
+}
+
 H='X-FHSM-Client-Subject: CN=web01\r\n'
 
 r=$(req "GET /health HTTP/1.1\r\nHost: x\r\n${H}\r\n")
@@ -119,8 +152,11 @@ echo "$r" | grep -q "400"; ok $? "  and a repeated one too, rather than resolved
 r=$(req "GET /sign HTTP/1.1\r\n${H}\r\n")
 echo "$r" | grep -q "405"; ok $? "GET /sign is 405, neither 404 nor 501"
 
-r=$(req "POST /certificates HTTP/1.1\r\n${H}Content-Length: 3\r\n\r\nabc")
-echo "$r" | grep -q "501"; ok $? "a route named but unwritten answers 501, not 404"
+r=$(req "GET /certificates HTTP/1.1\r\n${H}\r\n")
+echo "$r" | grep -q "404"; ok $? "/certificates is 404 here, not 501: it is on the public listener"
+h=$(reqh "GET /certificates HTTP/1.1\r\n${H}\r\n")
+echo "$h" | grep -q "Link: </certificates>"
+ok $? "  and the answer names the listener that has it"
 
 r=$(req "GET /token HTTP/1.1\r\n${H}\r\n")
 echo "$r" | grep -q "200 OK"; ok $? "/token reaches the module through a pooled session"

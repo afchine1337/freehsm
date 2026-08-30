@@ -194,6 +194,15 @@ endif
 OBJDIR ?= .obj
 LIB_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(LIB_SRC))
 
+# src/fhsm_revocation.c is deliberately NOT in LIB_SRC. It is shared between
+# fhsm-ca and fhsm-service -- one implementation of "is this serial revoked",
+# because two would drift and a drifted responder answers `good` for a revoked
+# certificate. But it is not part of the PKCS#11 module: it pulls in OpenSSL's
+# OCSP parser and computes SHA-1 for CertID matching, and the fips-strict
+# module has no business carrying either. Named here so both consumers get the
+# same object and neither the module nor a future tool acquires it by accident.
+REVOCATION_OBJ = $(OBJDIR)/src/fhsm_revocation.o
+
 LIB     = libfreehsm-fips.so
 LIB_VER = $(LIB).$(shell awk -F'"' '/FHSM_VERSION_STRING/{print $$2; exit}' include/fhsm_common.h)
 
@@ -241,8 +250,8 @@ tools/fhsm-csr: tools/fhsm_csr.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
 # fhsm-ca signs for other people; fhsm-csr makes requests and its own root.
 # Separate binaries because they are separate authorities, usually separate
 # operators, and a single tool named for one of them would misname the other.
-tools/fhsm-ca: tools/fhsm_ca.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
+tools/fhsm-ca: tools/fhsm_ca.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
 tools/fhsm-sign: tools/fhsm_sign.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
@@ -520,8 +529,8 @@ tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
 # The service links the library objects rather than dlopen()ing the module:
 # it is the PKCS#11 application, and it needs fhsm_audit_set_actor(), which is
 # not part of PKCS#11 and is not exported from the shared object.
-service/fhsm-service: service/fhsm_service.c $(LIB_OBJ)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+service/fhsm-service: service/fhsm_service.c $(LIB_OBJ) $(REVOCATION_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(REVOCATION_OBJ) $(LDFLAGS)
 
 # Regression test for the objects-blob loader bound (#108) and the v2
 # variable-record blob (#110) : >11-object and certificate-sized
@@ -709,6 +718,13 @@ service-budget: service/fhsm-service tools/fhsm-token tools/fhsm-csr
 .PHONY: service-public
 service-public: service/fhsm-service tools/fhsm-token tools/fhsm-csr
 	sh tests/service_public.sh
+
+# The revocation database, which fhsm-ca and fhsm-service now read through the
+# same code. Needs only the tool: `revoke` touches no key and unlocks nothing,
+# which is the whole point of keeping it separate from `crl`.
+.PHONY: revocation-db
+revocation-db: tools/fhsm-ca
+	$(TEST_LD) sh tests/revocation_db.sh
 
 .PHONY: ocsp-delegated
 ocsp-delegated:

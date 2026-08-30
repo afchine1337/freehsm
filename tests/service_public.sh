@@ -23,8 +23,23 @@ say() { printf '  %-58s %s\n' "$1" "$2"; }
 ok()  { if [ "$1" = 0 ]; then say "$2" OK; else say "$2" FAIL; fail=$((fail+1)); fi; }
 
 [ -x "$SVC" ] || { echo "service_public.sh: $SVC is not built" >&2; exit 2; }
-if [ "$("$SVC" --profile 2>/dev/null)" != "interop" ]; then
-    echo "service_public.sh: $SVC was built fips-strict; rebuild PROFILE=interop" >&2
+# The profile the binary carries, not the profile the tree was generated for.
+#
+# This used to read `[ "$("$SVC" --profile)" != "interop" ]` and print "was
+# built fips-strict" for anything that was not the word `interop` -- including
+# the empty string you get when the binary does not run at all. Under a TSAN
+# build that cannot map its shadow memory, that is exactly what happens, and
+# the message sent the reader to rebuild a profile that was already correct.
+# An absence in the output is not a value in the world; separate the two.
+p=$("$SVC" --profile 2>/dev/null) || true
+if [ -z "$p" ]; then
+    echo "service_public.sh: $SVC did not run. Its own output:" >&2
+    "$SVC" --profile >&2 2>&1 || true
+    exit 2
+fi
+if [ "$p" != "interop" ]; then
+    echo "service_public.sh: $SVC was built $p, which cannot sign with the" >&2
+    echo "  composite mechanism. Rebuild: make PROFILE=interop" >&2
     exit 2
 fi
 command -v python3 >/dev/null || { echo "service_public.sh: python3 needed" >&2; exit 2; }
