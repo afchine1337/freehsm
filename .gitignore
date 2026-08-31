@@ -105,6 +105,26 @@ tools/*.gcno
 tools/*.gcda
 tools/*.gcov
 
+# The seventh, and the comment above predicted it in as many words:
+# "enumeration keeps losing to the next file that does not exist yet."
+# service/ did not exist when that was written. fhsm-service was built,
+# `git status` showed it as untracked, and nothing stopped it being added --
+# 2.4 MB of ELF, the same mistake as 093ad70 in a directory the rule had
+# never been extended to.
+#
+# Same invariant, same shape: every source in service/ has an extension,
+# every built binary has none.
+service/*
+!service/*.*
+!service/*/
+service/*.o
+service/*.a
+service/*.so
+service/*.d
+service/*.gcno
+service/*.gcda
+service/*.gcov
+
 # Reproducible-build outputs
 dist/
 *.tar.xz
