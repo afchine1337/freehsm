@@ -47,6 +47,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
   is what made the difference visible. `revoke` now uses the responder's
   comparison.
 
+* **`make service-guards`, `service-budget` and `service-public` failed on a
+  correct tree.** Two causes, one message, and the shape this project keeps
+  finding: a control wired to most of the paths that reach a state and not the
+  rest. Forty-two recipes in the `Makefile` run tests through `$(TEST_LD)`;
+  these three did not, so the module resolved against the system OpenSSL, which
+  has no ML-DSA-65. And all three named the binaries as prerequisites but not
+  `$(LIB)` — so a `libfreehsm-fips.so` left over from the other profile
+  survived the rebuild and failed at the same keygen with the same
+  `CKR_MECHANISM_INVALID`, while the scripts' own `--profile` guard passed
+  throughout, because the service carries its profile statically and says
+  nothing about the library it never loads. Both fixed; the diagnostic now
+  prints the tool's own output and names both causes.
+
 * **The revocation database had no test.** The CRL encoder had a differential
   test against OpenSSL and the delegated responder had twenty assertions, but
   the file both of them read was exercised only incidentally. `make

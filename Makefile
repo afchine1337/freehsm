@@ -702,22 +702,39 @@ audit-switch:
 # The service's guards need the binary and a token, so they are their own
 # target rather than part of `make tests`, which links the library and never
 # opens a socket.
+# Two things here were learned by watching these three targets fail on a tree
+# that was correct.
+#
+# $(TEST_LD) is not decoration. Without it the module resolves against the
+# system OpenSSL, which on a distribution build has no ML-DSA-65, and the
+# first composite keygen fails with CKR_MECHANISM_INVALID. Forty-two recipes
+# in this file carry it; these three did not.
+#
+# And $(LIB) is a prerequisite, not an assumption. The tools dlopen
+# ./libfreehsm-fips.so; naming only the binaries let a library built for the
+# other profile survive a rebuild and fail at the same keygen with the same
+# status -- two causes, one message, and the service's own --profile guard
+# passing throughout because the service carries its profile statically and
+# the library it never loads carries another.
+#
+# The recurring shape twice over: a control wired to most of the paths that
+# reach a state and not the rest.
 .PHONY: service-guards
-service-guards: service/fhsm-service tools/fhsm-token
-	sh tests/service_guards.sh
+service-guards: $(LIB) service/fhsm-service tools/fhsm-token tools/fhsm-csr
+	$(TEST_LD) sh tests/service_guards.sh
 
 # The budget test is separate from service-guards because it stops and starts
 # the daemon: the property it exists for -- a count that survives a restart --
 # cannot be seen by a suite that never restarts anything.
 .PHONY: service-budget
-service-budget: service/fhsm-service tools/fhsm-token tools/fhsm-csr
-	sh tests/service_budget.sh
+service-budget: $(LIB) service/fhsm-service tools/fhsm-token tools/fhsm-csr
+	$(TEST_LD) sh tests/service_budget.sh
 
 # The public listener needs its own script for the same reason: it starts the
 # daemon three times expecting refusals, then once expecting success.
 .PHONY: service-public
-service-public: service/fhsm-service tools/fhsm-token tools/fhsm-csr
-	sh tests/service_public.sh
+service-public: $(LIB) service/fhsm-service tools/fhsm-token tools/fhsm-csr
+	$(TEST_LD) sh tests/service_public.sh
 
 # The revocation database, which fhsm-ca and fhsm-service now read through the
 # same code. Needs only the tool: `revoke` touches no key and unlocks nothing,

@@ -56,7 +56,19 @@ trap 'if [ -n "$PID" ]; then kill $PID 2>/dev/null; fi; rm -rf "$D"' EXIT
 
 "$TOK" init >/dev/null 2>&1
 "$CSR" keygen --label ca >/dev/null 2>&1 || {
-    echo "service_public.sh: cannot generate a composite key" >&2; exit 2; }
+    echo "service_public.sh: could not generate a composite key. The tool said:" >&2
+    "$CSR" keygen --label ca >&2 2>&1 || true
+    echo "  Two causes give CKR_MECHANISM_INVALID (0x70) here, and this script" >&2
+    echo "  cannot tell them apart from the outside:" >&2
+    echo "    - the module resolved against an OpenSSL with no ML-DSA-65;" >&2
+    echo "    - ./libfreehsm-fips.so was built fips-strict, where the composite" >&2
+    echo "      mechanism does not exist. The service's --profile above says" >&2
+    echo "      nothing about it: the service carries its profile statically." >&2
+    echo "  Both are handled by going through make rather than sh:" >&2
+    echo "    make PROFILE=interop service-public" >&2
+    echo "  and 'make PROFILE=interop show-profile' reports the second." >&2
+    exit 2
+}
 "$CSR" root --label ca --subject "/C=FR/O=Example/CN=Root" --out "$D/ca.der" \
     >/dev/null 2>&1 || { echo "service_public.sh: cannot build a root" >&2; exit 2; }
 printf '%s\n' "$FHSM_PIN" > "$D/pin"; chmod 600 "$D/pin"

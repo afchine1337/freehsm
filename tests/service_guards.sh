@@ -79,8 +79,19 @@ if [ "$p" != "interop" ]; then
     exit 2
 fi
 "$CSR" keygen --label tls-web01 >/dev/null 2>&1 || {
-    echo "service_guards.sh: fhsm-csr cannot generate a composite key" >&2
-    exit 2; }
+    echo "service_guards.sh: could not generate a composite key. The tool said:" >&2
+    "$CSR" keygen --label tls-web01 >&2 2>&1 || true
+    echo "  Two causes give CKR_MECHANISM_INVALID (0x70) here, and this script" >&2
+    echo "  cannot tell them apart from the outside:" >&2
+    echo "    - the module resolved against an OpenSSL with no ML-DSA-65;" >&2
+    echo "    - ./libfreehsm-fips.so was built fips-strict, where the composite" >&2
+    echo "      mechanism does not exist. The service's --profile above says" >&2
+    echo "      nothing about it: the service carries its profile statically." >&2
+    echo "  Both are handled by going through make rather than sh:" >&2
+    echo "    make PROFILE=interop service-guards" >&2
+    echo "  and 'make PROFILE=interop show-profile' reports the second." >&2
+    exit 2
+}
 "$CSR" keygen --label secret-ca >/dev/null 2>&1
 # ghost-key is permitted by the policy and was never generated. Without it
 # every refusal below fails on the policy check alone, and the branch that
