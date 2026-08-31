@@ -322,6 +322,17 @@ int fhsm_ocsp_check_responder(const uint8_t *responder_der, size_t responder_len
     return FHSM_REV_OK;
 }
 
+size_t fhsm_ocsp_status_response(int status, uint8_t out[5])
+{
+    if (status != FHSM_OCSP_RESP_MALFORMED &&
+        status != FHSM_OCSP_RESP_INTERNAL  &&
+        status != FHSM_OCSP_RESP_TRYLATER) return 0;
+    out[0] = 0x30; out[1] = 0x03;              /* SEQUENCE, 3 bytes        */
+    out[2] = 0x0A; out[3] = 0x01;              /* ENUMERATED, 1 byte       */
+    out[4] = (uint8_t)status;
+    return 5;
+}
+
 /* OCSPResponse ::= SEQUENCE { responseStatus ENUMERATED,
  *                             responseBytes [0] EXPLICIT ResponseBytes OPTIONAL }
  * Assembled here because OCSP_response_create needs an OCSP_BASICRESP, and we

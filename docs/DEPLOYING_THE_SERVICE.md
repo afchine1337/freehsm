@@ -309,9 +309,18 @@ job, and the way to do it is to revoke the certificate.
 * **`/certificates` and `/ocsp` are on the public listener, not this one.**
   The authenticated socket answers 404 for both, with a `Link:` header naming
   where they live, because a relying party has no identity to present. On the
-  public socket `GET /certificates` is served and `POST /ocsp` still answers
-  501. Implemented on the authenticated socket: `/health`, `/token`,
-  `POST /sign` and `POST /verify`.
+  public socket both are served: `GET /certificates`, and `POST /ocsp` given
+  `--revocation-db` and `--ocsp-label`. Implemented on the authenticated
+  socket: `/health`, `/token`, `POST /sign` and `POST /verify`.
+* **`GET /ocsp` is 405.** RFC 6960 A.1 allows the request base64'd into the
+  URL, and clients try it first because an intermediary can cache a GET. It is
+  not served: it needs a base64 decoder and a URL-length policy in a daemon
+  that has neither. The answer carries `Allow: POST`.
+* **No `Cache-Control` on an OCSP response.** The response carries its own
+  `nextUpdate`, and that is the freshness statement a relying party reads.
+  An HTTP `max-age` would let an intermediary keep serving `good` for a
+  certificate this responder already knows is revoked — undoing at the proxy
+  the re-read the daemon does on every query.
 * **No queue with a depth.** Requests beyond the worker count wait in the
   kernel's accept backlog, where the daemon can neither see nor reorder them.
   `docs/REST_API_DESIGN.md` records this as a later slice, and it is why one

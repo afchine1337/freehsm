@@ -235,6 +235,34 @@ int fhsm_ocsp_answer(const uint8_t *req, size_t req_len,
                      fhsm_ocsp_stats_t *stats,
                      char *err, size_t err_cap);
 
+/* ---------------------------------------------------------------------------
+ * The answers that are not answers.
+ *
+ * RFC 6960 4.2.1: an OCSPResponse whose responseStatus is anything but
+ * successful(0) carries no responseBytes, and therefore no signature. That is
+ * deliberate in the RFC and worth restating here, because it looks like a
+ * gap: a responder that has not parsed the request has nothing to sign *for*,
+ * and signing "your request was malformed" would let anyone who can reach the
+ * socket obtain a signature over a chosen-ish object. The client is expected
+ * to treat these as transport-level failures, not as statements about a
+ * certificate -- and it can, because none of them says anything about one.
+ *
+ * Five bytes: SEQUENCE { ENUMERATED status }.
+ *
+ * Returns the length written, or 0 for a status this will not encode --
+ * including successful(0), which without responseBytes is malformed, and is
+ * the one mistake a caller reaching for this function is likely to make.
+ * ------------------------------------------------------------------------- */
+#define FHSM_OCSP_RESP_SUCCESSFUL  0
+#define FHSM_OCSP_RESP_MALFORMED   1
+#define FHSM_OCSP_RESP_INTERNAL    2
+#define FHSM_OCSP_RESP_TRYLATER    3
+/* 4 is not assigned. 5 sigRequired and 6 unauthorized exist; neither is
+ * reachable from a responder that requires no signature on the request and
+ * refuses nobody, so neither is offered until something can produce it. */
+
+size_t fhsm_ocsp_status_response(int status, uint8_t out[5]);
+
 /* Would a verifier accept answers signed by this certificate?
  *
  * Both checks are about what happens at the far end. Producing responses

@@ -7,6 +7,46 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+* **`POST /ocsp` on the public listener (#163).** The route named in
+  `docs/REST_API_DESIGN.md` since the ADR now answers, from the code
+  `fhsm-ca ocsp-respond` uses. Configured with `--revocation-db`,
+  `--ocsp-label`, and optionally `--responder-cert` for a delegated responder
+  (RFC 6960 4.2.2.2), whose extendedKeyUsage and issuer are checked once at
+  start rather than per request. An incomplete set — a database with nothing
+  to sign it, a key with nothing to answer from, either without `--ca-cert` —
+  is refused at start rather than turned into a 404 the relying party has to
+  interpret.
+
+  **The database is re-read on every query**: a `stat()`, and a re-parse only
+  when the file moved. A responder that held it at start would keep answering
+  `good` for a certificate revoked an hour ago, until somebody restarted it —
+  the failure OCSP exists to prevent, produced by the responder. One syscall
+  per question is what a revocation taking effect costs. `fhsm-ca revoke`
+  writes through a temporary file and renames, so the daemon sees the old
+  inode or the new one, never half of either. A database that will not parse
+  leaves the previous one in force rather than dropping to empty, which would
+  answer `good` for everything.
+
+  The read side takes a read-write lock held across the signature, not a
+  mutex: signing is milliseconds, and under a mutex every relying party would
+  queue behind every other. Removing that lock makes ThreadSanitizer report
+  `fhsm_rev_db_free()` releasing entries another thread is walking, under the
+  test's own load.
+
+  Statuses other than `successful` are unsigned, per RFC 6960 4.2.1 — a
+  responder that has not parsed the request has nothing to sign *for*, and
+  signing "your request was malformed" would hand a signature over a
+  chosen-ish object to anyone who can reach the socket. A malformed request
+  gets `200` with five bytes of `malformedRequest(1)`; an unreadable database
+  gets `tryLater(3)`. `GET /ocsp` — the RFC 6960 A.1 base64-in-URL form — is
+  `405` with `Allow: POST`, because serving it means a base64 decoder and a
+  URL-length policy this daemon does not have. No `Cache-Control`: the
+  response carries its own `nextUpdate`, and an HTTP `max-age` would let an
+  intermediary serve `good` past a revocation the responder already knows
+  about. No audit line per query, like the rest of that listener; the start
+  line records which key answers.
+
 ### Changed
 * **The revocation database and the OCSP responder move into the library
   (#163).** Both lived in `tools/fhsm_ca.c`, reached only by

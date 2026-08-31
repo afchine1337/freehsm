@@ -489,6 +489,21 @@ Refusals are the part of an API that ages well, so they are decided here.
   the response assembly, shared with `fhsm-ca` rather than mirrored. Two
   copies would agree on the day they were written, and the one that drifted
   would answer `good` for a certificate the CA revoked.
+
+  **`POST /ocsp` re-reads the database on every query** — a `stat()`, and a
+  re-parse only when the file moved. Holding it at start would produce the
+  same wrong answer by a different route: a responder that says `good` for a
+  certificate revoked an hour ago, until somebody restarts it. One syscall per
+  question is what a revocation taking effect costs.
+
+  Statuses other than `successful` are unsigned, per RFC 6960 4.2.1, and this
+  is worth restating because it looks like a gap. A responder that has not
+  parsed the request has nothing to sign *for*, and signing "your request was
+  malformed" would hand a signature over a chosen-ish object to anyone who can
+  reach the socket. A malformed request gets `200` with a five-byte
+  `malformedRequest(1)`; a database that will not load gets `tryLater(3)`,
+  because nothing about the request is wrong and an operator fixing the file
+  makes the same question answerable.
 * **A connection whose peer credentials do not match the proxy's uid.**
 * **Any request naming a key the certificate subject is not authorised for.**
   Authorisation is a decision, not the absence of a denial.

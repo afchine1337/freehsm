@@ -55,6 +55,7 @@
  * ========================================================================= */
 #include "fhsm_common.h"
 #include "fhsm_audit.h"
+#include "fhsm_revocation.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -839,6 +840,87 @@ static int ca_cert_load(const char *path)
     fclose(f);
     if (n == 0 || over) { g_ca_cert_len = 0; return -1; }
     g_ca_cert_len = n;
+    return 0;
+}
+
+/* --------------------------------------------------------------------------
+ * OCSP (#163). Everything below is on the public listener only.
+ *
+ * WHY THE DATABASE IS RE-READ RATHER THAN HELD
+ *
+ * A responder exists so that a revocation takes effect. One that loaded the
+ * file at start would keep answering `good` for a certificate the operator
+ * revoked an hour ago, until somebody restarted it -- which is precisely the
+ * failure the protocol is for, produced by the responder itself.
+ *
+ * So the file is checked on every question: stat(), and a re-read only when
+ * mtime or size moved. One syscall per query, against a revocation that takes
+ * effect on the next one. `fhsm-ca revoke` writes through a temporary file and
+ * renames, so the daemon never sees a half-written database -- it sees the old
+ * inode or the new one.
+ *
+ * The lock is a read-write lock and not a mutex because answering includes
+ * signing, which is milliseconds. Under a mutex every relying party would
+ * queue behind every other; readers share, and only a reload -- rare -- takes
+ * anyone's turn.
+ * ----------------------------------------------------------------------- */
+static char          g_ocsp_db_path[4096] = "";
+static char          g_ocsp_label[128]    = "";
+static unsigned char g_ocsp_responder[CA_CERT_MAX];
+static size_t        g_ocsp_responder_len = 0;
+static int           g_ocsp_days = 7;
+static int           g_ocsp_on   = 0;
+
+static pthread_rwlock_t g_rev_lock = PTHREAD_RWLOCK_INITIALIZER;
+static fhsm_rev_db_t    g_rev_db;
+static int              g_rev_ok    = 0;   /* the last load succeeded */
+static time_t           g_rev_mtime = 0;
+static off_t            g_rev_size  = -1;
+
+/* Bring g_rev_db up to date with the file. Returns 0 when the database is
+ * usable afterwards. Takes and releases the write lock itself; the caller
+ * holds nothing when it calls this. */
+static int rev_db_refresh(void)
+{
+    struct stat st;
+    if (stat(g_ocsp_db_path, &st) != 0) {
+        /* Not there yet is not an error: `fhsm-ca revoke` creates the file on
+         * the first revocation, and a CA that has revoked nothing is the
+         * ordinary case. An empty database answers `good`, which is true. */
+        if (errno != ENOENT) return -1;
+        st.st_mtime = 0; st.st_size = 0;
+    }
+
+    pthread_rwlock_rdlock(&g_rev_lock);
+    int fresh = g_rev_ok && st.st_mtime == g_rev_mtime && st.st_size == g_rev_size;
+    pthread_rwlock_unlock(&g_rev_lock);
+    if (fresh) return 0;
+
+    fhsm_rev_db_t fresh_db;
+    char err[FHSM_REV_ERR_MAX] = "";
+    memset(&fresh_db, 0, sizeof fresh_db);
+    int rc = fhsm_rev_db_load(g_ocsp_db_path, &fresh_db, err, sizeof err);
+    if (rc != FHSM_REV_OK) {
+        /* Parsed into nothing, so the previous database stays in force. A
+         * responder that dropped its list because the operator mistyped a
+         * line would answer `good` for everything, which is the worst
+         * available answer to a question about revocation. */
+        fprintf(stderr, "fhsm-service: %s", err);
+        pthread_rwlock_wrlock(&g_rev_lock);
+        int usable = g_rev_ok;
+        /* Do not re-read the same broken file on every request. */
+        g_rev_mtime = st.st_mtime; g_rev_size = st.st_size;
+        pthread_rwlock_unlock(&g_rev_lock);
+        return usable ? 0 : -1;
+    }
+
+    pthread_rwlock_wrlock(&g_rev_lock);
+    fhsm_rev_db_free(&g_rev_db);
+    g_rev_db    = fresh_db;
+    g_rev_ok    = 1;
+    g_rev_mtime = st.st_mtime;
+    g_rev_size  = st.st_size;
+    pthread_rwlock_unlock(&g_rev_lock);
     return 0;
 }
 
@@ -1628,6 +1710,121 @@ static int login_once(unsigned long slot, const char *pin_file_override)
  * the end. accept() on one listening socket from several threads is safe on
  * Linux and needs no lock of ours.
  * ----------------------------------------------------------------------- */
+/* --------------------------------------------------------------------------
+ * POST /ocsp
+ *
+ * The parsing, the lookup and the assembly are fhsm_ocsp_answer(), shared with
+ * `fhsm-ca ocsp-respond`. What is here is the socket, the session and the
+ * choice of status.
+ *
+ * NO Cache-Control, DELIBERATELY. The response carries its own nextUpdate, and
+ * that is the freshness statement a relying party is meant to read. Adding an
+ * HTTP max-age would let an intermediary keep serving `good` for a certificate
+ * this responder already knows is revoked -- undoing, at the proxy, the
+ * re-read that the note above rev_db_refresh() exists for. RFC 5019 allows the
+ * header; this deployment cannot see the caches and will not speak for them.
+ *
+ * NO AUDIT LINE, like the rest of this listener. A durable barrier costs
+ * milliseconds and a responder answers as often as clients open connections.
+ * ----------------------------------------------------------------------- */
+typedef struct { unsigned long sess; unsigned long key; } ocsp_signer_t;
+
+static fhsm_rv_t ocsp_sign_cb(void *ctx, const uint8_t *tbs, size_t tbs_len,
+                               uint8_t *sig, size_t *sig_len)
+{
+    ocsp_signer_t *sg = ctx;
+    struct { unsigned long mechanism; void *p; unsigned long len; } mech =
+        { CKM_COMPOSITE_, NULL, 0 };
+    unsigned long n = (unsigned long)*sig_len;
+    unsigned long rv = C_SignInit(sg->sess, &mech, sg->key);
+    if (rv == 0) rv = C_Sign(sg->sess, (unsigned char *)(uintptr_t)tbs,
+                              (unsigned long)tbs_len, sig, &n);
+    if (rv != 0) return FHSM_RV_FUNCTION_FAILED;
+    *sig_len = (size_t)n;
+    return FHSM_RV_OK;
+}
+
+/* Send an OCSPResponse: a status-only one when `der` is NULL. Both go out as
+ * 200 with application/ocsp-response, because both are OCSP answers -- a
+ * client that reads only the HTTP status learns nothing either way, and one
+ * that parses the body learns exactly what happened. The alternative, a 4xx
+ * with a DER body, is a shape some clients discard unread. */
+static void respond_ocsp(int fd, const uint8_t *der, size_t len, int status)
+{
+    uint8_t small[5];
+    if (!der) {
+        len = fhsm_ocsp_status_response(status, small);
+        if (len == 0) { respond(fd, 500, "internal error\n"); return; }
+        der = small;
+    }
+    char hdr[256];
+    int n = snprintf(hdr, sizeof hdr,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/ocsp-response\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n", len);
+    if (n > 0 && (size_t)n < sizeof hdr) {
+        (void)!write(fd, hdr, (size_t)n);
+        (void)!write(fd, der, len);
+    }
+}
+
+static void do_ocsp(int fd, request_t *r)
+{
+    if (r->body_len == 0) { respond_ocsp(fd, NULL, 0, FHSM_OCSP_RESP_MALFORMED); return; }
+
+    if (rev_db_refresh() != 0) {
+        /* tryLater, not internalError: nothing about the request is wrong and
+         * an operator fixing the file makes the same question answerable.
+         * internalError would tell a client the responder is broken, which
+         * invites it to give up rather than come back. */
+        respond_ocsp(fd, NULL, 0, FHSM_OCSP_RESP_TRYLATER);
+        return;
+    }
+
+    unsigned long sess = 0;
+    if (pool_acquire(&sess) != 0) {
+        respond_ocsp(fd, NULL, 0, FHSM_OCSP_RESP_TRYLATER);
+        return;
+    }
+    unsigned long key = find_key(sess, g_ocsp_label, CKO_PRIVATE_KEY_);
+    if (key == 0) {
+        pool_release(sess);
+        respond_ocsp(fd, NULL, 0, FHSM_OCSP_RESP_INTERNAL);
+        return;
+    }
+
+    ocsp_signer_t sg = { sess, key };
+    uint8_t *out = NULL; size_t out_len = 0;
+    fhsm_ocsp_stats_t st;
+    char err[FHSM_REV_ERR_MAX] = "";
+
+    /* The read lock is held across the signature. See rev_db_refresh(). */
+    pthread_rwlock_rdlock(&g_rev_lock);
+    int rc = fhsm_ocsp_answer(r->body, r->body_len,
+                               g_ca_cert, g_ca_cert_len,
+                               g_ocsp_responder_len ? g_ocsp_responder : g_ca_cert,
+                               g_ocsp_responder_len ? g_ocsp_responder_len : g_ca_cert_len,
+                               &g_rev_db, g_ocsp_days, NULL,
+                               ocsp_sign_cb, &sg, &out, &out_len, &st,
+                               err, sizeof err);
+    pthread_rwlock_unlock(&g_rev_lock);
+    pool_release(sess);
+
+    if (rc != FHSM_REV_OK) {
+        /* EPARSE is the caller's request; anything else is ours. Telling a
+         * relying party that its request was malformed when the fault was
+         * here would send it looking in the wrong place. */
+        respond_ocsp(fd, NULL, 0,
+                     rc == FHSM_REV_EPARSE ? FHSM_OCSP_RESP_MALFORMED
+                                           : FHSM_OCSP_RESP_INTERNAL);
+        return;
+    }
+
+    respond_ocsp(fd, out, out_len, FHSM_OCSP_RESP_SUCCESSFUL);
+    free(out);
+}
+
 /* The public half of the daemon. Deliberately short: everything the
  * authenticated path does -- identity, policy, budget, fairness, per-request
  * audit -- is absent here, and each absence is a decision recorded above
@@ -1680,14 +1877,26 @@ static void serve_public(int fd, uid_t proxy_uid)
     }
 
     if (strcmp(r.target, "/ocsp") == 0) {
-        /* Named and unwritten, and the reason is worth stating rather than
-         * leaving as a bare 501. Assembling a response is in the library
-         * (`fhsm_composite_ocsp`), but parsing the OCSPRequest and looking the
-         * serial up in the revocation database live in tools/fhsm_ca.c. The
-         * service must share that code, not mirror it: a mirror that drifts is
-         * the hazard docs/FIPS_140_3_SECURITY_TARGET.md already names for the
-         * fuzz harnesses. Factoring it out is its own slice. */
-        respond(fd, 501, "not implemented yet\n");
+        if (!g_ocsp_on) {
+            /* Started without --revocation-db. 404 rather than 501: the route
+             * is not here on this deployment, and the operator's omission is
+             * theirs to see in the startup message, not the relying party's to
+             * decode from a status that promises the route exists. */
+            respond(fd, 404, "no responder configured\n");
+            return;
+        }
+        if (strcmp(r.method, "POST") != 0) {
+            /* RFC 6960 A.1 also allows the request base64'd into the URL, and
+             * clients try it first because an intermediary can cache a GET.
+             * Not served: it needs a base64 decoder and a URL-length policy in
+             * a daemon that has neither, and a decoder is a thing one can get
+             * wrong. The header names what does work rather than leaving the
+             * client to guess between GET and POST. */
+            respond_with(fd, 405, "POST only; RFC 6960 A.1 GET is not served\n",
+                         "Allow: POST\r\n");
+            return;
+        }
+        do_ocsp(fd, &r);
         return;
     }
 
@@ -1763,15 +1972,31 @@ static void usage(void)
       "  --public-socket PATH\n"
       "                   a second socket that requires no identity, for the\n"
       "                   things a relying party asks anonymously: GET\n"
-      "                   /certificates, and /ocsp once it is written. No\n"
-      "                   policy, no refusal budget, no audit line per\n"
-      "                   request -- see the notes in the source for why each\n"
-      "                   is absent. Off unless given.\n"
+      "                   /certificates and POST /ocsp. No policy, no refusal\n"
+      "                   budget, no audit line per request -- see the notes in\n"
+      "                   the source for why each is absent. Off unless given.\n"
       "  --public-workers N   threads for it (default 2). Separate from\n"
       "                   --workers so anonymous traffic cannot starve the\n"
       "                   authenticated side.\n"
-      "  --ca-cert FILE   the certificate GET /certificates returns. Only\n"
+      "  --ca-cert FILE   the certificate GET /certificates returns, and the\n"
+      "                   issuer POST /ocsp matches CertIDs against. Only\n"
       "                   meaningful with --public-socket.\n\n"
+      "  --revocation-db FILE\n"
+      "                   the database `fhsm-ca revoke` writes. Re-read when\n"
+      "                   the file changes, checked once per query: a\n"
+      "                   responder that held it would keep answering `good`\n"
+      "                   for a certificate revoked an hour ago, which is the\n"
+      "                   failure OCSP exists to prevent.\n"
+      "  --ocsp-label NAME    the key that signs responses. Required with\n"
+      "                   --revocation-db, and --ca-cert is required with\n"
+      "                   both: a CertID identifies by issuer name and key.\n"
+      "  --responder-cert FILE\n"
+      "                   sign as a delegated responder (RFC 6960 4.2.2.2)\n"
+      "                   rather than as the CA. Its extendedKeyUsage and\n"
+      "                   issuer are checked at start, not per request.\n"
+      "  --ocsp-days N    nextUpdate, in days (default 7).\n"
+      "                   POST only: the RFC 6960 A.1 GET form would need a\n"
+      "                   base64 decoder this daemon does not have.\n\n"
       "  --profile        print the profile this binary was built with and\n"
       "                   exit. The service links the module statically, so\n"
       "                   the answer is about this binary and no other.\n\n"
@@ -1799,7 +2024,8 @@ int main(int argc, char **argv)
     const char *sock_path = NULL, *pin_file = NULL, *policy_file = NULL;
     long proxy_uid = -1, workers = 4, pool_max = 32;
     const char *pub_path = NULL, *ca_cert_path = NULL;
-    long pub_workers = 2;
+    const char *rev_db_path = NULL, *ocsp_label = NULL, *responder_path = NULL;
+    long pub_workers = 2, ocsp_days = 7;
 
     for (int i = 1; i < argc; i++) {
         char *e = NULL;
@@ -1826,6 +2052,15 @@ int main(int argc, char **argv)
             if (!e || *e || pub_workers < 1 || pub_workers > 256) usage();
         } else if (!strcmp(argv[i], "--ca-cert") && i + 1 < argc) {
             ca_cert_path = argv[++i];
+        } else if (!strcmp(argv[i], "--revocation-db") && i + 1 < argc) {
+            rev_db_path = argv[++i];
+        } else if (!strcmp(argv[i], "--ocsp-label") && i + 1 < argc) {
+            ocsp_label = argv[++i];
+        } else if (!strcmp(argv[i], "--responder-cert") && i + 1 < argc) {
+            responder_path = argv[++i];
+        } else if (!strcmp(argv[i], "--ocsp-days") && i + 1 < argc) {
+            ocsp_days = strtol(argv[++i], &e, 10);
+            if (!e || *e || ocsp_days < 1 || ocsp_days > 365) usage();
         } else usage();
     }
     if (!sock_path || proxy_uid < 0 || !policy_file) usage();
@@ -1841,6 +2076,88 @@ int main(int argc, char **argv)
                         "  (missing, empty, or larger than %d bytes).\n",
                 ca_cert_path, CA_CERT_MAX);
         return 2;
+    }
+
+    /* ---- the responder, refused at start rather than per request ---------
+     *
+     * Answering OCSP needs three things at once: the CA certificate, to know
+     * which questions are about this authority; a key, to sign with; and the
+     * database, to answer from. Any one of them alone is an operator who meant
+     * something this daemon would not have done, so the incomplete set is
+     * refused here rather than turned into a 404 the relying party has to
+     * interpret. */
+    if ((rev_db_path || ocsp_label || responder_path) && !pub_path) {
+        fprintf(stderr, "fhsm-service: the OCSP options need --public-socket.\n"
+                        "  A relying party has no client certificate to present,\n"
+                        "  so /ocsp is on the anonymous listener and nowhere\n"
+                        "  else. Refused rather than configured and unreachable.\n");
+        return 2;
+    }
+    if ((rev_db_path != NULL) != (ocsp_label != NULL)) {
+        fprintf(stderr, "fhsm-service: --revocation-db and --ocsp-label go\n"
+                        "  together. One without the other is a responder that\n"
+                        "  could answer but has nothing to answer from, or one\n"
+                        "  that has the answers and cannot sign them.\n");
+        return 2;
+    }
+    if (rev_db_path && !ca_cert_path) {
+        fprintf(stderr, "fhsm-service: --revocation-db without --ca-cert.\n"
+                        "  A CertID identifies a certificate by hashes of its\n"
+                        "  issuer's name and key, so without the CA certificate\n"
+                        "  every question would be answered `unknown` -- which\n"
+                        "  is a working responder that is useless.\n");
+        return 2;
+    }
+    if (responder_path && !rev_db_path) {
+        fprintf(stderr, "fhsm-service: --responder-cert without a responder.\n");
+        return 2;
+    }
+    if (rev_db_path) {
+        if (strlen(rev_db_path) >= sizeof g_ocsp_db_path ||
+            strlen(ocsp_label)  >= sizeof g_ocsp_label) {
+            fprintf(stderr, "fhsm-service: OCSP path or label too long.\n");
+            return 2;
+        }
+        snprintf(g_ocsp_db_path, sizeof g_ocsp_db_path, "%s", rev_db_path);
+        snprintf(g_ocsp_label,   sizeof g_ocsp_label,   "%s", ocsp_label);
+        g_ocsp_days = (int)ocsp_days;
+
+        if (responder_path) {
+            FILE *f = fopen(responder_path, "rb");
+            size_t n = f ? fread(g_ocsp_responder, 1, sizeof g_ocsp_responder, f) : 0;
+            int over = f && !feof(f);
+            if (f) fclose(f);
+            if (n == 0 || over) {
+                fprintf(stderr, "fhsm-service: cannot read a certificate from %s\n",
+                        responder_path);
+                return 2;
+            }
+            g_ocsp_responder_len = n;
+
+            /* Checked once, here, and not on every request: the answer cannot
+             * change while the process runs, and a verifier that will refuse
+             * these responses should stop the daemon rather than be discovered
+             * by the first relying party. */
+            char err[FHSM_REV_ERR_MAX] = "";
+            if (fhsm_ocsp_check_responder(g_ocsp_responder, g_ocsp_responder_len,
+                                          g_ca_cert, g_ca_cert_len,
+                                          responder_path, ca_cert_path,
+                                          err, sizeof err) != FHSM_REV_OK) {
+                fprintf(stderr, "fhsm-service: %s", err);
+                return 2;
+            }
+        }
+
+        /* Read now, so that a database the daemon cannot parse is the
+         * operator's problem before the socket exists rather than a tryLater
+         * the first relying party has to report. A file that does not exist
+         * yet is fine -- a CA that has revoked nothing is the ordinary case. */
+        if (rev_db_refresh() != 0) {
+            fprintf(stderr, "fhsm-service: refusing to start: the revocation\n"
+                            "  database at %s could not be read.\n", rev_db_path);
+            return 2;
+        }
+        g_ocsp_on = 1;
     }
     snprintf(g_policy_path, sizeof g_policy_path, "%s", policy_file);
     {
@@ -1997,6 +2314,7 @@ int main(int argc, char **argv)
                             "socket", sock_path,
                             "public_socket", pub_path ? pub_path : "-",
                             "certificate", g_ca_cert_len ? "loaded" : "-",
+                            "ocsp", g_ocsp_on ? g_ocsp_label : "-",
                             NULL);
     fprintf(stderr, "fhsm-service: listening on %s, uid %ld only,"
                     " %ld workers, pool ceiling %ld\n",
