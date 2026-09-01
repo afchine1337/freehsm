@@ -570,14 +570,50 @@ reported "make integrity failed" on every second run of the pre-flight. The
 pattern is the one this project keeps meeting: a control wired to some of the
 paths that reach a state and not the rest.
 
-**Still open, and the substance of #167.** `dist/refs/` does not exist.
-`release.yml` computes `sha256sum libfreehsm-fips.so` and publishes it beside
-the file — a receipt that the download matches what was built, not an anchor
-that rebuilding the tag in six months yields the same bytes. Nothing in the
-pipeline compares against a committed reference. `scripts/release.sh` check 8
-requires one, but that is the local pre-flight, not the workflow that
-publishes. Closing this means: produce the reference once inside the image,
-commit it, and make `release.yml` fail when its build differs.
+**The anchor, and why six releases went without it.** `release.yml` computed
+`sha256sum libfreehsm-fips.so` and published it beside the file — a receipt
+that the download matches what was built, not an anchor that rebuilding the
+tag in six months yields the same bytes. Nothing compared against a committed
+reference.
+
+Two things kept `dist/refs/` empty, and neither was reluctance.
+
+The first was one line in `.gitignore`:
+
+    dist/
+
+with no negation anywhere in the file. **The reference could not be
+committed** — not by someone who forgot, by someone actively trying.
+`make dist-baseline` would write the file, print `NEXT STEPS: git add ...`,
+and git would silently decline. The requirement was written down, the producer
+existed, the pre-flight came to insist on it, and the door was locked. Nobody
+had opened the directory to check, including the note above this one, which
+said `dist/refs/` "held nothing but `.gitkeep`" — a guess. It did not exist.
+
+`dist/` excludes the *directory*, and git does not descend into an excluded
+directory, so `!dist/refs/*.sha256` alone would have changed nothing. The same
+trap the `tests/` block was rewritten four times for, and whose comment says
+so. Now `dist/*` with the path re-admitted down to the references, checked
+with `git check-ignore` rather than read.
+
+The second was that `make dist-baseline` needs Docker on the release machine,
+and the dev VM has none. The documented path required something absent, and
+the undocumented consequence was that no reference was produced.
+`.github/workflows/baseline.yml` now produces it in the same image
+`release.yml` runs in, on demand: it signs before hashing (the published
+artefact is the signed one), builds twice and requires agreement before
+printing anything, and refuses to overwrite an existing reference without an
+explicit input.
+
+`release.yml` compares against `dist/refs/v$VERSION.sha256` and fails when it
+is absent or differs — a missing reference is a failure, not a skip, since
+`if [ -f ... ]` there would recreate the situation this closes. It also fails
+when the tag and `FHSM_VERSION_STRING` disagree.
+
+**Still to do**, and it belongs to #172: the anchor that matters is v2.0.0's,
+and it can only be taken once the version is bumped. Run the baseline
+workflow, commit what it uploads, then tag. Until then `scripts/release.sh`
+fails check 8, correctly.
 
 **What the CI reproducibility job actually proves.** Two builds, same image,
 same commit, compared. Determinism — which was never the part in doubt.

@@ -31,7 +31,11 @@ OUT_DIR="${PROJ_ROOT}/out"
 
 if [ ! -f "$REF_FILE" ]; then
     echo "[verify-ref] FAIL : no reference digest at $REF_FILE"
-    echo "[verify-ref]        Run 'make dist-baseline' on the release machine first."
+    echo "[verify-ref]        With Docker here : make dist-baseline"
+    echo "[verify-ref]        Without          : run the 'Reproducibility baseline'"
+    echo "[verify-ref]                           workflow, which builds in the same"
+    echo "[verify-ref]                           image the release uses, and commit"
+    echo "[verify-ref]                           the file it uploads."
     exit 4
 fi
 

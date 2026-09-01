@@ -215,15 +215,24 @@ if [ -f "$REF" ]; then
             bad "dist-verify failed -- /tmp/rel_repro.log"
         fi
     else
-        # A reference nobody checked is the same non-verification in a new
-        # place, so this is a failure rather than a note.
-        bad "docker not found -- the reference exists but nothing compared against it"
+        # This was a failure -- "a reference nobody checked is the same
+        # non-verification in a new place". That was right when nothing else
+        # compared. It is no longer: .github/workflows/release.yml now refuses
+        # to publish a build that does not match this file, and that check
+        # cannot be skipped by tagging from a machine without Docker. So the
+        # comparison still happens; it happens there. A warning states what
+        # this run did and did not establish.
+        warn "docker not found -- not compared here.
+        release.yml will compare and will refuse to publish on a mismatch."
     fi
 else
     bad "no reproducibility reference at $REF
-        Record one on a trusted build machine, then commit it:
-            make dist-baseline
+        Produce one in the same image the release uses -- no Docker needed
+        locally -- by running the 'Reproducibility baseline' workflow on this
+        commit, then commit what it uploads:
+            gh workflow run baseline.yml
             git add $REF
+        With Docker on this machine, 'make dist-baseline' does the same.
         Six releases shipped without this. This one does not."
 fi
 

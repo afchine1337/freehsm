@@ -1,0 +1,144 @@
+# ===========================================================================
+# Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+# ===========================================================================
+# baseline.yml --- produce the reproducibility reference for a version.
+#
+# WHY THIS EXISTS
+#
+# docs/ROADMAP.md has asked since 2026-08-15 for a reference digest at
+# dist/refs/vX.Y.Z.sha256, so that `make dist-verify` compares a rebuild
+# against a published anchor instead of falling back to building twice in one
+# afternoon. Six tagged releases went out with dist/refs/ empty.
+#
+# Two things kept it empty, and neither was reluctance:
+#
+#   1. `dist/` was in .gitignore with no negation, so the reference file could
+#      not be committed even by someone trying. Fixed in the same commit as
+#      this file.
+#
+#   2. `make dist-baseline` runs scripts/verify_reproducibility.sh, which
+#      needs Docker on the machine doing the release. The maintainer's dev VM
+#      does not have it. So the documented path required a thing that was not
+#      there, and the undocumented consequence was that nobody produced a
+#      reference.
+#
+# This runs in the same image release.yml uses, on demand, and prints the
+# digest to commit. No Docker anywhere but GitHub's runner.
+#
+# WHAT THE DIGEST IS OF
+#
+# The SIGNED module. That is what release.yml publishes, and signing is itself
+# deterministic -- the digest patched into .fhsm_digest is a function of the
+# reproducible pre-image -- so a signed build is as reproducible as an
+# unsigned one. Hashing the unsigned .so would produce a reference that never
+# matches anything anyone can download.
+# ===========================================================================
+
+name: Reproducibility baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      overwrite:
+        description: 'Print a new digest even if a reference already exists'
+        type: boolean
+        default: false
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mark workspace as safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Read the version from the header
+        id: v
+        run: |
+          V=$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' include/fhsm_common.h)
+          [ -n "$V" ] || { echo "::error::could not read FHSM_VERSION_STRING"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "version: $V"
+
+      - name: Refuse to overwrite an existing reference
+        if: ${{ !inputs.overwrite }}
+        run: |
+          REF="dist/refs/v${{ steps.v.outputs.version }}.sha256"
+          if [ -f "$REF" ]; then
+            echo "::error::$REF already exists. A reference is an anchor; changing"
+            echo "::error::it silently would defeat it. Bump the version, or re-run"
+            echo "::error::with overwrite=true if you know why it must change."
+            exit 1
+          fi
+
+      - name: Build and sign
+        run: |
+          set -o pipefail
+          chmod +x scripts/*.sh 2>/dev/null || true
+          make clean
+          make
+          make integrity
+
+      - name: Confirm it is signed before hashing it
+        run: |
+          readelf -SW libfreehsm-fips.so | grep -q '\.fhsm_digest' \
+            || { echo "::error::no .fhsm_digest section"; exit 1; }
+          d=$(objcopy --dump-section .fhsm_digest=/dev/stdout \
+                      libfreehsm-fips.so /dev/null 2>/dev/null \
+              | od -An -tx1 -v | tr -d ' \n')
+          case "$d" in
+            *[!0]*) echo "embedded digest: $d" ;;
+            *)      echo "::error::unsigned; a reference over this would be useless"; exit 1 ;;
+          esac
+
+      # Build a second time and require the two to agree. A reference taken
+      # from a single build asserts reproducibility on the strength of one
+      # observation; if this tree is not deterministic today, that is the
+      # moment to find out, not six months after the anchor is committed.
+      - name: Build again and compare
+        run: |
+          set -o pipefail
+          sha256sum libfreehsm-fips.so | awk '{print $1}' > /tmp/first
+          make clean
+          make
+          make integrity
+          sha256sum libfreehsm-fips.so | awk '{print $1}' > /tmp/second
+          a=$(cat /tmp/first); b=$(cat /tmp/second)
+          echo "first : $a"
+          echo "second: $b"
+          if [ "$a" != "$b" ]; then
+            echo "::error::two builds in this image disagree -- do not commit a reference"
+            exit 1
+          fi
+
+      - name: The reference, to commit
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          REF="dist/refs/v${V}.sha256"
+          D=$(cat /tmp/first)
+          mkdir -p dist/refs
+          printf '%s  libfreehsm-fips.so v%s\n' "$D" "$V" > "$REF"
+          cat "$REF"
+          {
+            echo "## Reproducibility reference for v${V}"
+            echo
+            echo '```'
+            cat "$REF"
+            echo '```'
+            echo
+            echo "Two builds in \`freehsm-c-build:debian13-openssl-3.5\` agreed."
+            echo "Download the artefact below, put it at \`${REF}\`, commit it,"
+            echo "then tag. \`release.yml\` will refuse to publish a build that"
+            echo "does not match it."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reproducibility-reference
+          path: dist/refs/*.sha256
+          if-no-files-found: error

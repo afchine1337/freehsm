@@ -8,6 +8,24 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Fixed
+* **The reproducibility reference could never have been committed (#167).**
+  `.gitignore` contained `dist/` with no negation, so
+  `dist/refs/vX.Y.Z.sha256` — asked for in `docs/ROADMAP.md` since
+  2026-08-15, written by `make dist-baseline`, required by
+  `scripts/release.sh` since yesterday — was silently ignored by git. Six
+  releases shipped without an anchor not because the step was skipped but
+  because it was impossible. Note that `dist/` excludes the *directory*, so
+  `!dist/refs/*.sha256` alone would not have worked; the contents are excluded
+  and the path re-admitted, verified with `git check-ignore`.
+
+  The second obstacle was that `make dist-baseline` needs Docker on the
+  release machine. `.github/workflows/baseline.yml` now produces the reference
+  in the same image `release.yml` runs in: it signs before hashing, builds
+  twice and requires the two to agree, and refuses to overwrite an existing
+  reference. `release.yml` compares its build against the reference and fails
+  when it is missing or differs — a missing reference is a failure, not a
+  skip.
+
 * **The release workflow no longer swallows a failed `make integrity`
   (#167).** It ran `make integrity || echo "WARN: ... (expected outside Docker
   image)"` — from a job that declares `container:` and therefore runs *inside*

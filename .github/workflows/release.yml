@@ -125,6 +125,46 @@ jobs:
             *)       echo "::error::release artefact carries the all-zero placeholder: unsigned"; exit 1 ;;
           esac
 
+      # The anchor. Everything above proves this build is internally sound;
+      # this is the only step that says it is the SAME build a reference was
+      # taken from. Without it the .sha256 published below is a receipt --
+      # "the file you downloaded is the file we built" -- and reproducibility
+      # is asserted in the Security Target and demonstrated nowhere.
+      #
+      # A missing reference is a failure, not a skip. `if [ -f ... ]` here
+      # would recreate exactly the situation this closes: a step that is
+      # available, never required, and therefore never happens. Six releases
+      # went out that way. Produce one with the "Reproducibility baseline"
+      # workflow, commit it, then tag.
+      - name: Compare against the reproducibility reference
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          V="${TAG#v}"
+          HDR=$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' include/fhsm_common.h)
+          if [ "$V" != "$HDR" ]; then
+            echo "::error::tag $TAG says v$V, include/fhsm_common.h says $HDR"
+            exit 1
+          fi
+          REF="dist/refs/v${V}.sha256"
+          if [ ! -f "$REF" ]; then
+            echo "::error::no reproducibility reference at $REF."
+            echo "::error::Run the 'Reproducibility baseline' workflow on this"
+            echo "::error::commit, commit the file it produces, and re-tag."
+            exit 1
+          fi
+          ref=$(awk '{print $1}' "$REF")
+          got=$(sha256sum libfreehsm-fips.so | awk '{print $1}')
+          echo "reference : $ref"
+          echo "this build: $got"
+          if [ "$ref" != "$got" ]; then
+            echo "::error::this build does not reproduce the reference for v$V."
+            echo "::error::Either the source changed without a version bump, or"
+            echo "::error::the toolchain drifted. Do not publish until it is known"
+            echo "::error::which."
+            exit 1
+          fi
+          echo "reproduces the reference for v$V"
+
       - name: Compute digests
         run: |
           sha256sum libfreehsm-fips.so > libfreehsm-fips.so.sha256

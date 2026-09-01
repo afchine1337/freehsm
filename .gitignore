@@ -125,8 +125,24 @@ service/*.gcno
 service/*.gcda
 service/*.gcov
 
-# Reproducible-build outputs
-dist/
+# Reproducible-build outputs.
+#
+# This said `dist/` for six tagged releases, and that one line is why the
+# reproducibility anchor never existed. docs/ROADMAP.md has asked since
+# 2026-08-15 for a reference digest at dist/refs/vX.Y.Z.sha256; the file was
+# always going to be silently ignored, so the request could not be satisfied
+# even by someone trying to satisfy it. The requirement was real, the
+# mechanism was written, and the door was locked.
+#
+# `dist/` excludes the DIRECTORY, and git will not descend into an excluded
+# directory -- so `!dist/refs/*.sha256` on its own does nothing. This is the
+# same trap the tests/ block above was rewritten four times for. Exclude the
+# contents instead, then re-admit the path down to the references.
+dist/*
+!dist/refs/
+dist/refs/*
+!dist/refs/*.sha256
+!dist/refs/.gitkeep
 *.tar.xz
 *.tar.xz.asc
 *.tar.xz.sha256
