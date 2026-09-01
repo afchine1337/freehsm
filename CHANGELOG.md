@@ -8,6 +8,39 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* **The suite runs against the OpenSSL FIPS provider, and the delegation is
+  observed (#173).** `docs/FIPS_140_3_SECURITY_TARGET.md` says all
+  FIPS-relevant computation is delegated to the FIPS-validated provider. That
+  was true of the code and had never been seen happen: every test recipe sets
+  `FHSM_INTEGRITY_ALLOW_UNSIGNED=1`, which is exactly what makes
+  `src/fhsm_crypto.c` skip `OSSL_PROVIDER_load(NULL, "fips")`.
+  `scripts/run_fips_tests.sh` now stands the environment up and measures it:
+  **37 tests pass with the provider genuinely loaded, none fall back.** The
+  ones that could have shown a gap — `test_fips_digests`, `test_composite_p11`
+  and the three legacy-mechanism tests — did not.
+
+  Proof is positive, not inferred. `tests/probe_fips_loaded` opens the signed
+  `.so`, calls `C_Initialize`, then asks
+  `OSSL_PROVIDER_available(NULL, "fips")`. The script's first version instead
+  counted tests that had not printed the module's fallback notice and reported
+  21 of them as FIPS runs; a test that never reaches `crypto_init_once` prints
+  nothing, so that count was of tests which had failed to contradict the claim.
+
+  Tests that link `$(LIB_OBJ)` carry the all-zero `.fhsm_digest`, so they need
+  the bypass that skips the provider — which made them look unreachable. The
+  way out was already in the tree and wired to exactly one test:
+  `make test-integrity` signs the *test binary* with the same
+  `scripts/sign_module.sh` that signs the `.so`. Each is now copied to a
+  temporary directory and the **copy** is signed, so `make tests` still needs
+  no FIPS provider, a relink cannot leave a stale signature, and nothing signed
+  is left in `tests/`.
+
+  Classification reads the ELF for a `.fhsm_digest` section rather than
+  grepping the `.c` for `dlopen` — the first version misfiled
+  `test_fork_child` and `test_session_cap`, which reach the module through a
+  helper and never write the word. The section is a property of the artefact;
+  the string was a guess about it.
+
 * **`POST /ocsp` on the public listener (#163).** The route named in
   `docs/REST_API_DESIGN.md` since the ADR now answers, from the code
   `fhsm-ca ocsp-respond` uses. Configured with `--revocation-db`,

@@ -526,6 +526,15 @@ tests/test_tpm: tests/test_tpm.c $(OBJDIR)/tests/fhsm_tpm_testhooks.o $(LIB_OBJ)
 tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+# Asks positively whether the signed module really loads the FIPS provider,
+# for scripts/run_fips_tests.sh. dlopen of the .so on purpose : that is the
+# only artefact `make integrity` signs, so it is the only configuration in
+# which the question has an answer. Deliberately NOT linked against
+# $(LIB_OBJ) -- that would give it the all-zero digest placeholder and make it
+# the very thing it exists to detect.
+tests/probe_fips_loaded: tests/probe_fips_loaded.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -ldl
+
 # The service links the library objects rather than dlopen()ing the module:
 # it is the PKCS#11 application, and it needs fhsm_audit_set_actor(), which is
 # not part of PKCS#11 and is not exported from the shared object.

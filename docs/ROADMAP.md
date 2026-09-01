@@ -551,6 +551,56 @@ environment the Security Target describes has not been stood up.
 The second is honest and cheap. The first is what the document currently
 implies has already happened.
 
+### Resolved the same day (2026-09-01)
+
+The first option happened. The `fipsinstall` failure above was a stale
+`fipsmodule.cnf` being included while the new one was written; regenerating it
+with `OPENSSL_CONF=/dev/null` made the provider active on the dev VM.
+`scripts/run_fips_tests.sh` then measured, and the delegation holds.
+
+The first pass covered only the tests that open the `.so` -- fourteen of them,
+all passing, none falling back. The claim in the Security Target became
+observed rather than only specified, including for `test_fips_digests`,
+`test_composite_p11` and the three legacy-mechanism tests: the ones that could
+have shown a mechanism the module offers and the provider does not serve. None
+did.
+
+**And then the rest of the suite, the same day.** The tests that link
+`$(LIB_OBJ)` carry the all-zero `.fhsm_digest`, so they need the bypass that
+skips the provider, and they were written up here as an unreachable limit.
+
+They were not. The mechanism was already in the tree, wired to exactly one
+test. `make test-integrity` signs the *test binary* --
+`scripts/sign_module.sh ./tests/test_integrity` -- and runs it under
+`env -u FHSM_INTEGRITY_ALLOW_UNSIGNED`. `sign_module.sh` patches any ELF
+carrying the section, not only the `.so`, and the comment above that target
+has said so since it was written. A capability connected to one of the paths
+that needed it and not the rest: the recurring shape, this time in the build.
+
+`scripts/run_fips_tests.sh` now copies each such binary to a temporary
+directory and signs the **copy**. Signing in place would be wrong three times
+over — `make tests` would need a FIPS provider on every developer machine and
+in CI, a relink would leave an unsigned binary `sign_module.sh` refuses to
+re-sign without `--force`, and signed artefacts would sit in `tests/` between
+runs. On a fresh copy none of that arises. The working directory stays at the
+project root so relative paths inside a test still resolve.
+
+Final measurement, whole suite:
+
+    16 tests open the signed .so                pass
+    21 tests embed the module, signed as copies pass
+    0 fell back to dev mode
+
+`test_integrity` is not counted: `make test-integrity` drives it through
+unsigned, signed and tampered on its own, and does so correctly.
+
+One method note, because the first classification was wrong in an instructive
+way. The split was made by grepping each `.c` for the string `dlopen`, which
+misfiled `test_fork_child` and `test_session_cap` — they reach the module
+through a helper in `tools/p11_util.h` and never write the word. Reading the
+binary for a `.fhsm_digest` section answers the same question about the
+artefact rather than about the source text, and puts them where they belong.
+
 ## Continuous / parallel
 
 | # | Task | Cadence | Status |
