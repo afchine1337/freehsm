@@ -23,6 +23,18 @@ After=network.target
 RequiresMountsFor=/var/lib/freehsm
 
 [Service]
+
+# The descriptor limit is now a bound on the service, not a detail. Every
+# connection the acceptor holds while it has said nothing is one descriptor,
+# and --queue-depth is checked against this at start: past it accept() fails
+# with EMFILE and the connection is dropped without a 503 and without a line,
+# which is the silent failure the queue exists to replace.
+#
+# 4096 covers two listeners at the default depth of 256 with room to spare.
+# Declared rather than inherited: without this the service takes whatever
+# DefaultLimitNOFILE happens to be on the host, which is a bound nobody chose.
+LimitNOFILE=4096
+
 Type=exec
 User=freehsm
 Group=freehsm

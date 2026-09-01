@@ -106,7 +106,7 @@ echo
 
 "$SVC" --socket "$SOCK" --proxy-uid "$(id -u)" \
       --pin-file "$FHSM_TOKENS_DIR/pin" --policy "$FHSM_TOKENS_DIR/policy" \
-      --workers 4 --pool-max 8 \
+      --workers 4 --pool-max 8 --queue-depth 32 \
       >"$FHSM_TOKENS_DIR/svc.log" 2>&1 &
 PID=$!
 # Wait for the socket rather than sleeping a guessed amount: a fixed sleep is
@@ -533,6 +533,116 @@ ok $? "a body delivered over $(sed -n 's/^SLOWSECS //p' "$FHSM_TOKENS_DIR/mute.o
 
 grep -q "^SLOWCUT cut:" "$FHSM_TOKENS_DIR/mute.out"
 ok $? "  but one still arriving at $(sed -n 's/^SLOWCUTSECS //p' "$FHSM_TOKENS_DIR/mute.out") s is not"
+
+# --- the queue in front of the workers ------------------------------------
+#
+# The deadlines above bound what a silent peer costs; they do not remove it,
+# because a worker used to be committed to a connection from accept() onward.
+# With an acceptor holding the connections that have not spoken, a silent peer
+# costs a descriptor and a slot and costs a legitimate client nothing --
+# measured, at four workers, before and after:
+#
+#     silent connections    4        8       32
+#     honest client waits   0.8 s    1.8 s   7.9 s     (worker owns it)
+#                           5 ms     7 ms    8 ms      (acceptor owns it)
+#
+# This daemon runs with --queue-depth 32, so 32 is full and 33 is the refusal.
+python3 - "$SOCK" > "$FHSM_TOKENS_DIR/queue.out" 2>&1 <<'Q_EOF'
+import socket, sys, time
+SOCK = sys.argv[1]
+
+def health(t=30):
+    t0 = time.perf_counter()
+    try:
+        s = socket.socket(socket.AF_UNIX); s.settimeout(t); s.connect(SOCK)
+        s.sendall(b"GET /health HTTP/1.1\r\nX-FHSM-Client-Subject: CN=web01\r\n\r\n")
+        d = s.recv(300); s.close()
+        return d.split(b"\r\n")[0].decode(), (time.perf_counter() - t0) * 1000
+    except Exception as e:
+        return type(e).__name__, (time.perf_counter() - t0) * 1000
+
+held = []
+for target in (8, 24):
+    while len(held) < target:
+        s = socket.socket(socket.AF_UNIX); s.connect(SOCK); held.append(s)
+    time.sleep(0.1)
+    st, ms = health()
+    print("HELD%d %s %d" % (target, st, int(ms)))
+
+# Fill it, then one more. The refusal is the point: before the queue, past the
+# kernel's backlog connect() returned EAGAIN and an honest client could not
+# tell a saturated service from an absent one.
+while len(held) < 32:
+    s = socket.socket(socket.AF_UNIX); s.connect(SOCK); held.append(s)
+time.sleep(0.1)
+s = socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect(SOCK); held.append(s)
+try:
+    d = s.recv(400).decode(errors="replace")
+    print("OVER", d.split("\r\n")[0])
+    print("OVERRETRY", "Retry-After: 1" in d)
+except Exception as e:
+    print("OVER", type(e).__name__); print("OVERRETRY", False)
+
+for s in held:
+    try: s.close()
+    except Exception: pass
+
+# The queue drains by itself: every slot is released at the first-byte
+# deadline, so saturation is a transient 503 and not a lockout.
+time.sleep(1.6)
+st, ms = health()
+print("DRAINED %s %d" % (st, int(ms)))
+Q_EOF
+
+st=$(sed -n 's/^HELD8 \([A-Za-z0-9/. ]*\) [0-9]*$/\1/p' "$FHSM_TOKENS_DIR/queue.out")
+ms=$(sed -n 's/^HELD8 .* \([0-9]*\)$/\1/p' "$FHSM_TOKENS_DIR/queue.out")
+[ "$st" = "HTTP/1.1 200 OK" ] && [ "${ms:-9999}" -lt 300 ]
+ok $? "eight silent connections cost a client nothing (${ms:-?} ms, was 1800)"
+
+st=$(sed -n 's/^HELD24 \([A-Za-z0-9/. ]*\) [0-9]*$/\1/p' "$FHSM_TOKENS_DIR/queue.out")
+ms=$(sed -n 's/^HELD24 .* \([0-9]*\)$/\1/p' "$FHSM_TOKENS_DIR/queue.out")
+[ "$st" = "HTTP/1.1 200 OK" ] && [ "${ms:-9999}" -lt 300 ]
+ok $? "  nor do twenty-four (${ms:-?} ms): the acceptor holds them, not a worker"
+
+grep -q "^OVER HTTP/1.1 503" "$FHSM_TOKENS_DIR/queue.out"
+ok $? "past the depth the daemon says it is busy, rather than the kernel refusing"
+
+grep -q "^OVERRETRY True" "$FHSM_TOKENS_DIR/queue.out"
+ok $? "  with Retry-After, which is the first-byte deadline it will take"
+
+st=$(sed -n 's/^DRAINED \([A-Za-z0-9/. ]*\) [0-9]*$/\1/p' "$FHSM_TOKENS_DIR/queue.out")
+[ "$st" = "HTTP/1.1 200 OK" ]
+ok $? "  and the queue drains itself, so saturation is transient not a lockout"
+
+# --- and the refusals must not become the flood ---------------------------
+# Rule 1 of docs/RATE_LIMIT.md. A 503 is immediate, so the peer sets the rate:
+# before this was compressed, hammering a full queue wrote 722 lines and
+# 264 kB in two seconds. Connect-and-close was worse, because it reached a
+# worker: 1371 lines. Both are counted now, one line each way.
+python3 - "$SOCK" > "$FHSM_TOKENS_DIR/flood.out" 2>&1 <<'F_EOF'
+import socket, sys, time
+SOCK = sys.argv[1]
+n = 0
+t0 = time.perf_counter()
+while time.perf_counter() - t0 < 2.0:
+    try:
+        s = socket.socket(socket.AF_UNIX); s.connect(SOCK); s.close(); n += 1
+    except Exception:
+        break
+print("FLOODN", n)
+F_EOF
+sleep 6                              # past BURST_COOLDOWN_S, so the burst closes
+
+n=$(sed -n 's/^FLOODN //p' "$FHSM_TOKENS_DIR/flood.out")
+[ "${n:-0}" -gt 1000 ]
+ok $? "connect-and-close ${n:-0} times in two seconds"
+
+lines=$(cat "$FHSM_TOKENS_DIR"/audit.log* 2>/dev/null | grep -c '"reason":"hung_up_early"')
+[ "$lines" = 1 ]
+ok $? "  wrote one line, not one each ($lines)"
+
+cat "$FHSM_TOKENS_DIR"/audit.log* 2>/dev/null | grep -q '"reason":"hung_up_early_over"'
+ok $? "  and the burst was closed with the count it stood for"
 
 kill -TERM $PID 2>/dev/null
 i=0; while kill -0 $PID 2>/dev/null && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done

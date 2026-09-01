@@ -328,10 +328,16 @@ job, and the way to do it is to revoke the certificate.
   long as they were held, with nothing written to the audit log — measured, and
   now asserted in `tests/service_guards.sh`.
 
-  What the deadlines buy is a bound, not immunity. A worker is still committed
-  to a connection from `accept()` onward, so *n* silent connections still cost
-  a legitimate client about `(n / workers) x 1 s`: 0.8 s at 4, 1.8 s at 8,
-  **7.9 s at 32**. That residual is the queue's to remove, not the deadline's.
+  The residual the deadlines could not reach — a worker committed from
+  `accept()` onward, costing a client `(n / workers) x 1 s` — is gone: an
+  acceptor thread holds every connection that has not spoken, and hands a
+  worker only one that is already readable. Measured at four workers:
+
+  | silent connections | worker owns it | acceptor owns it |
+  |---|---|---|
+  | 4 | 0.8 s | 5 ms |
+  | 8 | 1.8 s | 7 ms |
+  | 32 | 7.9 s | 8 ms |
 
   The socket is mode 0660 with the peer's uid checked, so this takes the
   proxy's own uid rather than any local user. Note also that adding
@@ -339,11 +345,18 @@ job, and the way to do it is to revoke the certificate.
   connections open and walks into the same cost without meaning to. This
   service answers `Connection: close`; leave upstream keepalive off.
 
-* **No queue with a depth.** Requests beyond the worker count wait in the
-  kernel's accept backlog, where the daemon can neither see nor reorder them.
-  Past 64 pending, `connect()` itself returns `EAGAIN` and an honest client is
-  refused by the kernel before this process sees it — so there is no 503 to
-  read and no audit line to find.
+* **The queue has a depth, and it is a descriptor budget.** `--queue-depth`
+  (256 per listener) bounds what the acceptor will hold. Past it the daemon
+  answers **503 with `Retry-After: 1`** — the first time it can say it is busy
+  rather than leaving the kernel to return `EAGAIN`, which an honest client
+  cannot tell from an absent service. The queue drains itself: every slot is
+  released at the first-byte deadline, so saturation is transient, not a
+  lockout.
+
+  The depth is checked at start against `RLIMIT_NOFILE`, because past that the
+  failure is `EMFILE` and nobody is told. **The unit now sets
+  `LimitNOFILE=4096`** rather than inheriting whatever the host's
+  `DefaultLimitNOFILE` is: the bound should be one somebody chose.
   `docs/REST_API_DESIGN.md` records this as a later slice, and it is why one
   identity saturating the service still costs another a factor of 2.4 in
   latency rather than nothing.

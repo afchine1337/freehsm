@@ -59,6 +59,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,6 +72,7 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 
@@ -928,7 +930,15 @@ static int rev_db_refresh(void)
     return 0;
 }
 
-static volatile sig_atomic_t g_stop = 0;
+/* _Atomic rather than volatile sig_atomic_t. Both are correct -- C11
+ * 7.14.1.1p5 lets a handler touch a lock-free atomic, and volatile
+ * sig_atomic_t is the older blessing for the same thing -- but only one of
+ * them is checkable. The acceptor reads this on every pass of its loop rather
+ * than only after EINTR, and ThreadSanitizer reported the handler's write
+ * against those reads: a diagnostic that was correct about the code and wrong
+ * about the danger. Relying on the tool not looking is not a property worth
+ * keeping, so the flag says what it is. */
+static _Atomic sig_atomic_t g_stop = 0;
 static int g_stop_pipe[2] = { -1, -1 };
 
 /* write() to a pipe is async-signal-safe; almost nothing else here would be.
@@ -2002,63 +2012,314 @@ static void serve_public(int fd, uid_t proxy_uid)
     respond(fd, 404, "refused\n");
 }
 
-typedef struct { int lfd; int stopfd; uid_t proxy_uid; int is_public; } worker_arg_t;
-
-/* Each worker waits on the listening socket AND on a stop pipe, rather than
- * blocking in accept().
+/* ==========================================================================
+ * WHO OWNS A CONNECTION
  *
- * The obvious arrangement -- every thread in accept(), close the socket to
- * stop them -- does not work, and finding that out is what this comment is
- * for. A signal is delivered to one thread, so only that one leaves accept();
- * and closing the listening descriptor from another thread does not reliably
- * wake the rest on Linux. The process then never exits, a service manager
- * escalates to SIGKILL, and the stop is never recorded. A pipe every worker
- * is watching wakes all of them at once, and is portable. */
+ * Until this slice a worker owned a connection from accept() to close(), and
+ * that is what made a peer saying nothing expensive: the deadlines bounded the
+ * wait but a silent connection still cost a worker for the whole first second,
+ * so n of them cost a legitimate client (n / workers) x 1 s -- 7.9 s at 32,
+ * measured.
+ *
+ * The scarce thing is the worker. Measured, holding an accepted connection in
+ * a poll set costs 0.25-0.46 kB and one descriptor; an idle thread costs
+ * 19.7 kB and a pooled session ~29 kB. Two orders of magnitude apart, so the
+ * connection should wait somewhere that is not a worker.
+ *
+ * One acceptor thread per listener therefore holds every connection that has
+ * not yet said anything, and hands a worker only a connection that is already
+ * readable. A worker never waits for a first byte again. A silent peer costs a
+ * descriptor and a slot, and costs a legitimate client nothing.
+ *
+ * The slot count is the queue depth the ADR asked for, and having it is what
+ * finally lets this process say "too busy". Past it the acceptor answers 503
+ * with Retry-After and closes -- where before, past the kernel's backlog,
+ * connect() returned EAGAIN and an honest client could not tell a saturated
+ * service from an absent one.
+ *
+ * THE ACCEPTOR MUST NOT BLOCK. Everything it does is bounded: accept, poll,
+ * a non-blocking write of a short refusal, close. In particular the 503 and
+ * the 408 are written with the connection in O_NONBLOCK and abandoned on
+ * EAGAIN rather than waited on -- a peer that will not read its own refusal
+ * would otherwise stall the acceptor, which is this same defect one level up.
+ * ======================================================================= */
+
+enum { BURST_QUEUE_FULL = 0, BURST_HANGUP = 1 };
+
+typedef struct {
+    int   fd;
+    struct timespec deadline;        /* first byte, or it goes */
+} waiting_t;
+
+typedef struct {
+    int        lfd;
+    int        is_public;
+    uid_t      proxy_uid;
+    int        depth;
+
+    waiting_t *wait;                 /* the acceptor thread alone touches this */
+    int        nwait;
+    struct pollfd *pfds;             /* 2 + depth */
+
+    pthread_mutex_t mu;              /* the hand-off to workers */
+    pthread_cond_t  cv;
+    int       *ready;
+    int        rhead, rtail, rcount;
+    int        stopping;
+
+    /* The queue-full burst, compressed like the identity bursts and for the
+     * same reason -- rule 1 of docs/RATE_LIMIT.md: a control whose own record
+     * can be flooded is not a control. This one needed it more than the 408
+     * above, not less. Abandoning a connection costs the peer a whole second,
+     * so 408s rate-limit themselves; a 503 is immediate, so the *peer* sets
+     * the rate. Measured before this existed: 722 audit lines and 264 kB in
+     * two seconds from one process opening sockets in a loop.
+     *
+     * Touched only by the acceptor thread, which is single. */
+    /* Two of them: the queue being full, and peers that hang up before
+     * saying anything. The second was found by measuring the first --
+     * hammering a saturated service left 1371 `closed_early` lines, because a
+     * connection that closed became readable (POLLHUP), went to a worker, and
+     * the worker's read of zero bytes was logged as a refusal. That path
+     * predates the queue; what the acceptor adds is somewhere to catch it
+     * before a worker is woken at all. */
+    struct {
+        unsigned long count;
+        time_t        since, last;
+        int           open;
+    } burst[2];
+} listener_t;
+
+static const char *const BURST_OPEN_REASON[2]  = { "queue_full", "hung_up_early" };
+static const char *const BURST_CLOSE_REASON[2] = { "queue_full_over", "hung_up_early_over" };
+
+/* The first of a burst is written; the rest are counted. */
+static void burst_note(listener_t *L, int kind, time_t now)
+{
+    if (!L->burst[kind].open) {
+        (void)fhsm_audit_event(FHSM_EV_REQUEST_REFUSED, -1, -1,
+                                FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
+                                "reason", BURST_OPEN_REASON[kind],
+                                "route", "-", NULL);
+        L->burst[kind].open = 1;
+        L->burst[kind].since = now;
+        L->burst[kind].count = 0;
+    }
+    L->burst[kind].count++;
+    L->burst[kind].last = now;
+}
+
+static void burst_flush(listener_t *L, time_t now, int force)
+{
+    for (int k = 0; k < 2; k++) {
+        if (!L->burst[k].open) continue;
+        if (!force && (now - L->burst[k].last) < BURST_COOLDOWN_S) continue;
+        char cnt[32], win[32];
+        snprintf(cnt, sizeof cnt, "%lu", L->burst[k].count);
+        snprintf(win, sizeof win, "%ld", (long)(L->burst[k].last - L->burst[k].since));
+        (void)fhsm_audit_event(FHSM_EV_REQUEST_REFUSED, -1, -1,
+                                FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
+                                "reason", BURST_CLOSE_REASON[k],
+                                "refused", cnt, "window_s", win, NULL);
+        L->burst[k].open = 0; L->burst[k].count = 0;
+    }
+}
+
+/* Written with the fd non-blocking, and dropped rather than retried. */
+static void refuse_now(int fd, int status, const char *text, const char *extra)
+{
+    char buf[512];
+    const char *phrase = status == 408 ? "Request Timeout" : "Service Unavailable";
+    int n = snprintf(buf, sizeof buf,
+        "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\n"
+        "Content-Length: %zu\r\nConnection: close\r\n%s\r\n%s",
+        status, phrase, strlen(text), extra ? extra : "", text);
+    if (n > 0 && (size_t)n < sizeof buf) (void)!write(fd, buf, (size_t)n);
+}
+
+static void ready_push(listener_t *L, int fd)
+{
+    pthread_mutex_lock(&L->mu);
+    /* Cannot overflow: an fd is in `wait` or in `ready`, never both, and both
+     * are sized to depth. Checked anyway, because "cannot" is how a ring
+     * buffer overwrites its own tail. */
+    if (L->rcount < L->depth) {
+        L->ready[L->rtail] = fd;
+        L->rtail = (L->rtail + 1) % L->depth;
+        L->rcount++;
+        pthread_cond_signal(&L->cv);
+        fd = -1;
+    }
+    pthread_mutex_unlock(&L->mu);
+    if (fd >= 0) close(fd);
+}
+
 static void *worker(void *argp)
 {
-    worker_arg_t *a = argp;
+    listener_t *L = argp;
     for (;;) {
-        struct pollfd fds[2];
-        fds[0].fd = a->lfd;    fds[0].events = POLLIN; fds[0].revents = 0;
-        fds[1].fd = a->stopfd; fds[1].events = POLLIN; fds[1].revents = 0;
-        int n = poll(fds, 2, -1);
-        if (n < 0) {
-            if (errno == EINTR) { if (g_stop) break; continue; }
-            break;
+        int fd = -1;
+        pthread_mutex_lock(&L->mu);
+        while (L->rcount == 0 && !L->stopping)
+            pthread_cond_wait(&L->cv, &L->mu);
+        if (L->rcount > 0) {
+            fd = L->ready[L->rhead];
+            L->rhead = (L->rhead + 1) % L->depth;
+            L->rcount--;
         }
-        if (fds[1].revents) break;
-        if (!(fds[0].revents & POLLIN)) continue;
+        int stop = L->stopping;
+        pthread_mutex_unlock(&L->mu);
 
-        int cfd = accept(a->lfd, NULL, NULL);
-        if (cfd < 0) {
-            /* Another worker took it first: poll() reported the socket
-             * readable to all of them and only one wins. Not an error. */
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
-            break;
-        }
-        /* A peer that will not *read* must not hold a worker either. The
-         * deadline in read_request() covers the request; this covers the
-         * answer. SO_SNDTIMEO is enough on this side where a per-read timeout
-         * was not on the other: a blocked write means a full socket buffer,
-         * and the peer cannot reset the clock a byte at a time the way a
-         * drip-feeding sender can. The connection is closed on expiry, which
-         * is all that is left to do -- there is nowhere to send a status when
-         * sending is the thing that failed. */
-        {
-            struct timeval tv = { REQUEST_DEADLINE_MS / 1000,
-                                  (REQUEST_DEADLINE_MS % 1000) * 1000 };
-            (void)setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-        }
+        if (fd < 0) { if (stop) break; continue; }
 
-        if (a->is_public) {
-            serve_public(cfd, a->proxy_uid);
-        } else {
-            policy_reload_if_asked();
-            serve(cfd, a->proxy_uid);
-        }
-        close(cfd);
+        /* Back to blocking for the worker: the acceptor needed non-blocking to
+         * refuse without waiting, the worker needs the ordinary read path. */
+        int fl = fcntl(fd, F_GETFL, 0);
+        if (fl >= 0) (void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+        struct timeval tv = { REQUEST_DEADLINE_MS / 1000,
+                              (REQUEST_DEADLINE_MS % 1000) * 1000 };
+        (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+
+        if (L->is_public) serve_public(fd, L->proxy_uid);
+        else { policy_reload_if_asked(); serve(fd, L->proxy_uid); }
+        close(fd);
     }
     return NULL;
+}
+
+/* The acceptor. Owns lfd, the stop pipe and every connection that has not yet
+ * spoken. Single-threaded by construction, so `wait` needs no lock. */
+static void *acceptor(void *argp)
+{
+    listener_t *L = argp;
+    for (;;) {
+        int n = 0;
+        L->pfds[n].fd = L->lfd;          L->pfds[n].events = POLLIN; n++;
+        L->pfds[n].fd = g_stop_pipe[0];  L->pfds[n].events = POLLIN; n++;
+        for (int i = 0; i < L->nwait; i++) {
+            L->pfds[n].fd = L->wait[i].fd; L->pfds[n].events = POLLIN; n++;
+        }
+        for (int i = 0; i < n; i++) L->pfds[i].revents = 0;
+
+        /* Sleep no longer than the nearest deadline, so a silent connection is
+         * let go on time rather than when the next event happens to arrive. */
+        int timeout = -1;
+        /* An open burst needs the loop to wake up to close it, even once the
+         * queue has drained and there is nothing else to wait for. */
+        if (L->burst[0].open || L->burst[1].open) timeout = BURST_COOLDOWN_S * 1000;
+        for (int i = 0; i < L->nwait; i++) {
+            long ms = ms_left(&L->wait[i].deadline);
+            if (ms < 0) ms = 0;
+            if (timeout < 0 || ms < timeout) timeout = (int)ms;
+        }
+
+        int r = poll(L->pfds, (nfds_t)n, timeout);
+        burst_flush(L, time(NULL), 0);
+        if (r < 0 && errno != EINTR) break;
+        if (g_stop) break;
+        if (L->pfds[1].revents) break;
+
+        /* Expired first. A slot freed here is a slot the accept below can use,
+         * which is what keeps a burst of silent connections from turning into
+         * a burst of 503s for everyone behind them. */
+        for (int i = 0; i < L->nwait; ) {
+            int readable = L->pfds[2 + i].revents & (POLLIN | POLLHUP | POLLERR);
+            if (!readable && ms_left(&L->wait[i].deadline) <= 0) {
+                refuse_now(L->wait[i].fd, 408,
+                           "no request within the deadline\n", NULL);
+                (void)fhsm_audit_event(FHSM_EV_REQUEST_REFUSED, -1, -1,
+                                        FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
+                                        "reason", "request_timeout",
+                                        "route", "-", NULL);
+                close(L->wait[i].fd);
+                L->wait[i] = L->wait[--L->nwait];
+                continue;                /* the moved entry still needs looking at */
+            }
+            i++;
+        }
+        /* Then the ones that spoke. Recomputed against the *current* pfds
+         * indices would be wrong after the compaction above, so this pass
+         * matches on the descriptor rather than on the position. */
+        for (int k = 2; k < n; k++) {
+            if (!(L->pfds[k].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+            int fd = L->pfds[k].fd;
+            /* POLLHUP is not the test, and assuming it was cost a
+             * measurement: a unix peer that closes leaves the socket readable
+             * in the EOF sense, so POLLIN is set too and POLLHUP-without-
+             * POLLIN never fires. Look instead of deducing -- one MSG_PEEK
+             * says whether there is a byte or an end. */
+            char peek;
+            ssize_t pk = recv(fd, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
+            int hungup = (pk == 0);
+            if (pk < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                continue;                /* spurious wakeup: still waiting */
+            for (int i = 0; i < L->nwait; i++) {
+                if (L->wait[i].fd != fd) continue;
+                L->wait[i] = L->wait[--L->nwait];
+                if (hungup) {
+                    /* Gone before it said anything. There is no request to
+                     * refuse and nobody left to tell, so waking a worker to
+                     * discover that would spend a durable audit write on a
+                     * peer that is not there -- which is how connect-and-close
+                     * in a loop became a flood. Counted, not narrated. */
+                    burst_note(L, BURST_HANGUP, time(NULL));
+                    close(fd);
+                } else {
+                    ready_push(L, fd);
+                }
+                break;
+            }
+        }
+
+        if (!(L->pfds[0].revents & POLLIN)) continue;
+
+        for (;;) {
+            int cfd = accept(L->lfd, NULL, NULL);
+            if (cfd < 0) break;          /* EAGAIN: drained */
+            int fl = fcntl(cfd, F_GETFL, 0);
+            if (fl >= 0) (void)fcntl(cfd, F_SETFL, fl | O_NONBLOCK);
+
+            if (L->nwait >= L->depth) {
+                /* The first time this daemon can say it is busy. Retry-After
+                 * is one second because that is the first-byte deadline: the
+                 * slot ahead of this one is released within it or not at all. */
+                refuse_now(cfd, 503, "queue full\n", "Retry-After: 1\r\n");
+                /* What an operator needs is that the service went to
+                 * saturation and for how long, not one line per connection
+                 * that bounced off it. */
+                burst_note(L, BURST_QUEUE_FULL, time(NULL));
+                close(cfd);
+                continue;
+            }
+            L->wait[L->nwait].fd = cfd;
+            clock_gettime(CLOCK_MONOTONIC, &L->wait[L->nwait].deadline);
+            L->wait[L->nwait].deadline.tv_sec += FIRST_BYTE_DEADLINE_MS / 1000;
+            L->nwait++;
+        }
+    }
+
+    pthread_mutex_lock(&L->mu);
+    L->stopping = 1;
+    pthread_cond_broadcast(&L->cv);
+    pthread_mutex_unlock(&L->mu);
+    burst_flush(L, time(NULL), 1);         /* a burst that never ended */
+    for (int i = 0; i < L->nwait; i++) close(L->wait[i].fd);
+    L->nwait = 0;
+    return NULL;
+}
+
+static int listener_init(listener_t *L, int lfd, int is_public,
+                          uid_t uid, int depth)
+{
+    memset(L, 0, sizeof *L);
+    L->lfd = lfd; L->is_public = is_public; L->proxy_uid = uid; L->depth = depth;
+    L->wait  = calloc((size_t)depth, sizeof *L->wait);
+    L->ready = calloc((size_t)depth, sizeof *L->ready);
+    L->pfds  = calloc((size_t)depth + 2, sizeof *L->pfds);
+    if (!L->wait || !L->ready || !L->pfds) return -1;
+    pthread_mutex_init(&L->mu, NULL);
+    pthread_cond_init(&L->cv, NULL);
+    return 0;
 }
 
 static void usage(void)
@@ -2082,6 +2343,19 @@ static void usage(void)
       "  Fairness: while another identity has a request in flight, each is\n"
       "  held to --workers minus one, so a client cannot take every worker.\n"
       "  A single client is never capped, and the refusal is 429.\n\n"
+      );
+    /* Split, not shortened. One literal had grown past the 4095 characters
+     * C99 requires a compiler to accept, and -Wpedantic -Werror is right to
+     * say so; the fix is two calls, not a shorter explanation. */
+    fprintf(stderr,
+      "  --queue-depth N  connections the acceptor will hold while they have\n"
+      "                   said nothing (default 256, per listener). Holding one\n"
+      "                   costs a descriptor and ~0.4 kB; committing a worker to\n"
+      "                   it costs 19.7 kB and a client's latency, which is why\n"
+      "                   the acceptor holds it instead. Past the depth the\n"
+      "                   answer is 503 with Retry-After. Refused at start if\n"
+      "                   the descriptor limit cannot cover it -- past that the\n"
+      "                   failure is EMFILE, which nobody is told about.\n\n"
       "  --public-socket PATH\n"
       "                   a second socket that requires no identity, for the\n"
       "                   things a relying party asks anonymously: GET\n"
@@ -2138,7 +2412,7 @@ int main(int argc, char **argv)
     long proxy_uid = -1, workers = 4, pool_max = 32;
     const char *pub_path = NULL, *ca_cert_path = NULL;
     const char *rev_db_path = NULL, *ocsp_label = NULL, *responder_path = NULL;
-    long pub_workers = 2, ocsp_days = 7;
+    long pub_workers = 2, ocsp_days = 7, queue_depth = 256;
 
     for (int i = 1; i < argc; i++) {
         char *e = NULL;
@@ -2171,6 +2445,9 @@ int main(int argc, char **argv)
             ocsp_label = argv[++i];
         } else if (!strcmp(argv[i], "--responder-cert") && i + 1 < argc) {
             responder_path = argv[++i];
+        } else if (!strcmp(argv[i], "--queue-depth") && i + 1 < argc) {
+            queue_depth = strtol(argv[++i], &e, 10);
+            if (!e || *e || queue_depth < 1 || queue_depth > 65536) usage();
         } else if (!strcmp(argv[i], "--ocsp-days") && i + 1 < argc) {
             ocsp_days = strtol(argv[++i], &e, 10);
             if (!e || *e || ocsp_days < 1 || ocsp_days > 365) usage();
@@ -2306,6 +2583,35 @@ int main(int argc, char **argv)
                 pool_max, workers);
         return 2;
     }
+    /* The queue is bounded by descriptors before it is bounded by anything
+     * else: every waiting connection is one, and running out of them is a
+     * silent failure -- accept() returns EMFILE, the acceptor drops the
+     * connection, and nobody is told. So the arithmetic is done here, once,
+     * against the limit actually in force rather than the one assumed.
+     *
+     * The reserve covers what the daemon already holds: two listening
+     * sockets, the stop pipe, the audit log, the token store, stdio, and one
+     * descriptor per in-flight request. Sixty-four is generous for that and
+     * the point is the refusal, not the precision. */
+    {
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+            long reserve = 64 + workers + (pub_path ? pub_workers : 0);
+            long total   = queue_depth * (pub_path ? 2 : 1) + reserve;
+            if ((rlim_t)total > rl.rlim_cur) {
+                fprintf(stderr,
+                  "fhsm-service: --queue-depth %ld needs %ld descriptors%s,\n"
+                  "  and the limit in force is %ld. Past it accept() fails with\n"
+                  "  EMFILE and the connection is dropped without a 503 and\n"
+                  "  without a line -- the silent failure the queue exists to\n"
+                  "  replace. Raise LimitNOFILE or lower --queue-depth.\n",
+                  queue_depth, total,
+                  pub_path ? " (two listeners)" : "", (long)rl.rlim_cur);
+                return 2;
+            }
+        }
+    }
+
     g_pool_max = (int)pool_max;
     /* Set before any worker starts, read by every worker afterwards, never
      * written again -- so it needs no lock of its own. */
@@ -2436,35 +2742,51 @@ int main(int argc, char **argv)
     /* One thread short of the requested count runs the accept loop here, so
      * that a signal lands on a thread that is in accept() and the process can
      * be told to stop. The workers are detached from that concern. */
-    worker_arg_t warg  = { lfd, g_stop_pipe[0], (uid_t)proxy_uid, 0 };
-    worker_arg_t pwarg = { pfd, g_stop_pipe[0], (uid_t)proxy_uid, 1 };
-    pthread_t *ptids = NULL;
+    static listener_t priv, pub;
+    if (listener_init(&priv, lfd, 0, (uid_t)proxy_uid, (int)queue_depth) != 0) {
+        fprintf(stderr, "fhsm-service: out of memory\n"); return 1;
+    }
+    pthread_t *ptids = NULL, pacc = 0;
     if (pub_path) {
+        if (listener_init(&pub, pfd, 1, (uid_t)proxy_uid, (int)queue_depth) != 0) {
+            fprintf(stderr, "fhsm-service: out of memory\n"); return 1;
+        }
         ptids = calloc((size_t)pub_workers, sizeof *ptids);
         if (!ptids) { fprintf(stderr, "fhsm-service: out of memory\n"); return 1; }
         for (long i = 0; i < pub_workers; i++) {
-            if (pthread_create(&ptids[i], NULL, worker, &pwarg) != 0) {
+            if (pthread_create(&ptids[i], NULL, worker, &pub) != 0) {
                 fprintf(stderr, "fhsm-service: cannot start public worker\n");
                 return 1;
             }
         }
+        if (pthread_create(&pacc, NULL, acceptor, &pub) != 0) {
+            fprintf(stderr, "fhsm-service: cannot start the public acceptor\n");
+            return 1;
+        }
         fprintf(stderr, "fhsm-service: public listener on %s, %ld worker(s),"
                         " no identity required\n", pub_path, pub_workers);
     }
-    pthread_t *tids = calloc((size_t)workers - 1, sizeof *tids);
-    if (!tids && workers > 1) { fprintf(stderr, "fhsm-service: out of memory\n"); return 1; }
-    for (long i = 0; i < workers - 1; i++) {
-        if (pthread_create(&tids[i], NULL, worker, &warg) != 0) {
+    /* Every worker is a worker now. The accept loop is the acceptor's, so the
+     * thread that used to double as one runs the private acceptor instead --
+     * which is also what keeps a signal landing on a thread that is in poll()
+     * rather than in the middle of a signature. */
+    pthread_t *tids = calloc((size_t)workers, sizeof *tids);
+    if (!tids) { fprintf(stderr, "fhsm-service: out of memory\n"); return 1; }
+    for (long i = 0; i < workers; i++) {
+        if (pthread_create(&tids[i], NULL, worker, &priv) != 0) {
             fprintf(stderr, "fhsm-service: cannot start worker %ld\n", i);
             return 1;
         }
     }
-    worker(&warg);                       /* this thread serves too */
+    acceptor(&priv);                     /* this thread accepts */
 
-    /* The stop pipe already woke them; joining is only waiting for the
-     * request each was in the middle of. */
-    for (long i = 0; i < workers - 1; i++) (void)pthread_join(tids[i], NULL);
+    for (long i = 0; i < workers; i++) (void)pthread_join(tids[i], NULL);
     if (ptids) {
+        pthread_mutex_lock(&pub.mu);
+        pub.stopping = 1;
+        pthread_cond_broadcast(&pub.cv);
+        pthread_mutex_unlock(&pub.mu);
+        if (pacc) (void)pthread_join(pacc, NULL);
         for (long i = 0; i < pub_workers; i++) (void)pthread_join(ptids[i], NULL);
         free(ptids);
     }

@@ -47,6 +47,44 @@ project adheres to [Semantic Versioning](https://semver.org/).
   about. No audit line per query, like the rest of that listener; the start
   line records which key answers.
 
+### Added
+* **A queue in front of the workers (#111).** The ADR's later slice, and what
+  the deadlines above could not reach. A worker used to own a connection from
+  `accept()` onward, so a silent peer cost a legitimate client
+  `(n / workers) x 1 s`. An acceptor thread per listener now holds every
+  connection that has not spoken and hands a worker only one that is already
+  readable. Measured at four workers, before and after: 4 silent connections
+  0.8 s → **5 ms**, 8 → **7 ms**, 32 → **7.9 s → 8 ms**.
+
+  The design followed a measurement rather than the other way round: holding an
+  accepted connection in a poll set costs **0.25–0.46 kB** and one descriptor,
+  against **19.7 kB** for an idle thread and ~29 kB for a pooled session. Two
+  orders of magnitude, so the connection waits somewhere that is not a worker.
+
+  `--queue-depth` (256 per listener) bounds it, and past the depth the daemon
+  answers **503 with `Retry-After: 1`** — the first time it can say it is busy
+  instead of leaving the kernel to return `EAGAIN`, which an honest client
+  cannot distinguish from an absent service. The queue drains itself at the
+  first-byte deadline, so saturation is transient. The depth is checked at
+  start against `RLIMIT_NOFILE`, and the systemd unit now declares
+  `LimitNOFILE=4096` rather than inheriting a bound nobody chose.
+
+  **Two audit floods, both found by measuring the fix.** A 503 is immediate, so
+  the peer sets the rate: hammering a full queue wrote 722 lines and 264 kB in
+  two seconds. Connect-and-close was worse, because it reached a worker whose
+  read of zero bytes was logged — 1371 lines. Both are compressed now, the
+  first of a burst written and the rest counted: 463 843 connect-and-close in
+  two seconds produce **4 lines and 12 kB**, one of them
+  `hung_up_early_over` carrying `refused: 421409`.
+
+  Two corrections worth recording. `POLLHUP` is not how you detect a peer that
+  hung up — a closed unix peer leaves the socket readable in the EOF sense, so
+  `POLLIN` is set too and the test never fires; one `MSG_PEEK` answers it.
+  And `g_stop` is now `_Atomic sig_atomic_t` rather than
+  `volatile sig_atomic_t`: both are correct, but the acceptor reads it on every
+  pass and ThreadSanitizer reported the handler's write against those reads.
+  Relying on the tool not looking is not a property worth keeping.
+
 ### Fixed
 * **Four connections that sent nothing stopped the service (#111).** Found
   while measuring for the queue slice, which is not what it was looking for.
