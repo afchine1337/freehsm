@@ -436,6 +436,104 @@ n=$(sed -n 's/^HOGSERVED //p' "$FHSM_TOKENS_DIR/fair.out")
 [ -n "$n" ] && [ "$n" -gt 0 ]
 ok $? "  the capped identity is throttled, not locked out ($n served)"
 
+# --- a peer that says nothing ---------------------------------------------
+#
+# This is the assertion the suite did not have, and its absence was not
+# theoretical. Measured on the code before this block existed: with
+# --workers 4, four connections that sent no bytes took /health from 9.8 ms to
+# a timeout and held it there for as long as they stayed open, with nothing
+# written to the audit log. Every worker sat in a blocking read() waiting for
+# a header that was not coming. At sixty-nine such connections the accept
+# backlog filled and connect() itself returned EAGAIN, so an honest client was
+# refused by the kernel before the daemon saw it.
+#
+# Eight is used rather than four: with four the service could recover by
+# chance if a worker happened to be free. Twice the worker count cannot.
+python3 - "$SOCK" > "$FHSM_TOKENS_DIR/mute.out" 2>&1 <<'MUTE_EOF'
+import socket, sys, time
+SOCK = sys.argv[1]
+
+def health(timeout=30):
+    t0 = time.perf_counter()
+    try:
+        s = socket.socket(socket.AF_UNIX); s.settimeout(timeout)
+        s.connect(SOCK)
+        s.sendall(b"GET /health HTTP/1.1\r\nX-FHSM-Client-Subject: CN=web01\r\n\r\n")
+        d = s.recv(200); s.close()
+        return d.split(b"\r\n")[0].decode(), (time.perf_counter() - t0) * 1000
+    except Exception as e:
+        return type(e).__name__, (time.perf_counter() - t0) * 1000
+
+held = []
+for i in range(8):
+    s = socket.socket(socket.AF_UNIX); s.connect(SOCK); held.append(s)
+time.sleep(0.2)
+st, ms = health()
+print("MUTESTATUS", st)
+print("MUTEMS", int(ms))
+
+# What the silent peer is told. It is a refusal with a reason, not a socket
+# closed under it: the peer that is holding a worker is exactly the one that
+# should be able to find out why it was let go.
+held[0].settimeout(20)
+try:
+    d = held[0].recv(300)
+    print("MUTEGOT", d.split(b"\r\n")[0].decode())
+except Exception as e:
+    print("MUTEGOT", type(e).__name__)
+for s in held:
+    try: s.close()
+    except Exception: pass
+time.sleep(0.3)
+st, ms = health()
+print("AFTERSTATUS", st)
+
+# A body that arrives slowly is still a body. The deadline for the rest of the
+# request is ten seconds precisely so that this keeps working; only the wait
+# for the *first* byte is short, because a proxy that has connected has its
+# request in hand and nothing to compute.
+def slowbody(n, gap):
+    t0 = time.perf_counter()
+    s = socket.socket(socket.AF_UNIX); s.settimeout(40); s.connect(SOCK)
+    s.sendall(b"POST /sign HTTP/1.1\r\nX-FHSM-Client-Subject: CN=web01\r\n"
+              b"X-FHSM-Key: tls-web01\r\nContent-Length: %d\r\n\r\n" % n)
+    try:
+        for i in range(n):
+            time.sleep(gap); s.sendall(b"x")
+        d = s.recv(400)
+        st = d.split(b"\r\n")[0].decode()
+    except Exception as e:
+        st = "cut:" + type(e).__name__
+    s.close()
+    return st, time.perf_counter() - t0
+
+st, t = slowbody(8, 0.5)
+print("SLOWOK", st)
+print("SLOWSECS", round(t, 1))
+st, t = slowbody(40, 0.6)
+print("SLOWCUT", st)
+print("SLOWCUTSECS", round(t, 1))
+MUTE_EOF
+
+grep -q "^MUTESTATUS HTTP/1.1 200 OK" "$FHSM_TOKENS_DIR/mute.out"
+ok $? "eight connections that send nothing do not stop the service"
+
+n=$(sed -n 's/^MUTEMS //p' "$FHSM_TOKENS_DIR/mute.out")
+[ -n "$n" ] && [ "$n" -lt 6000 ]
+ok $? "  and the wait is bounded by the deadline, not by them (${n:-?} ms)"
+
+grep -q "^MUTEGOT HTTP/1.1 408" "$FHSM_TOKENS_DIR/mute.out"
+ok $? "  the silent peer is told why it was let go, not just cut off"
+
+grep -q "^AFTERSTATUS HTTP/1.1 200 OK" "$FHSM_TOKENS_DIR/mute.out"
+ok $? "  and the service is unharmed once they are gone"
+
+grep -q "^SLOWOK HTTP/1.1 200 OK" "$FHSM_TOKENS_DIR/mute.out"
+ok $? "a body delivered over $(sed -n 's/^SLOWSECS //p' "$FHSM_TOKENS_DIR/mute.out") s is still signed"
+
+grep -q "^SLOWCUT cut:" "$FHSM_TOKENS_DIR/mute.out"
+ok $? "  but one still arriving at $(sed -n 's/^SLOWCUTSECS //p' "$FHSM_TOKENS_DIR/mute.out") s is not"
+
 kill -TERM $PID 2>/dev/null
 i=0; while kill -0 $PID 2>/dev/null && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done
 if kill -0 $PID 2>/dev/null; then

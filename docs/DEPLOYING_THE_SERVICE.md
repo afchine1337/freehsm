@@ -321,8 +321,29 @@ job, and the way to do it is to revoke the certificate.
   An HTTP `max-age` would let an intermediary keep serving `good` for a
   certificate this responder already knows is revoked — undoing at the proxy
   the re-read the daemon does on every query.
+* **A connection is bounded, the service is not.** A peer that connects and
+  says nothing is let go after **1 second**; a request whose body is still
+  arriving is cut at **10 seconds**. Before those deadlines existed, four
+  silent connections against four workers stopped the service outright, for as
+  long as they were held, with nothing written to the audit log — measured, and
+  now asserted in `tests/service_guards.sh`.
+
+  What the deadlines buy is a bound, not immunity. A worker is still committed
+  to a connection from `accept()` onward, so *n* silent connections still cost
+  a legitimate client about `(n / workers) x 1 s`: 0.8 s at 4, 1.8 s at 8,
+  **7.9 s at 32**. That residual is the queue's to remove, not the deadline's.
+
+  The socket is mode 0660 with the peer's uid checked, so this takes the
+  proxy's own uid rather than any local user. Note also that adding
+  `keepalive` to an nginx `upstream` block — ordinary tuning — holds idle
+  connections open and walks into the same cost without meaning to. This
+  service answers `Connection: close`; leave upstream keepalive off.
+
 * **No queue with a depth.** Requests beyond the worker count wait in the
   kernel's accept backlog, where the daemon can neither see nor reorder them.
+  Past 64 pending, `connect()` itself returns `EAGAIN` and an honest client is
+  refused by the kernel before this process sees it — so there is no 503 to
+  read and no audit line to find.
   `docs/REST_API_DESIGN.md` records this as a later slice, and it is why one
   identity saturating the service still costs another a factor of 2.4 in
   latency rather than nothing.

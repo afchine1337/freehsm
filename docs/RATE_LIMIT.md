@@ -355,6 +355,16 @@ because the whole trade is the cost of one `fsync`.
 **The queue in front of the pool.** It does not exist yet, and its depth is the
 difference between a rate limit and a wait.
 
+Measuring for it found something else first, and the finding reorders the work.
+A worker is committed to a connection from `accept()` onward, and until this was
+fixed it then waited on a blocking `read()` with no deadline: **four connections
+that sent nothing stopped the service entirely**, silently, for as long as they
+were held. A queue would not have helped — a queue in front of workers that
+block forever just moves the stall. The deadlines came first, and what is left
+for the queue is the residual they cannot reach: *n* silent connections still
+cost a client `(n / workers) x 1 s`, which is 7.9 s at 32 connections. That is
+the number the queue has to take to zero.
+
 ---
 
 ## See also

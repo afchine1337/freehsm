@@ -63,7 +63,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
+#include <limits.h>
 #include <poll.h>
+#include <time.h>
+#include <time.h>
 #include <pthread.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -967,6 +971,7 @@ static void respond_with(int fd, int status, const char *text,
                        : status == 405 ? "Method Not Allowed"
                        : status == 422 ? "Unprocessable Content"
                        : status == 429 ? "Too Many Requests"
+                       : status == 408 ? "Request Timeout"
                        : status == 413 ? "Payload Too Large"
                        : status == 501 ? "Not Implemented"
                        : status == 503 ? "Service Unavailable"
@@ -1041,16 +1046,107 @@ typedef struct {
     size_t body_len;
 } request_t;
 
+/* --------------------------------------------------------------------------
+ * A DEADLINE ON THE WHOLE REQUEST
+ *
+ * Without one, four connections that say nothing stop the service. Measured,
+ * not reasoned: with --workers 4, opening four sockets and sending no bytes
+ * took /health from 9.8 ms to a timeout, for as long as they were held, and
+ * the daemon wrote nothing at all. Every worker was inside a blocking read()
+ * waiting for a header that was never coming. At sixty-nine such connections
+ * the accept backlog fills and connect() itself returns EAGAIN, so an honest
+ * client is refused by the kernel before this process sees it.
+ *
+ * The socket is mode 0660 and the peer's uid is checked, so this takes the
+ * proxy's own uid rather than any local user. That bounds who can do it; it
+ * does not make it survivable. An operator who adds `keepalive 16` to their
+ * nginx upstream block -- ordinary tuning advice -- would hold idle
+ * connections open and reach the same state without meaning to.
+ *
+ * WHY A DEADLINE AND NOT SO_RCVTIMEO
+ *
+ * SO_RCVTIMEO bounds one read(), which is not the property needed. A peer
+ * sending one byte every nine seconds resets it forever and holds the worker
+ * anyway -- the ordinary slowloris. What has to be bounded is the request, so
+ * the deadline is taken once on entry and every wait below gets whatever is
+ * left of it.
+ *
+ * ON NOT COMPRESSING THE AUDIT LINE
+ *
+ * A 408 goes through the ordinary refusal path, one durable line each, and
+ * that is deliberate. The burst compression exists because a refused identity
+ * can be refused thousands of times a second; an abandoned connection cannot,
+ * because abandoning one costs the peer the whole deadline. The control is its
+ * own rate limit, so it needs no second one.
+ * ----------------------------------------------------------------------- */
+/* TWO DEADLINES, NOT ONE
+ *
+ * A single ten-second deadline was the first version, and it left the service
+ * stalled for twenty seconds against eight silent connections and four
+ * workers: bounded, which the previous state was not, but bounded at
+ * (connections / workers) x deadline, which grows with the attacker's effort.
+ *
+ * The two waits are not the same shape. A proxy that has connected sends its
+ * request immediately -- it has it in hand; there is nothing to compute --
+ * so the wait for the *first byte* is a network hop on a unix socket, and a
+ * second is already three orders of magnitude more than it needs. The wait
+ * for the *rest* has to allow a body to arrive in pieces, which is why it is
+ * ten. nginx splits the same wait for the same reason
+ * (client_header_timeout against client_body_timeout).
+ *
+ * With the split, the same eight silent connections cost two seconds instead
+ * of twenty, and a slow body still gets its ten. */
+#define FIRST_BYTE_DEADLINE_MS 1000
+#define REQUEST_DEADLINE_MS   10000
+
+static long ms_left(const struct timespec *deadline)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long ms = (deadline->tv_sec - now.tv_sec) * 1000
+            + (deadline->tv_nsec - now.tv_nsec) / 1000000;
+    return ms;
+}
+
+/* 1 readable, 0 the deadline passed, -1 the connection failed. */
+static int wait_readable(int fd, const struct timespec *deadline)
+{
+    for (;;) {
+        long ms = ms_left(deadline);
+        if (ms <= 0) return 0;
+        struct pollfd pfd = { fd, POLLIN, 0 };
+        int n = poll(&pfd, 1, (int)(ms > INT_MAX ? INT_MAX : ms));
+        if (n > 0) return 1;
+        if (n == 0) return 0;
+        if (errno == EINTR) continue;
+        return -1;
+    }
+}
+
 static verdict_t read_request(int fd, request_t *r)
 {
     memset(r, 0, sizeof *r);
     r->content_length = -1;
+
+    struct timespec deadline, first;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    first = deadline;
+    deadline.tv_sec += REQUEST_DEADLINE_MS   / 1000;
+    first.tv_sec    += FIRST_BYTE_DEADLINE_MS / 1000;
+    int had_a_byte = 0;
 
     char *buf = r->hdr;
     size_t used = 0;
     const char *end = NULL;
 
     while (used < MAX_HEADER_BYTES) {
+        /* The first byte gets the short deadline; everything after it gets the
+         * long one. A connection that has said nothing at all is the cheap
+         * thing to hold and so the thing to let go of quickly. */
+        int w = wait_readable(fd, had_a_byte ? &deadline : &first);
+        if (w == 0)  return (verdict_t){ 408, "request_timeout" };
+        if (w < 0)   return (verdict_t){ 400, "read_failed" };
+        had_a_byte = 1;
         ssize_t n = read(fd, buf + used, MAX_HEADER_BYTES - used);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -1190,6 +1286,9 @@ static verdict_t read_request(int fd, request_t *r)
         memcpy(r->body, bstart, have);
         r->body_len = have;
         while (r->body_len < (size_t)r->content_length) {
+            int w = wait_readable(fd, &deadline);
+            if (w == 0)  return (verdict_t){ 408, "request_timeout" };
+            if (w < 0)   return (verdict_t){ 400, "body_read" };
             ssize_t n = read(fd, r->body + r->body_len,
                               (size_t)r->content_length - r->body_len);
             if (n < 0) {
@@ -1937,6 +2036,20 @@ static void *worker(void *argp)
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
             break;
         }
+        /* A peer that will not *read* must not hold a worker either. The
+         * deadline in read_request() covers the request; this covers the
+         * answer. SO_SNDTIMEO is enough on this side where a per-read timeout
+         * was not on the other: a blocked write means a full socket buffer,
+         * and the peer cannot reset the clock a byte at a time the way a
+         * drip-feeding sender can. The connection is closed on expiry, which
+         * is all that is left to do -- there is nowhere to send a status when
+         * sending is the thing that failed. */
+        {
+            struct timeval tv = { REQUEST_DEADLINE_MS / 1000,
+                                  (REQUEST_DEADLINE_MS % 1000) * 1000 };
+            (void)setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+        }
+
         if (a->is_public) {
             serve_public(cfd, a->proxy_uid);
         } else {

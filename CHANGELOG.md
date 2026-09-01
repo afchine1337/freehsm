@@ -47,6 +47,37 @@ project adheres to [Semantic Versioning](https://semver.org/).
   about. No audit line per query, like the rest of that listener; the start
   line records which key answers.
 
+### Fixed
+* **Four connections that sent nothing stopped the service (#111).** Found
+  while measuring for the queue slice, which is not what it was looking for.
+  With `--workers 4`, opening four sockets and sending no bytes took `/health`
+  from 9.8 ms to a timeout and held it there for as long as the connections
+  stayed open — and the daemon wrote nothing at all, so an operator had a dead
+  service and an empty log. Every worker sat in a blocking `read()` waiting for
+  a header that was never coming; `setsockopt` appeared nowhere in the file. At
+  sixty-nine such connections the accept backlog filled and `connect()` itself
+  returned `EAGAIN`, refusing an honest client at the kernel before the daemon
+  saw it.
+
+  Two deadlines, because the two waits are not the same shape. **1 second for
+  the first byte** — a proxy that has connected has its request in hand and
+  nothing to compute — and **10 seconds for the rest**, so a body arriving in
+  pieces still gets signed. A single ten-second deadline was the first attempt
+  and left the service stalled for twenty seconds against eight connections;
+  the split brings that to 1.8 s. `SO_SNDTIMEO` covers the other direction, so
+  a peer that will not read the answer cannot hold a worker either.
+
+  The expired connection gets `408` and one audit line. Not compressed like the
+  refusal bursts, deliberately: abandoning a connection costs the peer the
+  whole deadline, so the control is already its own rate limit.
+
+  Stated rather than left to be found: this bounds the damage, it does not
+  remove it. A worker is committed from `accept()` onward, so *n* silent
+  connections still cost a client about `(n / workers) x 1 s` — 7.9 s at 32.
+  That residual belongs to the queue slice, and `docs/RATE_LIMIT.md` now says
+  so. Reverting the deadlines fails four assertions in
+  `tests/service_guards.sh`; collapsing the two into one fails a fifth.
+
 ### Changed
 * **The revocation database and the OCSP responder move into the library
   (#163).** Both lived in `tools/fhsm_ca.c`, reached only by
