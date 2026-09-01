@@ -1474,6 +1474,19 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
 #define CKA_UNWRAP_ATTR     0x00000107UL
 #define CKA_SIGN_ATTR       0x00000108UL
 #define CKA_VERIFY_ATTR     0x0000010AUL
+/* The two the table forgot. This module implements neither recover
+ * operation, and it never will -- C_SignRecover is a signature scheme whose
+ * message is recovered from the signature, which nothing here does. But
+ * "not supported" and "I do not know this attribute" are different answers,
+ * and PKCS#11 defines both attributes for every key object. Returning
+ * CKR_ATTRIBUTE_TYPE_INVALID tells a caller asking about capabilities that
+ * the question was malformed; CK_FALSE tells it the truth.
+ *
+ * Found by OpenSC's pkcs11-tool, which prints a warning for each -- a third
+ * party enumerating a key noticed what seven wired attributes and two
+ * unwired ones look like from outside. */
+#define CKA_SIGN_RECOVER_ATTR   0x00000109UL
+#define CKA_VERIFY_RECOVER_ATTR 0x0000010BUL
 #define CKA_EXTRACTABLE     0x00000162UL
 #define CKA_DERIVE_ATTR     0x0000010CUL
 #define CKA_LOCAL_ATTR      0x00000163UL
@@ -3944,6 +3957,13 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_UNWRAP, cko_class != CKO_PUBLIC_KEY); src = &bval; src_len = 1; break;
             case CKA_DERIVE_ATTR:
                 bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_DERIVE, 0); src = &bval; src_len = 1; break;
+            /* Always false, and false is an answer. See the note by the
+             * defines: the module does not implement either recover
+             * operation, which is a capability statement, not a reason to
+             * reject the question. */
+            case CKA_SIGN_RECOVER_ATTR:
+            case CKA_VERIFY_RECOVER_ATTR:
+                bval = 0; src = &bval; src_len = 1; break;
             /* Date attributes : empty (unset) by default. A zero-length
              * value is the PKCS#11 encoding for "no date". */
             /* Dates and CKA_APPLICATION used to answer empty for every
