@@ -47,6 +47,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
   about. No audit line per query, like the rest of that listener; the start
   line records which key answers.
 
+### Changed
+* **The release pre-flight requires a reproducibility reference.** `dist/refs/`
+  had held nothing but `.gitkeep` across six tagged releases, so
+  `make dist-verify` always took its fallback branch — build twice in the same
+  container on the same day and compare. That proves determinism, not that the
+  published artefact can be reproduced, which is what a third party checks.
+  `scripts/release.sh` now fails without a reference, and fails again if one
+  exists but nothing compared against it.
+
+  The determinism itself holds: two builds of the same tree in two different
+  directories produce a bit-identical `libfreehsm-fips.so`. What was missing
+  was the anchor and the requirement that one exist.
+
 ### Added
 * **A queue in front of the workers (#111).** The ADR's later slice, and what
   the deadlines above could not reach. A worker used to own a connection from

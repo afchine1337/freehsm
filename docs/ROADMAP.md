@@ -338,6 +338,22 @@ dist-baseline` exists to record a reference, and the release pre-flight simply
 never asks whether one was recorded. A step that is available and never
 required is a step that does not happen.
 
+**Required as of 2026-09-01.** `scripts/release.sh` now has a check 8 that
+fails when `dist/refs/v<VERSION>.sha256` is absent, and fails again if the
+reference exists but nothing compared against it — a reference nobody checked
+is the same non-verification in a new place. Both directions were exercised
+before the check was committed.
+
+The half of the property that was in doubt turns out to hold. Two builds of the
+same tree in two different directories produce a bit-identical
+`libfreehsm-fips.so`:
+
+    ee49f922f2db7b1d9a59c9a14cb994e9b6321a13d3e9630d29ae621db7b2f4d6
+
+so `-ffile-prefix-map`, `--build-id=none`, `-frandom-seed` and the pinned
+`SOURCE_DATE_EPOCH` are doing what they were added for. What was missing was
+never the determinism; it was the anchor, and the requirement that one exist.
+
 **The containerised build cannot have run.** `scripts/build_reproducible.sh`
 mounts the tree `-v "${PROJ_ROOT}:/src:ro"` and the image's ENTRYPOINT is
 `cd /src && make clean && make all && ...`. `make all` has to write objects,

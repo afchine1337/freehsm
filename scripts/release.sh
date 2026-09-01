@@ -167,6 +167,52 @@ if grep -qi "clock skew" /tmp/rel_build.log /tmp/rel_integrity.log 2>/dev/null; 
     warn "make reported clock skew -- the build may be incomplete, check the VM clock"
 fi
 
+# --- 8. the reproducibility reference ------------------------------------
+#
+# docs/ROADMAP.md, 2026-08-15: dist/refs/ held nothing but .gitkeep across six
+# tagged releases, so `make dist-verify` always took its fallback branch --
+# build twice in the same container on the same day and compare. That proves
+# the build is deterministic. It does not prove the published artefact can be
+# reproduced, which is the property a third party actually wants: take the tag,
+# rebuild it months later, obtain the bytes that were published.
+#
+# Nothing was hiding it. The fallback prints which branch it took, and
+# `make dist-baseline` has always existed to record a reference. This script
+# simply never asked whether one had been recorded, and a step that is
+# available and never required is a step that does not happen. So it is
+# required here, which is the only place that can make it happen.
+echo
+echo "== Reproducibility =="
+REF="dist/refs/v${VERSION}.sha256"
+if [ -f "$REF" ]; then
+    ok "reference recorded: $REF"
+    if command -v docker >/dev/null 2>&1; then
+        if make dist-verify >/tmp/rel_repro.log 2>&1; then
+            if grep -q "reference found" /tmp/rel_repro.log; then
+                ok "local build matches the recorded reference"
+            else
+                # The reference exists and dist-verify still fell back. That
+                # means the two disagree about the version string, which is
+                # the failure mode that made the recipe compare against
+                # dist/refs/v.sha256 -- a file that cannot exist.
+                bad "dist-verify fell back despite $REF -- version mismatch?"
+            fi
+        else
+            bad "dist-verify failed -- /tmp/rel_repro.log"
+        fi
+    else
+        # A reference nobody checked is the same non-verification in a new
+        # place, so this is a failure rather than a note.
+        bad "docker not found -- the reference exists but nothing compared against it"
+    fi
+else
+    bad "no reproducibility reference at $REF
+        Record one on a trusted build machine, then commit it:
+            make dist-baseline
+            git add $REF
+        Six releases shipped without this. This one does not."
+fi
+
 # --- verdict -------------------------------------------------------------
 echo
 if [ "$fails" -ne 0 ]; then
