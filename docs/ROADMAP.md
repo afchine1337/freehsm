@@ -499,6 +499,58 @@ answer quietly.
 
 ---
 
+### The fips-strict profile has never run against the FIPS provider (2026-09-01)
+
+Found while asking a narrower question -- whether an external RAND could be
+used for key generation under FIPS. The answer to that is still unknown. What
+turned up instead is why it could not be asked here.
+
+`src/fhsm_crypto.c` skips the provider entirely in dev mode:
+
+    int dev_mode = (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED") != NULL);
+    if (!dev_mode) {
+        g_fips_prov = OSSL_PROVIDER_load(NULL, "fips");
+
+and `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` is set on **every** test recipe in the
+Makefile, in `scripts/run_pkcs11_check.sh`, and in the CI workflows.
+`OPENSSL_CONF=/dev/null` is set alongside it, so no configuration could
+activate the provider even if the shortcut did not exist.
+
+Neither is a defect. The dev-mode shortcut is deliberate and its comment
+explains it; `/dev/null` keeps EVP fetches on the default provider so the
+harness is reproducible. What is missing is anywhere that says what follows:
+**no test has ever run this module with the FIPS provider loaded.** The claim
+in `docs/FIPS_140_3_SECURITY_TARGET.md` -- "all FIPS-relevant computations are
+delegated to the FIPS-validated OpenSSL FIPS provider" -- is true of the code
+and unobserved in operation. What `make tests` proves about `fips-strict` is
+that the module *refuses* non-approved mechanisms, which is a test of the
+refusal and not of the delegation.
+
+This is the recurring shape at the level of the whole suite: a control wired to
+a path no test reaches.
+
+Attempted 2026-09-01 on the dev VM (Debian 13, OpenSSL 3.5.6, `fips.so` present
+in the modules directory):
+
+    openssl fipsinstall -out ... -module .../fips.so
+    Failed to load FIPS module
+    SELF_TEST_post:invalid state ; OSSL_provider_init_int:self test post failure
+
+so the provider will not initialise there at all. Whether that is a version
+mismatch between `fips.so` and the loaded `libcrypto`, or a module Debian ships
+without intending it to be usable, is not yet established. Either way the
+environment the Security Target describes has not been stood up.
+
+**Before v2.0.0 drops the beta suffix**, one of these has to happen:
+1. stand the provider up (a container with a known-good FIPS build if the VM
+   will not), run the suite signed and without the dev-mode variable, and
+   record what it says; or
+2. state plainly, in the release notes and in the Security Target, that the
+   operational environment is specified and not yet exercised.
+
+The second is honest and cheap. The first is what the document currently
+implies has already happened.
+
 ## Continuous / parallel
 
 | # | Task | Cadence | Status |

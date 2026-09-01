@@ -99,6 +99,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Relying on the tool not looking is not a property worth keeping.
 
 ### Fixed
+* **`CKA_SIGN_RECOVER` and `CKA_VERIFY_RECOVER` were refused rather than
+  answered.** `C_GetAttributeValue` returned `CKR_ATTRIBUTE_TYPE_INVALID` for
+  both, where PKCS#11 defines them for every key object. This module implements
+  neither recover operation and never will, but "not supported" and "I do not
+  know this attribute" are different answers, and a caller asking about
+  capabilities got the second. Both now return `CK_FALSE`. Seven usage
+  attributes were wired and two were not — found by OpenSC's `pkcs11-tool`,
+  which prints a warning for each. See `docs/THIRD_PARTY_CONSUMERS.md`.
+
 * **Four connections that sent nothing stopped the service (#111).** Found
   while measuring for the queue slice, which is not what it was looking for.
   With `--workers 4`, opening four sockets and sending no bytes took `/health`
