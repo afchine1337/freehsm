@@ -541,6 +541,57 @@ mismatch between `fips.so` and the loaded `libcrypto`, or a module Debian ships
 without intending it to be usable, is not yet established. Either way the
 environment the Security Target describes has not been stood up.
 
+### What reading the release path turned up (2026-09-01)
+
+The Docker image is not the missing piece, and an earlier note here implying
+otherwise was wrong. `build-image.yml` publishes
+`ghcr.io/<owner>/freehsm-c-build:debian13-openssl-3.5`, and both `ci.yml`'s
+`reproducibility` job and the whole of `release.yml` run **inside** it. The
+published artefact is already built in the pinned environment.
+
+Four things came out of reading it properly.
+
+**Fixed in this pass.** `release.yml` ran
+`make integrity || echo "WARN: ... (expected outside Docker image)"`. The
+parenthetical was false — the job runs inside the image — and the `||` meant
+a failed signing published an **unsigned** module, which carries the all-zero
+`.fhsm_digest` and cannot initialise at all. Now its own step, with no `||`,
+followed by one that reads the section back: a zero exit from `make integrity`
+would not have been the assurance anyway, since `sign_module.sh` exits 3 when
+the module is already signed.
+
+Looking for the same defect elsewhere found it three more times, which is why
+it was worth looking. `ci.yml` piped `make integrity` through `tee` in two
+steps; a `run:` block uses `bash -e {0}` and therefore has no `pipefail`, so
+the step took `tee`'s exit status and a failed signing passed — including in
+the step that feeds the artefact upload, and thence the reproducibility job's
+`build1`. `scripts/release.sh` treated any non-zero exit as failure and so
+reported "make integrity failed" on every second run of the pre-flight. The
+pattern is the one this project keeps meeting: a control wired to some of the
+paths that reach a state and not the rest.
+
+**Still open, and the substance of #167.** `dist/refs/` does not exist.
+`release.yml` computes `sha256sum libfreehsm-fips.so` and publishes it beside
+the file — a receipt that the download matches what was built, not an anchor
+that rebuilding the tag in six months yields the same bytes. Nothing in the
+pipeline compares against a committed reference. `scripts/release.sh` check 8
+requires one, but that is the local pre-flight, not the workflow that
+publishes. Closing this means: produce the reference once inside the image,
+commit it, and make `release.yml` fail when its build differs.
+
+**What the CI reproducibility job actually proves.** Two builds, same image,
+same commit, compared. Determinism — which was never the part in doubt.
+
+**A knob nobody reads.** `SOURCE_DATE_EPOCH` is `1717977600` in `ci.yml` and
+`release.yml`, against `1735689600` in the image's own `ENV`. Inert today: the
+Makefile reads it only in the `dist` target (tar mtime), the `.so` gets its
+determinism from `REPRO_FLAGS`, and `release.yml` builds its tarball with
+`git archive`. It contradicts the image and would begin to matter silently the
+day anything calls `make dist` in CI. Left in place with a comment at the
+point of use; it belongs to the anchor decision above.
+
+---
+
 **Before v2.0.0 drops the beta suffix**, one of these has to happen:
 1. stand the provider up (a container with a known-good FIPS build if the VM
    will not), run the suite signed and without the dev-mode variable, and

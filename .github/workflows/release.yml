@@ -68,6 +68,13 @@ jobs:
 
       - name: Build reproducibly
         env:
+          # Inert here: the Makefile reads SOURCE_DATE_EPOCH only in the
+          # `dist` target (tar mtime), and the .so gets its determinism from
+          # REPRO_FLAGS, which redact __DATE__/__TIME__ outright. It also
+          # contradicts the image's own ENV (1735689600). Left untouched in
+          # this commit, which is about the swallowed failure below; see
+          # docs/ROADMAP.md for the reproducibility anchor that has to
+          # settle it.
           SOURCE_DATE_EPOCH: '1717977600'
         run: |
           # Defensive : restore the exec bit in case actions/checkout
@@ -77,8 +84,46 @@ jobs:
                    tests/wycheproof/*.py 2>/dev/null || true
           make clean
           make
-          make integrity || echo "WARN: make integrity failed (expected outside Docker image)"
           test -f libfreehsm-fips.so
+
+      # Signing is not a nicety here and its failure must not be a warning.
+      #
+      # This step used to read
+      #     make integrity || echo "WARN: ... (expected outside Docker image)"
+      # and the parenthetical was false: this job runs INSIDE the image
+      # (see `container:` above), so there is no "outside" for it to excuse.
+      # What the `||` actually did was publish an UNSIGNED module whenever
+      # signing failed, for any reason. An unsigned module carries the
+      # all-zero .fhsm_digest, so do_verify() returns INTEGRITY_FAILED and
+      # C_Initialize refuses -- the release would be a brick, shipped
+      # silently, with a digest computed over it as if all were well.
+      - name: Sign the module
+        run: make integrity
+
+      # And then check the property, not the command. `make integrity` runs
+      # scripts/sign_module.sh, which exits 3 -- not 0 -- when the module is
+      # ALREADY signed, so a zero exit is not by itself the assurance wanted
+      # here. Read the section back instead: it is the same question a
+      # relying party would ask of the published file.
+      # readelf and objcopy come from binutils, od from coreutils -- both are
+      # in Dockerfile.build's install list. `xxd` is NOT: on Debian trixie it
+      # is its own package, and the first draft of this step used it, which
+      # would have failed every release with a verification unable to run.
+      # Checked against the Dockerfile rather than assumed.
+      - name: Verify the module is really signed
+        run: |
+          readelf -SW libfreehsm-fips.so | grep -q '\.fhsm_digest' || {
+              echo "::error::no .fhsm_digest section in the release artefact"
+              exit 1
+          }
+          d=$(objcopy --dump-section .fhsm_digest=/dev/stdout \
+                      libfreehsm-fips.so /dev/null 2>/dev/null \
+              | od -An -tx1 -v | tr -d ' \n')
+          case "$d" in
+            "")      echo "::error::.fhsm_digest section is empty"; exit 1 ;;
+            *[!0]*)  echo "signed: $d" ;;
+            *)       echo "::error::release artefact carries the all-zero placeholder: unsigned"; exit 1 ;;
+          esac
 
       - name: Compute digests
         run: |

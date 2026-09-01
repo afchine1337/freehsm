@@ -74,6 +74,12 @@ jobs:
 
       - name: Sign module digest
         run: |
+          # pipefail is NOT set by the default `bash -e {0}` shell, so
+          # `make integrity | tee` exited with tee's status -- always 0. A
+          # failed signing passed here for as long as the tee has been in
+          # place, and the artefact uploaded below would have been an
+          # unsigned module that cannot initialise at all.
+          set -o pipefail
           make integrity 2>&1 | tee integrity.log
           ls -la libfreehsm-fips.so
 
@@ -112,11 +118,26 @@ jobs:
       # the mandatory build before anything leaves this job.
       - name: Rebuild and re-sign the shipping configuration
         run: |
+          # See the note on the "Sign module digest" step: without pipefail,
+          # `| tee` returns tee's status and a failed build or signing walks
+          # straight into the upload.
+          set -o pipefail
           make clean
           make 2>&1 | tee build.log
           make integrity 2>&1 | tee integrity.log
           make test-integrity
           LD_LIBRARY_PATH=. sh tests/audit_switch.sh mandatory
+          # And the property, not just the commands: this is the artefact the
+          # upload step publishes and the reproducibility job compares.
+          readelf -SW libfreehsm-fips.so | grep -q '\.fhsm_digest' \
+            || { echo "::error::no .fhsm_digest section"; exit 1; }
+          d=$(objcopy --dump-section .fhsm_digest=/dev/stdout \
+                      libfreehsm-fips.so /dev/null 2>/dev/null \
+              | od -An -tx1 -v | tr -d ' \n')
+          case "$d" in
+            *[!0]*) echo "signed: $d" ;;
+            *)      echo "::error::uploading an unsigned module"; exit 1 ;;
+          esac
 
       - name: Upload artifacts
         if: success()

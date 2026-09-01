@@ -7,6 +7,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+* **The release workflow no longer swallows a failed `make integrity`
+  (#167).** It ran `make integrity || echo "WARN: ... (expected outside Docker
+  image)"` — from a job that declares `container:` and therefore runs *inside*
+  the image, so the excuse was false. The `||` meant a failed signing
+  published an **unsigned** module, which carries the all-zero
+  `.fhsm_digest`, so `C_Initialize` refuses and the released `.so` would not
+  load at all — while every later step computed digests and signed artefacts
+  around it. Nothing has shipped that way; only luck prevented it.
+
+  Signing is now its own step, and a second step reads the section back rather
+  than trusting the exit code — `sign_module.sh` exits 3 when the module is
+  already signed, so a zero exit was never the assurance wanted. The check
+  runs before the `.sha256` is computed, so the published digest covers a file
+  whose signature was confirmed.
+
+  The same defect was in three more places, and fixing only `release.yml`
+  would have reproduced the very pattern it is an instance of. `ci.yml` ran
+  `make integrity 2>&1 | tee integrity.log` twice; the default `bash -e {0}`
+  shell does not set `pipefail`, so the step exited with `tee`'s status —
+  always zero — and the second occurrence feeds the artefact upload.
+  `scripts/release.sh` treated a non-zero exit as failure, so it reported
+  "make integrity failed" on every second run of the pre-flight. All four now
+  distinguish signing from being signed.
+
 ### Added
 * **The suite runs against the OpenSSL FIPS provider, and the delegation is
   observed (#173).** `docs/FIPS_140_3_SECURITY_TARGET.md` says all

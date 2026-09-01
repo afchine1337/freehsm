@@ -158,10 +158,24 @@ else
     bad "make test-integrity failed -- /tmp/rel_selftest.log"
 fi
 
-if make integrity >/tmp/rel_integrity.log 2>&1; then
-    ok "module signed (integrity ran last)"
+# Sign, then ask whether it is signed. Those are two different questions and
+# this used to conflate them: scripts/sign_module.sh exits 3 -- not 0 -- when
+# the module already carries a digest, so on any second run of this pre-flight
+# the `else` branch fired and reported "make integrity failed" for a module
+# that was signed. A zero exit was never the assurance wanted here.
+make integrity >/tmp/rel_integrity.log 2>&1; rel_rc=$?
+if [ "$rel_rc" != 0 ] && [ "$rel_rc" != 3 ]; then
+    bad "make integrity failed (rc=$rel_rc) -- /tmp/rel_integrity.log"
 else
-    bad "make integrity failed -- /tmp/rel_integrity.log"
+    rel_lib=$(sed -n 's/^LIB[[:space:]]*=[[:space:]]*//p' Makefile | head -1)
+    rel_lib=${rel_lib:-libfreehsm-fips.so}
+    rel_d=$(objcopy --dump-section .fhsm_digest=/dev/stdout "$rel_lib" /dev/null \
+            2>/dev/null | od -An -tx1 -v | tr -d ' \n')
+    case "$rel_d" in
+        "")     bad "no .fhsm_digest section in $rel_lib" ;;
+        *[!0]*) ok  "module signed, digest read back (${rel_d:0:16}...)" ;;
+        *)      bad "$rel_lib carries the all-zero placeholder -- it is NOT signed" ;;
+    esac
 fi
 if grep -qi "clock skew" /tmp/rel_build.log /tmp/rel_integrity.log 2>/dev/null; then
     warn "make reported clock skew -- the build may be incomplete, check the VM clock"
