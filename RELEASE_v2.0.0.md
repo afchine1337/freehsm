@@ -120,6 +120,37 @@ to be. `CKM_COMPOSITE_MLDSA65_ED25519` is interop-only as a settled choice.
 This is not a limitation of the implementation: the composite signatures match
 the draft's Appendix D vectors byte for byte.
 
+### A FreeHSM token does not enumerate from OpenSSL today
+
+The first thing most people will try is `openssl storeutl -provider pkcs11`
+against a token these tools built. It fails, and the failure looks like ours:
+
+    p11prov_obj_find ... objects.c:1184: Failed to store object
+    store_fetch      ... store.c:144:   Failed to load keys from slot (0)
+
+Not the composite key alone — **the whole slot**. `fhsm-csr keygen` creates
+composite pairs, so every token provisioned by these tools contains an object
+`pkcs11-provider` refuses, and it fails the enumeration rather than skipping
+what it cannot use.
+
+`CKK_COMPOSITE_MLDSA65_ED25519` is `0x80004202`, and `0x80000000` is
+`CKK_VENDOR_DEFINED`. PKCS#11 reserves that range precisely so a module may
+hold objects a generic caller does not understand, and a consumer walking a
+token is expected to skip them. So this is a robustness limit in the
+enumeration, not a statement about the object — the same shape as the p11-kit
+finding, and reportable on the same grounds.
+
+What does work: OpenSC's `pkcs11-tool` reads the objects, their usage and
+access flags, the `EC_POINT`, the `EC_PARAMS` OID, and builds correct RFC 7512
+URIs. And `pkcs11-provider` itself works on a token holding no composite
+object — an OpenSSL application can use a FreeHSM token today if the token was
+provisioned by something else.
+
+Measured 2026-09-01 on Debian 13 with OpenSSL 3.5.6; the runs, the
+discriminating experiment and what it does *not* establish are in
+`docs/THIRD_PARTY_CONSUMERS.md`. Signing through either consumer was not
+attempted — enumeration is not use.
+
 ### Not certified, and not seeking certification
 
 FreeHSM holds no certificate and will not pursue one. The evaluation documents

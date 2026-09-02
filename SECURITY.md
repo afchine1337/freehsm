@@ -255,7 +255,7 @@ The following are NOT considered vulnerabilities :
 
 ```
 pub   ed25519 2026-06-12 [SCA] [expires: 2028-06-11]
-      743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2
+      743A 6A59 04A1 461A 6464 08DE 4856 0162 DBBF 28A2
 uid           [ultimate] Afchine Madjlessi <afchine.mad@gmail.com>
 sub   cv25519 2026-06-26 [E] [expires: 2028-06-11]
       9813 876A 34BA DD4A 0A50 915E 7EAC 4BA5 5574 DBE8

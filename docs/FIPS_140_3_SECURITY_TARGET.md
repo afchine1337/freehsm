@@ -406,7 +406,7 @@ Every release tag triggers a deterministic build inside a pinned Docker image (`
 | 32 matrix assertions, default + FIPS modes | Per push to main | 24/0/8 |
 | 37.9 million fuzz inputs across 3 harnesses | Per push (5 min) / nightly (1 h) | 0 crash, 0 leak, 12 invariants checked (§13.5) |
 | Reproducible build (sha256 bit-identical) | Per release tag | Verified by `dist-verify` |
-| GPG signed releases (Ed25519 fingerprint `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`) | Per release tag | **18 consecutive releases** since v1.1.0 (§13.7) |
+| GPG signed releases (Ed25519 fingerprint `743A 6A59 04A1 461A 6464 08DE 4856 0162 DBBF 28A2`) | Per release tag | **18 consecutive releases** since v1.1.0 (§13.7) |
 
 This surface is the *operational complement* to the boot KAT : it answers the questions "does the module match a third-party reference ?", "is the binary the one I think it is ?", and (from §13.5) "is the module memory-safe under adversarial input ?" that no §7.10.2 self-test can answer in isolation.
 
@@ -472,7 +472,7 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 
 ### 13.7 Release track record (ALC_DEL / ALC_CMC)
 
-**23 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`. Each release tag triggers an automated workflow (`release.yml`) that :
+**23 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 461A 6464 08DE 4856 0162 DBBF 28A2`. Each release tag triggers an automated workflow (`release.yml`) that :
 
 1. Verifies the tag's GPG signature against the canonical fingerprint.
 2. Builds `libfreehsm.so` reproducibly in the pinned `freehsm-c-build:debian13-openssl-3.5` container.

@@ -16,7 +16,7 @@ else moves:
 
 * Binary name stays `libfreehsm.so`.
 * PKCS#11 identifiers stay as they are (`manufacturerID = "Simorgh Labs"`).
-* The GPG release key stays `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`.
+* The GPG release key stays `743A 6A59 04A1 461A 6464 08DE 4856 0162 DBBF 28A2`.
 * GHSA identifiers already published are permanent.
 
 The naming is now explicit: **FreeHSM** is the Apache-2.0 PKCS#11 library.

@@ -60,4 +60,4 @@ validation, or submission.
 ## Contact
 
 Permission requests and questions: **afchine.mad@gmail.com** (GPG key
-`743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`).
+`743A 6A59 04A1 461A 6464 08DE 4856 0162 DBBF 28A2`).

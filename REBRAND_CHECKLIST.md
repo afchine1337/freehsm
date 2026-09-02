@@ -107,5 +107,5 @@ depuis chaharsou.com vers le dépôt, donc le chemin se fait dans les deux sens.
 
 * `libfreehsm-fips.so` — nom du binaire
 * Identifiants PKCS#11 (`manufacturerID = "Simorgh Labs"`, etc.)
-* Clé GPG `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`
+* Clé GPG `743A 6A59 04A1 461A 6464 08DE 4856 0162 DBBF 28A2`
 * GHSA publiés

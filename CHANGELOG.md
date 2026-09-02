@@ -3683,7 +3683,7 @@ Fixed by adding the three wired-and-implemented slots to `fhsm_function_list` in
 
 #### Operational gap : sign-only GPG key
 
-The published GPG key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2` was sign + certify + authenticate only, with no encryption capability. Denis could not send the rest of his report (memory-safety + key-handling findings) over an encrypted channel. A cv25519 encryption subkey (fingerprint `9813 876A 34BA DD4A 0A50 915E 7EAC 4BA5 5574 DBE8`) was generated on 2026-06-26 and published to `keys.openpgp.org` (with the `afchine.mad@gmail.com` address verified) and `keyserver.ubuntu.com`. SECURITY.md is updated to reflect the new key material and documents the gap honestly. The primary key remains sign / certify / authenticate only ; only the encryption operation has a target now.
+The published GPG key `743A 6A59 04A1 461A 6464 08DE 4856 0162 DBBF 28A2` was sign + certify + authenticate only, with no encryption capability. Denis could not send the rest of his report (memory-safety + key-handling findings) over an encrypted channel. A cv25519 encryption subkey (fingerprint `9813 876A 34BA DD4A 0A50 915E 7EAC 4BA5 5574 DBE8`) was generated on 2026-06-26 and published to `keys.openpgp.org` (with the `afchine.mad@gmail.com` address verified) and `keyserver.ubuntu.com`. SECURITY.md is updated to reflect the new key material and documents the gap honestly. The primary key remains sign / certify / authenticate only ; only the encryption operation has a target now.
 
 ### Added
 
