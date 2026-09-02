@@ -125,7 +125,11 @@ La TSFI est exclusivement l'ensemble des symboles `C_*` exportés par `libfreehs
 
 ### 6.1 ALC_CMC.4 — Support de production, procédures d'acceptation, automatisation
 
-- Contrôle de version : Git, tags signés uniquement (signing GPG via clé listée dans `docs/keys/dev-pubkeys.gpg`).
+- Contrôle de version : Git, tags signés uniquement. La clé publique du mainteneur est publiée sur
+  keys.openpgp.org avec vérification de l'adresse et figure dans le dépôt sous
+  `afchine-pubkey.asc` ; un trousseau `docs/keys/dev-pubkeys.gpg` a été nommé
+  ici comme forme future à plusieurs mainteneurs et n'a jamais été écrit,
+  puisqu'il n'y en a qu'un.
 - Build : reproductible via `Dockerfile.build` épinglé (Debian 12 + OpenSSL 3.x).
 - Acceptation : chaque tag de release déclenche la suite de tests complète + KAT + lint + `cppcheck` + `clang-tidy`.
 

@@ -1,5 +1,30 @@
 # FreeHSM C --- FIPS 140-3 Security Target (Draft v0.10)
 
+<!-- doc-audit: allow tests/test_smoke.tampered -- historical record of the
+     v1.2.1 killer test; the artefact is now tests/test_integrity.tampered.
+     See the note immediately below. -->
+> **On `tests/test_smoke.tampered`, named in §9.1.1, §13.8 and the revision
+> log below.** Nothing in the tree produces it and it is not in the
+> repository; the tamper demonstration now lives in `make test-integrity`,
+> which signs `tests/test_integrity`, flips one byte and requires the refusal.
+>
+> The artefact itself is real and was located on 2026-09-02 in an
+> off-repository archive dated 2026-08-15. Its own mtime is **2026-06-21
+> 20:07**, the day of the v1.2.1 fix; 1 580 544 bytes;
+> `sha256 8f6327dd0007361b581a21472c3a16c66f3c34c0924dc11f2557be3f293bf31e`;
+> and its `.fhsm_digest` is non-zero
+> (`707e11ee5855957d27e410c8c2104a50a72abedd2934cbf437a92220c557e8ef`), so it
+> was signed and then modified — the mechanism §9.1.1 describes.
+>
+> What is **not** re-verifiable is the "1 byte flipped in `.text`" figure: the
+> untampered signed binary of that day did not survive, so there is nothing to
+> difference it against. Existence, date and signedness are established; the
+> size of the edit rests on the record made at the time.
+>
+> The three mentions keep the old name, because they are records of June 2026
+> and the revision log says of itself that its rows are "preserved verbatim as
+> historical record". Checked 2026-09-02.
+
 **Status :** Written to the FIPS 140-3 Security Policy structure, never
 submitted. FreeHSM is not evaluated by a CST lab and will not be — see the
 mission note in `ROADMAP.md`. Published as a worked example of what a Security

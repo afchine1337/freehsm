@@ -77,8 +77,14 @@ depuis chaharsou.com vers le dépôt, donc le chemin se fait dans les deux sens.
 ## Phase 5 — Annonces (~1h, APRÈS que tout est live)
 
 - ✅ PRÉPARÉ Blog post (dans le repo, publié via Pages en Phase 4)
-- ✅ PRÉPARÉ LinkedIn : `simorgh_rebrand_announce/01_linkedin.md`
-- ✅ PRÉPARÉ Mastodon + X (thread de 3) : `simorgh_rebrand_announce/02_mastodon_x.md`
+<!-- doc-audit: allow simorgh_rebrand_announce/01_linkedin.md -->
+<!-- doc-audit: allow simorgh_rebrand_announce/02_mastodon_x.md -- written
+     outside this repository; the lines below say so. -->
+- ✅ PRÉPARÉ LinkedIn — rédigé hors de ce dépôt, cité ici comme
+      `simorgh_rebrand_announce/01_linkedin.md` ; ce chemin n'existe pas dans
+      ce dépôt et on n'établit plus s'il survit ailleurs sous ce nom.
+- ✅ PRÉPARÉ Mastodon + X (thread de 3) — même remarque, cité comme
+      `simorgh_rebrand_announce/02_mastodon_x.md`.
 - [ ] Poster : blog d'abord, puis LinkedIn (lien en 1er commentaire), puis
       Mastodon/X
 - [ ] Éventuel : courte note sur la ML habituelle (le ton oss-security ne se
@@ -90,7 +96,9 @@ depuis chaharsou.com vers le dépôt, donc le chemin se fait dans les deux sens.
       `contact@simorgh.io` (domaine abandonné). Utiliser une adresse qui existe
       réellement, sinon ne rien ajouter — un UID qui pointe vers un domaine mort
       est pire qu'aucun UID. (PAS de rotation : le fingerprint ne change jamais.)
-- [ ] `LICENSE-BRAND.md` vs `TRADEMARK.md` : TRADEMARK.md créé ; décider si le
+- ✅ `LICENSE-BRAND.md` vs `TRADEMARK.md` : **tranché — TRADEMARK.md**, qui est
+      livré. `LICENSE-BRAND.md` était l'option écartée et n'a jamais été écrit.
+      Reste à décider si le
       logo est ajouté au repo avec mention "all rights reserved" dans REUSE.toml
 - [ ] Mettre à jour le profil bestpractices.dev (nom du repo)
 - [ ] OpenSSF Scorecard / REUSE : re-lancer après rename pour vérifier badges

@@ -691,8 +691,9 @@ Both mechanisms are implemented and advertised in the `interop` profile, where
 these tests would exercise real code.
 
 **Position: harness gap, reported upstream.** The tests need a `has_mechanism`
-guard like their siblings. Verified by direct probe rather than asserted — see
-`probes/rsa_mech_advertised.c`.
+guard like their siblings. Verified by direct probe rather than asserted. The probe was written for
+this finding and not kept; it was named here as `probes/rsa_mech_advertised.c`
+and does not exist in the tree. What it established is the paragraph above.
 
 **What would move it:** a guard upstream, or running the harness against the
 interop build.

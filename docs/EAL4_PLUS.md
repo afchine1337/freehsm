@@ -123,7 +123,11 @@ The TSFI is exclusively the set of `C_*` symbols exported by `libfreehsm-fips.so
 
 ### 6.1 ALC_CMC.4 --- Production support, acceptance procedures, automation
 
-- Source control: Git, signed tags only (commit signing via GPG key listed in `docs/keys/dev-pubkeys.gpg`).
+- Source control: Git, signed tags only. The maintainer's public key is published on
+  keys.openpgp.org with email verification and is included in the repository
+  as `afchine-pubkey.asc`; a `docs/keys/dev-pubkeys.gpg` keyring was named
+  here as the eventual multi-maintainer form and has not been written, there
+  being one maintainer.
 - Build: reproducible via `Dockerfile.build` (Debian 12 + OpenSSL 3.2 FIPS module from CMVP cert #4825).
 - Acceptance: every release tag triggers the full test suite + KAT + lint + `cppcheck` + `scan-build` + `clang-tidy` clean.
 

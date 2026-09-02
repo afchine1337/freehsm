@@ -137,6 +137,17 @@ def check_paths(root):
         r"`([A-Za-z0-9_./-]+\.(?:c|h|md|sh|py|service|yml|yaml|cnf|patch)|"
         r"(?:src|docs|tests|tools|include|kat|scripts|service|systemd|probes|"
         r"contrib|fuzz)/[A-Za-z0-9_./-]*)`")
+
+    # Files that belong to the host, not to this repository. The bare-filename
+    # branch above matches any `something.cnf`, and OpenSSL's two configuration
+    # files are named constantly in the FIPS documents -- correctly, and about
+    # /usr/lib/ssl rather than about anything here. Reporting them as missing
+    # repository paths trains the reader to skim the list, which is how the
+    # real entries in it stop being read.
+    SYSTEM_FILES = {
+        "openssl.cnf",        # the host OpenSSL configuration
+        "fipsmodule.cnf",     # written by `openssl fipsinstall`, never shipped
+    }
     # A line that says the file is missing is not a stale claim about it. This
     # matters more than it sounds: the honest fix for a broken citation is often
     # to say "this does not exist", and a checker that then flags the honesty
@@ -146,21 +157,60 @@ def check_paths(root):
         r"does not exist|is not written|unwritten|not met|to be written|"
         r"will be created|does not ship|never (been )?written|was named here|"
         r"not built|has never existed|withdrawn|"
+        # Near-misses found 2026-09-02. Four of the six "unkept promises" in
+        # the report were already honest and the filter simply did not match
+        # the words used: "has not been written", "is still to be created",
+        # "(to write)", "created at the first external contribution". The
+        # checker was under-matching, not the documents over-claiming -- and
+        # a report padded with entries that are already correct is a report
+        # nobody finishes reading.
+        r"has not been written|(still )?to be created|\(to write\)|"
+        r"created at the first|not yet written|not yet created|"
+        r"was planned|is planned|remains? to be|no such file|"
         # Français -- the docs are bilingual, and a filter that only reads
         # English flags the honest French half.
         r"n'existe pas|n'a jamais (été écrit|existé)|jamais écrit|"
         r"a été nommé ici|non construit|à la main|procédure manuelle",
         re.I)
+    # An explicit, file-scoped waiver:
+    #
+    #     <!-- doc-audit: allow tests/test_smoke.tampered -- historical record -->
+    #
+    # The prose filter below guesses at English, and guessing loses: four
+    # honest admissions were flagged on 2026-09-02 because they said "has not
+    # been written" and "(to write)" rather than the exact words in the list,
+    # and widening the list to catch them is a race nobody wins. A waiver says
+    # what it means, is greppable, and carries its reason on the same line --
+    # which is the point, because a silent exemption is worse than a noisy
+    # false positive. The prose filter stays for the ordinary case.
+    waiver = re.compile(r"doc-audit:\s*allow\s+(\S+)")
+
     bad = []
     for f in doc_files(root):
-        for n, line in enumerate(open(f, encoding="utf-8", errors="replace"), 1):
-            if admits.search(line):
+        lines = open(f, encoding="utf-8", errors="replace").readlines()
+        allowed = set(waiver.findall("".join(lines)))
+        for n, line in enumerate(lines, 1):
+            # Look at the neighbours, not just the line.
+            #
+            # The admission and the path it excuses are one sentence, and a
+            # sentence wraps. Reading a single line flagged four entries whose
+            # very next line said "and that file was never written" -- the
+            # checker demanding honesty in a shape it could see rather than
+            # honesty. A window of one line either side is enough for prose
+            # and still narrow enough that an admission about a DIFFERENT file
+            # two paragraphs away cannot silence this one.
+            window = "".join(lines[max(0, n - 2):n + 1])
+            if admits.search(window):
                 continue
             for m in pat.findall(line):
                 p = (m[0] if isinstance(m, tuple) else m).rstrip("/")
                 if not p or " " in p or FOREIGN.match(p):
                     continue
                 if p in have or os.path.basename(p) in have:
+                    continue
+                if os.path.basename(p) in SYSTEM_FILES:
+                    continue
+                if p in allowed:
                     continue
                 # A build product is not a missing file: `tests/bench_fsync_floor`
                 # is absent from a clean tree and present after make, and its

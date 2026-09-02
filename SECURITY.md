@@ -95,11 +95,32 @@ binaries that statically link `fhsm_integrity.o`) were fixed in the same
 commit ; see CHANGELOG entry for v1.2.1 and Security Target v0.7 §9.1.1
 for the full breakdown.
 
-**Validation.** A reproducible artifact (`tests/test_smoke.tampered`,
-1 byte flipped in `.text` outside `.fhsm_digest`) is rejected with
-`C_Initialize` returning `0x80000002 = FHSM_RV_INTEGRITY_FAILED` on
-v1.2.1. The same artifact is accepted silently by v1.2.0, confirming
-the defect's behaviour on the affected window.
+<!-- doc-audit: allow tests/test_smoke.tampered -- named as the June 2026
+     artefact; the paragraph says so and gives the current form. -->
+**Validation.** A reproducible artifact — a signed binary with one byte
+flipped in `.text`, outside `.fhsm_digest` — is rejected with `C_Initialize`
+returning `0x80000002 = FHSM_RV_INTEGRITY_FAILED` on v1.2.1. The same artifact
+is accepted silently by v1.2.0, confirming the defect's behaviour on the
+affected window.
+
+That artifact was `tests/test_smoke.tampered`. Nothing in the current tree
+produces it, and it is not in the repository — it survives in an off-repository
+archive of 2026-08-15, dated **2026-06-21 20:07**, the day of the v1.2.1 fix,
+and 1 580 544 bytes:
+
+    sha256  8f6327dd0007361b581a21472c3a16c66f3c34c0924dc11f2557be3f293bf31e
+    .fhsm_digest  707e11ee5855957d27e410c8c2104a50a72abedd2934cbf437a92220c557e8ef
+
+The embedded digest is non-zero: the binary was signed first and modified
+after, which is the mechanism this section describes. The
+"1 byte flipped" figure is not re-verifiable: the untampered signed binary of
+that day did not survive, so what is established is the artifact's existence,
+its date and that it was signed, not the size of the edit.
+
+The check itself is still exercised on every run of `make test-integrity`,
+which signs `tests/test_integrity`, flips a byte and requires the refusal —
+the only place in the suite that runs the integrity check without
+`FHSM_INTEGRITY_ALLOW_UNSIGNED`.
 
 **Disclosure decision : no CVE.** The project is in pre-certification
 status (FIPS 140-3 Level 1 / CC EAL4+ candidate) with no known production

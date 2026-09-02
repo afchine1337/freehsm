@@ -8,6 +8,45 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **`doc_audit.py` reports none, and eight of the twenty were the checker's
+  fault (#171).** The report listed twenty stale paths. Reading them one by
+  one rather than fixing them one by one:
+
+  Two were host files — `openssl.cnf` and `fipsmodule.cnf` — matched by the
+  bare-filename branch of the pattern and named correctly, about
+  `/usr/lib/ssl`. Six were documents that *already* said the file did not
+  exist, in words the filter did not list: "has not been written", "is still
+  to be created", "(to write)", "created at the first external contribution".
+  And the filter read one line at a time, so an admission that wrapped onto
+  the next line was invisible — four more.
+
+  A checker whose report is padded with entries that are already correct
+  trains its reader to skim, which is how the real entries in it stop being
+  read. Fixed in the checker: a system-file exemption, the missing phrasings,
+  a one-line window either side, and an explicit `<!-- doc-audit: allow PATH
+  -- reason -->` waiver for the cases where guessing at English is the wrong
+  tool.
+
+  The genuine findings: `docs/EAL4_PLUS.md` and its French twin said the
+  signing key was "listed in `docs/keys/dev-pubkeys.gpg`", a keyring that was
+  never written — the key is `afchine-pubkey.asc`, and there is one
+  maintainer. `docs/PKCS11_CHECK_FINDINGS.md` cited a probe that was written
+  for one finding and not kept. And `docs/SIMORGH_LABS_BRAND_REFERENCE.md`
+  set itself a deadline — brand licence terms "decided and documented before
+  v2.0.0 stable" — which this release meets: **TRADEMARK.md**, which ships;
+  `LICENSE-BRAND.md` was the alternative and was never written.
+
+  `tests/test_smoke.tampered`, named four times, is produced by nothing today:
+  the tamper demonstration moved to `make test-integrity`. The artefact itself
+  is real — located in the maintainer's archive of 2026-08-15, mtime
+  2026-06-21 20:07, `sha256 8f6327dd…`, with a non-zero `.fhsm_digest`, so
+  signed and then modified. Existence, date and signedness are established;
+  the "1 byte flipped" figure is not, the untampered counterpart of that day
+  not having survived, and both documents now say which is which. The three
+  mentions in the Security Target keep the old name — they record June 2026,
+  and its revision log says of itself that its rows are "preserved verbatim as
+  historical record". Rewriting them would make the history tidier and false.
+
 * **Interop-only is a settled choice for the composite mechanism, not a state
   awaiting the RFC (#170).** The specification status is re-checked and dated:
   `draft-ietf-lamps-pq-composite-sigs-19` is still `-19`, the state moved on

@@ -114,7 +114,11 @@ Use these terms consistently across all communication :
 ## File inventory
 
 * **Original logo file** : (saved manually by the maintainer; the auto-save from chat was not possible due to the inline image not being persisted to `uploads/`)
-* **Strategic plan reference** : `STRATEGY_v2_0_2026-06-29.md`
+<!-- doc-audit: allow STRATEGY_v2_0_2026-06-29.md -- cited, not in this
+     repository, and whether it survives elsewhere is no longer established. -->
+* **Strategic plan reference** : `STRATEGY_v2_0_2026-06-29.md` — not in this
+  repository. Whether it survives elsewhere under that name is no longer
+  established, and this line is kept as the record that it was cited.
 * **Old SVG drafts** (not for production use, kept as historical reference of iteration) :
   * `simorgh-labs-logo-full.svg` (early Twitter-like attempt)
   * `simorgh-labs-icon.svg` (early)
@@ -156,7 +160,11 @@ The first vectorization pass (from the raster source to clean SVG) is typically 
 
 The final logo was provided by the maintainer (Afchine Madjlessi, Simorgh Labs) on 2026-06-29 as a finalized design. The earlier SVG-code iterations produced during the brainstorming session were superseded by this final design and are not for production use.
 
-The intellectual property of the logo belongs to **Simorgh Labs**. License terms (whether the logo is released under the same Apache-2.0 as the code, or kept as a trademark for the org) should be decided and documented in `LICENSE-BRAND.md` or `TRADEMARK.md` in the repo before v2.0.0 stable.
+The intellectual property of the logo belongs to **Simorgh Labs**. License terms (whether the logo is released under the same Apache-2.0 as the code, or kept as a trademark for the org) were to be decided before v2.0.0 stable, in one of two files. **Decided:**
+`TRADEMARK.md`, which ships. The logo and wordmark are held as marks and are
+not covered by the code's Apache-2.0 grant (Apache-2.0 §6). The alternative,
+a `LICENSE-BRAND.md` releasing the logo under Apache-2.0 alongside the code,
+was not taken and that file was never written.
 
 ---
 
