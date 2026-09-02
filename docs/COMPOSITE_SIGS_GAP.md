@@ -8,6 +8,31 @@ SPDX-License-Identifier: Apache-2.0
 **Established 2026-08-03, while scoping #112.**
 **Reference read: `draft-ietf-lamps-pq-composite-sigs-19`, 21 April 2026, IESG state RFC Editor Queue.**
 
+> **Specification status, re-checked 2026-09-02.** Still `-19`; no newer
+> revision. The state moved on 26 August 2026 — RFC Editor status is now *In
+> Progress (First Edit)*, IANA is at `RFC-Ed-Ack`, action holders none. No RFC
+> number assigned. The draft's own expiry is 23 October 2026, which is a
+> property of Internet-Drafts and not a deadline on the queue. So: advancing,
+> not published, and nothing in it has changed under us since this document
+> was written.
+>
+> On FIPS, §10.2 of the draft is the authority and it disclaims itself in its
+> own second sentence — "This guidance is not authoritative and has not been
+> endorsed by US NIST" — before setting out the design goal that a composite
+> "be able to be considered FIPS-approved". That goal addresses implementers
+> seeking certification. FreeHSM seeks none (see *Certification* in
+> `README.md`), so `CKM_COMPOSITE_MLDSA65_ED25519` is interop-only as a
+> settled choice and not as a state awaiting the RFC. Publication will lift
+> the interoperability limit — third-party CAs accepting these requests — and
+> will not change the profile question, because a mechanism enters
+> `fips-strict` by being approved, not by being argued for.
+>
+> One line of §10.2 bears on #168 and is worth quoting where it will be found:
+> the ML-DSA seed "MUST be the direct output of a FIPS-approved Deterministic
+> Random Bit Generator (DRBG)". `fhsm_drbg` is not one and will not become
+> one. That is the specification saying, independently, what
+> `docs/ROADMAP.md` concluded from measurement on 2026-09-01.
+
 The mechanism works and does something defensible. What is wrong is the label on
 it: three places in this repository cite the LAMPS composite draft as the
 mechanism's reference, and the mechanism does not implement that draft. This

@@ -173,14 +173,34 @@ The consequences are worth being precise about:
   common ones do yet, because the RFC has not published.
 * Anyone told otherwise will find out when they submit one.
 
-`draft-ietf-lamps-pq-composite-sigs` is in the RFC Editor queue. This lifts when
+**Where the specification stands, checked 2026-09-02.**
+`draft-ietf-lamps-pq-composite-sigs-19` (revision of 21 April 2026) is in the
+RFC Editor queue; the state last moved on 26 August 2026 to *In Progress
+(First Edit)*, IANA is at `RFC-Ed-Ack`, and no RFC number has been assigned.
+The draft expires 23 October 2026. It is advancing; it has not published.
+
+The interoperability half of this lifts when the RFC publishes and
 implementations follow, and nothing in the output format is expected to change.
 
-**Not FIPS-approved, and not announced as such.** The mechanism is available in
-the interop profile only. See `docs/COMPOSITE_SIGS_GAP.md` for the reasoning —
-in short, the draft states the design goal that a composite be *considered*
-approved and, two lines earlier, that this guidance is not authoritative and has
-no NIST endorsement.
+**Not FIPS-approved, and that part does not lift.** The mechanism is available
+in the interop profile only, permanently, and for a reason that publication
+will not alter. §10.2 of the draft is explicit about its own standing:
+
+> This guidance is not authoritative and has not been endorsed by US NIST.
+
+What follows it is a *design goal* — that a composite "be able to be considered
+FIPS-approved even when one of the component algorithms is not" — addressed to
+implementers seeking certification. FreeHSM seeks none and will not; the
+reasoning is in `README.md` under *Certification*, and the same notice heads
+`docs/AGD_PRE.md` and `docs/AGD_OPE.md`. A mechanism enters `fips-strict`
+because it is approved, not because a specification argues that it ought to be,
+so `CKM_COMPOSITE_MLDSA65_ED25519` stays outside that profile whatever the RFC
+Editor does.
+
+This is a stated choice rather than a provisional state, and it is not a
+limitation of the implementation: the composite signatures produced here match
+the draft's own Appendix D vectors byte for byte. See
+`docs/COMPOSITE_SIGS_GAP.md` for what conformance was checked against.
 
 **Issuance, revocation, CRLs and OCSP live in `fhsm-ca`** and are documented
 in [`FHSM_CA.md`](FHSM_CA.md). `fhsm-csr root` signs the CA's own certificate;

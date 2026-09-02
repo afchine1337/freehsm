@@ -8,6 +8,30 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **Interop-only is a settled choice for the composite mechanism, not a state
+  awaiting the RFC (#170).** The specification status is re-checked and dated:
+  `draft-ietf-lamps-pq-composite-sigs-19` is still `-19`, the state moved on
+  2026-08-26 to RFC Editor *In Progress (First Edit)*, IANA is at
+  `RFC-Ed-Ack`, and no RFC number is assigned. Advancing, not published.
+
+  `docs/FHSM_CSR.md` said the FIPS limitation "lifts when implementations
+  follow". It does not. §10.2 of the draft disclaims its own standing — "This
+  guidance is not authoritative and has not been endorsed by US NIST" — before
+  setting out a design goal addressed to implementers seeking certification.
+  FreeHSM seeks none. A mechanism enters `fips-strict` by being approved, not
+  by being argued for, so `CKM_COMPOSITE_MLDSA65_ED25519` stays outside that
+  profile whatever the RFC Editor does. The two halves are now stated
+  separately: interoperability lifts on publication, the profile question does
+  not.
+
+  Two dangling references fixed along the way. `docs/FHSM_CSR.md` pointed at
+  `docs/COMPOSITE_SIGS_GAP.md` "for the reasoning" on FIPS approval — the
+  reasoning is in the draft, not in that file, which never contained it. And
+  `docs/FIPS_140_3.md` alone among the evaluation documents carried no
+  "not seeking certification" banner while heading two lines *Target
+  validation* and *Validation authority*, which read as a live engagement. It
+  now carries the banner the AGD documents already had.
+
 * **The proxy configuration is measured, and one row of the guide was wrong
   (#169).** `docs/DEPLOYING_THE_SERVICE.md` said that when the proxy sets
   `X-FHSM-Client-Subject` and the client also sends one, **two** headers reach
