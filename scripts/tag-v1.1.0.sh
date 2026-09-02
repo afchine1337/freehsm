@@ -71,7 +71,7 @@ echo "==> Building and verifying"
 # 6. Clean build must succeed.
 make clean
 make
-test -f libfreehsm-fips.so
+test -f libfreehsm.so
 
 # 7. Sign integrity digest.
 make integrity
@@ -121,6 +121,6 @@ To publish :
         gpg --verify freehsm-c-$TAG-src.tar.xz.asc
 
   4. Announce on the project channels with the digest of
-     libfreehsm-fips.so :
+     libfreehsm.so :
 EOF
-sha256sum libfreehsm-fips.so
+sha256sum libfreehsm.so

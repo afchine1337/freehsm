@@ -14,7 +14,7 @@ Two announcements today. One is cosmetic, one is not.
 The repository `freehsm-c` is now **`freehsm`**. Old URLs redirect. Nothing
 else moves:
 
-* Binary name stays `libfreehsm-fips.so`.
+* Binary name stays `libfreehsm.so`.
 * PKCS#11 identifiers stay as they are (`manufacturerID = "Simorgh Labs"`).
 * The GPG release key stays `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`.
 * GHSA identifiers already published are permanent.

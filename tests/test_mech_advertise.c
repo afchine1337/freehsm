@@ -28,7 +28,7 @@ struct CK_MECHANISM_INFO { CK_ULONG mn, mx; CK_FLAGS flags; };
 #define CKF_SIGN 0x00000800UL
 
 int main(void) {
-    void *h = dlopen("./libfreehsm-fips.so", RTLD_NOW);
+    void *h = dlopen("./libfreehsm.so", RTLD_NOW);
     if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
     CK_RV (*Init)(void*); *(void**)&Init = dlsym(h,"C_Initialize");
     CK_RV (*GML)(CK_SLOT_ID,CK_ULONG*,CK_ULONG*); *(void**)&GML = dlsym(h,"C_GetMechanismList");

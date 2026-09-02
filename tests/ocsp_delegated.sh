@@ -20,7 +20,7 @@
 # Needs the tools built (`make all`) and an `openssl` on PATH to read back the
 # responses. See the note at check 5 for what OpenSSL can and cannot tell us.
 set -u
-LIB="${LIB:-./libfreehsm-fips.so}"
+LIB="${LIB:-./libfreehsm.so}"
 CA="${CA:-./tools/fhsm-ca}"
 CSR="${CSR:-./tools/fhsm-csr}"
 TOK="${TOK:-./tools/fhsm-token}"

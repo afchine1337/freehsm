@@ -95,16 +95,16 @@ build:default:
   script:
     - make clean
     - make 2>&1 | tee build.log
-    - test -f libfreehsm-fips.so
+    - test -f libfreehsm.so
     - make integrity 2>&1 | tee integrity.log
-    - ls -la libfreehsm-fips.so
-    - sha256sum libfreehsm-fips.so | tee libfreehsm-fips.so.sha256
+    - ls -la libfreehsm.so
+    - sha256sum libfreehsm.so | tee libfreehsm.so.sha256
   artifacts:
     name: "freehsm-c-${CI_COMMIT_SHORT_SHA}"
     expire_in: 14 days
     paths:
-      - libfreehsm-fips.so
-      - libfreehsm-fips.so.sha256
+      - libfreehsm.so
+      - libfreehsm.so.sha256
       - tests/test_smoke
       - tests/mlkem_e2e
       - tests/mldsa_e2e
@@ -139,7 +139,7 @@ test:coverage-matrix:legacy:
     - if: $CI_PIPELINE_SOURCE == "schedule"
   before_script:
     - mkdir -p /opt/freehsm/lib
-    - install -m 755 libfreehsm-fips.so /opt/freehsm/lib/
+    - install -m 755 libfreehsm.so /opt/freehsm/lib/
     - id freehsm 2>/dev/null || useradd -r -d /var/lib/freehsm -m freehsm
     - chown -R freehsm: /var/lib/freehsm
   script:
@@ -164,7 +164,7 @@ test:coverage-matrix:fips:
     - if: $CI_PIPELINE_SOURCE == "schedule"
   before_script:
     - mkdir -p /opt/freehsm/lib
-    - install -m 755 libfreehsm-fips.so /opt/freehsm/lib/
+    - install -m 755 libfreehsm.so /opt/freehsm/lib/
     - id freehsm 2>/dev/null || useradd -r -d /var/lib/freehsm -m freehsm
     - chown -R freehsm: /var/lib/freehsm
   script:
@@ -192,10 +192,10 @@ repro:rebuild-and-compare:
     # must match the artefact from build:default.
     - make clean
     - make
-    - sha256sum libfreehsm-fips.so > /tmp/build2.sha256
-    - cat libfreehsm-fips.so.sha256
+    - sha256sum libfreehsm.so > /tmp/build2.sha256
+    - cat libfreehsm.so.sha256
     - cat /tmp/build2.sha256
-    - cmp <(awk '{print $1}' libfreehsm-fips.so.sha256) <(awk '{print $1}' /tmp/build2.sha256)
+    - cmp <(awk '{print $1}' libfreehsm.so.sha256) <(awk '{print $1}' /tmp/build2.sha256)
     - echo "Reproducibility VERIFIED"
 
 # ===========================================================================
@@ -224,7 +224,7 @@ release:tarballs:
 
     # 3. Binary tarball (header bundle).
     - mkdir -p "dist/freehsm-c-${TAG}/lib" "dist/freehsm-c-${TAG}/include"
-    - cp libfreehsm-fips.so "dist/freehsm-c-${TAG}/lib/"
+    - cp libfreehsm.so "dist/freehsm-c-${TAG}/lib/"
     - cp include/*.h        "dist/freehsm-c-${TAG}/include/"
     - cp NOTICE LICENSE README.md CHANGELOG.md SECURITY.md "dist/freehsm-c-${TAG}/"
     - tar -cJf "dist/freehsm-c-${TAG}-bin.tar.xz" -C dist "freehsm-c-${TAG}"
@@ -256,8 +256,8 @@ release:tarballs:
       - dist/*.tar.xz
       - dist/*.tar.xz.asc
       - dist/*.sha256
-      - libfreehsm-fips.so
-      - libfreehsm-fips.so.sha256
+      - libfreehsm.so
+      - libfreehsm.so.sha256
 
 # ---------------------------------------------------------------------------
 # Optional : push to the GitLab Generic Package Registry so the artefacts

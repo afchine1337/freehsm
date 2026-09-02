@@ -19,7 +19,7 @@ time.
 
 ## OpenSC `pkcs11-tool` — works
 
-    pkcs11-tool --module ./libfreehsm-fips.so --login --pin ... \
+    pkcs11-tool --module ./libfreehsm.so --login --pin ... \
                 --keypairgen --key-type EC:prime256v1 --label ec-plain
 
 Generated the pair, read both objects back with their usage and access flags,
@@ -44,7 +44,7 @@ finding, and it took a third party to see it from outside.
 
 ## `pkcs11-provider` — works, except on a token holding a composite key
 
-    export PKCS11_PROVIDER_MODULE=$PWD/libfreehsm-fips.so
+    export PKCS11_PROVIDER_MODULE=$PWD/libfreehsm.so
     openssl storeutl -provider pkcs11 -provider default -text \
         "pkcs11:?pin-value=..."
 
@@ -86,7 +86,7 @@ Signing through either consumer was not attempted. Enumeration is not use.
 ## To reproduce
 
     # third consumer, and the attribute warnings that are now fixed
-    pkcs11-tool --module ./libfreehsm-fips.so --login --pin userpin1234 \
+    pkcs11-tool --module ./libfreehsm.so --login --pin userpin1234 \
                 --keypairgen --key-type EC:prime256v1 --label ec-plain
 
     # second consumer, on a token with no composite object

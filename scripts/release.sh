@@ -67,10 +67,13 @@ fi
 
 # --- 3. version string ---------------------------------------------------
 CUR=$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' "$HDR" 2>/dev/null)
-if [ "$CUR" = "$VERSION-FIPS" ]; then
+# Was `"$VERSION-FIPS"`. The suffix is gone from the header as of v2.0.0:
+# it named a certification the project does not hold, and it reached the
+# soname and the tarball prefix through FHSM_VERSION_STRING.
+if [ "$CUR" = "$VERSION" ]; then
     ok "FHSM_VERSION_STRING = $CUR"
 else
-    bad "FHSM_VERSION_STRING is \"$CUR\", expected \"$VERSION-FIPS\" ($HDR)"
+    bad "FHSM_VERSION_STRING is \"$CUR\", expected \"$VERSION\" ($HDR)"
 fi
 
 # --- 3b. version macros --------------------------------------------------
@@ -168,7 +171,7 @@ if [ "$rel_rc" != 0 ] && [ "$rel_rc" != 3 ]; then
     bad "make integrity failed (rc=$rel_rc) -- /tmp/rel_integrity.log"
 else
     rel_lib=$(sed -n 's/^LIB[[:space:]]*=[[:space:]]*//p' Makefile | head -1)
-    rel_lib=${rel_lib:-libfreehsm-fips.so}
+    rel_lib=${rel_lib:-libfreehsm.so}
     rel_d=$(objcopy --dump-section .fhsm_digest=/dev/stdout "$rel_lib" /dev/null \
             2>/dev/null | od -An -tx1 -v | tr -d ' \n')
     case "$rel_d" in
@@ -248,7 +251,7 @@ cat <<EOF
 Run the harness first and confirm the failure count is what you expect:
 
     FHSM_ALLOW_UNSIGNED=1 bash scripts/run_pkcs11_check.sh \\
-        ./libfreehsm-fips.so ./reports/pkcs11-check
+        ./libfreehsm.so ./reports/pkcs11-check
 
 Then:
 

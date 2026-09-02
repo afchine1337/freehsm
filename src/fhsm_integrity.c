@@ -120,7 +120,7 @@ static int find_self_cb(struct dl_phdr_info *info, size_t sz, void *vdata) {
                  * is the empty string for the program's own image (rather
                  * than a path). This happens for any binary that
                  * statically links fhsm_integrity.o instead of
-                 * dynamically loading libfreehsm-fips.so : the test
+                 * dynamically loading libfreehsm.so : the test
                  * harness `tests/test_smoke`, the CAVS harness, etc.
                  *
                  * Recover the binary's path via /proc/self/exe so the
@@ -229,7 +229,7 @@ static fhsm_rv_t do_verify(void) {
     if (find_section_offset(buf, flen, FHSM_INTEGRITY_SECTION, &off, &len) != 0
         || len < FHSM_INTEGRITY_DIGEST_LEN) {
         /* The .fhsm_digest section is only present in binaries built
-         * with the integrity-aware build (libfreehsm-fips.so plus any
+         * with the integrity-aware build (libfreehsm.so plus any
          * statically-linked test harness that includes
          * fhsm_integrity.o). If we cannot locate it, the operator is
          * running the wrong artifact. In dev mode (env var set) we

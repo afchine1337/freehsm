@@ -48,7 +48,7 @@ static void usage(void) {
       "  fhsm-csr keygen --label NAME [--module PATH] [--slot N]\n"
       "  fhsm-csr csr    --label NAME --subject DN [--out FILE] [--pem] ...\n"
       "  fhsm-csr root   --label NAME --subject DN [--days N] [--serial N] ...\n\n"
-      "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n"
+      "  --module PATH   PKCS#11 module (default ./libfreehsm.so)\n"
       "  --slot N        slot to address. Default: the one slot holding a token.\n"
       "  --subject DN    e.g. \"/C=FR/O=Simorgh Labs/CN=example\"\n"
       "  --days N        validity in days for root (default 3650)\n"
@@ -67,7 +67,7 @@ int main(int argc, char **argv) {
     p11_progname = "fhsm-csr";
     if (argc < 2) usage();
     const char *cmd = argv[1];
-    const char *module = "./libfreehsm-fips.so", *label = NULL, *subject = NULL;
+    const char *module = "./libfreehsm.so", *label = NULL, *subject = NULL;
     const char *out = NULL;
     int pem = 0, days = 3650; long serial = 1, slot = -1;
 

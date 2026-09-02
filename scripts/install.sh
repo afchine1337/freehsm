@@ -53,7 +53,7 @@ fi
 
 # --- 2. Build --------------------------------------------------------------
 if [ "${DO_BUILD}" -eq 1 ]; then
-    echo "[install] === Building libfreehsm-fips.so ==="
+    echo "[install] === Building libfreehsm.so ==="
     cd "${PROJ_ROOT}"
     make -j"$(nproc)" generate
     make -j"$(nproc)"
@@ -67,7 +67,7 @@ cd "${PROJ_ROOT}"
 make install PREFIX="${PREFIX}"
 
 # --- 4. Post-install verification -----------------------------------------
-SO="${PREFIX}/lib/libfreehsm-fips.so"
+SO="${PREFIX}/lib/libfreehsm.so"
 echo "[install] === Verifying installed module ==="
 echo "  SHA-256 :"
 sha256sum "${SO}"

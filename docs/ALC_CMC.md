@@ -17,7 +17,7 @@ The configuration items under management are :
 | Source-of-truth generator     | `scripts/gen_p11_thunks.py`                            | Git monorepo         |
 | Test vectors                  | `kat/cavp/*.rsp`, `kat/fhsm_kat_vectors.c`             | Git monorepo         |
 | Documentation                 | `docs/*.md`                                            | Git monorepo         |
-| Build artefacts (released)    | `libfreehsm-fips.so`, `freehsm-c-src.tar.xz`, `*.sha256` | Signed release bundle on the project's distribution server |
+| Build artefacts (released)    | `libfreehsm.so`, `freehsm-c-src.tar.xz`, `*.sha256` | Signed release bundle on the project's distribution server |
 | Evaluation evidence           | `docs/{ATE_FUN,AVA_VAN,ALC_CMC,FIPS_140_3,EAL4_PLUS,ARCHITECTURE,MECHANISMS,REPRODUCIBLE_BUILD}.md` | Git monorepo |
 | Issue tracker                 | label-managed by `evaluation/*` namespace              | Forge issue tracker  |
 | Security advisories           | `SECURITY.md` + CVE numbers                            | Git monorepo + MITRE |
@@ -74,11 +74,11 @@ The single source of truth for the build environment is `Dockerfile.build`. The 
 
 ### 3.2 Acceptance procedures
 
-A produced `libfreehsm-fips.so` is **accepted into the release artefact set** only if **all** of the following are true :
+A produced `libfreehsm.so` is **accepted into the release artefact set** only if **all** of the following are true :
 
 1. `make all integrity tests dist-verify` exits 0 inside the pinned Docker image.
 2. The embedded `fhsm_module_integrity_digest[]` matches the externally computed SHA-256 of the masked-section binary.
-3. `readelf -p .comment libfreehsm-fips.so` reports the expected toolchain version.
+3. `readelf -p .comment libfreehsm.so` reports the expected toolchain version.
 4. `pwntools.checksec` reports : `RELRO=Full`, `NX=Yes`, `PIE=Yes`, `Canary=Yes`, `Stripped=No (debug separately)`.
 5. Coverage thresholds met (§2.3 step 7).
 6. AVA_VAN re-analysis triggers (`docs/AVA_VAN.md` §6) are clear OR an updated AVA_VAN.md is included in the release.
@@ -126,8 +126,8 @@ The release bundle is published at :
 
 ```
 https://dist.freehsm.example/v<version>/
-    libfreehsm-fips.so              # the cryptographic module
-    libfreehsm-fips.so.sha256       # signed by release key
+    libfreehsm.so              # the cryptographic module
+    libfreehsm.so.sha256       # signed by release key
     freehsm-c-src.tar.xz            # reproducible source archive
     freehsm-c-src.tar.xz.sha256     # signed by release key
     RELEASE_NOTES.md                # human-readable summary
@@ -138,8 +138,8 @@ https://dist.freehsm.example/v<version>/
 A customer / evaluator verifies :
 
 1. Download all bundle files over HTTPS.
-2. `gpg --verify libfreehsm-fips.so.sha256` against the published key fingerprint.
-3. `sha256sum -c libfreehsm-fips.so.sha256` against the binary.
+2. `gpg --verify libfreehsm.so.sha256` against the published key fingerprint.
+3. `sha256sum -c libfreehsm.so.sha256` against the binary.
 4. Optionally rebuild from source : `tar xf freehsm-c-src.tar.xz && cd freehsm-c-<version> && make dist-verify`. The produced digest MUST match.
 
 ## 7. Flaw remediation (ALC_FLR.2)

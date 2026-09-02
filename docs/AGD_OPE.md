@@ -49,7 +49,7 @@ Anonymous (pre-login) services :
 #include <pkcs11.h>
 
 CK_FUNCTION_LIST_PTR p11;
-C_GetFunctionList(&p11);          /* loaded from libfreehsm-fips.so */
+C_GetFunctionList(&p11);          /* loaded from libfreehsm.so */
 p11->C_Initialize(NULL);          /* triggers integrity check + KAT  */
 
 CK_SESSION_HANDLE s;
@@ -522,7 +522,7 @@ The following actions **invalidate** the certified configuration and **forfeit**
 
 - Setting `mode = legacy` (or leaving `FHSM_MODE` unset) for a deployment claiming FIPS 140-3 conformance.
 - Setting `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` in any production context.
-- Replacing `libfreehsm-fips.so` with any other binary, even patched.
+- Replacing `libfreehsm.so` with any other binary, even patched.
 - Modifying any file in `/opt/freehsm/etc/`.
 - Loading an OpenSSL provider other than the validated FIPS provider.
 - Disabling `mlock` capability on the host.

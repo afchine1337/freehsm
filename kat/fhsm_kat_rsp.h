@@ -53,7 +53,7 @@
  *  Carlo); streaming keeps the validator memory-bounded.
  *
  *  This header is included by the KAT runner only. It is NOT part of
- *  the TSFI (no symbol exposed in libfreehsm-fips.so).
+ *  the TSFI (no symbol exposed in libfreehsm.so).
  * ========================================================================= */
 
 #ifndef FHSM_KAT_RSP_H

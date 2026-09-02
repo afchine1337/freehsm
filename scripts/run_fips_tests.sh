@@ -81,7 +81,7 @@ TEST_LD_ENV=""   # exported above; kept as a seam if that ever needs to differ
 # Read the module's name from the Makefile rather than hard-coding it, so a
 # profile that renames it does not leave this script measuring a stale file.
 LIB_SO=$(sed -n 's/^LIB[[:space:]]*=[[:space:]]*//p' Makefile | head -1)
-LIB_SO=${LIB_SO:-libfreehsm-fips.so}
+LIB_SO=${LIB_SO:-libfreehsm.so}
 [ -f "$LIB_SO" ] || { printf '  \033[31mNON\033[0m   %s not built -- run make first\n' "$LIB_SO"; exit 2; }
 
 fails=0
@@ -148,7 +148,7 @@ echo "== Does the signed module load the provider? =="
 # from another tree or another OpenSSL prefix is present, and would be run.
 make tests/probe_fips_loaded >/tmp/fips_probe_build.log 2>&1 \
     || { bad "could not build tests/probe_fips_loaded -- see /tmp/fips_probe_build.log"; exit 2; }
-probe_out=$($TEST_LD_ENV ./tests/probe_fips_loaded ./libfreehsm-fips.so 2>&1)
+probe_out=$($TEST_LD_ENV ./tests/probe_fips_loaded ./libfreehsm.so 2>&1)
 probe_rc=$?
 case "$probe_rc" in
     0) ok "$probe_out" ;;
@@ -200,7 +200,7 @@ for t in tests/test_*; do
         continue
     fi
     # test_p11_loader takes the module path, as it does in the Makefile.
-    arg=""; [ "$name" = "test_p11_loader" ] && arg="./libfreehsm-fips.so"
+    arg=""; [ "$name" = "test_p11_loader" ] && arg="./libfreehsm.so"
     D=$(mktemp -d)
     out=$(FHSM_TOKENS_DIR="$D" $TEST_LD_ENV "./$t" $arg 2>&1); rc=$?
     rm -rf "$D"

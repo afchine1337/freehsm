@@ -148,7 +148,7 @@ dist/refs/*
 *.tar.xz.sha256
 
 # Distributed artefacts (signed at release time)
-libfreehsm-fips.so.sha256
+libfreehsm.so.sha256
 
 # Editor / IDE
 .vscode/

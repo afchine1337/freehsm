@@ -100,7 +100,7 @@ static int child_has_no_active_operation(void) {
 int main(int argc, char **argv)
 {
     p11_progname = "test_fork_child";
-    load_module(argc > 1 ? argv[1] : "./libfreehsm-fips.so");
+    load_module(argc > 1 ? argv[1] : "./libfreehsm.so");
 
     g_pin = getenv("FHSM_PIN");  if (!g_pin || !*g_pin) g_pin = "userpin1234";
     const char *sopin = getenv("FHSM_SO_PIN");

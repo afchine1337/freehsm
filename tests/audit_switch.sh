@@ -13,7 +13,7 @@
 # script that decides for itself what the build is would pass either way.
 set -u
 MODE="${1:-mandatory}"
-LIB="${LIB:-./libfreehsm-fips.so}"
+LIB="${LIB:-./libfreehsm.so}"
 TOOL="${TOOL:-./tools/fhsm-token}"
 fail=0
 

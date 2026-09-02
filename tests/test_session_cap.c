@@ -37,7 +37,7 @@ static void ok(int cond, const char *what) {
 int main(int argc, char **argv)
 {
     p11_progname = "test_session_cap";
-    load_module(argc > 1 ? argv[1] : "./libfreehsm-fips.so");
+    load_module(argc > 1 ? argv[1] : "./libfreehsm.so");
     if (p11.Initialize(NULL) != CKR_OK) {
         fprintf(stderr, "test_session_cap: C_Initialize failed\n"); return 2; }
     const char *pin   = getenv("FHSM_PIN");    if (!pin   || !*pin)   pin   = "userpin1234";

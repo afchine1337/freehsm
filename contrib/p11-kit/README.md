@@ -21,7 +21,7 @@ Two patch files, and only one of them is for submitting:
 FreeHSM with `probes/rest/07_kit_mechanisms`:
 
 ```
-  ./libfreehsm-fips.so                            72
+  ./libfreehsm.so                            72
   …/p11-kit-client.so                             20
 
   dropped by the second: 52

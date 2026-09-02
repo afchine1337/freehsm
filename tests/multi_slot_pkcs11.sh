@@ -18,7 +18,7 @@
 
 set -u
 
-MODULE="${MODULE:-/opt/freehsm/lib/libfreehsm-fips.so}"
+MODULE="${MODULE:-/opt/freehsm/lib/libfreehsm.so}"
 TOKENS_DIR="${TOKENS_DIR:-$(mktemp -d /tmp/freehsm-multi-XXXXXX)}"
 export FHSM_TOKENS_DIR="${TOKENS_DIR}"
 

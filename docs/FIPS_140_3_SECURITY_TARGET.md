@@ -46,7 +46,7 @@ Policy for a software cryptographic module contains.
 | **Library Description (PKCS#11)** | `FreeHSM C (FIPS 140-3)` (CK_INFO.libraryDescription) |
 | **Token Model (PKCS#11)** | `FreeHSM-C-v1` (CK_TOKEN_INFO.model ; stable across the v1 major series) |
 | **Version** | 1.4.0-FIPS |
-| **Module Type** | Software (`libfreehsm-fips.so`, ELF-64 shared object) |
+| **Module Type** | Software (`libfreehsm.so`, ELF-64 shared object) |
 | **Module Embodiment** | Multi-chip standalone (GPC host) |
 | **Module Boundary** | The single `.so` file at SHA-256 = (see `.fhsm_digest` section, patched by `make integrity`) |
 | **Operational Environment (OE)** | Debian 13 / Linux kernel ≥ 6.1 / glibc ≥ 2.40 / OpenSSL 3.5.6 FIPS provider |
@@ -64,7 +64,7 @@ FreeHSM C is a software-only PKCS#11 v3.2 cryptographic module providing key gen
 
 ### 2.2 Cryptographic Boundary
 
-The cryptographic boundary is the entire address range of the `libfreehsm-fips.so` executable code, plus the embedded read-only `.fhsm_digest` section (32 octets of SHA-256). The boundary explicitly **excludes** :
+The cryptographic boundary is the entire address range of the `libfreehsm.so` executable code, plus the embedded read-only `.fhsm_digest` section (32 octets of SHA-256). The boundary explicitly **excludes** :
 - The host operating system kernel and user-land libraries (glibc, libdl, libpthread)
 - The OpenSSL provider modules (`fips.so`, `default.so`) which have their own boundaries and CMVP cert
 - The persistent token store on disk (treated as encrypted-at-rest data subject to §7.7 SSP transitions)
@@ -210,7 +210,7 @@ Runs once at `C_Initialize` :
 
 A defect introduced in commit `0c0f5df` (the initial open-source release v1.1.0, 2026-06-12) caused `src/fhsm_integrity.c::do_verify` to return `FHSM_RV_OK` on every reachable path of the comparison block, including when the embedded digest mismatched the computed digest and the development bypass env var `FHSM_INTEGRITY_ALLOW_UNSIGNED` was not set. The intent (per the surrounding comment and per the operator documentation) was to return `FHSM_RV_INTEGRITY_FAILED` in that case ; the implementation fell through to a final `return FHSM_RV_OK` regardless.
 
-The net effect was that the software integrity self-test described above was **not actually enforced** in any signed production build between v1.1.0 and v1.2.0 inclusive (19 GPG-signed releases over a 9-day window). A tampered `libfreehsm-fips.so` would have passed the check silently. The defect did not affect the boot KAT (which has its own enforcement path) nor any cryptographic primitive ; it affected only the §7.10.2 software / firmware integrity self-test itself.
+The net effect was that the software integrity self-test described above was **not actually enforced** in any signed production build between v1.1.0 and v1.2.0 inclusive (19 GPG-signed releases over a 9-day window). A tampered `libfreehsm.so` would have passed the check silently. The defect did not affect the boot KAT (which has its own enforcement path) nor any cryptographic primitive ; it affected only the §7.10.2 software / firmware integrity self-test itself.
 
 Fixed in v1.2.1 (commit `63e1b35`, 2026-06-21). The comparison block now returns `FHSM_RV_INTEGRITY_FAILED` in both the all-zero (unsigned) and the mismatched-digest paths when the bypass env var is unset. Two adjacent defects in the same translation unit (a use-after-free on the `find_section_offset` failure path, and a `locate_self` regression for binaries that statically link `fhsm_integrity.o`) were fixed in the same commit ; see CHANGELOG entry for v1.2.1 for the full breakdown.
 
@@ -395,7 +395,7 @@ The 8 skips are all due to tooling gaps in the harness layer (e.g., OpenSC's `pk
 
 ### 13.3 Reproducible build
 
-Every release tag triggers a deterministic build inside a pinned Docker image (`ghcr.io/<owner>/freehsm-c-build:debian13-openssl-3.5`). The resulting `libfreehsm-fips.so` is bit-identical (same SHA-256) across independent builds, verified continuously by the `reproducibility` CI job (cross-build + compare). A GPG-signed source + binary tarball is published per tag.
+Every release tag triggers a deterministic build inside a pinned Docker image (`ghcr.io/<owner>/freehsm-c-build:debian13-openssl-3.5`). The resulting `libfreehsm.so` is bit-identical (same SHA-256) across independent builds, verified continuously by the `reproducibility` CI job (cross-build + compare). A GPG-signed source + binary tarball is published per tag.
 
 ### 13.4 Public attestation summary
 
@@ -475,7 +475,7 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 **23 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2`. Each release tag triggers an automated workflow (`release.yml`) that :
 
 1. Verifies the tag's GPG signature against the canonical fingerprint.
-2. Builds `libfreehsm-fips.so` reproducibly in the pinned `freehsm-c-build:debian13-openssl-3.5` container.
+2. Builds `libfreehsm.so` reproducibly in the pinned `freehsm-c-build:debian13-openssl-3.5` container.
 3. Patches the `.fhsm_digest` section with the post-link SHA-256 of the binary.
 4. Builds both source and binary tarballs (`freehsm-c-X.Y.Z-FIPS-src.tar.xz` and `-bin.tar.xz`).
 5. Detached-signs both tarballs with the release GPG key.

@@ -16,7 +16,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * ========================================================================= */
 /* ===========================================================================
- * tests/test_smoke.c --- Smoke test for the libfreehsm-fips.so.
+ * tests/test_smoke.c --- Smoke test for the libfreehsm.so.
  *
  *  1. C_Initialize triggers POST (KAT + integrity).
  *  2. Check the module state machine is INITIALIZED.

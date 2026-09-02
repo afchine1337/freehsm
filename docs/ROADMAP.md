@@ -23,7 +23,7 @@ Legend: ✅ done · 🟡 partial · ⏳ pending · ♻ continuous
 
 ## Layering (keep these categories clean)
 
-* **FreeHSM** — the HSM *library* (`libfreehsm-fips.so`), PKCS#11 v3.2, built
+* **FreeHSM** — the HSM *library* (`libfreehsm.so`), PKCS#11 v3.2, built
   to FIPS 140-3 / CC EAL4+ requirements and documented with their evidence
   methodologies. Not certified. Apache-2.0.
 * **The command-line tools** — `fhsm-token`, `fhsm-csr`, `fhsm-ca`,
@@ -346,7 +346,7 @@ before the check was committed.
 
 The half of the property that was in doubt turns out to hold. Two builds of the
 same tree in two different directories produce a bit-identical
-`libfreehsm-fips.so`:
+`libfreehsm.so`:
 
     ee49f922f2db7b1d9a59c9a14cb994e9b6321a13d3e9630d29ae621db7b2f4d6
 
@@ -571,7 +571,7 @@ pattern is the one this project keeps meeting: a control wired to some of the
 paths that reach a state and not the rest.
 
 **The anchor, and why six releases went without it.** `release.yml` computed
-`sha256sum libfreehsm-fips.so` and published it beside the file — a receipt
+`sha256sum libfreehsm.so` and published it beside the file — a receipt
 that the download matches what was built, not an anchor that rebuilding the
 tag in six months yields the same bytes. Nothing compared against a committed
 reference.

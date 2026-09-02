@@ -21,7 +21,7 @@ Le profil n'est plus figé au build. Sélection au runtime via `FHSM_MODE` (ou `
 | `legacy` (défaut) | Délégation à `fhsm_legacy_dispatch` (weak symbol) via OpenSSL default provider. MD5 et SHA-1 (digest) câblés ; DES, 3DES, RC4 renvoient `CKR_MECHANISM_INVALID`. |
 | `fips` (strict) | `dispatch_reject_fips` renvoie `FHSM_RV_FIPS_NOT_APPROVED`. |
 
-Un seul binaire `libfreehsm-fips.so` couvre les deux cas.
+Un seul binaire `libfreehsm.so` couvre les deux cas.
 
 ## Conventions de lecture de la table
 

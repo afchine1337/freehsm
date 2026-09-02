@@ -5,7 +5,7 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## [2.0.0] --- 2026-09-02
 
 ### Changed
 * **`doc_audit.py` reports none, and eight of the twenty were the checker's

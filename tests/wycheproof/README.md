@@ -28,11 +28,11 @@ cd tests/wycheproof
 # 1. Fetch latest vectors (excluded from git -- ~30 MB JSON)
 ./fetch_vectors.sh
 
-# 2. Run all adapters against libfreehsm-fips.so
-./run_wycheproof.py --module ../../libfreehsm-fips.so
+# 2. Run all adapters against libfreehsm.so
+./run_wycheproof.py --module ../../libfreehsm.so
 
 # 3. Or target a single adapter
-./run_wycheproof.py --module ../../libfreehsm-fips.so --only ecdsa
+./run_wycheproof.py --module ../../libfreehsm.so --only ecdsa
 
 # 4. Smoke subset (~30 s, runs on every push)
 ./run_wycheproof.py --smoke

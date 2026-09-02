@@ -61,7 +61,7 @@ static CK_BYTE *fhsm_pad_label(CK_BYTE buf[32], const char *s) {
 }
 
 int main(void) {
-    void *h = dlopen("./libfreehsm-fips.so", RTLD_NOW);
+    void *h = dlopen("./libfreehsm.so", RTLD_NOW);
     if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
     CK_RV (*I)(void*); *(void**)&I = dlsym(h,"C_Initialize");
     CK_RV (*IT)(CK_SLOT_ID,CK_BYTE*,CK_ULONG,CK_BYTE*); *(void**)&IT = dlsym(h,"C_InitToken");

@@ -46,7 +46,7 @@
 #include <stdint.h>
 #include <time.h>
 
-#define MODULE      "/opt/freehsm/lib/libfreehsm-fips.so"
+#define MODULE      "/opt/freehsm/lib/libfreehsm.so"
 #define USER_PIN    "user0000"
 
 typedef unsigned long CK_ULONG;

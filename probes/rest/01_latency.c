@@ -31,7 +31,7 @@ static CK_OBJECT_HANDLE find_key(CK_SESSION_HANDLE s, const char *label) {
 
 int main(int argc, char **argv) {
     (void)argc;
-    const char *mod = argc > 1 ? argv[1] : "./libfreehsm-fips.so";
+    const char *mod = argc > 1 ? argv[1] : "./libfreehsm.so";
     const char *label = argc > 2 ? argv[2] : "k";
     PIN = getenv("FHSM_PIN");
     probe_load(mod);

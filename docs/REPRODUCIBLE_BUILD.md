@@ -1,6 +1,6 @@
 # Reproducible build --- FreeHSM C
 
-This document describes how to reproduce the **bit-identical** `libfreehsm-fips.so` shipped in a given release. Reproducibility is required by **CC EAL4+ ALC_CMC.4** ("production support, acceptance procedures, automation") and is the standard FIPS 140-3 lab expectation for binary-level conformance.
+This document describes how to reproduce the **bit-identical** `libfreehsm.so` shipped in a given release. Reproducibility is required by **CC EAL4+ ALC_CMC.4** ("production support, acceptance procedures, automation") and is the standard FIPS 140-3 lab expectation for binary-level conformance.
 
 ## 1. Quick verification
 
@@ -11,7 +11,7 @@ git checkout v1.0.0
 make dist-verify
 ```
 
-`dist-verify` performs two clean builds in the pinned Docker image and asserts that the SHA-256 of both `libfreehsm-fips.so` artefacts is identical. Expected output :
+`dist-verify` performs two clean builds in the pinned Docker image and asserts that the SHA-256 of both `libfreehsm.so` artefacts is identical. Expected output :
 
 ```
 [verify] run A digest : 4f9a3d2c...e15a8b04
@@ -60,10 +60,10 @@ export SOURCE_DATE_EPOCH=1735689600
 export LC_ALL=C TZ=UTC
 make clean
 make
-sha256sum libfreehsm-fips.so   # compare to the published digest
+sha256sum libfreehsm.so   # compare to the published digest
 ```
 
-Any version drift in `gcc`, `binutils` or `libc6-dev` will cause the digest to differ. The `.comment` section of the produced ELF embeds the toolchain version string ; use `readelf -p .comment libfreehsm-fips.so` to inspect.
+Any version drift in `gcc`, `binutils` or `libc6-dev` will cause the digest to differ. The `.comment` section of the produced ELF embeds the toolchain version string ; use `readelf -p .comment libfreehsm.so` to inspect.
 
 ## 5. CI integration
 
@@ -77,13 +77,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build A
-        run: make repro && mv libfreehsm-fips.so out/run-a.so
+        run: make repro && mv libfreehsm.so out/run-a.so
       - name: Build B (clean)
         run: docker volume prune -f && make repro
       - name: Assert byte-identical
         run: |
           a=$(sha256sum out/run-a.so | awk '{print $1}')
-          b=$(sha256sum libfreehsm-fips.so | awk '{print $1}')
+          b=$(sha256sum libfreehsm.so | awk '{print $1}')
           test "$a" = "$b" || { echo "REPRO FAIL"; exit 1; }
 ```
 
@@ -97,7 +97,7 @@ Whenever a new release requires a toolchain update :
 2. Update the apt version pins by hand, from a clean Debian container. A `scripts/freeze_apt_versions.sh` was named here to regenerate the list and does not exist; `scripts/build_reproducible.sh` and `scripts/verify_reproducibility.sh` do.
 3. Bump `FHSM_VERSION_STRING` in `include/fhsm_common.h` — this propagates to `-frandom-seed` and to the source archive prefix.
 4. Run `make dist-verify` locally to confirm reproducibility on the new toolchain.
-5. Publish the new image digest and the resulting `libfreehsm-fips.so` SHA-256 in the release notes.
+5. Publish the new image digest and the resulting `libfreehsm.so` SHA-256 in the release notes.
 
 ## 7. Verification by an evaluator
 
@@ -105,7 +105,7 @@ For CMVP / CESTI evaluators :
 
 1. Pull the published source archive : `freehsm-c-src.tar.xz` (and the sidecar `.sha256`).
 2. Verify the archive digest matches the release notes.
-3. Run `make dist-verify` ; the produced `libfreehsm-fips.so` SHA-256 MUST match the one in the release notes and the one embedded in the signed `fhsm_module_integrity_digest[]` (see `docs/FIPS_140_3.md` §6.1).
+3. Run `make dist-verify` ; the produced `libfreehsm.so` SHA-256 MUST match the one in the release notes and the one embedded in the signed `fhsm_module_integrity_digest[]` (see `docs/FIPS_140_3.md` §6.1).
 4. Optionally, run the same on a second host (different distribution, different CPU vendor) to confirm the build is host-independent.
 
 A successful match closes the **ALC_CMC.4** evidence requirement for the release.

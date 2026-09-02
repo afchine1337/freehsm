@@ -27,7 +27,7 @@ La Cible de sécurité (`EAL4_PLUS.fr.md` §3.2) liste six objectifs OE. À conf
 
 | Identifiant OE | Exigence                                                       | Vérification                                                       |
 |----------------|----------------------------------------------------------------|--------------------------------------------------------------------|
-| **OE.OS**      | Linux ≥ 5.4 avec capacité `mlock`                              | `uname -r ; getcap /usr/local/lib/libfreehsm-fips.so`              |
+| **OE.OS**      | Linux ≥ 5.4 avec capacité `mlock`                              | `uname -r ; getcap /usr/local/lib/libfreehsm.so`              |
 | **OE.STORAGE** | FS local avec `rename` atomique (ext4/xfs)                     | `findmnt -T /var/lib/freehsm -o FSTYPE`                            |
 | **OE.OPENSSL** | OpenSSL ≥ 3.0 avec provider FIPS chargé et actif               | `openssl list -providers \| grep -A2 fips`                          |
 | **OE.OP**      | Administrateur formé, contrôle des credentials d'authentification | (procédural — voir §6)                                          |
@@ -41,8 +41,8 @@ Si une vérification échoue, **ne pas continuer** : la TOE n'entrera pas dans s
 La TOE est livrée comme quatre fichiers sur le serveur de distribution (`https://dist.freehsm.example/v1.0.0/`) :
 
 ```
-libfreehsm-fips.so
-libfreehsm-fips.so.sha256       # digest détaché, GPG-signé
+libfreehsm.so
+libfreehsm.so.sha256       # digest détaché, GPG-signé
 freehsm-c-src.tar.xz
 freehsm-c-src.tar.xz.sha256     # digest détaché, GPG-signé
 RELEASE_NOTES.md
@@ -60,7 +60,7 @@ Vérifier que chaque `*.sha256` est signé par la clé de release dont l'emprein
 
 ```bash
 gpg --import freehsm-release-pubkey.asc
-gpg --verify libfreehsm-fips.so.sha256
+gpg --verify libfreehsm.so.sha256
 # Attendu : Good signature from "FreeHSM Release Manager <release@freehsm.example>"
 gpg --verify freehsm-c-src.tar.xz.sha256
 ```
@@ -70,8 +70,8 @@ Refuser la livraison si l'une des signatures ne valide pas.
 ### 2.3 Vérification d'intégrité
 
 ```bash
-sha256sum -c libfreehsm-fips.so.sha256
-# Attendu : libfreehsm-fips.so: OK
+sha256sum -c libfreehsm.so.sha256
+# Attendu : libfreehsm.so: OK
 
 sha256sum -c freehsm-c-src.tar.xz.sha256
 # Attendu : freehsm-c-src.tar.xz: OK
@@ -87,7 +87,7 @@ cd freehsm-c-1.0.0-FIPS
 make dist-verify     # rebuild deux fois dans Docker épinglé, assert SHA-256 identiques
 ```
 
-Le SHA-256 du `libfreehsm-fips.so` résultant DOIT correspondre à la valeur dans `libfreehsm-fips.so.sha256`. Voir `REPRODUCIBLE_BUILD.fr.md`.
+Le SHA-256 du `libfreehsm.so` résultant DOIT correspondre à la valeur dans `libfreehsm.so.sha256`. Voir `REPRODUCIBLE_BUILD.fr.md`.
 
 ## 3. Installation
 
@@ -104,11 +104,11 @@ sudo install -d -o freehsm -g freehsm -m 700 \
 ### 3.2 Installation du module
 
 ```bash
-sudo install -o root -g root -m 0755 libfreehsm-fips.so \
-    /opt/freehsm/lib/libfreehsm-fips.so
+sudo install -o root -g root -m 0755 libfreehsm.so \
+    /opt/freehsm/lib/libfreehsm.so
 
 sudo useradd -r -s /usr/sbin/nologin -d /var/lib/freehsm freehsm
-sudo setcap 'cap_ipc_lock=+ep' /opt/freehsm/lib/libfreehsm-fips.so
+sudo setcap 'cap_ipc_lock=+ep' /opt/freehsm/lib/libfreehsm.so
 ```
 
 ### 3.3 Activation du provider FIPS OpenSSL
@@ -125,17 +125,17 @@ openssl list -providers
 ### 3.4 Vérification de l'identité du module
 
 ```bash
-readelf -p .comment /opt/freehsm/lib/libfreehsm-fips.so
+readelf -p .comment /opt/freehsm/lib/libfreehsm.so
 # Attendu : GCC 12.2.0 ; binutils 2.40 ; (match Dockerfile.build)
 
-readelf -S /opt/freehsm/lib/libfreehsm-fips.so | grep .fhsm_digest
+readelf -S /opt/freehsm/lib/libfreehsm.so | grep .fhsm_digest
 # Attendu : section read-only 32-byte
 ```
 
 Si `.fhsm_digest` est tout à zéro, le module **n'a pas été signé** :
 
 ```bash
-xxd -s 0x2000 -l 32 /opt/freehsm/lib/libfreehsm-fips.so
+xxd -s 0x2000 -l 32 /opt/freehsm/lib/libfreehsm.so
 # Attendu (signé) : 32 octets hex
 # Tout-zéro ⇒ refuser le déploiement.
 ```
@@ -167,7 +167,7 @@ audit_dir  = /var/lib/freehsm/audit
 
 ```bash
 sudo -u freehsm pkcs11-tool \
-    --module /opt/freehsm/lib/libfreehsm-fips.so \
+    --module /opt/freehsm/lib/libfreehsm.so \
     --show-info
 ```
 
@@ -179,7 +179,7 @@ Si `C_Initialize` retourne `0x00000005` ou `0x80000002` (`INTEGRITY_FAILED`), la
 read -s -p "SO PIN > " SO_PIN ; echo
 
 sudo -u freehsm pkcs11-tool \
-    --module /opt/freehsm/lib/libfreehsm-fips.so \
+    --module /opt/freehsm/lib/libfreehsm.so \
     --init-token --label "prod-slot-0" --so-pin "$SO_PIN"
 unset SO_PIN
 ```
@@ -190,7 +190,7 @@ Le SO définit ensuite un PIN utilisateur pour l'opérateur quotidien. Le PIN US
 
 ```bash
 sudo -u freehsm pkcs11-tool \
-    --module /opt/freehsm/lib/libfreehsm-fips.so \
+    --module /opt/freehsm/lib/libfreehsm.so \
     --so-pin "$SO_PIN" --init-pin --new-pin "$USER_PIN"
 ```
 
@@ -304,7 +304,7 @@ sudo grep -r FHSM_KAT_ALLOW_FAIL /etc/ /lib/systemd/ /usr/lib/systemd/ || \
     echo "OK : variable absente du PATH système"
 ```
 
-Quand le bypass est actif, `libfreehsm-fips.so` émet sur `stderr` un avertissement explicite ainsi que la liste des KAT en échec, ce qui rend toute exécution audit-traceable et écarte toute confusion avec un build conforme.
+Quand le bypass est actif, `libfreehsm.so` émet sur `stderr` un avertissement explicite ainsi que la liste des KAT en échec, ce qui rend toute exécution audit-traceable et écarte toute confusion avec un build conforme.
 
 ### 7.6 Diagnostic : harnais KAT externalisé
 
@@ -336,14 +336,14 @@ Cette section décrit la procédure de vérification cryptographique opérationn
 ```bash
 # 1. Génération de la paire EC P-256
 sudo -u freehsm pkcs11-tool \
-    --module /opt/freehsm/lib/libfreehsm-fips.so \
+    --module /opt/freehsm/lib/libfreehsm.so \
     --slot 0 --login --pin "$USER_PIN" \
     --keypairgen --key-type EC:secp256r1 --label "val-ecdsa" --id 03
 
 # 2. Signature du message
 echo -n "operational validation test" > /tmp/msg.bin
 sudo -u freehsm pkcs11-tool \
-    --module /opt/freehsm/lib/libfreehsm-fips.so \
+    --module /opt/freehsm/lib/libfreehsm.so \
     --slot 0 --login --pin "$USER_PIN" \
     --sign --mechanism ECDSA-SHA256 \
     --input-file /tmp/msg.bin --output-file /tmp/sig.bin \
@@ -351,7 +351,7 @@ sudo -u freehsm pkcs11-tool \
 
 # 3. Export de la clé publique
 sudo -u freehsm pkcs11-tool \
-    --module /opt/freehsm/lib/libfreehsm-fips.so \
+    --module /opt/freehsm/lib/libfreehsm.so \
     --slot 0 --login --pin "$USER_PIN" \
     --read-object --type pubkey --id 03 \
     --output-file /tmp/pub.der
@@ -373,13 +373,13 @@ Ce test prouve que la clé privée n'a jamais quitté le HSM en clair et que le 
 ```bash
 # 1. Génération de la paire RSA-2048
 sudo -u freehsm pkcs11-tool \
-    --module /opt/freehsm/lib/libfreehsm-fips.so \
+    --module /opt/freehsm/lib/libfreehsm.so \
     --slot 0 --login --pin "$USER_PIN" \
     --keypairgen --key-type rsa:2048 --label "val-rsa" --id 04
 
 # 2. Export de la clé publique
 sudo -u freehsm pkcs11-tool \
-    --module /opt/freehsm/lib/libfreehsm-fips.so \
+    --module /opt/freehsm/lib/libfreehsm.so \
     --slot 0 --login --pin "$USER_PIN" \
     --read-object --type pubkey --id 04 \
     --output-file /tmp/pub-rsa.der
@@ -395,7 +395,7 @@ openssl pkeyutl -provider default -encrypt \
 
 # 4. Le HSM déchiffre
 sudo -u freehsm pkcs11-tool \
-    --module /opt/freehsm/lib/libfreehsm-fips.so \
+    --module /opt/freehsm/lib/libfreehsm.so \
     --slot 0 --login --pin "$USER_PIN" \
     --decrypt --mechanism RSA-PKCS-OAEP --hash-algorithm SHA-256 \
     --input-file /tmp/ct.bin --output-file /tmp/recovered.bin \
@@ -454,7 +454,7 @@ sudo systemctl stop freehsm-bound-service
 sudo shred -uvz /var/lib/freehsm/tokens/*.tok
 sudo shred -uvz /var/lib/freehsm/audit/*.audit.log
 sudo shred -uvz /var/lib/freehsm/kek/*.kek
-sudo rm /opt/freehsm/lib/libfreehsm-fips.so /opt/freehsm/etc/freehsm.conf
+sudo rm /opt/freehsm/lib/libfreehsm.so /opt/freehsm/etc/freehsm.conf
 sudo rmdir /opt/freehsm/{lib,etc,bin}
 sudo userdel freehsm
 sudo rm -rf /var/lib/freehsm

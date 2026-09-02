@@ -1,6 +1,6 @@
 # pkcs11-check Findings Triage (#125)
 
-*First external-harness run, 2026-07-10, against libfreehsm-fips.so
+*First external-harness run, 2026-07-10, against libfreehsm.so
 (v1.4.0 line + #108/#110). pkcs11-check by Denis Mingulov.*
 
 Headline counts: **162 passed · 691 xfailed · 517 failed · 7 crashed · 5 error**.

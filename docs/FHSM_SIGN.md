@@ -177,7 +177,7 @@ defect in the output.
 | `--sig FILE` | the signature to check (`verify` only) |
 | `--cert FILE` | the signer's certificate, DER or PEM (`cms` only) |
 | `--cms FILE` | the CMS structure to check (`cms-verify` only) |
-| `--module PATH` | PKCS#11 module, default `./libfreehsm-fips.so` |
+| `--module PATH` | PKCS#11 module, default `./libfreehsm.so` |
 | `--slot N` | slot identifier, as reported by `C_GetSlotList`; default: the one slot holding a token |
 
 ### The PIN, and why there is no `--pin`

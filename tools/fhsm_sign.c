@@ -49,7 +49,7 @@ static void usage(void) {
       "  --sig FILE      the signature to check\n"
       "  --cert FILE     the signer's certificate (DER or PEM), for cms\n"
       "  --cms FILE      the CMS structure to check\n"
-      "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n"
+      "  --module PATH   PKCS#11 module (default ./libfreehsm.so)\n"
       "  --slot N        slot to address. Default: the one slot holding a token.\n\n"
       "  The PIN is read from FHSM_PIN. There is no --pin option: an argument\n"
       "  is visible in ps to every user on the machine.\n\n"
@@ -116,7 +116,7 @@ struct opts { const char *module, *label, *in, *out, *sig, *cert, *cms; long slo
 
 static struct opts parse(int argc, char **argv) {
     struct opts o;
-    o.module = "./libfreehsm-fips.so";
+    o.module = "./libfreehsm.so";
     o.label = o.in = o.out = o.sig = o.cert = o.cms = NULL;
     o.slot = -1;
     for (int i = 2; i < argc; ++i) {

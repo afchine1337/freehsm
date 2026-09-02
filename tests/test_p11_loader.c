@@ -37,7 +37,7 @@ static void ok(int cond, const char *what) {
 
 int main(int argc, char **argv)
 {
-    const char *mod = (argc > 1) ? argv[1] : "./libfreehsm-fips.so";
+    const char *mod = (argc > 1) ? argv[1] : "./libfreehsm.so";
     p11_progname = "test_p11_loader";
 
     printf("PKCS#11 module loader\n\n");

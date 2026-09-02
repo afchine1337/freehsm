@@ -1,7 +1,7 @@
 # pkcs11-check Hardening Campaign (#125)
 
 Summary of the behavioural-conformance and hardening campaign driven by
-Denis Mingulov's `pkcs11-check` harness against `libfreehsm-fips.so`.
+Denis Mingulov's `pkcs11-check` harness against `libfreehsm.so`.
 The harness runs >100k vendor-neutral checks (spec conformance, CKR
 negatives, security probes, Wycheproof / ACVP vectors). Large xfail/fail
 counts are expected — findings are evidence to triage, not a verdict.

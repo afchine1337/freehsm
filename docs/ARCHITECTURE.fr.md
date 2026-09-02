@@ -115,7 +115,7 @@ Aucun lock n'est détenu en traversant la frontière du provider OpenSSL. Le pro
 Le TOE C lit et écrit le **format JSON de token exact** du POC Python. Une organisation en production peut donc :
 
 1. Arrêter le service Python.
-2. Remplacer `libfreehsm.so` par `libfreehsm-fips.so` (même SONAME).
+2. Remplacer `libfreehsm.so` par `libfreehsm.so` (même SONAME).
 3. Démarrer le service C.
 4. Tous les slots, toutes les clés, tous les compteurs PIN, toutes les chaînes d'audit sont conservés.
 

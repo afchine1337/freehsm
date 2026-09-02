@@ -11,7 +11,7 @@
 
 ### 1.1 TOE type
 
-The TOE is a software cryptographic module ("Soft HSM") providing PKCS#11 v3.2 services to applications. It is delivered as a single shared object `libfreehsm-fips.so` plus the configuration file `freehsm.conf`. It depends on the OpenSSL 3.x FIPS provider, which is treated as a separately-evaluated module within the same Operational Environment.
+The TOE is a software cryptographic module ("Soft HSM") providing PKCS#11 v3.2 services to applications. It is delivered as a single shared object `libfreehsm.so` plus the configuration file `freehsm.conf`. It depends on the OpenSSL 3.x FIPS provider, which is treated as a separately-evaluated module within the same Operational Environment.
 
 ### 1.2 Major security features
 
@@ -117,7 +117,7 @@ The TOE is a software cryptographic module ("Soft HSM") providing PKCS#11 v3.2 s
 | Audit log        | `src/fhsm_audit.c`               | (internal only)               |
 | PKCS#11 façade   | `src/fhsm_pkcs11.c`              | `C_*` (full PKCS#11 v3.2)    |
 
-The TSFI is exclusively the set of `C_*` symbols exported by `libfreehsm-fips.so`. All other symbols are hidden by `-fvisibility=hidden` and the linker version script.
+The TSFI is exclusively the set of `C_*` symbols exported by `libfreehsm.so`. All other symbols are hidden by `-fvisibility=hidden` and the linker version script.
 
 ## 6. Lifecycle (ALC_*)
 

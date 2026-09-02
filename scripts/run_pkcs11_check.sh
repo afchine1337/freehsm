@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ===========================================================================
 # run_pkcs11_check.sh --- Drive Denis Mingulov's pkcs11-check harness
-# against libfreehsm-fips.so (#125). Shared by `make pkcs11-check` and
+# against libfreehsm.so (#125). Shared by `make pkcs11-check` and
 # .github/workflows/pkcs11-check.yml.
 #
 #  pkcs11-check is an external, vendor-neutral behavioral test client
@@ -30,7 +30,7 @@
 # ===========================================================================
 set -u
 
-MODULE="${1:-./libfreehsm-fips.so}"
+MODULE="${1:-./libfreehsm.so}"
 REPORTS="${2:-./reports/pkcs11-check}"
 SO_PIN="00000000"     # same conventions as tests/coverage_matrix.sh
 USER_PIN="user0000"

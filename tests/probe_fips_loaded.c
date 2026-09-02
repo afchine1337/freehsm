@@ -35,7 +35,7 @@ typedef CK_RV (*init_fn)(void *);
 
 int main(int argc, char **argv)
 {
-    const char *mod = (argc > 1) ? argv[1] : "./libfreehsm-fips.so";
+    const char *mod = (argc > 1) ? argv[1] : "./libfreehsm.so";
 
     /* Say this here rather than let it become a puzzling result later: in
      * this mode src/fhsm_crypto.c does not even attempt OSSL_PROVIDER_load,

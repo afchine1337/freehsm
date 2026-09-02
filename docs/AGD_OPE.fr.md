@@ -43,7 +43,7 @@ Services anonymes (pré-login) :
 #include <pkcs11.h>
 
 CK_FUNCTION_LIST_PTR p11;
-C_GetFunctionList(&p11);          /* chargé depuis libfreehsm-fips.so */
+C_GetFunctionList(&p11);          /* chargé depuis libfreehsm.so */
 p11->C_Initialize(NULL);          /* déclenche integrity check + KAT   */
 
 CK_SESSION_HANDLE s;
@@ -413,7 +413,7 @@ Les actions suivantes **invalident** la configuration certifiée et **font perdr
 - Laisser `FHSM_MODE` non défini (= mode legacy) pour un déploiement réclamant la conformité FIPS 140-3.
 - Définir `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` en production.
 - Définir `fips_strict=false` dans `freehsm.conf`.
-- Remplacer `libfreehsm-fips.so` par tout autre binaire, même patché.
+- Remplacer `libfreehsm.so` par tout autre binaire, même patché.
 - Modifier tout fichier dans `/opt/freehsm/etc/`.
 - Charger un provider OpenSSL autre que le provider FIPS validé.
 - Désactiver la capacité `mlock` sur l'hôte.

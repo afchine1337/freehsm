@@ -125,7 +125,7 @@ static void usage(void) {
       "                  plus id-pkix-ocsp-nocheck (RFC 6960 4.2.2.2). Such a\n"
       "                  certificate cannot be revoked in any way a verifier\n"
       "                  will notice, so issue it short.\n"
-      "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n"
+      "  --module PATH   PKCS#11 module (default ./libfreehsm.so)\n"
       "  --slot N        slot to address. Default: the one slot holding a token.\n"
       "  --out FILE      output file (default stdout)\n"
       "  --pem           PEM instead of DER\n\n"
@@ -142,7 +142,7 @@ static void usage(void) {
 }
 
 static int cmd_issue(int argc, char **argv) {
-    const char *module = "./libfreehsm-fips.so", *label = NULL;
+    const char *module = "./libfreehsm.so", *label = NULL;
     const char *cacert_p = NULL, *csr_p = NULL, *subject = NULL, *out = NULL;
     const char *san = NULL;
     /* Repeatable rather than comma-separated like --san: an LDAP URI carries
@@ -354,7 +354,7 @@ static int cmd_revoke(int argc, char **argv) {
  * crl --- sign and emit the revocation list.
  * ------------------------------------------------------------------------- */
 static int cmd_crl(int argc, char **argv) {
-    const char *module = "./libfreehsm-fips.so", *label = NULL;
+    const char *module = "./libfreehsm.so", *label = NULL;
     const char *cacert_p = NULL, *db_p = NULL, *out = NULL;
     int pem = 0, days = 30; long slot = -1;
 
@@ -465,7 +465,7 @@ static int cmd_crl(int argc, char **argv) {
  * the command line, the token, and the file.
  * ========================================================================= */
 static int cmd_ocsp_respond(int argc, char **argv) {
-    const char *module = "./libfreehsm-fips.so", *label = NULL;
+    const char *module = "./libfreehsm.so", *label = NULL;
     const char *cacert_p = NULL, *db_p = NULL, *req_p = NULL, *out = NULL;
     const char *rcert_p = NULL;
     long slot = -1; int days = 7;

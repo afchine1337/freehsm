@@ -31,7 +31,7 @@
 
 set -u
 
-MODULE="${MODULE:-/opt/freehsm/lib/libfreehsm-fips.so}"
+MODULE="${MODULE:-/opt/freehsm/lib/libfreehsm.so}"
 TOKENS_DIR="${TOKENS_DIR:-$(mktemp -d /tmp/freehsm-cov-XXXXXX)}"
 export FHSM_TOKENS_DIR="${TOKENS_DIR}"
 
@@ -328,7 +328,7 @@ echo "$out" | grep -q "CKR_MECHANISM_INVALID\|illegal\|not supported" \
 # ---- 7. PKCS#11 v3.0 entry points -------------------------------------
 color_info ""
 color_info "[7/8] v3.0 CK_INTERFACE"
-nm -D /opt/freehsm/lib/libfreehsm-fips.so | grep -q "T C_GetInterface" \
+nm -D /opt/freehsm/lib/libfreehsm.so | grep -q "T C_GetInterface" \
     && record C_GetInterface "n/a" PASS "v3.0 entry exposed" \
     || record C_GetInterface "n/a" FAIL "v3.0 entry missing"
 
@@ -350,7 +350,7 @@ pq_e2e() {
         FHSM_TOKENS_DIR="${FHSM_TOKENS_DIR:-${TOKENS_DIR:-/tmp/freehsm-cov}}" \
         "$@" 2>&1
 }
-# The PQ end-to-end harnesses dlopen /opt/freehsm/lib/libfreehsm-fips.so
+# The PQ end-to-end harnesses dlopen /opt/freehsm/lib/libfreehsm.so
 # (hardcoded), do their own C_Initialize, and expect slot 0 to already
 # hold a token. The token IS initialized by step [2/8] in the same
 # FHSM_TOKENS_DIR, but cross-process state hand-off (token blob

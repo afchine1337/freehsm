@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# dist_verify_ref.sh --- Compare the locally built libfreehsm-fips.so
+# dist_verify_ref.sh --- Compare the locally built libfreehsm.so
 # against the reference digest published for this release.
 #
 #  Workflow :
@@ -25,7 +25,12 @@ set -euo pipefail
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Same defect as dist_baseline.sh: the grep -oP required an `=` the header
 # does not have, so this looked for a reference named "unknown".
+# Defensive. The header carried a -FIPS suffix until v2.0.0, when it was
+# dropped -- it named a certification the project does not hold and reached
+# the soname and the tarball prefix. Stripping it costs nothing now and
+# would matter again the day a suffix returns for a real reason.
 VERSION="${VERSION:-$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' "$PROJ_ROOT/include/fhsm_common.h" 2>/dev/null || echo unknown)}"
+VERSION="${VERSION%-FIPS}"
 REF_FILE="${PROJ_ROOT}/dist/refs/v${VERSION}.sha256"
 OUT_DIR="${PROJ_ROOT}/out"
 

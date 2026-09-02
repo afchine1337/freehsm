@@ -145,7 +145,7 @@ Re-running the generator with a different `--profile=fips-strict` flag emits a b
 The C TOE reads and writes the *exact same JSON token format* as the Python POC. An organization in production can therefore:
 
 1. Stop the Python service.
-2. Replace `libfreehsm.so` with `libfreehsm-fips.so` (same SONAME).
+2. Replace `libfreehsm.so` with `libfreehsm.so` (same SONAME).
 3. Start the C service.
 4. All slots, all keys, all PIN counters, all audit chains carry over.
 

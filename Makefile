@@ -2,7 +2,7 @@
 # Makefile --- FreeHSM C natif (FIPS 140-3 / CC EAL4+ candidate)
 #
 # Build targets:
-#   make              # libfreehsm-fips.so + binaire de test
+#   make              # libfreehsm.so + binaire de test
 #   make tests        # exécute la suite KAT + tests d'audit
 #   make integrity    # signe le .so et imprime le digest pour le module
 #   make clean
@@ -203,7 +203,7 @@ LIB_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(LIB_SRC))
 # same object and neither the module nor a future tool acquires it by accident.
 REVOCATION_OBJ = $(OBJDIR)/src/fhsm_revocation.o
 
-LIB     = libfreehsm-fips.so
+LIB     = libfreehsm.so
 LIB_VER = $(LIB).$(shell awk -F'"' '/FHSM_VERSION_STRING/{print $$2; exit}' include/fhsm_common.h)
 
 # ---------------------------------------------------------------------------
@@ -638,7 +638,7 @@ tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cb
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_switch
 	$(TEST_LD) sh tests/audit_switch.sh mandatory
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_verify
-	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_p11_loader ./libfreehsm-fips.so
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_p11_loader ./libfreehsm.so
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_token_capacity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_decrypt_null_args
@@ -720,7 +720,7 @@ audit-switch:
 # in this file carry it; these three did not.
 #
 # And $(LIB) is a prerequisite, not an assumption. The tools dlopen
-# ./libfreehsm-fips.so; naming only the binaries let a library built for the
+# ./libfreehsm.so; naming only the binaries let a library built for the
 # other profile survive a rebuild and fail at the same keygen with the same
 # status -- two causes, one message, and the service's own --profile guard
 # passing throughout because the service carries its profile statically and

@@ -2,7 +2,7 @@
 # .github/workflows/wycheproof.yml
 #
 # Nightly run of the Wycheproof crypto test vector suite against the
-# libfreehsm-fips.so built from the current main branch. Publishes the
+# libfreehsm.so built from the current main branch. Publishes the
 # JSON report as a build artefact and fails the run if any "valid"
 # vector is rejected or any "invalid" vector is accepted.
 #
@@ -34,7 +34,7 @@ jobs:
         run: |
           pip3 install --break-system-packages python-pkcs11
 
-      - name: Build libfreehsm-fips.so
+      - name: Build libfreehsm.so
         run: |
           make clean
           make
@@ -59,7 +59,7 @@ jobs:
         run: |
           chmod +x tests/wycheproof/run_wycheproof.py
           tests/wycheproof/run_wycheproof.py \
-              --module "$PWD/libfreehsm-fips.so"
+              --module "$PWD/libfreehsm.so"
 
       - name: Upload report
         if: always()
@@ -89,4 +89,4 @@ jobs:
           chmod +x tests/wycheproof/fetch_vectors.sh tests/wycheproof/run_wycheproof.py
           tests/wycheproof/fetch_vectors.sh
           tests/wycheproof/run_wycheproof.py \
-              --module "$PWD/libfreehsm-fips.so" --smoke
+              --module "$PWD/libfreehsm.so" --smoke

@@ -126,7 +126,7 @@ int main(int argc, char **argv)
 {
     p11_progname = "bench_fork_client";
     const char *modpath = getenv("FHSM_MODULE");
-    if (!modpath || !*modpath) modpath = "./libfreehsm-fips.so";
+    if (!modpath || !*modpath) modpath = "./libfreehsm.so";
     const char *pin = getenv("FHSM_PIN");
     if (!pin || !*pin) pin = "userpin1234";
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# sign_module.sh --- Embed the integrity digest into libfreehsm-fips.so.
+# sign_module.sh --- Embed the integrity digest into libfreehsm.so.
 #
 # Two-pass procedure (matches FIPS 140-3 §7.10.2 expectations) :
 #
@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-SO_PATH="${1:-libfreehsm-fips.so}"
+SO_PATH="${1:-libfreehsm.so}"
 FORCE="${2:-}"
 
 if [ ! -f "${SO_PATH}" ]; then

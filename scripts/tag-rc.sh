@@ -83,7 +83,7 @@ Watch the workflow at :
 
 Expected stages :
    1. Verify tag GPG signature                  — should match Ed25519 fpr.
-   2. Reproducible build in pinned Docker image — produces libfreehsm-fips.so.
+   2. Reproducible build in pinned Docker image — produces libfreehsm.so.
    3. Sign + embed integrity digest             — re-builds with the digest in
                                                   the .fhsm_digest section.
    4. Build source + binary tarballs            — both reproducible.

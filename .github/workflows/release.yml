@@ -84,7 +84,7 @@ jobs:
                    tests/wycheproof/*.py 2>/dev/null || true
           make clean
           make
-          test -f libfreehsm-fips.so
+          test -f libfreehsm.so
 
       # Signing is not a nicety here and its failure must not be a warning.
       #
@@ -112,12 +112,12 @@ jobs:
       # Checked against the Dockerfile rather than assumed.
       - name: Verify the module is really signed
         run: |
-          readelf -SW libfreehsm-fips.so | grep -q '\.fhsm_digest' || {
+          readelf -SW libfreehsm.so | grep -q '\.fhsm_digest' || {
               echo "::error::no .fhsm_digest section in the release artefact"
               exit 1
           }
           d=$(objcopy --dump-section .fhsm_digest=/dev/stdout \
-                      libfreehsm-fips.so /dev/null 2>/dev/null \
+                      libfreehsm.so /dev/null 2>/dev/null \
               | od -An -tx1 -v | tr -d ' \n')
           case "$d" in
             "")      echo "::error::.fhsm_digest section is empty"; exit 1 ;;
@@ -141,6 +141,10 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           V="${TAG#v}"
           HDR=$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' include/fhsm_common.h)
+          # Defensive: the -FIPS suffix was dropped from the header in
+          # v2.0.0. Comparing raw would have failed this release on its
+          # first attempt back when the suffix was there.
+          HDR="${HDR%-FIPS}"
           if [ "$V" != "$HDR" ]; then
             echo "::error::tag $TAG says v$V, include/fhsm_common.h says $HDR"
             exit 1
@@ -153,7 +157,7 @@ jobs:
             exit 1
           fi
           ref=$(awk '{print $1}' "$REF")
-          got=$(sha256sum libfreehsm-fips.so | awk '{print $1}')
+          got=$(sha256sum libfreehsm.so | awk '{print $1}')
           echo "reference : $ref"
           echo "this build: $got"
           if [ "$ref" != "$got" ]; then
@@ -167,7 +171,7 @@ jobs:
 
       - name: Compute digests
         run: |
-          sha256sum libfreehsm-fips.so > libfreehsm-fips.so.sha256
+          sha256sum libfreehsm.so > libfreehsm.so.sha256
           sha256sum tests/test_smoke   > test_smoke.sha256
 
       - name: Build source tarball
@@ -189,7 +193,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           mkdir -p dist/freehsm-c-${TAG}/lib dist/freehsm-c-${TAG}/include
-          cp libfreehsm-fips.so dist/freehsm-c-${TAG}/lib/
+          cp libfreehsm.so dist/freehsm-c-${TAG}/lib/
           cp include/*.h         dist/freehsm-c-${TAG}/include/
           cp NOTICE LICENSE README.md CHANGELOG.md SECURITY.md dist/freehsm-c-${TAG}/
           tar -cJf dist/freehsm-c-${TAG}-bin.tar.xz \
@@ -220,5 +224,5 @@ jobs:
             dist/*.tar.xz
             dist/*.sha256
             dist/*.asc
-            libfreehsm-fips.so
-            libfreehsm-fips.so.sha256
+            libfreehsm.so
+            libfreehsm.so.sha256

@@ -2,7 +2,7 @@
 # pkcs11-check.yml --- External behavioral harness run (#125).
 #
 # Runs Denis Mingulov's pkcs11-check (>100k vendor-neutral behavioral
-# checks) against the digest-signed libfreehsm-fips.so and uploads the
+# checks) against the digest-signed libfreehsm.so and uploads the
 # JSON report + log as artifacts.
 #
 # NON-GATING by design : per pkcs11-check's own guidance, large
@@ -55,7 +55,7 @@ jobs:
           # locked arena, more than the usual RLIMIT_MEMLOCK allows.
           make
           make integrity
-          test -f libfreehsm-fips.so
+          test -f libfreehsm.so
 
       - name: Install harness (opensc + pkcs11-check)
         run: |
@@ -68,7 +68,7 @@ jobs:
 
       - name: Run pkcs11-check against signed module
         run: |
-          bash scripts/run_pkcs11_check.sh ./libfreehsm-fips.so ./reports/pkcs11-check \
+          bash scripts/run_pkcs11_check.sh ./libfreehsm.so ./reports/pkcs11-check \
             2>&1 | tee harness.log
 
       - name: Publish summary

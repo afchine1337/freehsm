@@ -16,7 +16,7 @@
 #
 # Quick usage :
 #     from _p11 import P11Module, A
-#     m = P11Module("/path/to/libfreehsm-fips.so")
+#     m = P11Module("/path/to/libfreehsm.so")
 #     sess = m.open_session()
 #     pubkey = sess.create_object([
 #         A.CLASS(A.CKO_PUBLIC_KEY),

@@ -50,7 +50,7 @@ static long rss_kb(void) {
 
 int main(int argc, char **argv) {
     p11_progname = "bench_session_mem";
-    const char *modpath = (argc > 1) ? argv[1] : "./libfreehsm-fips.so";
+    const char *modpath = (argc > 1) ? argv[1] : "./libfreehsm.so";
 
     long base_load = rss_kb();
     load_module(modpath);

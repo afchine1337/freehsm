@@ -22,7 +22,7 @@
 #     2  --- runner / module setup failure (P0)
 #
 # Usage :
-#     ./run_wycheproof.py --module /path/to/libfreehsm-fips.so [--smoke] [--only <name>]
+#     ./run_wycheproof.py --module /path/to/libfreehsm.so [--smoke] [--only <name>]
 #
 # The "smoke" mode picks the first 10 % of each schema's tests, capped at
 # 50, to keep wall-clock under ~30 seconds for per-push CI.
@@ -155,7 +155,7 @@ def run_file(adapter: Adapter, path: Path, smoke: bool) -> AdapterStats:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--module", required=True,
-                        help="path to libfreehsm-fips.so")
+                        help="path to libfreehsm.so")
     parser.add_argument("--smoke", action="store_true",
                         help="run only ~10 %% of vectors per file")
     parser.add_argument("--only", default=None,
@@ -242,7 +242,7 @@ def main() -> int:
                     # message (symbol name, etc.) is visible inside our
                     # display window.
                     short = comment.replace(
-                        "/__w/freehsm-c/freehsm-c/libfreehsm-fips.so",
+                        "/__w/freehsm-c/freehsm-c/libfreehsm.so",
                         "[lib]",
                     )
                     prefix = short[:150] or "(no comment)"

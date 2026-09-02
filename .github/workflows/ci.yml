@@ -70,7 +70,7 @@ jobs:
         run: |
           make clean
           make 2>&1 | tee build.log
-          test -f libfreehsm-fips.so
+          test -f libfreehsm.so
 
       - name: Sign module digest
         run: |
@@ -81,7 +81,7 @@ jobs:
           # unsigned module that cannot initialise at all.
           set -o pipefail
           make integrity 2>&1 | tee integrity.log
-          ls -la libfreehsm-fips.so
+          ls -la libfreehsm.so
 
       # The integrity self-check is the one mechanism that must be exercised
       # WITHOUT FHSM_INTEGRITY_ALLOW_UNSIGNED -- every other job sets it, which
@@ -112,7 +112,7 @@ jobs:
       # Both steps above end with a tree built some other way -- audit-switch
       # with FHSM_AUDIT_MANDATORY=0, ocsp-delegated with PROFILE=interop. The
       # upload below took whatever was on disk, so from the moment the audit
-      # switch step was added this job has been shipping a libfreehsm-fips.so
+      # switch step was added this job has been shipping a libfreehsm.so
       # that was neither the configuration `make integrity` signed nor the one
       # the artefact name claims. Rebuild, re-sign, and prove the result is
       # the mandatory build before anything leaves this job.
@@ -129,10 +129,10 @@ jobs:
           LD_LIBRARY_PATH=. sh tests/audit_switch.sh mandatory
           # And the property, not just the commands: this is the artefact the
           # upload step publishes and the reproducibility job compares.
-          readelf -SW libfreehsm-fips.so | grep -q '\.fhsm_digest' \
+          readelf -SW libfreehsm.so | grep -q '\.fhsm_digest' \
             || { echo "::error::no .fhsm_digest section"; exit 1; }
           d=$(objcopy --dump-section .fhsm_digest=/dev/stdout \
-                      libfreehsm-fips.so /dev/null 2>/dev/null \
+                      libfreehsm.so /dev/null 2>/dev/null \
               | od -An -tx1 -v | tr -d ' \n')
           case "$d" in
             *[!0]*) echo "signed: $d" ;;
@@ -143,9 +143,9 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: libfreehsm-fips-so
+          name: libfreehsm-so
           path: |
-            libfreehsm-fips.so
+            libfreehsm.so
             build.log
             integrity.log
           retention-days: 14
@@ -164,11 +164,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: libfreehsm-fips-so
+          name: libfreehsm-so
       - name: Install module
         run: |
           mkdir -p /opt/freehsm/lib
-          install -m 755 libfreehsm-fips.so /opt/freehsm/lib/
+          install -m 755 libfreehsm.so /opt/freehsm/lib/
           useradd -r -d /var/lib/freehsm -m freehsm || true
           chown -R freehsm: /var/lib/freehsm
       - name: Run coverage matrix
@@ -198,12 +198,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: libfreehsm-fips-so
+          name: libfreehsm-so
       - name: Run in FIPS strict mode
         env:
           FHSM_MODE: fips
         run: |
-          install -m 755 libfreehsm-fips.so /opt/freehsm/lib/
+          install -m 755 libfreehsm.so /opt/freehsm/lib/
           bash tests/coverage_matrix.sh 2>&1 | tee matrix-fips.log
           tail -1 matrix-fips.log | grep -q "ALL ASSERTIONS PASS"
 
@@ -231,17 +231,17 @@ jobs:
           # function of the reproducible pre-image), so signed builds are
           # bit-identical across independent runs.
           make integrity
-          sha256sum libfreehsm-fips.so > /tmp/build2.sha256
+          sha256sum libfreehsm.so > /tmp/build2.sha256
       - uses: actions/download-artifact@v4
         with:
-          name: libfreehsm-fips-so
+          name: libfreehsm-so
           path: /tmp/build1/
       - name: Compare
         # Explicit bash because the default container shell (dash on
         # Debian 13) does not understand process substitution (<(...)).
         shell: bash
         run: |
-          sha256sum /tmp/build1/libfreehsm-fips.so > /tmp/build1.sha256
+          sha256sum /tmp/build1/libfreehsm.so > /tmp/build1.sha256
           cat /tmp/build1.sha256 /tmp/build2.sha256
           h1=$(awk '{print $1}' /tmp/build1.sha256)
           h2=$(awk '{print $1}' /tmp/build2.sha256)
@@ -251,4 +251,4 @@ jobs:
               echo "  build2 : $h2" >&2
               exit 1
           fi
-          echo "OK : libfreehsm-fips.so is bit-identical across builds ($h1)"
+          echo "OK : libfreehsm.so is bit-identical across builds ($h1)"

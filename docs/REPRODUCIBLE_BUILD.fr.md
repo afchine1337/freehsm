@@ -2,7 +2,7 @@
 
 > English version: [`REPRODUCIBLE_BUILD.md`](REPRODUCIBLE_BUILD.md). In case of discrepancy, the English version prevails.
 
-Ce document décrit comment reproduire le `libfreehsm-fips.so` **bit-pour-bit identique** livré dans une release donnée. La reproductibilité est requise par **CC EAL4+ ALC_CMC.4** et est l'attente standard des laboratoires FIPS 140-3.
+Ce document décrit comment reproduire le `libfreehsm.so` **bit-pour-bit identique** livré dans une release donnée. La reproductibilité est requise par **CC EAL4+ ALC_CMC.4** et est l'attente standard des laboratoires FIPS 140-3.
 
 ## 1. Vérification rapide
 
@@ -60,10 +60,10 @@ export SOURCE_DATE_EPOCH=1735689600
 export LC_ALL=C TZ=UTC
 make clean
 make
-sha256sum libfreehsm-fips.so   # comparer au digest publié
+sha256sum libfreehsm.so   # comparer au digest publié
 ```
 
-Toute dérive de version de `gcc`, `binutils` ou `libc6-dev` fera diverger le digest. La section `.comment` du `.so` produit embarque la chaîne de version du toolchain ; utiliser `readelf -p .comment libfreehsm-fips.so` pour inspecter.
+Toute dérive de version de `gcc`, `binutils` ou `libc6-dev` fera diverger le digest. La section `.comment` du `.so` produit embarque la chaîne de version du toolchain ; utiliser `readelf -p .comment libfreehsm.so` pour inspecter.
 
 ## 5. Intégration CI
 
@@ -74,13 +74,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build A
-        run: make repro && mv libfreehsm-fips.so out/run-a.so
+        run: make repro && mv libfreehsm.so out/run-a.so
       - name: Build B (clean)
         run: docker volume prune -f && make repro
       - name: Assert byte-identical
         run: |
           a=$(sha256sum out/run-a.so | awk '{print $1}')
-          b=$(sha256sum libfreehsm-fips.so | awk '{print $1}')
+          b=$(sha256sum libfreehsm.so | awk '{print $1}')
           test "$a" = "$b" || { echo "REPRO FAIL"; exit 1; }
 ```
 
@@ -94,7 +94,7 @@ La CI utilise `diffoscope` comme fallback quand les digests divergent, exposant 
 2. Mettre à jour les pins de version apt (lancer *(à la main — un `scripts/freeze_apt_versions.sh` a été nommé ici et n'existe pas ; `scripts/build_reproducible.sh` et `scripts/verify_reproducibility.sh`, eux, existent)* dans un container Debian propre).
 3. Bumper `FHSM_VERSION_STRING` dans `include/fhsm_common.h`.
 4. Lancer `make dist-verify` localement pour confirmer la reproductibilité sur la nouvelle toolchain.
-5. Publier le nouveau digest d'image et le SHA-256 du `libfreehsm-fips.so` résultant dans les release notes.
+5. Publier le nouveau digest d'image et le SHA-256 du `libfreehsm.so` résultant dans les release notes.
 
 ## 7. Vérification par un évaluateur
 
@@ -102,7 +102,7 @@ Pour les évaluateurs CMVP / CESTI :
 
 1. Télécharger l'archive source publiée : `freehsm-c-src.tar.xz` (et son sidecar `.sha256`).
 2. Vérifier que le digest d'archive correspond aux release notes.
-3. Lancer `make dist-verify` ; le SHA-256 du `libfreehsm-fips.so` produit DOIT correspondre à celui des release notes et à celui embarqué dans `fhsm_module_integrity_digest[]` signé (voir `FIPS_140_3.fr.md` §6.1).
+3. Lancer `make dist-verify` ; le SHA-256 du `libfreehsm.so` produit DOIT correspondre à celui des release notes et à celui embarqué dans `fhsm_module_integrity_digest[]` signé (voir `FIPS_140_3.fr.md` §6.1).
 4. Optionnellement, lancer le même processus sur un second host (distribution différente, vendor CPU différent) pour confirmer l'indépendance du host.
 
 Une correspondance réussie ferme l'exigence de preuve **ALC_CMC.4** pour la release.

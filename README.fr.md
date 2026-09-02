@@ -26,7 +26,7 @@ Le POC Python est fonctionnellement complet (165 tests passants, couverture faç
 - L'allocateur Python est garbage-collecté --- aucune garantie de zéroisation.
 - Les primitives crypto délèguent à `cryptography` (CFFI → libssl), ce qui rajoute un *boundary* impossible à tracer.
 
-Le portage en C élimine ces obstacles : un seul `.so` (`libfreehsm-fips.so`) qui charge directement le **provider FIPS d'OpenSSL 3.x** (déjà validé séparément), avec un *secure heap* `mlock()`-é pour tous les SSP, et une frontière exclusivement composée des symboles `C_*` PKCS#11.
+Le portage en C élimine ces obstacles : un seul `.so` (`libfreehsm.so`) qui charge directement le **provider FIPS d'OpenSSL 3.x** (déjà validé séparément), avec un *secure heap* `mlock()`-é pour tous les SSP, et une frontière exclusivement composée des symboles `C_*` PKCS#11.
 
 ## Structure
 
@@ -97,7 +97,7 @@ sudo apt install -y libssl-dev cmake ninja-build
 
 make generate                  # regénère le mechanism dispatch (CKM_* + table + doc)
 make generate PROFILE=interop  # idem mais avec les CKM_* legacy actifs (audit-only)
-make                           # generate puis build libfreehsm-fips.so
+make                           # generate puis build libfreehsm.so
 make tests                     # exécute test_smoke (POST + KAT + AES-GCM RT + tamper)
 make lint                      # cppcheck strict
 make integrity                 # SHA-256 du .so (à patcher dans fhsm_module_integrity_digest[])
@@ -244,7 +244,7 @@ En revanche il n'y a **aucune interopérabilité au niveau des octets**. Le POC 
 
 ## Synthèse
 
-- **C11 strict** durci (`-Werror -Wpedantic -fstack-protector-strong …`), frontière cryptographique unique (`libfreehsm-fips.so` + provider FIPS OpenSSL 3.x).
+- **C11 strict** durci (`-Werror -Wpedantic -fstack-protector-strong …`), frontière cryptographique unique (`libfreehsm.so` + provider FIPS OpenSSL 3.x).
 - **78 `CKM_*`** dispatchables (66 FIPS-approved + 12 legacy rejetés) générés depuis une source unique de vérité auditable (`scripts/gen_p11_thunks.py`).
 - **66 handlers concrets** dans `src/dispatch/` (10 fichiers, ~2 400 l.) : SHA-2/3/SHAKE, HMAC, AES-{GCM,CBC,CTR,CCM,KW,KWP,CMAC}, **KMAC128/256**, RSA-PSS/OAEP, ECDSA, EdDSA, ECDH/X25519/X448, ML-KEM/DSA, SLH-DSA, PBKDF2, HKDF, NIST PRF KDF, **CONCATENATE/XOR**, et 2 mécanismes **hybrides PQ + classique** (KEM X25519+ML-KEM-768, signature Ed25519+ML-DSA-65).
 - **Boot self-test FIPS 140-3 §7.10.2** : section ELF `.fhsm_digest` patchée post-build par `scripts/sign_module.sh`, vérification SHA-256 du `.so` (zone digest zéroizée) au `C_Initialize` avant chargement du provider FIPS. État ERROR latché irrécouvrable en cas de mismatch.

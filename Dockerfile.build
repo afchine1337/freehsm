@@ -1,7 +1,7 @@
 # ===========================================================================
 # Dockerfile.build --- Reproducible build environment for FreeHSM C TOE.
 #
-# Goal : produce a bit-identical libfreehsm-fips.so given the same source
+# Goal : produce a bit-identical libfreehsm.so given the same source
 #        archive. Required by ALC_CMC.4 ("production support, acceptance
 #        procedures, automation") of CC EAL4+ and by the CMVP reviewers
 #        who need to independently reconstruct the binary submitted for
@@ -80,6 +80,6 @@ WORKDIR /src
 VOLUME ["/src", "/out"]
 ENTRYPOINT ["/bin/bash", "-c", \
     "cd /src && make clean && make all && \
-     sha256sum libfreehsm-fips.so > /out/digest.txt && \
-     cp libfreehsm-fips.so /out/ && \
+     sha256sum libfreehsm.so > /out/digest.txt && \
+     cp libfreehsm.so /out/ && \
      echo '[repro] build complete' && cat /out/digest.txt"]

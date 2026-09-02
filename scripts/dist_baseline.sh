@@ -18,7 +18,12 @@ PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # The grep -oP that used to be here required one, so it never matched and this
 # script would have written its baseline as "unknown" -- under a name
 # dist-verify does not look for.
+# Defensive. The header carried a -FIPS suffix until v2.0.0, when it was
+# dropped -- it named a certification the project does not hold and reached
+# the soname and the tarball prefix. Stripping it costs nothing now and
+# would matter again the day a suffix returns for a real reason.
 VERSION="${VERSION:-$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' "$PROJ_ROOT/include/fhsm_common.h" 2>/dev/null || echo unknown)}"
+VERSION="${VERSION%-FIPS}"
 REF_DIR="${PROJ_ROOT}/dist/refs"
 REF_FILE="${REF_DIR}/v${VERSION}.sha256"
 
@@ -42,7 +47,7 @@ fi
 mkdir -p "$REF_DIR"
 {
     awk '{print $1}' "$src_digest_file" | tr -d '\n'
-    printf '  libfreehsm-fips.so v%s\n' "$VERSION"
+    printf '  libfreehsm.so v%s\n' "$VERSION"
 } > "$REF_FILE"
 echo "[baseline] wrote $REF_FILE :"
 cat "$REF_FILE"

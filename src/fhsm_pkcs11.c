@@ -16,7 +16,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * ========================================================================= */
 /* ===========================================================================
- * fhsm_pkcs11.c --- PKCS#11 v3.2 entry points (libfreehsm-fips.so).
+ * fhsm_pkcs11.c --- PKCS#11 v3.2 entry points (libfreehsm.so).
  *
  * This is the ABI boundary visible to applications. Every C_* function
  *   1. Validates fhsm_state_get() != ERROR  (else FHSM_RV_FUNCTION_FAILED)
@@ -101,7 +101,7 @@ typedef void          *CK_VOID_PTR;
 #define CK_DECLARE_FUNCTION(rt, name)  rt name
 
 /* ---------------------------------------------------------------------------
- * Forward declarations of every TSFI symbol exported by libfreehsm-fips.so.
+ * Forward declarations of every TSFI symbol exported by libfreehsm.so.
  * Required to satisfy -Wmissing-prototypes : the C_* functions are
  * exported (default visibility) but no upstream header is included here,
  * so we declare them locally. The visibility attribute overrides the

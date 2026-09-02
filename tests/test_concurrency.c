@@ -119,7 +119,7 @@ static void *cold_worker(void *arg) {
 
 int main(int argc, char **argv) {
     int cold = (argc > 1 && strcmp(argv[1], "--cold") == 0);
-    void *h = dlopen("./libfreehsm-fips.so", RTLD_NOW);
+    void *h = dlopen("./libfreehsm.so", RTLD_NOW);
     if (!h) { fprintf(stderr, "%s\n", dlerror()); return 2; }
 #define SYM(x) *(void**)&x = dlsym(h, #x)
     SYM(C_Initialize); SYM(C_OpenSession); SYM(C_CloseSession); SYM(C_Login);

@@ -58,7 +58,7 @@ static CK_BYTE *fhsm_pad_label(CK_BYTE buf[32], const char *s) {
 }
 
 int main(void) {
-    H = dlopen("./libfreehsm-fips.so", RTLD_NOW);
+    H = dlopen("./libfreehsm.so", RTLD_NOW);
     if (!H) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
     CK_RV (*I)(void*); CK_RV (*IT)(CK_SLOT_ID,CK_BYTE*,CK_ULONG,CK_BYTE*); CK_RV (*IP)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
     #define S(n,nm) *(void**)&n = dlsym(H, nm)

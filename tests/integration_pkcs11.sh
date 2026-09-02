@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# integration_pkcs11.sh --- end-to-end PKCS#11 test for libfreehsm-fips.so
+# integration_pkcs11.sh --- end-to-end PKCS#11 test for libfreehsm.so
 #
 # Exercises the full TSFI lifecycle :
 #
@@ -20,7 +20,7 @@
 #  14. C_Finalize
 #
 # Default settings :
-#   MODULE      = /opt/freehsm/lib/libfreehsm-fips.so
+#   MODULE      = /opt/freehsm/lib/libfreehsm.so
 #   TOKENS_DIR  = a temporary directory ; reset every run
 #   SO_PIN      = 12345678         (8 octets, >= 4 minimum FIPS)
 #   USER_PIN    = 87654321
@@ -40,7 +40,7 @@ set -u   # error on undefined vars (but NOT -e : we want to inspect failures)
 
 # ---- configuration -------------------------------------------------------
 
-MODULE="${MODULE:-/opt/freehsm/lib/libfreehsm-fips.so}"
+MODULE="${MODULE:-/opt/freehsm/lib/libfreehsm.so}"
 SO_PIN="${SO_PIN:-12345678}"
 USER_PIN="${USER_PIN:-87654321}"
 LABEL="${LABEL:-freehsm-test}"
@@ -123,7 +123,7 @@ color_info "[1/14] C_Initialize + C_GetInfo"
 out=$(run_p11 --show-info)
 assert "Cryptoki version 3.2"               "Cryptoki version 3.2"      "$out"
 assert "Manufacturer = FreeHSM C"            "FreeHSM C"                 "$out"
-assert "Library description present"         "libfreehsm-fips.so"        "$out"
+assert "Library description present"         "libfreehsm.so"        "$out"
 
 # ---- 2. C_GetSlotList (tokenPresent=0 should yield 4 configured slots) ---
 

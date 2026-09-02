@@ -57,7 +57,7 @@ static void usage(void) {
       "  --label TEXT    token label, at most 32 characters (default \"freehsm\")\n"
       "  --slot N        slot to address. Default: the lowest empty slot for\n"
       "                  init, the one initialised token for info.\n"
-      "  --module PATH   PKCS#11 module (default ./libfreehsm-fips.so)\n\n"
+      "  --module PATH   PKCS#11 module (default ./libfreehsm.so)\n\n"
       "  init reads the Security Officer PIN from FHSM_SO_PIN and the user PIN\n"
       "  from FHSM_PIN. Neither can be passed as an argument: arguments are\n"
       "  visible in ps to every user on the machine.\n\n"
@@ -216,7 +216,7 @@ static int cmd_init(const char *module, long slot, const char *label, int force)
 int main(int argc, char **argv) {
     p11_progname = "fhsm-token";
     if (argc < 2) usage();
-    const char *module = "./libfreehsm-fips.so", *label = "freehsm";
+    const char *module = "./libfreehsm.so", *label = "freehsm";
     int force = 0; long slot = -1;
     for (int i = 2; i < argc; ++i) {
         if      (!strcmp(argv[i],"--module") && i+1<argc) module = argv[++i];

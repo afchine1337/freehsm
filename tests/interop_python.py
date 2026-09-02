@@ -11,7 +11,7 @@ Or with apt :
     sudo apt install python3-pkcs11 python3-cryptography
 
 Test flow :
-    1. Connect to libfreehsm-fips.so via python-pkcs11
+    1. Connect to libfreehsm.so via python-pkcs11
     2. Open session, login as USER
     3. Generate an EC P-256 key pair
     4. Sign a message with ECDSA-SHA256
@@ -28,7 +28,7 @@ import os
 import sys
 import tempfile
 
-MODULE   = os.environ.get("MODULE",     "/opt/freehsm/lib/libfreehsm-fips.so")
+MODULE   = os.environ.get("MODULE",     "/opt/freehsm/lib/libfreehsm.so")
 TOKEN    = os.environ.get("TOKEN",      "prod-slot0")
 USER_PIN = os.environ.get("USER_PIN",   "user0000")
 MSG      = b"interop check via python-pkcs11"

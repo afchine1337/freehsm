@@ -76,7 +76,7 @@ Re-run the measurement rather than trusting this table, which was taken on
 unpatched p11-kit 0.24.0:
 
 ```bash
-probes/rest/07_kit_mechanisms ./libfreehsm-fips.so \
+probes/rest/07_kit_mechanisms ./libfreehsm.so \
     /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so
 ```
 
@@ -109,7 +109,7 @@ The commands below were run against p11-kit 0.24.0 and FreeHSM built
 ```bash
 export FHSM_TOKENS_DIR=/var/lib/freehsm            # where the token lives
 p11-kit server -f -n /run/freehsm/p11.sock "pkcs11:" \
-        --provider /usr/lib/freehsm/libfreehsm-fips.so
+        --provider /usr/lib/freehsm/libfreehsm.so
 ```
 
 `-f` keeps it in the foreground, which is what you want under a supervisor and

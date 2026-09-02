@@ -25,13 +25,13 @@ rm -rf "${OUT_A}" "${OUT_B}"
 mkdir -p "${OUT_A}" "${OUT_B}"
 
 "${PROJ_ROOT}/scripts/build_reproducible.sh"
-mv "${PROJ_ROOT}/out/libfreehsm-fips.so" "${OUT_A}/"
+mv "${PROJ_ROOT}/out/libfreehsm.so" "${OUT_A}/"
 mv "${PROJ_ROOT}/out/digest.txt"          "${OUT_A}/"
 
 echo "[verify] === run B (clean) ==="
 docker volume prune -f >/dev/null 2>&1 || true
 "${PROJ_ROOT}/scripts/build_reproducible.sh"
-mv "${PROJ_ROOT}/out/libfreehsm-fips.so" "${OUT_B}/"
+mv "${PROJ_ROOT}/out/libfreehsm.so" "${OUT_B}/"
 mv "${PROJ_ROOT}/out/digest.txt"          "${OUT_B}/"
 
 dig_a="$(awk '{print $1}' "${OUT_A}/digest.txt")"
@@ -47,12 +47,12 @@ fi
 echo "[verify] FAIL : digests differ. Comparing with diffoscope ..."
 if command -v "${DIFFOSCOPE}" >/dev/null 2>&1; then
     "${DIFFOSCOPE}" --max-page-diff-block-lines 50 \
-                     "${OUT_A}/libfreehsm-fips.so" \
-                     "${OUT_B}/libfreehsm-fips.so" \
+                     "${OUT_A}/libfreehsm.so" \
+                     "${OUT_B}/libfreehsm.so" \
                      || true
 else
     echo "[verify] diffoscope unavailable ; falling back to objdump diff."
-    diff -u <(objdump -h "${OUT_A}/libfreehsm-fips.so") \
-            <(objdump -h "${OUT_B}/libfreehsm-fips.so") || true
+    diff -u <(objdump -h "${OUT_A}/libfreehsm.so") \
+            <(objdump -h "${OUT_B}/libfreehsm.so") || true
 fi
 exit 3

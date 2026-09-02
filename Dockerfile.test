@@ -13,7 +13,7 @@
 # Goal : carry just enough PKCS#11 tooling for the harness scripts
 # while staying intentionally minimal. The build toolchain stays in
 # Dockerfile.build (freehsm-c-build:debian13-openssl-3.5). The test
-# image consumes a prebuilt libfreehsm-fips.so via the artifact
+# image consumes a prebuilt libfreehsm.so via the artifact
 # upload/download cycle.
 #
 # Published by .github/workflows/publish-test-image.yml as :

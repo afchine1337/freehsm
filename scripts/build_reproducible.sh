@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# build_reproducible.sh --- Build libfreehsm-fips.so in the pinned Docker
+# build_reproducible.sh --- Build libfreehsm.so in the pinned Docker
 # image and write the result + its SHA-256 digest to ./out/.
 #
 # Exit codes :
@@ -30,7 +30,7 @@ Environment :
   SOURCE_DATE_EPOCH   default 1735689600 (2025-01-01 00:00 UTC)
 
 After a successful build, the artefacts land in :
-  ${OUT_DIR}/libfreehsm-fips.so
+  ${OUT_DIR}/libfreehsm.so
   ${OUT_DIR}/digest.txt
 EOF
 }
@@ -70,7 +70,7 @@ fi
 
 # --- Actual build. -------------------------------------------------------
 mkdir -p "${OUT_DIR}"
-rm -f  "${OUT_DIR}/libfreehsm-fips.so" "${OUT_DIR}/digest.txt"
+rm -f  "${OUT_DIR}/libfreehsm.so" "${OUT_DIR}/digest.txt"
 
 docker run --rm \
     -e SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \

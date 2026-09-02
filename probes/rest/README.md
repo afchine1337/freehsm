@@ -14,9 +14,9 @@ them by hand.
 ```bash
 make -C probes/rest
 export FHSM_TOKENS_DIR=$(mktemp -d) FHSM_SO_PIN=... FHSM_PIN=...
-./tools/fhsm-token init  --module ./libfreehsm-fips.so --label t
-./tools/fhsm-csr  keygen --module ./libfreehsm-fips.so --label k
-probes/rest/01_latency ./libfreehsm-fips.so k
+./tools/fhsm-token init  --module ./libfreehsm.so --label t
+./tools/fhsm-csr  keygen --module ./libfreehsm.so --label k
+probes/rest/01_latency ./libfreehsm.so k
 ```
 
 The composite mechanism is `interop`-only, so build the module with
@@ -136,7 +136,7 @@ It answers §2b of the ADR: two client processes on one `p11-kit server` socket,
 one logged in and holding, the other never logged in.
 
 ```bash
-p11-kit server -f -n /tmp/fhsm.sock "pkcs11:" --provider $PWD/libfreehsm-fips.so &
+p11-kit server -f -n /tmp/fhsm.sock "pkcs11:" --provider $PWD/libfreehsm.so &
 export P11_KIT_SERVER_ADDRESS="unix:path=/tmp/fhsm.sock"
 C=/usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so
 probes/rest/06_kit_isolation $C hold 14 k1 &
@@ -157,12 +157,12 @@ Isolation was the wrong thing to worry about first. Nothing post-quantum
 crosses the socket at all:
 
 ```bash
-probes/rest/07_kit_mechanisms ./libfreehsm-fips.so \
+probes/rest/07_kit_mechanisms ./libfreehsm.so \
     /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so
 ```
 
 ```
-  ./libfreehsm-fips.so                            72
+  ./libfreehsm.so                            72
   …/p11-kit-client.so                             20
 
   dropped by the second: 52
@@ -203,11 +203,11 @@ formats the line and computes the HMAC; only the durability goes away.
 
 ```bash
 # with the log, as every number above was taken
-FHSM_TOKENS_DIR=$(mktemp -d) probes/rest/04_concurrency ./libfreehsm-fips.so k1
+FHSM_TOKENS_DIR=$(mktemp -d) probes/rest/04_concurrency ./libfreehsm.so k1
 
 # same thing, without making the line durable
 FHSM_TOKENS_DIR=$(mktemp -d) FHSM_AUDIT_LOG=/dev/null \
-    probes/rest/04_concurrency ./libfreehsm-fips.so k1
+    probes/rest/04_concurrency ./libfreehsm.so k1
 ```
 
 | | with the log | on `/dev/null` |

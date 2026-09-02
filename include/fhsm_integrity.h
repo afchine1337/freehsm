@@ -25,7 +25,7 @@
  *
  *  Mechanism :
  *    1. At build time, `scripts/sign_module.sh` computes SHA-256 of
- *       the final libfreehsm-fips.so with the bytes inside the
+ *       the final libfreehsm.so with the bytes inside the
  *       dedicated ELF section `.fhsm_digest` set to zero.
  *    2. The script patches the resulting 32-byte digest into that
  *       same section, so the shipped .so contains its own digest at

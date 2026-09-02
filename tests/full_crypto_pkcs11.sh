@@ -2,7 +2,7 @@
 # ============================================================================
 # full_crypto_pkcs11.sh --- Full cryptographic operations exercise
 #
-# Exercises every wired mechanism in libfreehsm-fips.so on a fresh slot 0,
+# Exercises every wired mechanism in libfreehsm.so on a fresh slot 0,
 # generating keys, signing/encrypting, then validating round-trip and
 # (where applicable) interoperating with external OpenSSL.
 #
@@ -28,7 +28,7 @@
 # ============================================================================
 
 set -u
-MODULE="${MODULE:-/opt/freehsm/lib/libfreehsm-fips.so}"
+MODULE="${MODULE:-/opt/freehsm/lib/libfreehsm.so}"
 TOKENS_DIR="${TOKENS_DIR:-$(mktemp -d /tmp/freehsm-full-XXXXXX)}"
 export FHSM_TOKENS_DIR="${TOKENS_DIR}"
 SO_PIN="00000000"; USER_PIN="user0000"

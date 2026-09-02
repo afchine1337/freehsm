@@ -18,7 +18,7 @@ Items sous gestion :
 | Générateur source-of-truth      | `scripts/gen_p11_thunks.py`                              | Mono-repo Git     |
 | Vecteurs de test                | `kat/cavp/*.rsp`, `kat/fhsm_kat_vectors.c`               | Mono-repo Git     |
 | Documentation                   | `docs/*.md`                                              | Mono-repo Git     |
-| Artefacts de build (releases)   | `libfreehsm-fips.so`, `freehsm-c-src.tar.xz`, `*.sha256` | Serveur de release signé |
+| Artefacts de build (releases)   | `libfreehsm.so`, `freehsm-c-src.tar.xz`, `*.sha256` | Serveur de release signé |
 | Evidence d'évaluation           | `docs/{ATE_FUN,AVA_VAN,ALC_CMC,FIPS_140_3,EAL4_PLUS,ARCHITECTURE,MECHANISMS,REPRODUCIBLE_BUILD,AGD_PRE,AGD_OPE}.md` | Mono-repo Git |
 | Issue tracker                   | label-managed `evaluation/*`                             | Forge issue tracker |
 | Avis de sécurité                | `SECURITY.md` + numéros CVE                              | Mono-repo + MITRE |
@@ -71,11 +71,11 @@ Single source of truth = `Dockerfile.build`. Le reviewer est référé à `REPRO
 
 ### 3.2 Procédures d'acceptation
 
-Un `libfreehsm-fips.so` produit est **accepté dans le set d'artefacts release** uniquement si **toutes** les conditions sont vraies :
+Un `libfreehsm.so` produit est **accepté dans le set d'artefacts release** uniquement si **toutes** les conditions sont vraies :
 
 1. `make all integrity tests dist-verify` sort 0 dans l'image Docker épinglée.
 2. Le `fhsm_module_integrity_digest[]` embarqué correspond au SHA-256 calculé externement.
-3. `readelf -p .comment libfreehsm-fips.so` rapporte la version de toolchain attendue.
+3. `readelf -p .comment libfreehsm.so` rapporte la version de toolchain attendue.
 4. `pwntools.checksec` rapporte : `RELRO=Full`, `NX=Yes`, `PIE=Yes`, `Canary=Yes`.
 5. Seuils de couverture atteints (§2.3 étape 7).
 6. Déclencheurs ré-analyse AVA_VAN (`AVA_VAN.fr.md` §6) clairs OU un AVA_VAN mis à jour est inclus dans la release.
@@ -107,8 +107,8 @@ Bundle release publié à :
 
 ```
 https://dist.freehsm.example/v<version>/
-    libfreehsm-fips.so              # le module cryptographique
-    libfreehsm-fips.so.sha256       # signé par clé de release
+    libfreehsm.so              # le module cryptographique
+    libfreehsm.so.sha256       # signé par clé de release
     freehsm-c-src.tar.xz            # archive source reproductible
     freehsm-c-src.tar.xz.sha256     # signé par clé de release
     RELEASE_NOTES.md
@@ -119,8 +119,8 @@ https://dist.freehsm.example/v<version>/
 Un client / évaluateur vérifie :
 
 1. Télécharger tous les fichiers du bundle via HTTPS.
-2. `gpg --verify libfreehsm-fips.so.sha256` contre l'empreinte de clé publiée.
-3. `sha256sum -c libfreehsm-fips.so.sha256` contre le binaire.
+2. `gpg --verify libfreehsm.so.sha256` contre l'empreinte de clé publiée.
+3. `sha256sum -c libfreehsm.so.sha256` contre le binaire.
 4. Optionnellement, rebuilder depuis sources : `make dist-verify` (le digest produit DOIT correspondre).
 
 ## 7. Remédiation de défauts (ALC_FLR.2)

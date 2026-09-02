@@ -20,7 +20,7 @@ The Python POC is functionally complete (165 passing tests, façade + engine + s
 - The Python allocator is garbage-collected --- no zeroization guarantee.
 - The crypto primitives delegate to `cryptography` (CFFI → libssl), adding an untraceable boundary.
 
-The C port removes these obstacles : a single `.so` (`libfreehsm-fips.so`) directly loading the **OpenSSL 3.x FIPS provider** (separately validated), with a `mlock()`-ed *secure heap* for all SSP, and a boundary made exclusively of the `C_*` PKCS#11 symbols.
+The C port removes these obstacles : a single `.so` (`libfreehsm.so`) directly loading the **OpenSSL 3.x FIPS provider** (separately validated), with a `mlock()`-ed *secure heap* for all SSP, and a boundary made exclusively of the `C_*` PKCS#11 symbols.
 
 ## Structure
 
@@ -92,7 +92,7 @@ sudo apt install -y libssl-dev cmake ninja-build
 
 make generate                  # regenerate the mechanism dispatch (CKM_* + table + doc)
 make generate PROFILE=interop  # same but with legacy CKM_* dispatchable (audit-only)
-make                           # generate then build libfreehsm-fips.so
+make                           # generate then build libfreehsm.so
 make tests                     # run test_smoke (POST + KAT + AES-GCM RT + tamper)
 make integrity                 # patch SHA-256 into fhsm_module_integrity_digest[]
 make repro                     # build inside the pinned Docker image
@@ -156,7 +156,7 @@ Legend : ✅ implemented · 🟡 partial/scaffold · ⏳ to do
 
 ## Synthesis
 
-- **Strict C11** hardened (`-Werror -Wpedantic -fstack-protector-strong ...`), single cryptographic boundary (`libfreehsm-fips.so` + OpenSSL 3.x FIPS provider).
+- **Strict C11** hardened (`-Werror -Wpedantic -fstack-protector-strong ...`), single cryptographic boundary (`libfreehsm.so` + OpenSSL 3.x FIPS provider).
 - **78 `CKM_*`** dispatchable (66 FIPS-approved + 12 legacy rejected), generated from a single auditable source of truth.
 - **66 concrete handlers** in `src/dispatch/` (10 files, ~2 400 l.), including KMAC, CONCATENATE/XOR KDFs, and 2 hybrid PQ + classical mechanisms.
 - **Boot self-test FIPS 140-3 §7.10.2** : `.fhsm_digest` ELF section patched post-build, SHA-256 of the .so (digest area zeroized) verified before the FIPS provider loads.
@@ -170,4 +170,4 @@ Legend : ✅ implemented · 🟡 partial/scaffold · ⏳ to do
 
 ## Maintainer & brand
 
-**Simorgh Labs — Open Source Cryptography and Digital Trust** — sponsoring entity for the FreeHSM project and publisher of **Simorgh PKI** (v2.0, in development: `fhsm-ca` PKI CLI + `fhsm-sign` signing toolkit + PQC composite signatures per IETF LAMPS). Maintained by Afchine Madjlessi (`afchine.mad@gmail.com`). All releases are GPG-signed with key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2` (Ed25519, unchanged across the rebrand). The PKCS#11 module reports `manufacturerID = "Simorgh Labs"` (truncated to the 32-octet field per PKCS#11 v3.2 §C.6.1). The library binary name `libfreehsm-fips.so` and all PKCS#11 identifiers are stable — the rebrand changes no consumer-facing interface. Name and logo usage: see [`TRADEMARK.md`](TRADEMARK.md).
+**Simorgh Labs — Open Source Cryptography and Digital Trust** — sponsoring entity for the FreeHSM project and publisher of **Simorgh PKI** (v2.0, in development: `fhsm-ca` PKI CLI + `fhsm-sign` signing toolkit + PQC composite signatures per IETF LAMPS). Maintained by Afchine Madjlessi (`afchine.mad@gmail.com`). All releases are GPG-signed with key `743A 6A59 04A1 4616 46A6 408D E485 6016 2DBB F28A 2` (Ed25519, unchanged across the rebrand). The PKCS#11 module reports `manufacturerID = "Simorgh Labs"` (truncated to the 32-octet field per PKCS#11 v3.2 §C.6.1). The library binary name `libfreehsm.so` and all PKCS#11 identifiers are stable — the rebrand changes no consumer-facing interface. Name and logo usage: see [`TRADEMARK.md`](TRADEMARK.md).
