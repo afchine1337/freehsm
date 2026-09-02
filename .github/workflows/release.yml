@@ -216,9 +216,30 @@ jobs:
                 --armor --detach-sign "$f"
           done
 
+      # The release notes for this version are written by hand, in the repo, and
+      # until v2.0.0 no workflow had ever read them: `generate_release_notes`
+      # alone produced a commit list, and RELEASE_vX.Y.Z.md was published
+      # nowhere. v2.0.0 shipped without its own strongest warning -- that a
+      # token these tools build does not enumerate from OpenSSL -- because the
+      # warning was in the file and the file was not on the path.
+      #
+      # Missing file is a hard failure. A release whose notes silently fall
+      # back to a commit list is the defect this step exists to prevent, and a
+      # warning in a green log would not be read.
+      - name: The hand-written notes must exist
+        id: notes
+        run: |
+          N="RELEASE_${GITHUB_REF_NAME}.md"
+          [ -f "$N" ] || { echo "::error::$N not found; write the notes before tagging"; exit 1; }
+          echo "path=$N" >> "$GITHUB_OUTPUT"
+          echo "notes: $N ($(wc -l < "$N") lines)"
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          # Both: the file is the body, and GitHub appends its generated
+          # changelog and compare link underneath it.
+          body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true
           files: |
             dist/*.tar.xz
