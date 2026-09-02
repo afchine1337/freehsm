@@ -203,6 +203,23 @@ echo "== Reproducibility =="
 REF="dist/refs/v${VERSION}.sha256"
 if [ -f "$REF" ]; then
     ok "reference recorded: $REF"
+    # Three outcomes, not two. This block had two, and conflated the third
+    # with a real mismatch:
+    #
+    #   compared, agrees      -> ok
+    #   compared, DIFFERS     -> bad. The artefact does not reproduce, which
+    #                            is the whole point of the file.
+    #   could not compare     -> warn, naming why. Docker absent, a daemon
+    #                            that will not answer, a bind mount the
+    #                            container cannot enter -- none of these is a
+    #                            statement about the build.
+    #
+    # The distinction was not academic on 2026-09-02: dist-verify failed here
+    # with `cd: /src: Permission denied`, the container unable to enter the
+    # mounted tree, and the run was reported as a reproducibility failure. It
+    # was a report about the machine. A check that cannot separate "the
+    # property does not hold" from "I could not look" is the shape of defect
+    # this whole pre-flight exists to catch, and it was in the pre-flight.
     if command -v docker >/dev/null 2>&1; then
         if make dist-verify >/tmp/rel_repro.log 2>&1; then
             if grep -q "reference found" /tmp/rel_repro.log; then
@@ -214,8 +231,18 @@ if [ -f "$REF" ]; then
                 # dist/refs/v.sha256 -- a file that cannot exist.
                 bad "dist-verify fell back despite $REF -- version mismatch?"
             fi
+        elif grep -qiE "digest divergence|FAIL : digest" /tmp/rel_repro.log; then
+            # It looked, and the answer is no. This is the failure the file
+            # exists to produce, and it must not be softened.
+            bad "the local build does NOT reproduce $REF -- /tmp/rel_repro.log
+        Either the source changed without a version bump, or the toolchain
+        drifted. Do not tag until it is known which."
         else
-            bad "dist-verify failed -- /tmp/rel_repro.log"
+            warn "could not compare here -- dist-verify did not get as far as
+        a digest. Last line: $(tail -2 /tmp/rel_repro.log | head -1)
+        Full log: /tmp/rel_repro.log. This says nothing about the build.
+        release.yml compares inside the image at tag time and refuses to
+        publish on a mismatch, so the comparison still happens."
         fi
     else
         # This was a failure -- "a reference nobody checked is the same
