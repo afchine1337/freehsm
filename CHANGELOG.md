@@ -7,6 +7,24 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+* **Key generation and `fhsm_drbg`: the beta's remedy is withdrawn, measured
+  (#168).** `RELEASE_v2.0.0-beta.md` prescribed "a library context backed by
+  `fhsm_drbg`" to make key generation draw from the module's DRBG. Tried
+  against the FIPS provider: the DRBG is live and callable, and neither
+  `RAND_bytes_ex` nor key generation reaches it — 0 bytes for RSA-2048,
+  RSA-4096, EC P-256 and ML-DSA-65, where the same code under the default
+  provider draws 31574 / 77772 / 32 / 32. Why the two diverge is not
+  established and is not claimed.
+
+  The framing was the error. FIPS 140-3 puts the DRBG inside the validated
+  boundary, and per `docs/FIPS_140_3_SECURITY_TARGET.md` that boundary is the
+  OpenSSL FIPS provider — so keys coming from *its* approved DRBG is the
+  delegation working, not a gap in it. `fhsm_drbg` remains the generator for
+  what the module itself produces: serial numbers, object ids, blob nonces.
+  In `interop`, key material comes from OpenSSL's default RAND, which the
+  release notes now state as a property rather than as an unfinished step.
+
 ### Fixed
 * **The reproducibility reference could never have been committed (#167).**
   `.gitignore` contained `dist/` with no negation, so

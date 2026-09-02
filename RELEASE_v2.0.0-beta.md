@@ -61,6 +61,15 @@ lost is the property the module's own DRBG was built for. Certificate serial
 numbers were on the same path and are fixed in this release; closing it for key
 generation needs a library context backed by `fhsm_drbg` and is not done.
 
+> **Superseded 2026-09-01.** The remedy proposed in the last sentence was
+> tried and measured: a private `OSSL_LIB_CTX` with `RAND_set_DRBG_type` does
+> not make the FIPS provider's key generation draw from `fhsm_drbg`
+> (`probes/spike_provider_rand.c`). The description above is still accurate;
+> the prescription is not. See `docs/ROADMAP.md` — under FIPS the DRBG belongs
+> inside the validated boundary, which for this module is the OpenSSL FIPS
+> provider, so keys coming from *its* approved DRBG is the delegation working
+> rather than a gap in it.
+
 ### The service has never run behind a real reverse proxy
 
 `fhsm-service` is new in this release and is the part to treat with the most
