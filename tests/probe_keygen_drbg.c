@@ -1,4 +1,9 @@
-/* Does a key this module generates draw its material from this module's DRBG?
+/* ===========================================================================
+ * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+ * SPDX-License-Identifier: Apache-2.0
+ * ===========================================================================
+ * probe_keygen_drbg --- does a key this module generates draw its material
+ * from this module's DRBG?
  *
  * RELEASE_v2.0.0-beta.md said this of composite key generation only. It is
  * true of every key the module generates: EVP_PKEY_Q_keygen(NULL, ...)
