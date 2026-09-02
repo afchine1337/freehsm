@@ -481,6 +481,12 @@ number invites the assumption that nothing moved.
 | R4/R5 RSA harness gaps | fail | **gone** — fixed upstream in v0.1.8 |
 | `TestEncryptOutputLengthTruncation` | (test did not exist) | **fail — harness defect, not ours** |
 | `TestDecryptOutputLengthTruncation` | (test did not exist) | **fail — harness defect, not ours** |
+| `TestECDH1CofactorDerive` | skipped | skipped |
+
+*A third run, same harness version, on 2026-09-02 before the v2.0.0 tag:*
+**5 failed, 1697 passed, 2102 skipped, 0 crashed.** Passed identical,
+skipped down by one, failed up by one — `TestECDH1CofactorDerive` moved from
+skipped to failed. See R6.
 
 **No new defect in the module.** Two of the four failures are our two standing
 positions; the other two are a bug in the probe's own teardown.
@@ -671,6 +677,49 @@ matters, which is the pattern this whole campaign exists to remove.
 **What would move it:** implementing SP 800-38D §8.2.1 deterministic IV
 construction, where the module owns the counter and the caller cannot supply a
 colliding IV. That is a feature, and the right one; it is not a bug fix.
+
+## R6 — `TestECDH1CofactorDerive::test_cofactor_matches_standard_ecdh`
+
+**Observed 2026-09-02, not diagnosed.** Recorded before the v2.0.0 tag rather
+than after, because the release notes say the harness runs and an unaccounted
+failure is what this document exists to prevent.
+
+The test derives a shared secret twice — once with `CKM_ECDH1_DERIVE`, once
+with `CKM_ECDH1_COFACTOR_DERIVE` — and asserts they match. On a prime-order
+curve the cofactor is 1, so they should. One of the two derivations returned:
+
+```
+pkcs11_check.raw.rv.CkrAssertionError: Unexpected CK_RV CKR_FUNCTION_FAILED;
+    expected one of: CKR_OK
+    at testcases/test_ecdh_extended.py:176 in _ecdh_derive
+```
+
+Which of the two calls failed is not visible in the captured report, and
+`FHSM_RV_FUNCTION_FAILED` is returned from more than one place on that path.
+
+**What the code says.** The mechanism is implemented, not stubbed:
+`C_DeriveKey` accepts `CKM_ECDH1_COFACTOR_DERIVE` alongside `CKM_ECDH1_DERIVE`
+(`src/fhsm_pkcs11.c`), and `dispatch_ecdh1_cofactor`
+(`src/dispatch/fhsm_dispatch_pkey.c:464`) calls the same `ecdh_derive()` as the
+standard path. So `docs/MECHANISMS.md` marking it ✅ is accurate, and a stub is
+not the explanation.
+
+**What the counts say, and it is worth the arithmetic.** Against v0.1.8 on
+2026-08-03: 4 failed, 1697 passed, 2103 skipped. Tonight, same harness version:
+5 failed, **1697 passed**, 2102 skipped. The passed count is identical and
+skipped fell by exactly one. So one test moved from *skipped* to *failed* —
+this one. That is a test which began running, not a behaviour that changed. Why
+it was skipped before is the first thing to establish, and it has not been
+established.
+
+**Not a security finding.** A derivation that fails leaks nothing, forges
+nothing, extracts nothing. It is a functional gap between an advertised
+mechanism and its behaviour in a configuration the harness reaches.
+
+**What would move it:** running the single node-id against the module with the
+audit log open, to learn which call fails and where `FUNCTION_FAILED` is
+raised. Not attempted on 2026-09-02 — it was late and a guess written down
+would have been worse than a gap named.
 
 ## R4 / R5 — `test_rsa_encrypt_boundary`, `test_rsa_decrypt_timing_sanity`
 
