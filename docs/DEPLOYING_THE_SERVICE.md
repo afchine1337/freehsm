@@ -35,13 +35,23 @@ knowing exactly which:
 
 | The proxy… | What arrives | What the daemon does |
 |---|---|---|
-| sets the header, client also sends one | two headers | **400**, refused. It does not pick one. Resolving an ambiguity about identity is how the wrong answer becomes authoritative |
+| sets the header with `proxy_set_header`, client also sends one | **one header, the proxy's** | served, correctly. nginx *replaces* |
 | sets the header, client sends none | one header, the proxy's | served, correctly |
+| **adds** a header without replacing (not the config below) | two headers | **400**, refused. It does not pick one. Resolving an ambiguity about identity is how the wrong answer becomes authoritative |
 | **does not set the header at all** | the client's, if any | **served, and the client is whoever it said it was** |
 
-The third row is the one nothing in the daemon can catch. A header it never
+*Measured against nginx 1.18.0 by `tests/proxy_nginx.sh`, 2026-09-02.* The
+first row previously said "two headers → 400", which contradicted the comment
+in the configuration below — `proxy_set_header` replaces, so a client-supplied
+header never reaches the daemon at all. The 400 is real and worth having, but
+it belongs to a proxy that *adds*; nginx configured as shown here never
+produces it. The row was a prediction and it was wrong.
+
+The last row is the one nothing in the daemon can catch. A header it never
 receives is indistinguishable from a header the proxy wrote. Every check below
-exists because of that row.
+exists because of that row, and it is asserted rather than asserted-about:
+with the `proxy_set_header` line removed, `CN=attacker,O=Example,C=FR` arrives
+intact.
 
 ### nginx
 
@@ -102,6 +112,12 @@ assume.** The quickest way is to look: make one request and read the audit log,
 where the subject appears as `actor`. A policy written in the wrong format does
 not fail loudly — every request is simply refused as unauthorised, and the
 refusals are indistinguishable from an attack by design.
+
+*Both rows measured against nginx 1.18.0, 2026-09-02* (`tests/proxy_nginx.sh`):
+a certificate with subject `/C=FR/O=Example/CN=web01` reaches the backend as
+`CN=web01,O=Example,C=FR` through `$ssl_client_s_dn`, and as
+`/C=FR/O=Example/CN=web01` through `$ssl_client_s_dn_legacy`. This table was
+right.
 
 ---
 

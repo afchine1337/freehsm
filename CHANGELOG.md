@@ -8,6 +8,30 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Changed
+* **The proxy configuration is measured, and one row of the guide was wrong
+  (#169).** `docs/DEPLOYING_THE_SERVICE.md` said that when the proxy sets
+  `X-FHSM-Client-Subject` and the client also sends one, **two** headers reach
+  the daemon and it answers 400. Measured against nginx 1.18.0: **one** header
+  arrives, carrying the proxy's value — `proxy_set_header` replaces, which the
+  configuration comment three lines below that table already said. The table
+  contradicted its own commentary and the table was the wrong one. The 400 is
+  kept and re-attributed to a proxy that *adds* rather than replaces.
+
+  `tests/proxy_nginx.sh` is new and runs the documented nginx configuration
+  for real: the header is replaced not merged, the subject arrives as
+  `CN=web01,O=Example,C=FR` (and `/C=FR/O=Example/CN=web01` through
+  `$ssl_client_s_dn_legacy` — that table was right), a missing client
+  certificate is a 403, and with the `proxy_set_header` line removed the
+  client's own `CN=attacker` arrives intact. The hole the guide describes is
+  now asserted rather than described. It skips, loudly, where nginx is absent.
+
+  Scope stated rather than blurred: the backend is a stand-in that reports the
+  headers it received, because the subject under test is nginx. Running
+  `fhsm-service` itself behind this configuration is the other half of #169
+  and is not done — `/health` answers 200 without authorisation, so showing
+  that a policy in the wrong format refuses everything needs `/sign` and a key
+  label.
+
 * **Key generation and `fhsm_drbg`: the beta's remedy is withdrawn, measured
   (#168).** `RELEASE_v2.0.0-beta.md` prescribed "a library context backed by
   `fhsm_drbg`" to make key generation draw from the module's DRBG. Tried
