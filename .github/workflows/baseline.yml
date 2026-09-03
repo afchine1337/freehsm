@@ -140,8 +140,14 @@ jobs:
             echo "does not match it."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The one file this run produced, not the directory.
+      #
+      # `dist/refs/*.sha256` also matched every reference already committed in
+      # the checkout, so the artefact for v2.0.1 shipped v2.0.0.sha256 with it
+      # and `gh run download` refused to extract over the copy already on disk.
+      # The glob would keep growing with every release.
       - uses: actions/upload-artifact@v4
         with:
           name: reproducibility-reference
-          path: dist/refs/*.sha256
+          path: dist/refs/v${{ steps.v.outputs.version }}.sha256
           if-no-files-found: error
