@@ -299,7 +299,7 @@ Run the harness first and confirm the failure count is what you expect:
 Then:
 
     git add -A && git commit -S -m "release: $TAG"
-    git tag -s $TAG -m "FreeHSM / Simorgh PKI $TAG"
+    git tag -s $TAG -m "FreeHSM $TAG --- PKCS#11 v3.2 software HSM, Simorgh Labs"
     git tag -v $TAG
     git push origin main --follow-tags
     git ls-remote --tags origin | grep $TAG   # confirm it actually went
