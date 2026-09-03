@@ -14,8 +14,13 @@
 set -euo pipefail
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT_A="${PROJ_ROOT}/out/run-a"
-OUT_B="${PROJ_ROOT}/out/run-b"
+# Outside PROJ_ROOT, for the reason spelled out in build_reproducible.sh:
+# PROJ_ROOT is mounted read-only in the container, and its `make clean` runs
+# `rm -rf out/`. These two directories, created here before either build, were
+# precisely what that rm tripped over (issue #4).
+REPRO_BASE="${FHSM_REPRO_OUT:-${TMPDIR:-/tmp}/freehsm-repro-out}"
+OUT_A="${REPRO_BASE}/run-a"
+OUT_B="${REPRO_BASE}/run-b"
 DIFFOSCOPE="${DIFFOSCOPE:-diffoscope}"  # optional; install via apt if missing
 
 command -v docker >/dev/null || { echo "docker not found"; exit 1; }
@@ -24,15 +29,15 @@ echo "[verify] === run A ==="
 rm -rf "${OUT_A}" "${OUT_B}"
 mkdir -p "${OUT_A}" "${OUT_B}"
 
-"${PROJ_ROOT}/scripts/build_reproducible.sh"
-mv "${PROJ_ROOT}/out/libfreehsm.so" "${OUT_A}/"
-mv "${PROJ_ROOT}/out/digest.txt"          "${OUT_A}/"
+FHSM_REPRO_OUT="${REPRO_BASE}" "${PROJ_ROOT}/scripts/build_reproducible.sh"
+mv "${REPRO_BASE}/libfreehsm.so" "${OUT_A}/"
+mv "${REPRO_BASE}/digest.txt"    "${OUT_A}/"
 
 echo "[verify] === run B (clean) ==="
 docker volume prune -f >/dev/null 2>&1 || true
-"${PROJ_ROOT}/scripts/build_reproducible.sh"
-mv "${PROJ_ROOT}/out/libfreehsm.so" "${OUT_B}/"
-mv "${PROJ_ROOT}/out/digest.txt"          "${OUT_B}/"
+FHSM_REPRO_OUT="${REPRO_BASE}" "${PROJ_ROOT}/scripts/build_reproducible.sh"
+mv "${REPRO_BASE}/libfreehsm.so" "${OUT_B}/"
+mv "${REPRO_BASE}/digest.txt"    "${OUT_B}/"
 
 dig_a="$(awk '{print $1}' "${OUT_A}/digest.txt")"
 dig_b="$(awk '{print $1}' "${OUT_B}/digest.txt")"

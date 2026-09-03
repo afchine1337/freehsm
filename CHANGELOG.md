@@ -8,6 +8,38 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **Three reports from outside, two of them fixed, one already fixed and never
+  answered (#4, #7, #8).** Eight issues had been open for weeks; these are the
+  ones that block someone.
+
+  **#7 — the build fails for a Debian maintainer.** `snprintf("AES-%zu-GCM",
+  key_len * 8)` into a `char[16]`, twice, rejected under his flags as
+  `-Werror=format-truncation=`. Replaced by a lookup table, which also closes
+  the hole the format string hid: neither caller validated `key_len`, so a
+  7-byte key built `"AES-56-GCM"` and failed several layers down instead of
+  answering `CKR_KEY_SIZE_RANGE`. **Why this tree does not see the warning is
+  not established** — the Makefile already sets `-D_FORTIFY_SOURCE=2` with
+  `-Wall -Wextra -Werror`; raising it to `=3` on the unpatched code produces
+  nothing, and `-Wformat-truncation=2` fires on eight sites rather than these
+  two. Asked upstream rather than guessed.
+
+  **#4 — `make dist-verify` cannot run at all.** `out/` lived inside the
+  project root, which the reproducible build mounts at `/src:ro`; the
+  container's `make clean` runs `rm -rf out/` and dies on the read-only mount.
+  Moved to `${FHSM_REPRO_OUT:-${TMPDIR:-/tmp}/freehsm-repro-out}`. **Four**
+  scripts derived that path, not the two the first pass fixed —
+  `dist_baseline.sh` and `dist_verify_ref.sh` would have read an empty
+  directory, the same shape as the v2.0.0 slice where four places derived the
+  reference filename three ways. Untested here: the path needs Docker, absent
+  from the maintainer's machine — which is why a documented AGD_PRE step nobody
+  on the project could execute survived nine months, and why the reporter found
+  it on his first run.
+
+  **#8 — an ELF binary in git.** Already removed in `b67b451` on 2026-08-01,
+  eleven days *before* the report: the reporter was packaging an older release
+  tarball. Verified rather than asserted — the published v2.0.0 source tarball
+  lists only `.c` files under `tests/`. `tests/bench_capacity` added to
+  `.gitignore` so a local build cannot put it back.
 * **`C_Initialize` said nothing when the FIPS provider would not load.** The
   branch latched the module into ERROR and returned, printing nothing, while
   the two failures either side of it in the same sequence — the audit key and

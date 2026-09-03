@@ -17,7 +17,21 @@ set -euo pipefail
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IMAGE="freehsm-build:1.0.0"
-OUT_DIR="${PROJ_ROOT}/out"
+# The output directory must NOT live inside PROJ_ROOT.
+#
+# PROJ_ROOT is mounted at /src:ro and the container's build runs `make clean`,
+# whose recipe ends with `rm -rf out/`. With out/ inside the source tree that
+# is a write to a read-only mount, and the build dies before it starts:
+#
+#   rm: cannot remove 'out/run-a': Read-only file system
+#   uid=2000(freehsm) gid=2000(freehsm)
+#
+# Reported by an external user following AGD_PRE (issue #4, 2026-07-20). It
+# survived because this path needs Docker, which the maintainer's dev VM does
+# not have -- the same absence that left dist/refs/ empty through six releases
+# and is why .github/workflows/baseline.yml exists. A documented step nobody
+# on the project could execute.
+OUT_DIR="${FHSM_REPRO_OUT:-${TMPDIR:-/tmp}/freehsm-repro-out}"
 EXPECTED_DIGEST=""
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1735689600}"
 

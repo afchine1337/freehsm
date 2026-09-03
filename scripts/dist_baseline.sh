@@ -38,7 +38,14 @@ echo "[baseline] establishing reference for v${VERSION}"
 "${PROJ_ROOT}/scripts/verify_reproducibility.sh"
 
 # At this point both runs produced the same digest ; just take one.
-src_digest_file="${PROJ_ROOT}/out/run-a/digest.txt"
+#
+# Same base as verify_reproducibility.sh and build_reproducible.sh. It moved
+# out of PROJ_ROOT because the container mounts PROJ_ROOT read-only and its
+# `make clean` runs `rm -rf out/` (issue #4). Four scripts derived this path;
+# this one and dist_verify_ref.sh kept the old value after the first two were
+# fixed, which is the identical shape as the v2.0.0 slice where four places
+# derived the reference filename three ways.
+src_digest_file="${FHSM_REPRO_OUT:-${TMPDIR:-/tmp}/freehsm-repro-out}/run-a/digest.txt"
 if [ ! -f "$src_digest_file" ]; then
     echo "[baseline] FAIL : verify_reproducibility didn't leave run-a/digest.txt"
     exit 1

@@ -6290,6 +6290,43 @@ static uint32_t resolve_mech(uint32_t m) {
  * captured at op_init time from pMechanism->pParameter and stored in
  * op->gcm_iv (the same buffer used by CKM_AES_GCM ; sufficient for the
  * variable IV lengths Wycheproof exercises). */
+/* The AES cipher name an EVP_MAC "cipher" parameter needs, by key length.
+ * cbc=0 gives the GCM name (GMAC), cbc=1 the CBC name (CMAC). NULL for a
+ * length this module does not support.
+ *
+ * Both callers built this with snprintf("AES-%zu-GCM", key_len * 8) into a
+ * char[16]. GCC under Debian's default hardening rejects that outright:
+ *
+ *   error: '%zu' directive output may be truncated writing between 1 and 20
+ *   bytes into a region of size 12 [-Werror=format-truncation=]
+ *
+ * The compiler is right and the fix is not a cast to silence it. Neither
+ * caller validated key_len, so a 7-byte key produced "AES-56-GCM" and failed
+ * three layers down in EVP_MAC_init with nothing pointing back here. A table
+ * makes the truncation impossible to write and answers CKR_KEY_SIZE_RANGE at
+ * the point where the length is actually wrong.
+ *
+ * Reported by a Debian maintainer packaging FreeHSM (issue #7).
+ *
+ * Why this build does not see it is NOT established. The obvious guess was
+ * that our hardening is weaker than Debian's, and it is wrong twice over: the
+ * Makefile already sets -D_FORTIFY_SOURCE=2 with -Wall -Wextra -Werror, and
+ * raising it to =3 on the unpatched code here produces nothing. Forcing
+ * -Wformat-truncation=2 does fire, but on eight sites rather than these two,
+ * so it is not the reporter's configuration either. GCC version or LTO remain
+ * possible and neither has been checked. Asked upstream rather than assumed.
+ *
+ * The fix does not depend on that answer: the construct is gone, and the
+ * unvalidated length it hid is now an error at the point where it is wrong. */
+static const char *aes_mac_cipher_name(size_t key_len, int cbc) {
+    switch (key_len) {
+        case 16: return cbc ? "AES-128-CBC" : "AES-128-GCM";
+        case 24: return cbc ? "AES-192-CBC" : "AES-192-GCM";
+        case 32: return cbc ? "AES-256-CBC" : "AES-256-GCM";
+        default: return NULL;
+    }
+}
+
 static fhsm_rv_t aes_gmac(const uint8_t *key, size_t key_len,
                            const uint8_t *iv,  size_t iv_len,
                            const uint8_t *data, size_t data_len,
@@ -6300,7 +6337,9 @@ static fhsm_rv_t aes_gmac(const uint8_t *key, size_t key_len,
     EVP_MAC_free(mac);
     if (!ctx) return FHSM_RV_HOST_MEMORY;
     char cipher_name[16];
-    snprintf(cipher_name, sizeof(cipher_name), "AES-%zu-GCM", key_len * 8);
+    const char *cn = aes_mac_cipher_name(key_len, 0);
+    if (!cn) { EVP_MAC_CTX_free(ctx); return FHSM_RV_KEY_SIZE_RANGE; }
+    memcpy(cipher_name, cn, strlen(cn) + 1);
     OSSL_PARAM params[3] = {
         OSSL_PARAM_construct_utf8_string("cipher", cipher_name, 0),
         OSSL_PARAM_construct_octet_string("iv", (void *)iv, iv_len),
@@ -6328,7 +6367,9 @@ static fhsm_rv_t aes_cmac(const uint8_t *key, size_t key_len,
     EVP_MAC_free(mac);
     if (!ctx) return FHSM_RV_HOST_MEMORY;
     char cipher_name[16];
-    snprintf(cipher_name, sizeof(cipher_name), "AES-%zu-CBC", key_len * 8);
+    const char *cn = aes_mac_cipher_name(key_len, 1);
+    if (!cn) { EVP_MAC_CTX_free(ctx); return FHSM_RV_KEY_SIZE_RANGE; }
+    memcpy(cipher_name, cn, strlen(cn) + 1);
     OSSL_PARAM params[2] = {
         OSSL_PARAM_construct_utf8_string("cipher", cipher_name, 0),
         OSSL_PARAM_construct_end()

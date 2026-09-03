@@ -215,3 +215,4 @@ src/gen/.profile.stamp
 # Measurement probes: the sources are tracked, the binaries are not.
 probes/*/0[0-9]_*
 !probes/*/0[0-9]_*.c
+tests/bench_capacity

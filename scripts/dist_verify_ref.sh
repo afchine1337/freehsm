@@ -32,7 +32,10 @@ PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${VERSION:-$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' "$PROJ_ROOT/include/fhsm_common.h" 2>/dev/null || echo unknown)}"
 VERSION="${VERSION%-FIPS}"
 REF_FILE="${PROJ_ROOT}/dist/refs/v${VERSION}.sha256"
-OUT_DIR="${PROJ_ROOT}/out"
+# Not inside PROJ_ROOT : the reproducible build mounts it read-only and its
+# `make clean` runs `rm -rf out/` (issue #4). One base, read the same way by
+# build_reproducible.sh, verify_reproducibility.sh and dist_baseline.sh.
+OUT_DIR="${FHSM_REPRO_OUT:-${TMPDIR:-/tmp}/freehsm-repro-out}"
 
 if [ ! -f "$REF_FILE" ]; then
     echo "[verify-ref] FAIL : no reference digest at $REF_FILE"
