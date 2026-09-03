@@ -7,7 +7,41 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+* **v1.4.0 was published unsigned, and the two people who reported it were told
+  nothing for ten weeks (#1, #3).** Read from the published artefacts:
+  v1.4.0's `.fhsm_digest` is all zeros; v1.5.0 and v1.6.0 carry real digests.
+  `release.yml` ran `make integrity || echo "WARN…"`, so a failed signing step
+  printed into a green log and published anyway. Every download of v1.4.0
+  returned `FHSM_RV_INTEGRITY_FAILED (0x80000002)` from `C_Initialize`.
+
+  It fails closed, so this is not a vulnerability in the module. What makes it
+  a security entry is the workaround: both reporters found
+  `FHSM_INTEGRITY_ALLOW_UNSIGNED=1`, which starts the module by disabling the
+  integrity check. A broken release drove users to switch off a control to
+  evaluate the product.
+
+  The cause was removed on 2026-09-01 during v2.0.0 preparation and described
+  in the release notes as a hypothetical — "a failed signing would have
+  published an unsigned module, which cannot initialise at all". It had already
+  happened, twice reported, in issues open at the time. Full account in
+  `SECURITY.md`.
+
 ### Fixed
+* **`make tests` fails on a fresh build, and nothing says why (#3).** `make`
+  leaves the digest slot zeroed; `make integrity` is what signs it. So
+  `make && make tests` returns the same `0x80000002` as an unsigned release,
+  and a first-time user has no way to tell a broken download from a missing
+  step.
+* **AGD_PRE implied the module needs a dedicated user (#1).** It does not: the
+  `freehsm` user belongs to `fhsm-service`, and the module is usable by any
+  user who can read it and its `FHSM_TOKENS_DIR`. Answered; the guide still
+  needs the correction.
+* **32-bit is unsupported, and now says so (#2).** `src/fhsm_integrity.c` reads
+  `Elf64_*` unconditionally to locate `.fhsm_digest`, so the `-Wconversion`
+  failures a Debian maintainer hit on i386 are correct rejections rather than
+  sloppy casts. AGD_PRE's environment table now states 64-bit only (x86_64 or
+  aarch64).
 * **Three reports from outside, two of them fixed, one already fixed and never
   answered (#4, #7, #8).** Eight issues had been open for weeks; these are the
   ones that block someone.

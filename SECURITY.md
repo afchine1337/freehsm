@@ -161,6 +161,59 @@ standing practice for any future evidence-bearing surface defect.
 
 ---
 
+## Self-disclosed release-integrity defect — v1.4.0 published unsigned (2026-09-03)
+
+**v1.4.0 was published without its integrity digest.** Measured on the released
+artefact, not inferred:
+
+| release | `.fhsm_digest` |
+|---|---|
+| v1.4.0 | **all zeros — unsigned** |
+| v1.5.0 | `5fb23673a8fef7f09572189fe61d2730f86a2dcd478a461bc55e6eef605c6906` |
+| v1.6.0 | `df05720f12e9c721c69ccdb131509bca12ff3fc0cccaa509824bf99560b63501` |
+
+**Cause.** `.github/workflows/release.yml` ran `make integrity || echo "WARN…"`.
+A failed signing step wrote a warning into an otherwise green log and the
+release published anyway.
+
+**Effect.** The module refuses to initialise when its digest slot is zero, so
+every download of v1.4.0 returned `FHSM_RV_INTEGRITY_FAILED (0x80000002)` from
+`C_Initialize`, for every user, on every machine. It fails closed: an unsigned
+module is unusable, not silently trusted.
+
+**Why it is recorded here rather than as a mere packaging slip.** Two
+independent reporters hit it on 2026-06-29 (issues #1 and #3) and both found the
+same way forward — `FHSM_INTEGRITY_ALLOW_UNSIGNED=1`, which starts the module by
+**turning the integrity check off**. A broken release drove users to disable a
+security control in order to evaluate the product at all. That is the harm, and
+it is larger than the outage.
+
+**Not a vulnerability in the module.** The check behaved exactly as specified.
+Nothing about a signed release is weakened, and no key material was exposed. The
+defect is in the release path.
+
+**Fixed in v2.0.0.** Signing is a hard step; a separate step reads `.fhsm_digest`
+back and fails the release if it is all zeros; the build is compared against a
+committed reproducibility reference and the workflow refuses to publish without
+one. Three further occurrences of the same swallowed-failure shape were found
+and fixed in `ci.yml` (twice) and `scripts/release.sh`.
+
+**Detection.** For any release, before trusting it:
+
+    objcopy --dump-section .fhsm_digest=/dev/stdout libfreehsm.so /dev/null \
+      | od -An -tx1 -v | tr -d ' \n'
+
+All zeros means unsigned; do not use it, and do not set the bypass to work
+around it.
+
+**Timeline.** Published in v1.4.0; reported by two users 2026-06-29; the cause
+was removed 2026-09-01 during v2.0.0 preparation, described at the time as a
+hypothetical risk; the connection to the two open reports was made 2026-09-03,
+by reading the published artefacts. Ten weeks between the report and the answer,
+and two days between fixing the cause and noticing it had already happened.
+
+---
+
 ## Supported versions
 
 | Version | Supported |

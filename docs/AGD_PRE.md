@@ -28,7 +28,7 @@ The Security Target (`docs/EAL4_PLUS.md` §3.2) lists six operational-environmen
 
 | OE id        | Requirement                                                     | Verification                                                     |
 |--------------|-----------------------------------------------------------------|------------------------------------------------------------------|
-| **OE.OS**    | Linux ≥ 5.4 with `mlock` capability                              | `uname -r ; getcap /usr/local/lib/libfreehsm.so`            |
+| **OE.OS**    | Linux ≥ 5.4 with `mlock` capability, **64-bit only** (x86_64 or aarch64) | `uname -rm ; getcap /usr/local/lib/libfreehsm.so`     |
 | **OE.STORAGE** | Local filesystem with atomic `rename` (ext4/xfs)               | `findmnt -T /var/lib/freehsm -o FSTYPE`                          |
 | **OE.OPENSSL** | OpenSSL ≥ 3.0 with FIPS provider loaded and active             | `openssl list -providers \| grep -A2 fips`                        |
 | **OE.OP**    | Administrator trained, controls authentication credentials       | (procedural --- see §6)                                          |
