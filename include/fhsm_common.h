@@ -141,6 +141,12 @@ typedef uint32_t fhsm_rv_t;
 #define FHSM_RV_KMS_QUORUM_FAILED           0x80000006u
 #define FHSM_RV_SECURE_HEAP_EXHAUSTED       0x80000007u
 #define FHSM_RV_RNG_FAILURE                 0x80000008u
+/* An OpenSSL provider this build requires would not load -- distinct from
+ * FIPS_NOT_APPROVED, which means "that mechanism is not approved in this
+ * profile" and is answered per-call. A caller that special-cases the latter as
+ * "try another mechanism" would misread an initialisation failure; there is no
+ * other mechanism to try. Returned only from C_Initialize. */
+#define FHSM_RV_PROVIDER_UNAVAILABLE        0x80000009u
 
 /* ---------------------------------------------------------------------------
  * Operator roles (PKCS#11 CKU_*). Defined here in fhsm_common.h because

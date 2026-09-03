@@ -138,6 +138,61 @@ openssl list -providers
 
 If not active, follow `docs/REPRODUCIBLE_BUILD.md` §3 to rebuild OpenSSL with `enable-fips` and patch `/etc/ssl/openssl.cnf` to activate the provider.
 
+#### 3.3.1 After every OpenSSL upgrade — `fipsmodule.cnf` must be regenerated
+
+**Run §3.3 again after any OpenSSL package update, before anything else.** An
+upgrade replaces `fips.so` but does not touch `fipsmodule.cnf`, which holds the
+MAC of the *previous* module. The provider then fails its own integrity check
+and simply does not appear:
+
+```bash
+openssl fipsinstall -verify \
+  -module /usr/lib/x86_64-linux-gnu/ossl-modules/fips.so \
+  -in /etc/ssl/fipsmodule.cnf
+# Module integrity mismatch
+# VERIFY FAILED
+```
+
+Three things make this worth its own section rather than a line.
+
+**FreeHSM will not tell you.** A signed module loads the FIPS provider during
+`C_Initialize`. When the load fails, `C_Initialize` returns
+`CKR_FUNCTION_FAILED` and prints nothing — unlike the audit-key and
+tokens-directory failures beside it, which each name themselves. Observed
+2026-09-03 on Debian 13, OpenSSL 3.5.6 → 3.5.7: forty minutes to reach a cause
+the module already knew.
+
+**`fipsinstall` cannot repair what your configuration has already broken.**
+It loads `fips.so` through the ambient `openssl.cnf`, which activates the
+provider from the stale `fipsmodule.cnf`; the module enters an error state and
+the tool meant to fix it can no longer open it:
+
+```
+Failed to load FIPS module
+INSTALL FAILED
+SELF_TEST_post:invalid state
+```
+
+Run it outside the configuration. Note that `sudo` clears the environment, so
+the assignment must be inside it:
+
+```bash
+sudo env OPENSSL_CONF=/dev/null openssl fipsinstall \
+  -module /usr/lib/x86_64-linux-gnu/ossl-modules/fips.so \
+  -out /usr/lib/ssl/fipsmodule.cnf
+openssl list -providers          # fips … status: active
+```
+
+**There must be exactly one `.include`.** A host can accumulate two
+`fipsmodule.cnf` at different paths, both included from `openssl.cnf` —
+`[fips_sect]` defined twice, and the first one read wins whether or not it is
+the valid one. Check before regenerating, and keep one:
+
+```bash
+grep -n '^\.include' /etc/ssl/openssl.cnf
+readlink -f /usr/lib/ssl        # if not /etc/ssl, the two paths are two files
+```
+
 ### 3.4 Verifying module identity
 
 ```bash

@@ -33,6 +33,7 @@
 #include "fhsm_integrity.h"
 #include "fhsm_drbg.h"
 
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/kdf.h>
@@ -103,6 +104,36 @@ static void crypto_init_once(void) {
     if (!dev_mode) {
         g_fips_prov = OSSL_PROVIDER_load(NULL, "fips");
         if (g_fips_prov == NULL) {
+            /* Say so, on stderr, with OpenSSL's own reason.
+             *
+             * This branch was silent until 2026-09-03. A caller saw
+             * C_Initialize return CKR_FUNCTION_FAILED and nothing else, while
+             * the two failures either side of it in the initialisation
+             * sequence -- the audit key and the tokens directory -- each name
+             * themselves and say what to check. Cost of the asymmetry, measured
+             * once: forty minutes on a host whose fipsmodule.cnf still held the
+             * MAC of the pre-upgrade fips.so. OpenSSL knew exactly that, and
+             * had put it on an error stack nobody printed.
+             *
+             * The generic rv is replaced too. Every other failure here sets a
+             * specific code -- INTEGRITY_FAILED, FIPS_NOT_APPROVED, KAT_FAILED
+             * -- and only this one left the FHSM_RV_FUNCTION_FAILED the
+             * variable is initialised to, so the one condition an operator is
+             * most likely to hit was the one reported least precisely. */
+            fprintf(stderr,
+                "[freehsm-c] FATAL : the OpenSSL FIPS provider would not load.\n"
+                "  This module is signed, so it requires the provider ; only an\n"
+                "  unsigned/dev build (FHSM_INTEGRITY_ALLOW_UNSIGNED) skips it.\n"
+                "  Check, in order :\n"
+                "    openssl list -providers          fips must be active\n"
+                "    OPENSSL_CONF                     currently %s\n"
+                "  An OpenSSL upgrade invalidates fipsmodule.cnf : it holds the\n"
+                "  MAC of the previous fips.so. See AGD_PRE 3.3.1.\n"
+                "  OpenSSL says :\n",
+                getenv("OPENSSL_CONF") ? getenv("OPENSSL_CONF")
+                                       : "<unset, system default>");
+            ERR_print_errors_fp(stderr);
+            g_crypto_init_rv = FHSM_RV_PROVIDER_UNAVAILABLE;
             fhsm_state_latch_error("OpenSSL FIPS provider load failed");
             return;
         }
@@ -117,6 +148,12 @@ static void crypto_init_once(void) {
         if (g_base_prov == NULL) {
             if (g_fips_prov) OSSL_PROVIDER_unload(g_fips_prov);
             g_fips_prov = NULL;
+            fprintf(stderr,
+                "[freehsm-c] FATAL : the OpenSSL base provider would not load.\n"
+                "  It supplies the PEM/DER encoders ; without it no key can be\n"
+                "  serialised to disk. OpenSSL says :\n");
+            ERR_print_errors_fp(stderr);
+            g_crypto_init_rv = FHSM_RV_PROVIDER_UNAVAILABLE;
             fhsm_state_latch_error("OpenSSL base provider load failed");
             return;
         }
@@ -138,7 +175,7 @@ static void crypto_init_once(void) {
             OSSL_PROVIDER_unload(g_fips_prov);
             g_base_prov = NULL;
             g_fips_prov = NULL;
-            g_crypto_init_rv = FHSM_RV_FIPS_NOT_APPROVED;
+            g_crypto_init_rv = FHSM_RV_PROVIDER_UNAVAILABLE;
             fhsm_state_latch_error("FIPS default property failed");
             return;
         }

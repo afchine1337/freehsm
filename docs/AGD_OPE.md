@@ -392,6 +392,7 @@ p11->C_Sign(s, msg, msg_len, sig, &sig_len);
 | `0x80000004`  | `FHSM_RV_PIN_THROTTLED`         | wait the indicated milliseconds, retry once                    |
 | `0x80000007`  | `FHSM_RV_SECURE_HEAP_EXHAUSTED` | reduce key inventory or raise `secure_heap_kb`                  |
 | `0x80000008`  | `FHSM_RV_RNG_FAILURE`           | **Critical** : DRBG failed self-test ; restart the process     |
+| `0x80000009`  | `FHSM_RV_PROVIDER_UNAVAILABLE`  | from `C_Initialize` only : a required OpenSSL provider would not load. The module prints the reason and OpenSSL's error stack on stderr. After an OpenSSL upgrade, see AGD_PRE 3.3.1 |
 
 Critical errors latch the module ERROR state. The only recovery is to restart the process (per FIPS 140-3 §7.10.5). The operator MUST also examine the audit log to determine the root cause before relaunching.
 

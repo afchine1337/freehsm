@@ -7,6 +7,40 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+* **`C_Initialize` said nothing when the FIPS provider would not load.** The
+  branch latched the module into ERROR and returned, printing nothing, while
+  the two failures either side of it in the same sequence — the audit key and
+  the tokens directory — each name themselves and say what to check. It also
+  left the generic `FHSM_RV_FUNCTION_FAILED` the variable is initialised to,
+  where every other failure in that function sets a specific code. So the one
+  condition an operator is most likely to meet was reported least precisely.
+
+  Both provider branches now write to stderr, name `OPENSSL_CONF` as it stands,
+  point at AGD_PRE 3.3.1, and print OpenSSL's own error stack — which had the
+  answer all along (`SELF_TEST_post: missing config data`). Measured cost of the
+  silence, once: forty minutes on a host whose `fipsmodule.cnf` still held the
+  MAC of the pre-upgrade `fips.so`.
+
+  The first fix reused `FHSM_RV_FIPS_NOT_APPROVED (0x80000003)`, which was
+  wrong for a reason the operator table states outright: AGD_OPE lists that
+  code as *"switch to an approved mechanism"*. There is no other mechanism to
+  try when the module will not initialise. Hence a new vendor code,
+  **`FHSM_RV_PROVIDER_UNAVAILABLE (0x80000009)`**, returned from `C_Initialize`
+  only and documented in AGD_OPE in both languages.
+
+### Added
+* **AGD_PRE 3.3.1 — regenerate `fipsmodule.cnf` after every OpenSSL upgrade.**
+  An upgrade replaces `fips.so` and leaves the MAC of the previous one, so the
+  provider fails its own integrity self-test and simply does not appear in
+  `openssl list -providers`. Two further traps are documented because both were
+  hit: `fipsinstall` loads the module through the ambient configuration, so it
+  cannot repair a host whose configuration is already broken (`SELF_TEST_post:
+  invalid state`) and must be run under `sudo env OPENSSL_CONF=/dev/null`; and
+  a host can accumulate two `fipsmodule.cnf` at different paths, both included
+  from `openssl.cnf`, with `[fips_sect]` defined twice and the stale one read
+  first.
+
 ### Changed
 * **pkcs11-check pinned to 0.1.9, and three findings closed that were never
   ours.** Both workflows installed the harness unpinned, so the version

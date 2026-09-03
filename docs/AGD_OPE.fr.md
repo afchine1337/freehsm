@@ -277,6 +277,7 @@ p11->C_Encrypt(s, plaintext, plen, ciphertext, &clen);
 | `0x80000004`  | `FHSM_RV_PIN_THROTTLED`         | attendre les ms indiquées, retry une fois                       |
 | `0x80000007`  | `FHSM_RV_SECURE_HEAP_EXHAUSTED` | réduire l'inventaire de clés ou augmenter `secure_heap_kb`      |
 | `0x80000008`  | `FHSM_RV_RNG_FAILURE`           | **Critique** : DRBG échoue auto-test ; redémarrer le processus  |
+| `0x80000009`  | `FHSM_RV_PROVIDER_UNAVAILABLE`  | depuis `C_Initialize` seulement : un fournisseur OpenSSL requis n'a pas pu être chargé. Le module écrit la raison et la pile d'erreurs OpenSSL sur stderr. Après une mise à jour d'OpenSSL, voir AGD_PRE 3.3.1 |
 
 Les erreurs critiques verrouillent l'état module ERROR. La seule récupération est de redémarrer le processus (per FIPS 140-3 §7.10.5).
 
