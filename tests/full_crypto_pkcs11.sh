@@ -64,7 +64,24 @@ assert_file_size() {
     fi
 }
 
-p11() { sudo -u freehsm "$PKCS11_TOOL" --module "$MODULE" "$@" 2>&1; }
+# `sudo env` and not plain `sudo`: sudo scrubs the environment, so the
+# FHSM_TOKENS_DIR this script exports never reached the module. Every call ran
+# against the compile-time default, /var/lib/freehsm/tokens.
+#
+# It was invisible for as long as that default happened to work. An operator
+# who has followed AGD_PRE has /var/lib/freehsm/tokens owned by freehsm, so the
+# suite passed against a directory it did not choose and did not clean; the
+# "tokens_dir preserved: /tmp/…" line it prints at the end named a directory
+# the module never opened. On a machine where the default is root-owned, all
+# twenty assertions fail at C_Initialize.
+#
+# Found 2026-09-03, on the same day and by the same mechanism as `openssl
+# fipsinstall` needing `sudo env OPENSSL_CONF=/dev/null` (AGD_PRE 3.3.1). Twice
+# in one day, a variable set beside sudo rather than inside it.
+p11() {
+    sudo -u freehsm env FHSM_TOKENS_DIR="$TOKENS_DIR" \
+         "$PKCS11_TOOL" --module "$MODULE" "$@" 2>&1
+}
 ossl() { openssl "$@" -provider default 2>&1; }
 
 cleanup() {
@@ -85,7 +102,16 @@ trap cleanup EXIT
 
 if [ -z "$PKCS11_TOOL" ]; then color_fail "pkcs11-tool not installed"; exit 2; fi
 if [ ! -f "$MODULE" ]; then color_fail "module $MODULE missing"; exit 2; fi
-mkdir -p "$TOKENS_DIR"; chmod 700 "$TOKENS_DIR"; chown freehsm "$TOKENS_DIR" 2>/dev/null || true
+mkdir -p "$TOKENS_DIR"; chmod 700 "$TOKENS_DIR"
+# `chown … 2>/dev/null || true` stood here: the error went to /dev/null and the
+# `|| true` ate the exit status, so a chown that could not run left the
+# directory mode 700 owned by the invoking user -- unopenable by freehsm, which
+# is the user every p11() call runs as. Two suppressions on one line.
+sudo chown freehsm "$TOKENS_DIR" \
+  || { color_fail "cannot give $TOKENS_DIR to the freehsm user"; exit 2; }
+# And prove it rather than infer it from the chown returning 0.
+sudo -u freehsm test -w "$TOKENS_DIR" \
+  || { color_fail "$TOKENS_DIR is not writable by freehsm"; exit 2; }
 
 # Wipe leftover /tmp/fc-* from a previous failed run. Those files may be
 # owned by `freehsm` with mode 600, which would block our `echo > ...`
@@ -188,8 +214,31 @@ p11 --slot 0 --login --pin "$USER_PIN" \
 # External verify with OpenSSL
 sudo cp /tmp/fc-ecdsa.bin /tmp/fc-ecdsa-r.bin && sudo chmod 644 /tmp/fc-ecdsa-r.bin
 sudo cp /tmp/fc-ec-pub.der /tmp/fc-ec-pub-r.der && sudo chmod 644 /tmp/fc-ec-pub-r.der
+# PKCS#11 returns an ECDSA signature as raw r||s (64 bytes for P-256, §2.3.1 of
+# the Cryptoki mechanisms spec). OpenSSL wants an ECDSA-Sig-Value, i.e. DER
+# SEQUENCE { INTEGER r, INTEGER s }. Until 2026-09-03 this fed the raw bytes
+# straight to pkeyutl, so the assertion could never pass whatever the module
+# produced -- it had been reported as a module defect (issue #5) and was ours.
+#
+# Verified by encoding the SAME signature both ways: raw -> "Signature
+# Verification Failure", DER -> "Signature Verified Successfully".
+#
+# RSA hid it: a PKCS#1 v1.5 signature is a bare octet string, so B2 passed and
+# made B1 look like an ECDSA problem rather than an encoding one.
+python3 - <<'PYEOF'
+sig = open('/tmp/fc-ecdsa-r.bin', 'rb').read()
+n = len(sig) // 2
+def enc(b):
+    b = b.lstrip(b'\0') or b'\0'
+    if b[0] & 0x80:          # DER INTEGER is signed: keep it positive
+        b = b'\0' + b
+    return b'\x02' + bytes([len(b)]) + b
+body = enc(sig[:n]) + enc(sig[n:])
+open('/tmp/fc-ecdsa-der.bin', 'wb').write(b'\x30' + bytes([len(body)]) + body)
+PYEOF
+
 out=$(openssl pkeyutl -provider default -verify -pubin -inkey /tmp/fc-ec-pub-r.der \
-      -keyform DER -rawin -in /tmp/fc-msg.bin -sigfile /tmp/fc-ecdsa-r.bin \
+      -keyform DER -rawin -in /tmp/fc-msg.bin -sigfile /tmp/fc-ecdsa-der.bin \
       -digest sha256 2>&1)
 assert "ECDSA external verify"  "Signature Verified"  "$out"
 
