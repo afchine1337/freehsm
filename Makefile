@@ -43,8 +43,38 @@ WARN_FLAGS = \
     -Wnull-dereference -Wdouble-promotion -Wconversion \
     -Wno-sign-conversion -Wno-unused-parameter
 
+# LOCAL_CFLAGS / LOCAL_LDFLAGS (PR #9, jas4711) --- the contract
+#
+# Both are appended AFTER every group this Makefile defines, so a packager can
+# raise -O1 to -O2 or add a distribution's hardening, and cannot silently drop
+# -Werror, -fstack-protector-strong or the -z relro,now,noexecstack bundle.
+# Later flags win where GCC lets them; earlier ones stand where it does not.
+#
+# They do NOT reach the reproducible build. dist/refs/vX.Y.Z.sha256 is produced
+# inside the pinned image, which sets neither, so nothing a downstream passes
+# can move the published reference. A Debian build is not expected to match our
+# digest, and should not try to.
+#
+# _FORTIFY_SOURCE stands down when the caller supplies one, so that a caller
+# hardening further than we do wins outright rather than colliding: without
+# this, their value wins on position but GCC warns `"_FORTIFY_SOURCE"
+# redefined`, and -Werror turns that into a build failure -- the flag meant to
+# allow more hardening would have forbidden it.
+#
+# Measured on Debian 13 (2026-09-03): `dpkg-buildflags --get CFLAGS` emits
+#
+#   -g -O2 -Werror=implicit-function-declaration -ffile-prefix-map=…
+#   -fstack-protector-strong -fstack-clash-protection -Wformat
+#   -Werror=format-security -fcf-protection
+#
+# with NO _FORTIFY_SOURCE at all. So this guard is defensive, not a response to
+# what Debian actually passes today -- and the "our =2 versus their =3" theory
+# built on it while chasing issue #7 was wrong. Stated here because a comment
+# claiming a distribution's flags is a claim, and this one was checked.
+FORTIFY_FLAG := $(if $(findstring _FORTIFY_SOURCE,$(LOCAL_CFLAGS)),,-D_FORTIFY_SOURCE=2)
+
 HARDEN_FLAGS = \
-    -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIC \
+    -fstack-protector-strong $(FORTIFY_FLAG) -fPIC \
     -fstack-clash-protection -fcf-protection=full \
     -fvisibility=hidden -fno-strict-aliasing \
     -fno-omit-frame-pointer \

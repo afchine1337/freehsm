@@ -16,7 +16,12 @@
 set -euo pipefail
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IMAGE="freehsm-build:1.0.0"
+# Bumped 1.0.0 -> 1.1.0 with the Dockerfile entrypoint that builds in a
+# writable copy instead of in the read-only /src mount (issue #4). The script
+# only builds the image when it is absent, so anyone with the old one cached
+# would have kept running the broken entrypoint and seen no change. The tag is
+# the only thing that makes a fix to the image reach an existing checkout.
+IMAGE="freehsm-build:1.1.0"
 # The output directory must NOT live inside PROJ_ROOT.
 #
 # PROJ_ROOT is mounted at /src:ro and the container's build runs `make clean`,

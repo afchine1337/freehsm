@@ -62,6 +62,47 @@ jobs:
           test -f "$SPEC" || { echo "spec table not found at $SPEC"; exit 1; }
           python3 scripts/audit_constants.py --spec "$SPEC"
 
+  # Build under a distribution's own flags, not ours.
+  #
+  # Issue #7: a Debian maintainer could not compile FreeHSM, with an error this
+  # project's CI has never produced. Chasing it by guessing failed --- neither
+  # -D_FORTIFY_SOURCE=3 nor -Wformat-truncation=2 reproduced what he saw. The
+  # answer is to stop guessing: PR #9 made LOCAL_CFLAGS injectable, so this job
+  # asks dpkg-buildflags what Debian actually passes and builds with it.
+  #
+  # NON-GATING. Debian's flag set moves without reference to this repository,
+  # and a red X on main for a change nobody here made is how a signal stops
+  # being read --- ten consecutive red CI runs went unnoticed on 2026-09-02 for
+  # exactly that reason. It is a tripwire for the maintainers, not a gate on
+  # contributors.
+  distro-flags:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: debian:trixie
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install a Debian toolchain
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq build-essential dpkg-dev libssl-dev python3
+      - name: What Debian passes
+        id: flags
+        run: |
+          set -o pipefail
+          C=$(dpkg-buildflags --get CFLAGS)
+          L=$(dpkg-buildflags --get LDFLAGS)
+          gcc --version | head -1
+          echo "CFLAGS  : $C"
+          echo "LDFLAGS : $L"
+          echo "c=$C" >> "$GITHUB_OUTPUT"
+          echo "l=$L" >> "$GITHUB_OUTPUT"
+      - name: Build with them
+        run: |
+          make LOCAL_CFLAGS="${{ steps.flags.outputs.c }}" \
+               LOCAL_LDFLAGS="${{ steps.flags.outputs.l }}"
+
   build:
     runs-on: ubuntu-latest
     container:

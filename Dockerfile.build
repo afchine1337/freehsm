@@ -78,8 +78,34 @@ RUN groupadd -g 2000 freehsm && useradd -u 2000 -g 2000 -m -s /bin/bash freehsm
 USER freehsm
 WORKDIR /src
 VOLUME ["/src", "/out"]
+# Build in a writable COPY of the source, never in /src itself.
+#
+# /src is mounted read-only, on purpose: the reproducible build must not be
+# able to modify the tree it is measuring. But the entrypoint ran
+# `cd /src && make clean`, and `make clean` writes -- it removes .obj/,
+# libfreehsm.so, tests/*.o, tools/*. So this path could never complete:
+#
+#   rm -rf .obj
+#   rm: cannot remove '.obj/src/fhsm_state.o': Read-only file system
+#   make: *** [Makefile:838: clean] Error 1
+#
+# Reported by an external user (issue #4). The first fix moved out/ outside the
+# tree, which was one symptom of several -- .obj/ and every other clean target
+# are inside /src too. Moving directories one at a time was the wrong shape;
+# the build simply must not write to /src.
+#
+# This also explains dist/refs/ better than the .gitignore fix did on its own.
+# Six releases went out with no reproducibility reference for two independent
+# reasons: the file could not be committed, AND the path meant to produce it
+# could not run. Either alone would have been enough.
+#
+# The copy does not move the digest: the Makefile's -ffile-prefix-map is
+# derived from CURDIR, so building at /home/freehsm/build maps to the same "."
+# as building at /src. Verify rather than trust that sentence -- two runs must
+# agree, which is what scripts/verify_reproducibility.sh is for.
 ENTRYPOINT ["/bin/bash", "-c", \
-    "cd /src && make clean && make all && \
+    "cp -a /src /home/freehsm/build && cd /home/freehsm/build && \
+     make clean && make all && \
      sha256sum libfreehsm.so > /out/digest.txt && \
      cp libfreehsm.so /out/ && \
      echo '[repro] build complete' && cat /out/digest.txt"]
