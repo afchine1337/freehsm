@@ -29,8 +29,10 @@ Legend: ✅ done · 🟡 partial · ⏳ pending · ♻ continuous
 * **The command-line tools** — `fhsm-token`, `fhsm-csr`, `fhsm-ca`,
   `fhsm-sign`, and the `fhsm-service` daemon. These **ship**, as part of
   FreeHSM and under the same licence. They are what #112 and #123 built.
-* **Simorgh PKI** — the *product* on top: an operator, IaC modules, packaging,
-  support. **Not built. Do not describe it as existing.**
+* **A commercial offering on top** — an operator, IaC modules, packaging,
+  support. **Not built. Do not describe it as existing, and do not give it a
+  name here.** It had one in this file until 2026-09-03; a name is the first
+  step towards a product page, and there is no product.
 
   The distinction is worth keeping sharp in both directions. Saying the PKI
   product exists would be a claim about something nobody can download; saying

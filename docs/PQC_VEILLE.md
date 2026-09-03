@@ -1,7 +1,7 @@
 # PQC — veille / watch
 
 Suivi trimestriel des jeux de tests, standards et signaux post-quantiques qui
-touchent Simorgh PKI / FreeHSM (ML-DSA, ML-KEM, SLH-DSA, composite sigs).
+touchent FreeHSM (ML-DSA, ML-KEM, SLH-DSA, composite sigs).
 Roadmap #116. Chaque entrée est datée ; la plus récente en haut.
 
 Principe : on note ce qu'on a **vérifié**, avec la source et la méthode, pas ce

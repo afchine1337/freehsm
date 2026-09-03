@@ -106,8 +106,8 @@ Use these terms consistently across all communication :
 * **"Persian"** : reserved for narrow uses --- the Persian language, the Pars / Fars region specifically, or the Persian ethnic group within Iran
 * **"Simorgh"** : the project name; refers to the mythical bird of the Shahnameh + Sufi literature (especially Attar's Conference of the Birds). Etymologically rooted in Iranian Avestan (saēna-mərəga). Belongs to the shared cultural heritage of Iran, not to any specific ethnicity within it
 * **"Simorgh Labs"** : the company / organization
-* **"FreeHSM"** : the open-source PKCS#11 library (Apache-2.0)
-* **"Simorgh PKI"** : the product MVP v2.0 (built on FreeHSM, with PQC composite signature support)
+* **"FreeHSM"** : the open-source PKCS#11 library and the `fhsm-*` tools that ship with it (Apache-2.0)
+* There is **no product name** for a commercial offering on top, deliberately. One was reserved here until 2026-09-03; a name in a brand reference is how something not built starts appearing in sentences as though it were.
 
 ---
 

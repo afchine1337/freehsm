@@ -1,4 +1,4 @@
-# Trademark and Brand Policy — Simorgh Labs / FreeHSM / Simorgh PKI
+# Trademark and Brand Policy — Simorgh Labs / FreeHSM
 
 *Version 1.0 — July 2026. Required by the brand reference before v2.0.0 stable.*
 
@@ -9,8 +9,8 @@ trademarks (common-law / unregistered unless stated otherwise) by
 **Simorgh Labs** (Afchine Madjlessi):
 
 * **Simorgh Labs** — the organization / stewarding entity
-* **Simorgh PKI** — the product (PKI + signing toolkit built on FreeHSM)
-* **FreeHSM** — the open-source PKCS#11 library
+* **FreeHSM** — the open-source PKCS#11 library, and the `fhsm-*` tools that
+  ship with it
 * The **Simorgh Labs logo** (Simorgh bird with mosaic-tile wing, shield +
   keyhole, halo, سیمرغ nastaliq script) and the **SIMORGH LABS wordmark**
   (all-caps, triangle accent in the "A")
@@ -18,7 +18,7 @@ trademarks (common-law / unregistered unless stated otherwise) by
 
 ## What the Apache-2.0 license covers — and what it does not
 
-The **source code** of FreeHSM and Simorgh PKI is licensed under
+The **source code** of FreeHSM is licensed under
 **Apache-2.0** (see `LICENSE`). That license grants you broad rights to
 use, modify, and redistribute the code — including commercially.
 
@@ -29,11 +29,11 @@ reserved.
 
 ## You may, without asking
 
-* Use the names "FreeHSM", "Simorgh PKI", and "Simorgh Labs" to **truthfully
-  refer** to the software (nominative use), including in articles, talks,
-  package descriptions, and comparisons.
+* Use the names "FreeHSM" and "Simorgh Labs" to **truthfully refer** to the
+  software (nominative use), including in articles, talks, package
+  descriptions, and comparisons.
 * State that your product or service **works with**, **is built on**, or
-  **is compatible with** FreeHSM / Simorgh PKI, provided it is true.
+  **is compatible with** FreeHSM, provided it is true.
 * Ship unmodified binaries/packages of the software under its original name
   (e.g. as a distro package), keeping the attribution intact.
 
@@ -41,7 +41,7 @@ reserved.
 
 * Use the names or logos in a way that suggests **endorsement, affiliation,
   or official status** ("official", "certified by Simorgh Labs", etc.).
-* Name a **fork or derivative** "FreeHSM", "Simorgh PKI", or anything
+* Name a **fork or derivative** "FreeHSM", "Simorgh Labs", or anything
   confusingly similar. Forks must be renamed (patch sets carried by distros
   are fine).
 * Use the logo, wordmark, or tagline as (part of) **your own product name,
