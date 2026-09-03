@@ -42,6 +42,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
   first.
 
 ### Changed
+* **The harness cannot see which provider is loaded — measured, and the planned
+  CI job dropped.** Running the full suite against the signed module with the
+  FIPS provider loaded gives **2 / 1700 / 2103**: the same counts as the
+  default-provider run, and — compared node by node, because identical counts
+  proved nothing the day before — the same 3805 node-ids with not one outcome
+  different.
+
+  The reason is structural. The profile is a compile-time constant, so in
+  `fips-strict` the mechanism list and the dispatch guard filter *upstream* of
+  any EVP fetch; every mechanism the harness exercises is one both providers
+  serve identically. The dedicated job filed for this would have cost an hour of
+  CI to reproduce a known number. `tests/probe_fips_loaded` and the 37 tests of
+  `scripts/run_fips_tests.sh` remain the only things that observe the
+  delegation, and 37 tests that can tell the difference are worth more than 1700
+  that cannot.
+
+  The configuration that *would* discriminate is named rather than guessed:
+  `interop` built **and signed**, where the module advertises SHA-1, MD5, 3DES
+  and RSA-PKCS v1.5 while the FIPS provider refuses to serve them. Untested.
+
 * **pkcs11-check pinned to 0.1.9, and three findings closed that were never
   ours.** Both workflows installed the harness unpinned, so the version
   measuring FreeHSM changed whenever PyPI did. That is not hypothetical: on the

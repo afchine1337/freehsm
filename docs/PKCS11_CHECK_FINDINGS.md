@@ -604,6 +604,93 @@ a precondition. Recorded here as an open question rather than folded into the
 two positions below, which stand on their own reasoning and are not weakened by
 it.
 
+## The harness cannot see which provider is loaded (2026-09-03, negative result)
+
+Run twice, same tree, same harness v0.1.9, same OpenSSL 3.5.7, `fips-strict`:
+
+| | integrity bypassed, default provider | signed, **FIPS provider loaded** |
+|---|---|---|
+| failed | 2 | 2 |
+| passed | 1700 | 1700 |
+| skipped | 2103 | 2103 |
+
+Identical counts prove nothing on their own — that lesson is one section above,
+where `failed −3, passed +3, skipped +1` fitted two incompatible stories. So
+the reports were compared node by node: **3805 node-ids, none present in one
+run and absent from the other, and not one outcome different.**
+
+The provider was loaded. That is not an assumption: since 2026-09-03 a signed
+module whose provider will not load fails `C_Initialize` with
+`FHSM_RV_PROVIDER_UNAVAILABLE` and the harness aborts at `C_InitToken` before a
+single test runs. A run that completes is proof the provider came up.
+
+**Why the two are indistinguishable, by construction rather than by luck.** The
+profile is a compile-time constant. In `fips-strict`, `C_GetMechanismList`
+advertises only approved mechanisms and the dispatch guard rejects the rest —
+both *upstream* of any EVP fetch. So the harness gates its 2103 skips on the
+same list either way, and every mechanism it does exercise is one both
+providers serve identically. There is no path by which the provider's identity
+can reach an assertion.
+
+**Consequence: no dedicated CI job.** This was filed as work worth doing on the
+grounds that it was "roughly 1700 tests where `run_fips_tests.sh` has 37". The
+count was the wrong measure. What matters is whether any test can distinguish
+the configurations, and none can. A job costing an hour of CI per run to
+reproduce a number already known would be theatre.
+
+What does observe the delegation remains `tests/probe_fips_loaded` — which asks
+`OSSL_PROVIDER_available(NULL, "fips")` after `C_Initialize` — and the 37 tests
+`scripts/run_fips_tests.sh` runs against it. Thirty-seven tests that can tell
+the difference are worth more than 1700 that cannot.
+
+**What that comparison does not cover.** `report.jsonl` records test outcomes,
+not collection failures. `testcases/test_benchmark.py` (file 114 of 295) fails
+to import in every run we have made — see below — and appears nowhere in the
+report and nowhere in the summary line. The comparison above is therefore over
+what the report contains, and both runs were equally blind to the same file.
+That does not weaken the conclusion, since the absence is identical on both
+sides, but "3805 node-ids, nothing moved" covers less than it sounds like.
+
+**Where it would become discriminating, and that is worth doing.** Build
+`interop` *and* sign it. The module then advertises SHA-1, MD5, 3DES and
+RSA-PKCS v1.5 while the FIPS provider refuses to serve them: the mechanism list
+promises what the EVP layer will not deliver. What the module does at that
+point — a clean `CKR_MECHANISM_INVALID`, or a failure further in — is not
+known, and it is the one question this harness is well placed to answer.
+Untested, and named rather than guessed.
+
+## H1 — `test_benchmark.py` cannot run from any published install (upstream)
+
+Not a FreeHSM finding. Recorded here because it silently subtracts one file of
+295 from every run this document reports, and because a run's summary line is
+the number that ends up in release notes.
+
+```
+[114/295] .../testcases/test_benchmark.py
+ImportError: Error importing plugin "benchmark": No module named 'benchmark'
+FAILED .../testcases/test_benchmark.py (1.2s)
+```
+
+pytest is given `-p benchmark`, resolves it through entry points first, finds
+none because **pytest-benchmark is not installed**, and falls back to importing
+a module literally named `benchmark`.
+
+The cause is in `pyproject.toml`. `pytest-benchmark>=5.2.3` appears only under
+`[dependency-groups] dev` — a PEP 735 group, which `pip install pkcs11-check`
+does not install, and neither does `pip install -e .`. It needs
+`pip install --group dev` or `uv sync`. So a test file shipped inside the
+package cannot execute for anyone who installs the package.
+
+**Why it matters beyond the one file.** The failure produces no record in
+`report.jsonl` (`grep -c benchmark` → 0) and no line in `== Summary ==`. It
+exists only in console output that scrolls past. A consumer reading either
+artefact concludes 295 of 295 files ran.
+
+Worked around locally with `pip install pytest-benchmark` in the harness venv.
+Not added to the pinned CI install: what CI measures should be what a published
+install gives, and a workaround there would hide the gap rather than close it.
+To report upstream.
+
 ## R1 — `TestTookanUnwrapAttrs::test_unwrapped_key_cannot_unset_sensitive`
 
 An unwrap template carrying `CKA_SENSITIVE=False` produces a readable copy of a
