@@ -72,8 +72,32 @@ jobs:
           ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
           pkcs11-check version
 
-      - name: Run pkcs11-check against signed module
+      # FHSM_ALLOW_UNSIGNED keeps this job measuring what it has always
+      # measured. The module is signed above and stays signed; this only tells
+      # run_pkcs11_check.sh to take the unsigned path -- integrity check
+      # skipped, FIPS provider not loaded, EVP fetches on the default provider.
+      #
+      # It became necessary on 2026-09-03. Until then the script forced
+      # OPENSSL_CONF=/dev/null unconditionally, which silently prevented the
+      # provider from ever loading; fixing that would have flipped this job to
+      # the FIPS provider without renaming anything, and the counts recorded in
+      # docs/PKCS11_CHECK_FINDINGS.md would have stopped describing what runs
+      # here. A reference that changes meaning while keeping its name is the
+      # defect this project spent two days removing elsewhere.
+      #
+      # Running the harness against the signed module with the provider loaded
+      # is worth doing -- roughly 1700 tests where run_fips_tests.sh has 37 --
+      # but as its own deliberate job with its own baseline, not as a silent
+      # change of subject in this one.
+      #
+      # pipefail: without it `cmd | tee` reports tee's status, so a harness that
+      # aborts (FATAL: C_InitToken failed, exit 2) would leave this step green.
+      # Findings here are not a gate; a harness that never ran is not a finding.
+      - name: Run pkcs11-check (default provider, integrity check bypassed)
+        env:
+          FHSM_ALLOW_UNSIGNED: '1'
         run: |
+          set -o pipefail
           bash scripts/run_pkcs11_check.sh ./libfreehsm.so ./reports/pkcs11-check \
             2>&1 | tee harness.log
 
