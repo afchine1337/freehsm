@@ -52,16 +52,31 @@ trap 'rm -rf "$TOKENS_DIR"' EXIT
 rm -f  .pkcs11-check-isolation-*.json 2>/dev/null || true
 rm -rf .*.report-records ..*.report-records "$REPORTS"/*.report-records 2>/dev/null || true
 
-# Environment for the module. OPENSSL_CONF=/dev/null keeps EVP fetches
-# on the default provider in legacy/dev mode (same rationale as
-# coverage_matrix.sh). If the module was digest-signed (make
-# integrity), no integrity escape hatch is needed --- that is the
-# recommended way to run this harness.
+# Environment for the module.
+#
+# These two settings are not independent, and until 2026-09-02 this block
+# treated them as if they were. FHSM_INTEGRITY_ALLOW_UNSIGNED is what makes
+# src/fhsm_crypto.c SKIP OSSL_PROVIDER_load(NULL, "fips"). Without it -- i.e.
+# against a signed module -- the provider is loaded, and OPENSSL_CONF=/dev/null
+# means there is no configuration to load it from. C_Initialize then fails,
+# printing nothing: that path has no message, unlike the audit-key and
+# tokens-directory failures beside it.
+#
+# The comment that stood here recommended running this harness against a
+# signed module, in the same breath as forcing the one setting that makes a
+# signed module impossible to initialise. The recommended configuration was
+# the one configuration that could not work.
+#
+# So: /dev/null only on the unsigned path, where the provider is never loaded
+# and the isolation is free. On the signed path the ambient configuration is
+# left alone, because the module needs it.
 export FHSM_TOKENS_DIR="$TOKENS_DIR"
-export OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}"
 if [ "${FHSM_ALLOW_UNSIGNED:-0}" = "1" ]; then
     export FHSM_INTEGRITY_ALLOW_UNSIGNED=1
-    echo "NOTE: running with FHSM_INTEGRITY_ALLOW_UNSIGNED=1 (unsigned module)"
+    export OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}"
+    echo "NOTE: unsigned module --- FHSM_INTEGRITY_ALLOW_UNSIGNED=1, OPENSSL_CONF=${OPENSSL_CONF}"
+else
+    echo "NOTE: signed module --- FIPS provider will be loaded, OPENSSL_CONF=${OPENSSL_CONF:-<system default>}"
 fi
 
 echo "== Initializing token (pkcs11-tool) =="

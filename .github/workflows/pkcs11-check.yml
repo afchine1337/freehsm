@@ -62,9 +62,15 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq opensc python3-pip python3-venv
           python3 -m venv /opt/p11check
-          /opt/p11check/bin/pip install --quiet pkcs11-check
+          # Pinned. Unpinned, this installed whatever PyPI had latest, so a
+          # harness release could change the reported counts on a tree nobody
+          # had touched -- and did: v0.1.9 closed three failures that v0.1.8
+          # reported, with the module unchanged (docs/PKCS11_CHECK_FINDINGS.md,
+          # 2026-09-03). A comparison whose reference version drifts on its own
+          # cannot attribute a change to anything.
+          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.1.9'
           ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
-          pkcs11-check --help >/dev/null
+          pkcs11-check version
 
       - name: Run pkcs11-check against signed module
         run: |

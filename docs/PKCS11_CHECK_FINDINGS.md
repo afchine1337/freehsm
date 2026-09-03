@@ -536,6 +536,74 @@ has not been audited. Worth remembering that a test which skips itself reports
 nothing — that is how the `isize` input-length bound stayed invisible until three
 of those tests started timing out instead of being skipped.
 
+## Re-measured against harness v0.1.9 (2026-09-03)
+
+**2 failed, 1700 passed, 2103 skipped, 0 crashed.** Against the same module,
+the same build, the same OpenSSL 3.5.6, on the unsigned path with the default
+provider — the only configuration `run_pkcs11_check.sh` could reach at the
+time. Nothing on our side changed between the two runs. Every difference below
+belongs to the harness.
+
+| | v0.1.8 (2026-09-02) | v0.1.9 (2026-09-03) |
+|---|---|---|
+| failed | 5 | **2** |
+| passed | 1697 | 1700 |
+| skipped | 2102 | 2103 |
+| total | 3804 | 3805 |
+
+Three failures closed and one test appeared. The counts alone do not say which:
+`failed −3, passed +3, skipped +1` is equally consistent with R6 passing and a
+new test skipping, or with R6 skipping again and a new test passing. Those two
+readings differ in the only way that matters — one resolves R6, the other
+returns it to the invisibility it came out of — so the outcomes were read from
+`report.jsonl` per node-id rather than inferred:
+
+| node-id | v0.1.8 | v0.1.9 |
+|---|---|---|
+| `TestECDH1CofactorDerive::test_cofactor_matches_standard_ecdh` | fail | **pass**, in all three isolation runs |
+| `TestEncryptOutputLengthTruncation` | fail | **pass** |
+| `TestDecryptOutputLengthTruncation` | fail | **pass** |
+| `TestTookanUnwrapAttrs::test_unwrapped_key_cannot_unset_sensitive` | fail | fail — R1, position below |
+| `TestGcmIvReuse::test_gcm_iv_reuse_same_key` | fail | fail — R3, position below |
+
+The one new test is the output-length family extended to AES-OFB, AES-CFB128,
+AES-CFB8 and ChaCha20; those pass where the mechanism is available and skip
+where it is not.
+
+### What this changes, and what it does not
+
+**R6 is closed by the harness, not by us.** See R6 below: the plan was to
+replay the single node-id with the audit log open, to learn which of the two
+derivations returned `CKR_FUNCTION_FAILED`. That work is now moot — the
+mechanism was never the problem. The upstream branch
+`fix/harness-error-attribution`, fetched with the v0.1.9 tag, is the likely
+cause, and it is the same correction that closed the two output-length tests.
+Those two were reported by us on 2026-08-03 as harness defects rather than
+module defects; that reading is now confirmed from outside.
+
+Worth stating plainly, because it cuts both ways: an evening of investigation
+into `dispatch_ecdh1_cofactor` would have found nothing, and the reason we did
+not spend it is that R6 was written down as *observed, not diagnosed* instead
+of being given a plausible cause.
+
+**R1 and R3 survive, and something about them is new.** Both fail in exactly
+one of the three isolation runs the harness performs, and pass in the other
+two:
+
+```
+passed  ·  failed  ·  passed     TestTookanUnwrapAttrs::test_unwrapped_key_cannot_unset_sensitive
+passed  ·  failed  ·  passed     TestGcmIvReuse::test_gcm_iv_reuse_same_key
+```
+
+The aggregate reports them as failures, correctly — a finding in any mode is a
+finding. But "fails under one isolation mode" is a different fact from "fails",
+and it is not the fact this document has been recording. Which mode, and why
+the other two pass, is **not established**. It may be that the mode reaching
+the failure is the only one that exercises the path, or that the other two skip
+a precondition. Recorded here as an open question rather than folded into the
+two positions below, which stand on their own reasoning and are not weakened by
+it.
+
 ## R1 — `TestTookanUnwrapAttrs::test_unwrapped_key_cannot_unset_sensitive`
 
 An unwrap template carrying `CKA_SENSITIVE=False` produces a readable copy of a
@@ -679,6 +747,14 @@ construction, where the module owns the counter and the caller cannot supply a
 colliding IV. That is a feature, and the right one; it is not a bug fix.
 
 ## R6 — `TestECDH1CofactorDerive::test_cofactor_matches_standard_ecdh`
+
+> **CLOSED 2026-09-03 by harness v0.1.9 — the module was not at fault.** The
+> node-id now passes in all three isolation runs, with the module unchanged.
+> The investigation proposed at the end of this section was never performed and
+> is no longer worth performing. What follows is kept as written on 2026-09-02,
+> because it is the record of what was known before the answer arrived, and
+> because the one sentence that turned out to matter is the one that declined to
+> name a cause.
 
 **Observed 2026-09-02, not diagnosed.** Recorded before the v2.0.0 tag rather
 than after, because the release notes say the harness runs and an unaccounted

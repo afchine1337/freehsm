@@ -5,6 +5,46 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+* **pkcs11-check pinned to 0.1.9, and three findings closed that were never
+  ours.** Both workflows installed the harness unpinned, so the version
+  measuring FreeHSM changed whenever PyPI did. That is not hypothetical: on the
+  same module, the same build and the same OpenSSL, v0.1.8 reported **5 failed
+  / 1697 passed / 2102 skipped** and v0.1.9 reports **2 failed / 1700 passed /
+  2103 skipped**.
+
+  The three that closed are `TestECDH1CofactorDerive::test_cofactor_matches_standard_ecdh`
+  (R6) and the two output-length truncation tests. The counts alone could not
+  say which — `failed −3, passed +3, skipped +1` also fits R6 going back to
+  *skipped* — so the outcomes were read per node-id from `report.jsonl`
+  instead. R6 passes, in all three isolation runs.
+
+  R6 was recorded on 2026-09-02 as *observed, not diagnosed*, with a planned
+  investigation into `dispatch_ecdh1_cofactor`. That investigation would have
+  found nothing: the upstream branch `fix/harness-error-attribution` is the
+  likely cause, and it also closed the two output-length tests we had reported
+  as harness defects on 2026-08-03. Declining to name a cause is what kept the
+  evening from being spent.
+
+  R1 (Tookan unwrap) and R3 (GCM IV reuse) survive as the two documented
+  positions — and the report shows each failing in exactly one of the three
+  isolation runs and passing in the other two, which is a different fact from
+  "fails" and is recorded as an open question rather than folded into either
+  position.
+
+* **`run_pkcs11_check.sh` no longer recommends the one configuration it made
+  impossible.** The script forced `OPENSSL_CONF=/dev/null` unconditionally
+  while its comment recommended running against a signed module. But
+  `FHSM_INTEGRITY_ALLOW_UNSIGNED` is what makes `src/fhsm_crypto.c` *skip*
+  `OSSL_PROVIDER_load(NULL, "fips")`; without it the provider is loaded, and
+  `/dev/null` leaves nothing to load it from. `C_Initialize` then fails and
+  **prints nothing** — the only fatal path in that sequence without a message,
+  beside the audit-key and tokens-directory failures which both have one.
+  `/dev/null` is now set on the unsigned path only, and the script announces
+  which configuration it is running.
+
 ## [2.0.0] --- 2026-09-02
 
 ### Changed

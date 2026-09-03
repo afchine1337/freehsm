@@ -48,7 +48,12 @@ jobs:
       - name: PKCS#11 constant audit
         run: |
           python3 -m venv /tmp/p11spec
-          /tmp/p11spec/bin/pip install --quiet pkcs11-check
+          # Pinned, and this one gates. types_std.py is the reference the audit
+          # compares our constants against; an unpinned install means the
+          # reference can change under a tree nobody touched, and a GATING step
+          # whose oracle moves on its own turns green or red for reasons that
+          # are not in this repository.
+          /tmp/p11spec/bin/pip install --quiet 'pkcs11-check==0.1.9'
           # Locate types_std.py without importing it: the module uses
           # `from typing import Self` (3.11+) and importing it would tie this
           # step to the runner's Python version. We only need to read the file.
