@@ -5,7 +5,12 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.0.1] --- 2026-09-03
+
+Released one day after v2.0.0, because v2.0.0 shipped a test script carrying an
+assertion that cannot pass and a module that would not say why it refused to
+start. Everything below was found by three people outside the project running
+the documented steps, or by us while trying to reproduce what they reported.
 
 ### Security
 * **v1.4.0 was published unsigned, and the two people who reported it were told
