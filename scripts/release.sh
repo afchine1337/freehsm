@@ -149,7 +149,23 @@ for t in tests/test_*; do
     esac
     [ -x "$t" ] || continue
     D=$(mktemp -d)
-    if FHSM_TOKENS_DIR="$D" "./$t" >/dev/null 2>&1; then t_pass=$((t_pass+1))
+    # FHSM_INTEGRITY_ALLOW_UNSIGNED is required here and was missing.
+    #
+    # Step 7 builds with `make clean && make`, deliberately leaving signing for
+    # last so the signature covers the file that ships. But these test binaries
+    # link the module's objects and therefore carry their OWN .fhsm_digest,
+    # all-zero on a fresh build -- so every one of them fails C_Initialize with
+    # FHSM_RV_INTEGRITY_FAILED. Running them straight, rather than through
+    # `make tests` whose recipes set this, reimplemented the target and got it
+    # wrong: 15 of 37 "failing" on a tree where `make tests` is green.
+    #
+    # Skipping the check here costs nothing, because it is exercised twice
+    # immediately below and neither exercise is weakened by this line:
+    # `make test-integrity` drives unsigned/signed/tampered without any bypass,
+    # and the signed-module check reads .fhsm_digest back out of the shipped
+    # .so. What this loop is for is the functional suite.
+    if FHSM_TOKENS_DIR="$D" FHSM_INTEGRITY_ALLOW_UNSIGNED=1 "./$t" >/dev/null 2>&1
+    then t_pass=$((t_pass+1))
     else t_fail=$((t_fail+1)); echo "        failing: $(basename "$t")"; fi
     rm -rf "$D"
 done

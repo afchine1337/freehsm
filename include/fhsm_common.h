@@ -68,7 +68,7 @@ extern "C" {
  * ----------------------------------------------------------------------- */
 #define FHSM_VERSION_MAJOR   2
 #define FHSM_VERSION_MINOR   0
-#define FHSM_VERSION_PATCH   0
+#define FHSM_VERSION_PATCH   1
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
  * a certification this project holds and will not seek. The profile a
