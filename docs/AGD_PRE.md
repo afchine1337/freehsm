@@ -112,12 +112,35 @@ sudo install -d -o freehsm -g freehsm -m 700 \
 
 ### 3.2 Module installation
 
+#### The module does not require a dedicated user
+
+Read this before the commands below, because the commands alone give the wrong
+impression and did so for at least one reader (issue #1).
+
+FreeHSM is an ordinary PKCS#11 module. **Any user who can read the `.so` and
+read/write a tokens directory can use it**, which is how PKCS#11 modules are
+normally used. The tokens directory comes from `FHSM_TOKENS_DIR`, falling back
+to a compile-time `/var/lib/freehsm/tokens`. For per-user or per-application
+use, point it somewhere that user owns:
+
+```bash
+FHSM_TOKENS_DIR="$HOME/.local/share/freehsm/tokens" \
+    pkcs11-tool --module /opt/freehsm/lib/libfreehsm.so --show-info
+```
+
+The `freehsm` user below belongs to a **shared, multi-tenant deployment** —
+typically `fhsm-service`, where one daemon holds the tokens on behalf of
+several callers and the token files must not be readable by those callers. It
+is a deployment posture for that case, not a requirement of the module. The
+rest of this section assumes that posture because the evaluated configuration
+is a service deployment; adapt it if yours is not.
+
 ```bash
 sudo install -o root -g root -m 0755 libfreehsm.so \
     /opt/freehsm/lib/libfreehsm.so
 
-# Create a dedicated unprivileged user under which any HSM-using daemon
-# will run. The user MUST own /var/lib/freehsm and have CAP_IPC_LOCK.
+# For a shared deployment only: a dedicated unprivileged user under which the
+# HSM-using daemon runs, owning /var/lib/freehsm and holding CAP_IPC_LOCK.
 sudo useradd -r -s /usr/sbin/nologin -d /var/lib/freehsm freehsm
 sudo setcap 'cap_ipc_lock=+ep' /opt/freehsm/lib/libfreehsm.so
 ```
@@ -277,6 +300,20 @@ sudo -u freehsm pkcs11-tool \
     --module /opt/freehsm/lib/libfreehsm.so \
     --show-info
 ```
+
+**The slots will report `uninitialized`, and no token will be present. That is
+correct at this point, not a fault.** A FreeHSM slot holds a token once one has
+been created in it; until then there is nothing to find, and `C_GetSlotList`
+with `tokenPresent = CK_TRUE` returns none. It surprises people used to
+thinking of a software token as always there — a reader reported exactly that
+in issue #3 — because "soft token" suggests permanence and the file does not
+exist yet. §4.3 creates it.
+
+If `C_Initialize` itself fails, the module now says why on stderr: an unsigned
+module, a module altered after signing, a missing `.fhsm_digest` section, a
+FIPS provider that will not load, and a tokens directory it cannot use each
+name themselves. If you get a bare return code with no message, the build
+predates v2.0.2 and the cause is one of those five.
 
 Expected output excerpt :
 
