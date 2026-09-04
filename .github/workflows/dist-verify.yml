@@ -20,10 +20,16 @@
 # -- each invisible until the one before it was fixed. A fourth is entirely
 # possible, and finding it should not cost a stranger another evening.
 #
-# So this runs on a runner that has Docker. Non-gating: it builds an image and
-# compiles twice, it is slow, and a red X on main for infrastructure reasons is
-# how a signal stops being read -- ten consecutive red CI runs went unnoticed
-# here on 2026-09-02 for exactly that reason.
+# So this runs on a runner that has Docker. It is slow -- it builds an image
+# and compiles twice -- and it is not a required check, so a failure here
+# blocks nobody. That is what "non-gating" means; it is a branch-protection
+# setting, not something to arrange by making the job unable to fail.
+#
+# The first version of this file had `continue-on-error: true` for that
+# reasoning, and reported success in 47 seconds without doing the work. Ten
+# consecutive red CI runs went unnoticed on this repository on 2026-09-02
+# because a signal nobody reads is worthless -- but a signal that cannot say
+# "no" is worse, because it is read and it lies.
 # ===========================================================================
 
 name: dist-verify
@@ -40,11 +46,41 @@ on:
       - '.github/workflows/dist-verify.yml'
 
 jobs:
+  # No `continue-on-error`. It was here for one run, on the reasoning that a
+  # slow infrastructure job should not paint main red -- and it makes the job
+  # report success whatever happens inside it. The first run went green in 47
+  # seconds, which is not long enough to build an image and compile twice, and
+  # the tick said nothing at all.
+  #
+  # Non-gating is a property of branch protection, not of this line: this
+  # workflow is not a required check, so a red X here blocks nobody. Hiding the
+  # result was never the goal, and a control that cannot report failure is the
+  # exact defect this job exists to catch on someone else's behalf.
   dist-verify:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # tags, for the checkout below
+
+      # Verify the version the header claims, not whatever main happens to be.
+      #
+      # dist/refs/vX.Y.Z.sha256 anchors one commit: the one that was tagged.
+      # Running this on main compares a modified tree against a release anchor
+      # and always diverges -- the first run of this job did exactly that, and
+      # the digest difference said nothing except "main is not v2.0.1", which
+      # was already known.
+      - name: Check out the version this tree claims to be
+        run: |
+          V=$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' include/fhsm_common.h)
+          [ -n "$V" ] || { echo "::error::could not read FHSM_VERSION_STRING"; exit 1; }
+          if ! git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+            echo "::error::no tag v$V -- the header names a version that was"
+            echo "::error::never tagged, so there is no anchor to verify against."
+            exit 1
+          fi
+          echo "verifying v$V at $(git rev-parse --short "v$V")"
+          git checkout --quiet "v$V"
 
       # Run it as an ordinary user with an ordinary umask, which is the
       # situation the reports came from. Running as root would pass for

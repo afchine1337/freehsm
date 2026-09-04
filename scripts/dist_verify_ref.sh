@@ -70,9 +70,32 @@ fi
 echo "[verify-ref] FAIL : digest divergence."
 echo "[verify-ref]   ref   = ${ref_digest}"
 echo "[verify-ref]   local = ${local_digest}"
-echo "[verify-ref] possible causes :"
+echo "[verify-ref] possible causes, likeliest first :"
+# The old list opened with "source modification" and reached Docker layer
+# corruption before mentioning the one thing that is true nearly every time.
+# dist/refs/v${VERSION}.sha256 anchors exactly one commit -- the tagged one --
+# so on any tree that has moved since, divergence is the correct answer and
+# says nothing about reproducibility. That case was missing entirely, and the
+# first CI run of this check hit it.
+if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+        if [ "$(git rev-parse HEAD)" != "$(git rev-parse "v${VERSION}^{commit}")" ]; then
+            echo "  - YOU ARE NOT ON THE TAGGED COMMIT. HEAD is $(git rev-parse --short HEAD),"
+            echo "    v${VERSION} is $(git rev-parse --short "v${VERSION}^{commit}"). The reference"
+            echo "    anchors the tag; anything else is expected to differ."
+            echo "    Try :  git checkout v${VERSION} && make dist-verify"
+        fi
+        if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+            echo "  - the working tree has uncommitted changes"
+        fi
+    fi
+fi
 echo "  - source modification (intentional ? then update dist/refs/v${VERSION}.sha256)"
 echo "  - toolchain drift (gcc version, glibc, OpenSSL changed without bumping VERSION)"
+echo "  - the reference was produced by a different image. dist/refs/ is written"
+echo "    by .github/workflows/baseline.yml, which builds in"
+echo "    ghcr.io/<owner>/freehsm-c-build ; this script builds in the image from"
+echo "    Dockerfile.build. Two toolchains, one number."
 echo "  - Docker layer corruption (try : docker build --no-cache -f Dockerfile.build .)"
 echo "  - timestamp leak (check SOURCE_DATE_EPOCH override and embedded mtimes)"
 exit 3
