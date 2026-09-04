@@ -5,7 +5,30 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.0.2] --- 2026-09-04
+
+Released one day after v2.0.1. Nothing in the module's cryptography changed.
+What changed is that five conditions which used to fail with a bare return code
+now say what they are — and that the people who found them can get a build
+carrying the fixes without compiling it themselves.
+
+### Fixed
+* **`C_Initialize` returning `CKR_HOST_MEMORY` now says which limit is in the
+  way.** Raising `secure_heap_kb` above the host's `ulimit -l` does not give a
+  bigger arena — it stops the module, because FreeHSM refuses an arena OpenSSL
+  could not lock (an unlocked one can be paged to swap, which is the whole
+  point of having it). The reporter who hit this concluded "there is some
+  problem with the config", which is true and unusable. The message now names
+  the size asked for, the default, which of the two failures occurred, and the
+  operator's actual `RLIMIT_MEMLOCK`.
+
+  It also settled a question two comments in `src/fhsm_memory.c` had got wrong
+  in opposite directions. `CRYPTO_secure_malloc_init` returns **2** for
+  "allocated but not locked", distinct from 0 and 1 — so accepting only 1 is
+  the strict check the original comment claimed to perform elsewhere, and the
+  replacement comment I wrote on 2026-09-04 accusing this code of missing it
+  was also wrong. Observed, not read: the failure path reports `rc == 2` on a
+  64 MiB request against an 8 MiB limit.
 
 ### Added
 * **`tests/probe_secure_heap` — is the secure heap actually locked?**

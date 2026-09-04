@@ -68,14 +68,14 @@ extern "C" {
  * ----------------------------------------------------------------------- */
 #define FHSM_VERSION_MAJOR   2
 #define FHSM_VERSION_MINOR   0
-#define FHSM_VERSION_PATCH   1
+#define FHSM_VERSION_PATCH   2
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
  * a certification this project holds and will not seek. The profile a
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
-#define FHSM_VERSION_STRING  "2.0.1"
+#define FHSM_VERSION_STRING  "2.0.2"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including

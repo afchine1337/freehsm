@@ -37,7 +37,11 @@
 
 #include <openssl/crypto.h>
 #include <pthread.h>
+#include <stdio.h>              /* fprintf on the heap-init failure path */
 #include <string.h>
+#include <sys/resource.h>       /* getrlimit(RLIMIT_MEMLOCK) --- so the message
+                                 * can name the limit instead of the operator
+                                 * having to guess which one is in the way */
 
 /* Volatile function pointer to memset --- prevents the compiler from
  * eliding the call as dead-store when the caller is about to free /
@@ -57,25 +61,36 @@ static void heap_init_once(void) {
      * OPENSSL_secure_malloc_initialized() returns 1 but secure-allocations are
      * *not* swap-excluded.
      *
-     * THIS CODE DOES NOT DETECT THAT. Until 2026-09-04 the sentence above ended
-     * "We re-check the result and reject the init in strict mode", and there
-     * was no re-check: the function is what you see, twenty lines, and a return
-     * of 1 sets g_heap_ok. So a fallback to swappable memory is
-     * indistinguishable, from inside the module, from the locked arena
-     * docs/FIPS_140_3_SECURITY_TARGET.md claims.
+     * THE `== 1` BELOW IS THAT CHECK, and it is stricter than it looks.
+     * CRYPTO_secure_malloc_init distinguishes three outcomes: 0 for failure,
+     * 1 for an arena that is allocated AND locked, and 2 for an arena that was
+     * allocated but could not be locked. Accepting only 1 therefore rejects
+     * the swappable fallback, which is what an evaluation document claiming
+     * swap-excluded key material requires.
      *
-     * The question is now measurable rather than asserted:
-     * tests/probe_secure_heap reads VmLck across C_Initialize and reports what
-     * the kernel actually locked. Measured 2026-09-04 on Debian 13: 8192 kB
-     * locked, i.e. the whole arena -- but exactly at RLIMIT_MEMLOCK, whose
-     * default under systemd is also 8 MiB. There is no margin, and on a host
-     * with anything else locked the fallback would happen silently.
+     * This paragraph has now been wrong twice, in opposite directions, and the
+     * history is worth keeping because both errors were about the same gap.
      *
-     * Not turned into a hard failure here on purpose. Refusing to initialise
-     * whenever mlock falls short would refuse on most default installations,
-     * which is not hardening. The right sequence is: lower the default arena
-     * below the common limit so locking has room, THEN make it verified and
-     * mandatory. Roadmap, not this commit.
+     *   until 2026-09-04  "We re-check the result and reject the init in
+     *                      strict mode" -- describing a separate re-check that
+     *                      does not exist anywhere in this file.
+     *   on 2026-09-04     I replaced it with "OpenSSL returns 1 but the arena
+     *                      is not locked, and this code does not detect that"
+     *                      -- also false, and worse, because it accused
+     *                      working code of a hole it does not have.
+     *
+     * What settled it was neither reading: an external reporter set
+     * secure_heap_kb = 65536 on a host with RLIMIT_MEMLOCK = 8 MiB, and
+     * C_Initialize returned CKR_HOST_MEMORY. If the unlocked fallback were
+     * accepted, it would have started.
+     *
+     * The consequence for operators is real and belongs in AGD_PRE rather than
+     * here: raising secure_heap_kb above `ulimit -l` does not give you a bigger
+     * arena, it stops the module. The two must be raised together.
+     *
+     * tests/probe_secure_heap reports what the kernel actually locked across
+     * C_Initialize, so the property is observable rather than argued. Measured
+     * 2026-09-04 on Debian 13: 8192 kB, the whole default arena.
      */
     /* Arena size is operator-configurable via `secure_heap_kb` (#128). It has
      * to be: once sensitive key material lives in this arena (#127) and
@@ -83,9 +98,47 @@ static void heap_init_once(void) {
      * with a large token needs a way to raise the ceiling. A compile-time
      * constant would make that a rebuild. */
     g_heap_bytes = fhsm_conf_secure_heap_bytes();
-    if (CRYPTO_secure_malloc_init(g_heap_bytes,
-                                   FHSM_SECURE_HEAP_MINSIZE) == 1) {
+    int rc = CRYPTO_secure_malloc_init(g_heap_bytes, FHSM_SECURE_HEAP_MINSIZE);
+    if (rc == 1) {
         g_heap_ok = 1;
+        return;
+    }
+
+    /* Say which of the two failures this is, and name the limit.
+     *
+     * C_Initialize returned a bare CKR_HOST_MEMORY here. The reporter who hit
+     * it had raised secure_heap_kb to 65536 on a host with RLIMIT_MEMLOCK at
+     * 8 MiB, and concluded "there is some problem with the config" -- which is
+     * true and unactionable. The module knew the size it asked for and could
+     * have said so. */
+    {
+        struct rlimit rl;
+        unsigned long lim_kb = 0;
+        if (getrlimit(RLIMIT_MEMLOCK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+            lim_kb = (unsigned long)(rl.rlim_cur / 1024);
+
+        fprintf(stderr,
+            "[freehsm-c] FATAL : the secure heap could not be created.\n"
+            "  Asked for %lu kB (secure_heap_kb in /etc/freehsm/freehsm.conf,\n"
+            "  default %lu kB).\n",
+            (unsigned long)(g_heap_bytes / 1024),
+            (unsigned long)(FHSM_SECURE_HEAP_BYTES / 1024));
+        if (rc == 2) {
+            fputs("  OpenSSL allocated it but could NOT lock it in memory, and\n"
+                  "  an unlocked arena is refused: key material there could be\n"
+                  "  written to swap, which is exactly what this heap prevents.\n",
+                  stderr);
+        } else {
+            fputs("  OpenSSL could not allocate it at all.\n", stderr);
+        }
+        if (lim_kb)
+            fprintf(stderr,
+                "  Your locked-memory limit is %lu kB (ulimit -l). The arena must\n"
+                "  fit inside it -- raising secure_heap_kb alone does not give you\n"
+                "  a bigger arena, it stops the module. Raise both, or neither.\n",
+                lim_kb);
+        else
+            fputs("  Check `ulimit -l` : the arena must fit inside it.\n", stderr);
     }
 }
 
