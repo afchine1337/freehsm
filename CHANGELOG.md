@@ -7,6 +7,28 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+* **`tests/probe_secure_heap` — is the secure heap actually locked?**
+  `src/fhsm_memory.c` asked OpenSSL for an mlock'd arena and treated a return
+  of 1 as success; its own comment claimed "we re-check the result and reject
+  the init in strict mode", and **there was no re-check**. OpenSSL falls back to
+  ordinary swappable memory when `mlock` fails and still returns 1, so a
+  fallback was indistinguishable from the locked arena the Security Target
+  claims. Same shape as the FIPS provider before v2.0.0: true of the design,
+  never observed.
+
+  The probe reads `VmLck` across `C_Initialize` — the kernel's own answer.
+  Measured 2026-09-04 on Debian 13: **8192 kB locked, the whole arena**. So the
+  claim holds here. It holds by exactly nothing: the default arena is 8 MiB and
+  the default `RLIMIT_MEMLOCK` under systemd is also 8 MiB, so any host with
+  other locked pages falls back silently.
+
+  Not made a hard failure, deliberately — refusing to start whenever `mlock`
+  falls short would refuse on most default installations, which is not
+  hardening. The order has to be: lower the default arena below the common
+  limit, then make locking verified and mandatory. The comment now says what
+  the code does.
+
 ### Fixed
 * **Three more silent failures in `C_Initialize`, and one in
   `C_GenerateKeyPair`.** The integrity check returned

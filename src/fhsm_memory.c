@@ -52,10 +52,30 @@ static void heap_init_once(void) {
     /* OPENSSL_secure_malloc_init: arg1 = arena size in bytes, arg2 = min
      * allocation size (must be a power of 2). Both are build-time
      * configurable through FHSM_SECURE_HEAP_BYTES / FHSM_SECURE_HEAP_MINSIZE.
-     * The arena is mmap()-ed and mlock()-ed; if mlock fails (rlimit too
-     * low), OpenSSL falls back to a regular mmap arena and OPENSSL_secure_malloc_initialized()
-     * returns 1 but secure-allocations are *not* swap-excluded. We re-
-     * check the result and reject the init in strict mode.
+     * The arena is mmap()-ed and mlock()-ed; if mlock fails (rlimit too low),
+     * OpenSSL falls back to a regular mmap arena and
+     * OPENSSL_secure_malloc_initialized() returns 1 but secure-allocations are
+     * *not* swap-excluded.
+     *
+     * THIS CODE DOES NOT DETECT THAT. Until 2026-09-04 the sentence above ended
+     * "We re-check the result and reject the init in strict mode", and there
+     * was no re-check: the function is what you see, twenty lines, and a return
+     * of 1 sets g_heap_ok. So a fallback to swappable memory is
+     * indistinguishable, from inside the module, from the locked arena
+     * docs/FIPS_140_3_SECURITY_TARGET.md claims.
+     *
+     * The question is now measurable rather than asserted:
+     * tests/probe_secure_heap reads VmLck across C_Initialize and reports what
+     * the kernel actually locked. Measured 2026-09-04 on Debian 13: 8192 kB
+     * locked, i.e. the whole arena -- but exactly at RLIMIT_MEMLOCK, whose
+     * default under systemd is also 8 MiB. There is no margin, and on a host
+     * with anything else locked the fallback would happen silently.
+     *
+     * Not turned into a hard failure here on purpose. Refusing to initialise
+     * whenever mlock falls short would refuse on most default installations,
+     * which is not hardening. The right sequence is: lower the default arena
+     * below the common limit so locking has room, THEN make it verified and
+     * mandatory. Roadmap, not this commit.
      */
     /* Arena size is operator-configurable via `secure_heap_kb` (#128). It has
      * to be: once sensitive key material lives in this arena (#127) and

@@ -567,6 +567,14 @@ tests/test_smoke: tests/test_smoke.c $(LIB_OBJ)
 tests/probe_fips_loaded: tests/probe_fips_loaded.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -ldl
 
+# Same shape, same reason: is the secure heap actually mlock()-ed, or did
+# OpenSSL fall back to swappable memory and return success anyway?
+# src/fhsm_memory.c promises a re-check in a comment and does not perform one,
+# so nothing in the module can tell the difference. This reads VmLck across
+# C_Initialize, which is the kernel's own answer.
+tests/probe_secure_heap: tests/probe_secure_heap.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -ldl
+
 # The service links the library objects rather than dlopen()ing the module:
 # it is the PKCS#11 application, and it needs fhsm_audit_set_actor(), which is
 # not part of PKCS#11 and is not exported from the shared object.
