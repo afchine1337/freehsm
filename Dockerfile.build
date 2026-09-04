@@ -103,9 +103,35 @@ VOLUME ["/src", "/out"]
 # derived from CURDIR, so building at /home/freehsm/build maps to the same "."
 # as building at /src. Verify rather than trust that sentence -- two runs must
 # agree, which is what scripts/verify_reproducibility.sh is for.
+# `make integrity` before hashing, because the reference is of the SIGNED
+# module and this was hashing the unsigned one.
+#
+# The two numbers gave it away. On 2026-09-04, v2.0.2:
+#
+#   published libfreehsm.so, sha256      25b50513…   <- dist/refs/v2.0.2.sha256
+#   published .fhsm_digest section       b5acc024…
+#   this entrypoint's digest.txt         b5acc024…
+#
+# The embedded digest is SHA-256 of the file with its .fhsm_digest section
+# zeroed -- which is exactly the unsigned image. So the third number being the
+# second is not a coincidence: this path was hashing the module before signing
+# it, while .github/workflows/baseline.yml runs `make integrity` first and says
+# so ("WHAT THE DIGEST IS OF: The SIGNED module").
+#
+# Two different artefacts, one number, and `make dist-verify` could therefore
+# never agree -- which nobody discovered for as long as the step could not run
+# at all. It is the fourth defect on this path in three days, and the first one
+# found here rather than by the external user who reported the other three.
+#
+# Signing is deterministic (the digest patched in is a function of the
+# reproducible pre-image), so a signed build is exactly as reproducible as an
+# unsigned one. sign_module.sh exits 3 when the module already carries a digest,
+# which is not a failure; `make integrity` is run once on a fresh build here, so
+# it returns 0, but the `|| [ $? = 3 ]` keeps that from being a trap later.
 ENTRYPOINT ["/bin/bash", "-c", \
     "cp -a /src /home/freehsm/build && cd /home/freehsm/build && \
      make clean && make all && \
+     { make integrity || [ $? = 3 ]; } && \
      sha256sum libfreehsm.so > /out/digest.txt && \
      cp libfreehsm.so /out/ && \
-     echo '[repro] build complete' && cat /out/digest.txt"]
+     echo '[repro] build complete (signed)' && cat /out/digest.txt"]

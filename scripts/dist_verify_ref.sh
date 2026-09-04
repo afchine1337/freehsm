@@ -92,10 +92,17 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; th
 fi
 echo "  - source modification (intentional ? then update dist/refs/v${VERSION}.sha256)"
 echo "  - toolchain drift (gcc version, glibc, OpenSSL changed without bumping VERSION)"
+echo "  - signed vs unsigned. Both this check and dist/refs/ are of the SIGNED"
+echo "    module. If your local digest equals the .fhsm_digest section of the"
+echo "    published .so, you have hashed the unsigned image: that section IS"
+echo "    sha256 of the file with the section zeroed. This is what the Docker"
+echo "    entrypoint did until freehsm-build:1.2.0. Check with :"
+echo "      objcopy --dump-section .fhsm_digest=/dev/stdout libfreehsm.so \\"
+echo "        /dev/null | od -An -tx1 -v | tr -d ' \\n'"
 echo "  - the reference was produced by a different image. dist/refs/ is written"
 echo "    by .github/workflows/baseline.yml, which builds in"
 echo "    ghcr.io/<owner>/freehsm-c-build ; this script builds in the image from"
-echo "    Dockerfile.build. Two toolchains, one number."
+echo "    Dockerfile.build."
 echo "  - Docker layer corruption (try : docker build --no-cache -f Dockerfile.build .)"
 echo "  - timestamp leak (check SOURCE_DATE_EPOCH override and embedded mtimes)"
 exit 3

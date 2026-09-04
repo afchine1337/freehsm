@@ -16,12 +16,14 @@
 set -euo pipefail
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# Bumped 1.0.0 -> 1.1.0 with the Dockerfile entrypoint that builds in a
-# writable copy instead of in the read-only /src mount (issue #4). The script
-# only builds the image when it is absent, so anyone with the old one cached
-# would have kept running the broken entrypoint and seen no change. The tag is
-# the only thing that makes a fix to the image reach an existing checkout.
-IMAGE="freehsm-build:1.1.0"
+# The tag moves whenever the entrypoint does, because this script builds the
+# image only when it is absent -- so a cached image would keep running the old
+# entrypoint against a "fixed" checkout and show no change at all.
+#
+#   1.0.0 -> 1.1.0   build in a writable copy, not in the read-only /src mount
+#   1.1.0 -> 1.2.0   `make integrity` before hashing: the reference is of the
+#                    SIGNED module and this was hashing the unsigned one
+IMAGE="freehsm-build:1.2.0"
 # The output directory must NOT live inside PROJ_ROOT.
 #
 # PROJ_ROOT is mounted at /src:ro and the container's build runs `make clean`,
