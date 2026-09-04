@@ -80,7 +80,8 @@ The lab will require **published CAVP certificates** for every approved mechanis
 - [ ] **Functional tests** : `tests/integration_pkcs11.sh` (17 assertions) ; `tests/multi_slot_pkcs11.sh` (13) ; `tests/full_crypto_pkcs11.sh` (20)
 - [ ] **End-to-end PQ** : `tests/mlkem_e2e`, `tests/mldsa_e2e`, `tests/slhdsa_e2e` (3 binaries)
 - [ ] **External interop** : OpenSSL pkeyutl verify (already documented in `docs/AGD_PRE.md` §7) ; python-pkcs11 alternative client
-- [ ] **Coverage matrix** : `tests/coverage_matrix.sh` exercising every wired C_* function × every wired mechanism (to be created)
+- [ ] **Coverage matrix** : `tests/coverage_matrix.sh` exists and exercises every wired C_* function × every wired mechanism — **but its default run is not evidence**, and was listed here as though it were. It exports `FHSM_INTEGRITY_ALLOW_UNSIGNED=1`, `FHSM_KAT_ALLOW_FAIL=1` and `OPENSSL_CONF=/dev/null`, so the integrity self-test is skipped, a failing KAT does not stop the module, and every EVP fetch is served by the default provider rather than the validated one. A matrix collected that way attests to none of §7.10.2, §7.10.3 or §7.11. The script now prints a `NOTE` when the bypass is active so a pasted table says so itself.
+  To make it submittable: re-run with the three variables unset, against a signed module, and record the counts. Nobody has done that; the numbers under those conditions are unknown. `scripts/run_fips_tests.sh` already runs that way (37 of 37 at v2.0.2, provider load proven by `tests/probe_fips_loaded`) and is the better basis for a §7.11 attestation.
 
 ---
 

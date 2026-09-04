@@ -7,6 +7,32 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+* **The coverage matrix was described as pre-certification evidence and cannot
+  be.** `tests/coverage_matrix.sh` exports `FHSM_INTEGRITY_ALLOW_UNSIGNED=1`,
+  `FHSM_KAT_ALLOW_FAIL=1` and `OPENSSL_CONF=/dev/null` by default — the
+  integrity self-test is skipped, a failing known-answer test does not stop the
+  module, and every EVP fetch is served by the default provider rather than the
+  one the Security Target defines as the boundary. Its header nonetheless
+  claimed "Self-attestation for FIPS 140-3 §7.11 functional testing" and
+  "Pre-cert evidence for the NIST CST lab", and
+  `docs/CST_LAB_SUBMISSION_CHECKLIST.md` listed it as a submission item.
+
+  Both corrected. The script is a regression check and a functional inventory,
+  which is worth having and is not evidence. It now prints a `NOTE` when the
+  bypass is active, so a matrix pasted into a document says so itself — the
+  note fired on its first run, which is how this was found.
+
+  What would be evidence already exists: `scripts/run_fips_tests.sh` unsets all
+  three, refuses to run against an unsigned module, and proves the provider is
+  loaded before counting. 37 of 37 at v2.0.2.
+
+* **A test that checked one field and claimed another.** The matrix's identity
+  assertion was a single `grep -q "FreeHSM C"` recorded as "Manufacturer
+  reported" — it read the library description while claiming to check the
+  manufacturer, and would have passed a module whose `manufacturerID` was empty
+  or wrong. Now two assertions, each testing what it names.
+
 ### Changed
 * **A module running with the integrity bypass now says so in its own
   identity.** `CK_INFO.libraryDescription` becomes

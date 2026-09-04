@@ -659,8 +659,16 @@ CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
      * should not be distinguishable from a signed one only by a line someone
      * may not see.
      *
-     * Exactly 32 characters, which is the field width; fhsm_pack_field
-     * space-pads and does not NUL-terminate, per §C.6.1. */
+     * Both strings keep the "FreeHSM C" prefix. The first attempt read
+     * "FreeHSM TEST MODE - NOT FOR PROD", and CI caught it in twenty seconds:
+     * tests/coverage_matrix.sh greps --show-info for "FreeHSM C" and its two
+     * jobs run with the bypass set, so the module stopped identifying itself
+     * as FreeHSM at all. It should not -- a test-mode module is still this
+     * module, and a warning that erases the product name makes the output
+     * harder to attribute, not easier.
+     *
+     * Field width is 32; fhsm_pack_field space-pads and does not
+     * NUL-terminate, per §C.6.1. */
     /* "FIPS 140-3" removed from the product name, 2026-09-04.
      *
      * It read as a certification to anyone who found it -- `pkcs11-tool
@@ -677,7 +685,7 @@ CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
      * cannot. */
     fhsm_pack_field(info->libraryDescription,
                     getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")
-                        ? "FreeHSM TEST MODE - NOT FOR PROD"
+                        ? "FreeHSM C - TEST MODE, NOT PROD"
                         : "FreeHSM C PKCS#11 module",                          32);
     info->libraryVersion[0] = FHSM_VERSION_MAJOR;
     info->libraryVersion[1] = FHSM_VERSION_MINOR;

@@ -7,9 +7,37 @@
 # wired mechanism (plus some error paths), and the result is recorded.
 #
 # Use cases :
-#   - Self-attestation for FIPS 140-3 §7.11 functional testing.
-#   - Regression detection (CI).
-#   - Pre-cert evidence for the NIST CST lab.
+#   - Regression detection (CI). This is what it is for.
+#   - A functional inventory: which entry points and mechanisms respond, in
+#     one table, on a given build.
+#
+# NOT, as of 2026-09-04, either of the two things this header used to claim.
+# It said "Self-attestation for FIPS 140-3 §7.11 functional testing" and
+# "Pre-cert evidence for the NIST CST lab". By default this script exports
+#
+#     FHSM_INTEGRITY_ALLOW_UNSIGNED=1   the §7.10.2 integrity self-test is
+#                                       skipped, not exercised
+#     FHSM_KAT_ALLOW_FAIL=1             a known-answer test may FAIL and the
+#                                       module still starts
+#     OPENSSL_CONF=/dev/null            no FIPS provider: every EVP fetch is
+#                                       served by the default provider, i.e.
+#                                       outside the boundary the Security
+#                                       Target defines
+#
+# A matrix collected under those three attests to none of the properties the
+# claim named. It is a smoke test of the dispatch surface, which is worth
+# having and is not evidence. The script now prints a NOTE when the bypass is
+# active, so a matrix that lands in a document says so on its own.
+#
+# What WOULD be evidence, and already exists: scripts/run_fips_tests.sh, which
+# unsets all three, refuses to run against an unsigned module, and proves the
+# provider is loaded with tests/probe_fips_loaded before counting anything.
+# 37 of 37 as of v2.0.2. If a §7.11 attestation is ever assembled, it is built
+# from that, not from this.
+#
+# The defaults here are ${VAR:-1}, so a caller may unset them and run this
+# matrix inside the boundary. Nobody has; the counts under those conditions
+# are unknown.
 #
 # Sections :
 #   1. Module identity   (Initialize, GetInfo, GetSlotList, GetSlotInfo)
@@ -112,9 +140,29 @@ color_info "============================================================"
 # ---- 1. Module identity ------------------------------------------------
 color_info ""
 color_info "[1/8] Module identity"
-out=$(p11 --show-info); echo "$out" | grep -q "FreeHSM C" \
-    && record C_GetInfo "n/a" PASS "Manufacturer reported" \
-    || record C_GetInfo "n/a" FAIL "Manufacturer not found"
+# Two fields, two assertions. This was one grep for "FreeHSM C" recorded as
+# "Manufacturer reported" -- which checked the library description while
+# claiming to check the manufacturer, and would have passed a module whose
+# manufacturerID was empty or wrong.
+#
+# It also broke on 2026-09-04 for a reason worth keeping: the module started
+# announcing "FreeHSM TEST MODE - NOT FOR PROD" as its description when the
+# integrity bypass is set, and these jobs run with it set. The description no
+# longer contained "FreeHSM C", so the check failed on a module that was
+# working correctly. The module's string was fixed to keep the product name;
+# the check was wrong independently and is fixed here.
+out=$(p11 --show-info)
+echo "$out" | grep -q "Simorgh Labs" \
+    && record C_GetInfo "manufacturerID" PASS "manufacturer reported" \
+    || record C_GetInfo "manufacturerID" FAIL "manufacturer not found"
+echo "$out" | grep -q "FreeHSM C" \
+    && record C_GetInfo "libraryDescription" PASS "product identified" \
+    || record C_GetInfo "libraryDescription" FAIL "product name not found"
+# Not an assertion: report whether this run is in test mode, so a matrix
+# collected as evidence says which configuration produced it.
+echo "$out" | grep -q "TEST MODE" \
+    && color_info "  NOTE  integrity bypass active -- this matrix is NOT evidence" \
+    || true
 out=$(p11 --slot 0 --list-mechanisms 2>&1)
 mech_count=$(echo "$out" | grep -c "^  ")
 record C_GetMechanismList "n/a" PASS "$mech_count mechanisms listed"
