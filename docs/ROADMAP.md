@@ -769,6 +769,48 @@ Not urgent: the property holds today on a default Debian. It is on this list
 because it holds by coincidence rather than by design, and because nothing
 before `probe_secure_heap` could have told us either way.
 
+### 2105 pkcs11-check tests report nothing, and nobody knows why (noted 2026-09-04)
+
+At v2.0.2: **2 failed, 1706 passed, 2105 skipped** out of 3813. Fifty-five per
+cent of the harness says nothing about this module, and
+`docs/PKCS11_CHECK_FINDINGS.md` has admitted since 2026-08-03 that the skip
+count "has not been audited".
+
+**The goal is not to reduce that number.** Most of those skips are correct: in
+`fips-strict` the module does not advertise non-approved mechanisms, the harness
+gates on `C_GetMechanismList`, and it skips. Adding mechanisms to move a counter
+would be optimising the counter. The goal is to know which of four things each
+skip is:
+
+1. **Not approved in this profile** — correct and permanent. Expected to be the
+   large majority, and never counted.
+2. **Approved, not implemented** — a real gap, and the only category that is a
+   candidate for work.
+3. **Implemented but not advertised** — a defect. There is precedent in the
+   other direction: F13 was CCM/CTS *advertised and not implemented*, and it
+   took an external harness to find it.
+4. **Skipped for reasons outside the module** — `pkcs11-tool` not exposing
+   ML-DSA or AES-CTR decrypt, capability probes the module cannot influence.
+   Not about us, and should stop being counted as if it were.
+
+**Why it matters beyond tidiness.** A test that skips reports nothing, and this
+project has been caught by that three times: the `isize` input-length bound
+stayed invisible until three tests began timing out rather than skipping;
+`test_benchmark.py` never ran at all for want of a Python dependency and left no
+trace in `report.jsonl` or the summary; and `run_fips_tests.sh` counted 21
+passes that had never loaded the module. Silence is where this project's
+defects have lived.
+
+**Cheap first measurement, before any decision.** Run the harness under
+`PROFILE=interop`, which advertises SHA-1, MD5, 3DES and RSA-PKCS v1.5, and diff
+the skip sets per node-id against the `fips-strict` run. Whatever moves is
+category 1; whatever stays skipped in both is 2, 3 or 4 and is the set worth
+reading. That partitions two thousand tests with one run and no code.
+
+Only then is there a decision to make, and it is a scoping decision rather than
+a coverage one: which of the category-2 mechanisms are worth implementing for
+something other than a number.
+
 ### Verify that what is published is what was written (noted 2026-09-03)
 
 Three defects in one evening had the same shape, and none was a bug in the code
