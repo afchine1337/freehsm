@@ -106,7 +106,11 @@ export FHSM_TOKENS_DIR="${TOKENS_DIR}"
 # fetches on the default provider in legacy mode. Under FHSM_COV_EVIDENCE it is
 # left alone so the system configuration -- and therefore the FIPS provider --
 # applies.
-if [ "${FHSM_COV_EVIDENCE:-0}" = 1 ]; then
+# FHSM_EVIDENCE is the project-wide spelling, added the same day for
+# tests/wycheproof/adapters/_p11.py; FHSM_COV_EVIDENCE stays as the local one
+# so the flag learned here keeps working. One lever across the scripts is
+# worth more than each of them having its own name for the same idea.
+if [ "${FHSM_EVIDENCE:-0}" = 1 ] || [ "${FHSM_COV_EVIDENCE:-0}" = 1 ]; then
     FHSM_COV_MODE="evidence"
 else
     FHSM_COV_MODE="bypass"

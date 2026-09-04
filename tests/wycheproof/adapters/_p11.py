@@ -286,12 +286,31 @@ class P11Module:
         # embedded digest is not patched at build time. The Wycheproof
         # harness is dev-only ; both env vars are forbidden in any
         # FIPS 140-3 deployment (see AGD_PRE §7.5 / §7.5bis).
-        os.environ.setdefault("FHSM_INTEGRITY_ALLOW_UNSIGNED", "1")
-        os.environ.setdefault("FHSM_KAT_ALLOW_FAIL", "1")
-        # Some FreeHSM-build OpenSSL installs ship an openssl.cnf that
-        # forces fips=yes on every EVP fetch. In dev mode we want the
-        # default provider to serve fetches with no FIPS bias.
-        os.environ.setdefault("OPENSSL_CONF", "/dev/null")
+        #
+        # FHSM_EVIDENCE=1 sets none of them: the module verifies its own
+        # integrity, a failing KAT stops it, and EVP fetches go to whatever the
+        # system openssl.cnf provides -- i.e. the FIPS provider. A run under
+        # that flag says something about the evaluated configuration; the
+        # default run says something about the implementation only.
+        #
+        # This existed nowhere until 2026-09-04, and its absence was invisible:
+        # the harness sets these from inside the process, before dlopen, so
+        # `env -i` cannot prevent it, and `setdefault` is no escape hatch
+        # either -- the module tests for PRESENCE, so exporting an empty value
+        # still counts as set. The measurement "do the PQC vectors pass inside
+        # the boundary?" was simply not expressible.
+        #
+        # Third script in one day with this shape: coverage_matrix.sh used
+        # ${VAR:-1} at three call sites, run_pkcs11_check.sh forced
+        # OPENSSL_CONF=/dev/null on the signed path, and this. A default that
+        # cannot be turned off is not a default.
+        if os.environ.get("FHSM_EVIDENCE") != "1":
+            os.environ.setdefault("FHSM_INTEGRITY_ALLOW_UNSIGNED", "1")
+            os.environ.setdefault("FHSM_KAT_ALLOW_FAIL", "1")
+            # Some FreeHSM-build OpenSSL installs ship an openssl.cnf that
+            # forces fips=yes on every EVP fetch. In dev mode we want the
+            # default provider to serve fetches with no FIPS bias.
+            os.environ.setdefault("OPENSSL_CONF", "/dev/null")
         # Default token store under /tmp so the harness is self-
         # contained and re-runnable. The runner cleans this up.
         os.environ.setdefault(

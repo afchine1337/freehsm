@@ -47,12 +47,10 @@ Contrôle de cohérence : `rsa_pss match=1083 viol=0` dans le même run, identiq
 
 ### Ce que cela n'établit pas — trois réserves
 
-**La mesure est hors de la frontière.** Le runner affiche
-`NOTE : dev mode active (no FIPS provider)` : `run_pkcs11_check.sh` et ce
-runner posent le contournement d'intégrité, donc les fetches EVP sont servis
-par le fournisseur par défaut et non par le fournisseur FIPS. Le résultat vaut
-pour l'implémentation, pas pour la configuration évaluée. Même réserve que pour
-`coverage_matrix.sh`, et le même remède : refaire la mesure dans la frontière.
+**~~La mesure est hors de la frontière.~~ Levée le même jour — voir plus bas.**
+Le premier run affichait `NOTE : dev mode active (no FIPS provider)`, donc les
+fetches EVP étaient servis par le fournisseur par défaut. La réserve était juste
+et elle est tombée en dix minutes une fois qu'on a pu exprimer la mesure.
 
 **La couverture ML-KEM est mince.** 21 assertions contre 614 pour ML-DSA, sur
 douze fichiers contre neuf. Deux ordres de grandeur d'écart : soit les vecteurs
@@ -66,10 +64,41 @@ l'extérieur. À formuler ainsi, et pas autrement : ce n'est pas « nos tests
 SLH-DSA sont insuffisants », c'est « personne n'a publié de quoi les rendre
 suffisants ». Vérifié le 2026-07-24 par sonde directe, inchangé au 2026-09-04.
 
+### La mesure dans la frontière — faite le jour même
+
+`tests/wycheproof/adapters/_p11.py` posait lui-même les trois contournements,
+depuis Python, **avant le `dlopen`** :
+
+```python
+os.environ.setdefault("FHSM_INTEGRITY_ALLOW_UNSIGNED", "1")
+os.environ.setdefault("FHSM_KAT_ALLOW_FAIL", "1")
+os.environ.setdefault("OPENSSL_CONF", "/dev/null")
+```
+
+Aucun `env -i` ne peut l'en empêcher, et `setdefault` n'offrait pas d'issue : le
+module teste la **présence** de la variable, donc l'exporter vide la laisse
+active. La question « les vecteurs PQC passent-ils dans la frontière ? » n'était
+pas *exprimable*, ce qui est différent de n'avoir pas été posée.
+
+`FHSM_EVIDENCE=1` ne pose aucune des trois. Run complet, module signé,
+fournisseur FIPS, 19,3 s :
+
+    mldsa    match=  614   viol= 0   skip= 15
+    mlkem    match=   21   viol= 0   skip=  0
+
+**Identiques aux valeurs hors frontière**, et il en va de même pour les huit
+autres familles — `aes_cmac` 306, `aes_gcm` 310, `aes_gmac` 414, `ecdsa` 3098,
+`eddsa` 236, `hmac` 522, `rsa_oaep` 788, `rsa_pss` 1083. Aucune ligne
+`NOTE : dev mode active`, aucun `FATAL` : la preuve que le mode a pris est
+l'absence du message que le mode dev imprime toujours.
+
+Ce qui est donc établi, et ne l'était pas ce matin : **7 392 assertions
+Wycheproof, dix familles, zéro violation, dans la configuration évaluée.** La
+couverture PQC adverse n'est plus une propriété de l'implémentation seule.
+
 ### À faire
 
-1. Rejouer les deux familles PQC **dans la frontière** — module signé,
-   fournisseur FIPS, sans contournement — et consigner ces chiffres-là.
+1. ~~Rejouer les deux familles PQC dans la frontière.~~ Fait, voir ci-dessus.
 2. Comprendre le 21 de ML-KEM avant de s'en réclamer.
 3. Faire monter `VECTORS_SHA` vers `3fa63dd0344a` et rejouer : ce qui bouge est
    nouveau en amont, ce qui ne bouge pas ne l'est pas.
