@@ -244,6 +244,16 @@ static fhsm_rv_t do_verify(void) {
         if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")) {
             return FHSM_RV_OK;
         }
+        /* Third silent path, and the one whose message is least guessable:
+         * no .fhsm_digest section at all. Not "unsigned" -- unsigned means the
+         * placeholder is there and zero -- but a file that was never built to
+         * carry the check. Usually the wrong .so on the path. */
+        fprintf(stderr,
+            "[freehsm-c] FATAL : this file has no .fhsm_digest section.\n"
+            "  It was not built with the integrity check compiled in, so it\n"
+            "  cannot be a FreeHSM module -- most likely the wrong library is\n"
+            "  on your path or in --module. Check with :\n"
+            "    readelf -SW <file> | grep fhsm_digest\n");
         return FHSM_RV_INTEGRITY_FAILED;
     }
     memset(buf + off, 0, len);
@@ -290,12 +300,35 @@ static fhsm_rv_t do_verify(void) {
      * the integrity check whenever the env var was unset. That
      * effectively disabled FIPS 140-3 §7.10.2 in all signed
      * production builds. Fixed in v1.2.1 (CVE candidate). */
+    /* Both branches below say so on stderr, and they say DIFFERENT things.
+     *
+     * Until 2026-09-03 they returned INTEGRITY_FAILED silently, and a caller
+     * saw only `C_Initialize rv = 0x80000002`. Two users reported that as a
+     * bug on 2026-06-29 (issues #1 and #3) and both worked it out by reading
+     * the source; one then reached for FHSM_INTEGRITY_ALLOW_UNSIGNED, which
+     * starts the module by turning this check off. A control that fails
+     * without explaining itself teaches people to disable it.
+     *
+     * The two conditions are not the same event and must not read alike:
+     * an unsigned build is a missing step in the developer's own workflow,
+     * a mismatched digest is a binary that changed after it was signed. The
+     * first message names the missing command; the second deliberately does
+     * NOT offer the bypass. */
     uint8_t embedded[FHSM_INTEGRITY_DIGEST_LEN];
     read_embedded_digest(embedded);
     if (is_all_zero(embedded, FHSM_INTEGRITY_DIGEST_LEN)) {
         if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")) {
             return FHSM_RV_OK;   /* unsigned build, allowed by explicit opt-in */
         }
+        fprintf(stderr,
+            "[freehsm-c] FATAL : this module is unsigned.\n"
+            "  Its .fhsm_digest section is the all-zero placeholder a fresh\n"
+            "  build leaves, so the integrity self-test has nothing to verify\n"
+            "  against and the module refuses to start (FIPS 140-3 7.10.2).\n"
+            "  If you built it yourself :   make integrity\n"
+            "  If you downloaded it, it was published unsigned -- do not use\n"
+            "  it, and do not set FHSM_INTEGRITY_ALLOW_UNSIGNED to get past\n"
+            "  this. See SECURITY.md, \"v1.4.0 published unsigned\".\n");
         return FHSM_RV_INTEGRITY_FAILED;
     }
 
@@ -304,6 +337,13 @@ static fhsm_rv_t do_verify(void) {
         if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")) {
             return FHSM_RV_OK;   /* dev override, mismatch tolerated */
         }
+        fprintf(stderr,
+            "[freehsm-c] FATAL : this module does not match its signature.\n"
+            "  .fhsm_digest carries a digest, and it is not the digest of this\n"
+            "  file. The binary has changed since it was signed.\n"
+            "  This is not a missing build step. Do not run it. Reinstall from\n"
+            "  a verified download and check the detached GPG signature that\n"
+            "  ships beside it.\n");
         return FHSM_RV_INTEGRITY_FAILED;
     }
     return FHSM_RV_OK;

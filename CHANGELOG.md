@@ -5,6 +5,44 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+* **Three more silent failures in `C_Initialize`, and one in
+  `C_GenerateKeyPair`.** The integrity check returned
+  `FHSM_RV_INTEGRITY_FAILED (0x80000002)` without a word for three quite
+  different conditions — an unsigned build, a binary altered after signing, and
+  a file with no `.fhsm_digest` section at all. Two users reported that opacity
+  as a bug on 2026-06-29 (#1, #3), worked it out by reading the source, and one
+  then reached for `FHSM_INTEGRITY_ALLOW_UNSIGNED`, which starts the module by
+  turning the check off. **A control that fails without explaining itself
+  teaches people to disable it.**
+
+  The three now say which condition applies, and they deliberately do not read
+  alike: an unsigned build names `make integrity`; a mismatched digest names
+  neither that nor the bypass, because a binary that changed after signing is
+  not a missing build step.
+
+  `C_GenerateKeyPair` likewise returned a bare failure when
+  `EVP_PKEY_Q_keygen` gave NULL. It now prints the mechanism and OpenSSL's
+  error stack. This one is not verifiable here — RSA keygen works on this
+  machine — and exists so that the reporter of #5, who has spent five exchanges
+  on it over two days, gets the reason from the module instead of another
+  question from us.
+
+* **`make dist-verify`: the container could not write its own output.** `/out`
+  is a host directory created by the invoking user at mode 0755; the container
+  runs as uid 2000. Third defect on that path in two days, each hidden behind
+  the one before, all three found by an external user (#4).
+
+### Added
+* **`.github/workflows/dist-verify.yml`** — runs `make dist-verify` on a runner
+  that has Docker. The maintainer's machine does not, which is why a step
+  documented in AGD_PRE went nine months without anyone inside the project
+  executing it, and why a stranger has been serving as its CI. Non-gating, with
+  the full log kept as an artefact so the next defect on that path is legible
+  here rather than in someone else's evening.
+
 ## [2.0.1] --- 2026-09-03
 
 Released one day after v2.0.0, because v2.0.0 shipped a test script carrying an

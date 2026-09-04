@@ -3525,7 +3525,29 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     } else {
         return FHSM_RV_MECHANISM_INVALID;
     }
-    if (!composite && !pkey) return FHSM_RV_FUNCTION_FAILED;
+    if (!composite && !pkey) {
+        /* Ask OpenSSL why, and say so.
+         *
+         * This returned a bare CKR_FUNCTION_FAILED. An external reporter spent
+         * five exchanges over two days on exactly this line (issue #5): RSA-2048
+         * keygen fails on his machine while EC, AES, HMAC and ECDH all succeed,
+         * on a module byte-identical to one where RSA works. Three hypotheses
+         * were raised and eliminated from the outside -- accumulated token
+         * state, RLIMIT_MEMLOCK, the encoder property -- none of which we
+         * needed to guess, because libcrypto had put the reason on an error
+         * stack that nobody read.
+         *
+         * The pairwise check below cannot be the cause and was eliminated
+         * without a new measurement: it latches ERROR on failure, and his run
+         * shows AES and ECDH passing after the RSA failure. Deduction from a
+         * log beats a round trip; printing the reason beats both. */
+        fprintf(stderr,
+            "[freehsm-c] C_GenerateKeyPair: key generation failed.\n"
+            "  Mechanism 0x%08lx. OpenSSL says :\n",
+            (unsigned long)pMechanism->mechanism);
+        ERR_print_errors_fp(stderr);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
 
     /* ---- FIPS 140-3 §7.10.2.b : pair-wise consistency check ---------
      * Verify that the freshly-generated keypair is mathematically

@@ -1,0 +1,71 @@
+# ===========================================================================
+# Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+# ===========================================================================
+# dist-verify.yml --- run the reproducibility check AGD_PRE documents.
+#
+# WHY THIS EXISTS
+#
+# `make dist-verify` builds twice in Docker and compares. It is the step
+# AGD_PRE tells an evaluator to run, and until 2026-09-03 nobody in the project
+# had ever run it: the maintainer's machine has no Docker. It was broken, and
+# it took an external user three round trips to surface three defects stacked
+# behind one another --
+#
+#   1. `cd /src && make clean` in a read-only mount -- could never complete
+#   2. out/ inside the source tree, so the same rm hit it too
+#   3. /out owned by the host user, mode 0755, container running as uid 2000:
+#      "/out/digest.txt: Permission denied"
+#
+# -- each invisible until the one before it was fixed. A fourth is entirely
+# possible, and finding it should not cost a stranger another evening.
+#
+# So this runs on a runner that has Docker. Non-gating: it builds an image and
+# compiles twice, it is slow, and a red X on main for infrastructure reasons is
+# how a signal stops being read -- ten consecutive red CI runs went unnoticed
+# here on 2026-09-02 for exactly that reason.
+# ===========================================================================
+
+name: dist-verify
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Dockerfile.build'
+      - 'scripts/build_reproducible.sh'
+      - 'scripts/verify_reproducibility.sh'
+      - 'scripts/dist_baseline.sh'
+      - 'scripts/dist_verify_ref.sh'
+      - '.github/workflows/dist-verify.yml'
+
+jobs:
+  dist-verify:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # Run it as an ordinary user with an ordinary umask, which is the
+      # situation the reports came from. Running as root would pass for
+      # reasons that tell us nothing about anyone else's machine.
+      - name: id and docker
+        run: |
+          id
+          umask
+          docker --version
+
+      - name: make dist-verify
+        run: |
+          set -o pipefail
+          make dist-verify 2>&1 | tee /tmp/dist-verify.log
+
+      # The log is the deliverable when this fails: the next defect on this
+      # path, whatever it is, should be readable here rather than reported by
+      # someone who tried the documented instructions.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dist-verify-log
+          path: /tmp/dist-verify.log
+          if-no-files-found: warn

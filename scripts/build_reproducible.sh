@@ -88,7 +88,22 @@ if [ "${EXEC_SHELL:-0}" = 1 ]; then
 fi
 
 # --- Actual build. -------------------------------------------------------
+# The container runs as uid 2000 (freehsm), fixed in the image so that file
+# ownership inside `make dist` archives is stable. /out is a host directory
+# created here by whoever ran this script -- a different uid, mode 0755. The
+# container could not write its own output:
+#
+#   /bin/bash: line 1: /out/digest.txt: Permission denied
+#
+# Reported on issue #4 after the read-only-mount fix let the build get that
+# far. Third distinct failure on the same path, each hidden behind the last.
+#
+# 0777 rather than chown: this is a scratch directory under $TMPDIR holding a
+# .so and a digest for the duration of one build, the script owns its whole
+# lifecycle, and requiring root to run a reproducibility check would put the
+# check further out of reach than it already is.
 mkdir -p "${OUT_DIR}"
+chmod 0777 "${OUT_DIR}"
 rm -f  "${OUT_DIR}/libfreehsm.so" "${OUT_DIR}/digest.txt"
 
 docker run --rm \
