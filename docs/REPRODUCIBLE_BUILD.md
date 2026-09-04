@@ -109,3 +109,36 @@ For CMVP / CESTI evaluators :
 4. Optionally, run the same on a second host (different distribution, different CPU vendor) to confirm the build is host-independent.
 
 A successful match closes the **ALC_CMC.4** evidence requirement for the release.
+
+## 8. First independent verification — v2.0.2, 2026-09-04
+
+Until this date the procedure above had never been executed to completion by
+anyone, including the maintainer: `make dist-verify` needs Docker, which the
+development machine does not have, and the path carried four defects stacked
+behind one another — a read-only mount that `make clean` wrote to, `out/`
+inside that mount, `/out` not writable by the container's uid, and finally the
+two sides hashing different artefacts (unsigned versus signed). Each was
+invisible until the one before it was fixed. Three of the four were reported by
+an external user following this document.
+
+With those closed, **four independent environments produced the same bytes for
+v2.0.2**:
+
+| environment | digest |
+|---|---|
+| maintainer's development VM (Debian 13, OpenSSL 3.5.7) | `25b5051362eff…` |
+| `.github/workflows/baseline.yml`, `ghcr.io/…/freehsm-c-build:debian13-openssl-3.5` | `25b5051362eff…` |
+| `.github/workflows/dist-verify.yml`, image built from `Dockerfile.build` | `25b5051362eff…` |
+| **an unaffiliated third party's machine**, issue #4 | `25b5051362eff…` |
+
+and that digest is the SHA-256 of the published `libfreehsm.so` asset, recorded
+at `dist/refs/v2.0.2.sha256`.
+
+The fourth row is the one that matters. The first three share this repository's
+assumptions; the fourth does not, and it is the row §7 step 4 asks an evaluator
+to produce. It exists because someone outside the project ran the documented
+instructions, reported what happened four times over two weeks, and kept going.
+
+What this does **not** show: that the build is deterministic across
+distributions or CPU vendors. All four are Debian 13 on x86-64. §7 step 4 is
+therefore still open in its stronger form.
