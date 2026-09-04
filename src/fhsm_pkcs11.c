@@ -638,7 +638,47 @@ CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
      * Security Target §1 and in the README. */
     fhsm_pack_field(info->manufacturerID,    "Simorgh Labs",                      32);
     info->flags = 0;
-    fhsm_pack_field(info->libraryDescription, "FreeHSM C (FIPS 140-3)",           32);
+
+    /* In dev mode the library SAYS SO, in the field every consumer reads.
+     *
+     * The module already prints a warning on stderr when the integrity bypass
+     * is set. That is not enough, and this project has spent a week proving
+     * why: stderr gets swallowed by a pipe, a `2>/dev/null`, or a harness that
+     * captures it, and the reader who most needs the warning is the one least
+     * likely to be watching a terminal.
+     *
+     * libraryDescription survives all of that. `pkcs11-tool --show-info`
+     * prints it, p11-kit lists it, and any application that logs which module
+     * it loaded records it. A build running with FHSM_INTEGRITY_ALLOW_UNSIGNED
+     * now identifies itself as such wherever it is used.
+     *
+     * Suggested by the reporter of issue #3, who had set the bypass
+     * deliberately to run a third-party test suite -- a legitimate use -- and
+     * pointed out that nothing downstream of his shell would ever know. He is
+     * right, and it is the better half of the answer: an unsigned module
+     * should not be distinguishable from a signed one only by a line someone
+     * may not see.
+     *
+     * Exactly 32 characters, which is the field width; fhsm_pack_field
+     * space-pads and does not NUL-terminate, per §C.6.1. */
+    /* "FIPS 140-3" removed from the product name, 2026-09-04.
+     *
+     * It read as a certification to anyone who found it -- `pkcs11-tool
+     * --show-info` prints it as the Library, and that is where an evaluator or
+     * a packager looks first. FreeHSM holds no certificate and will not seek
+     * one; README.md, AGD_PRE, AGD_OPE, the Security Target and every release
+     * note say so. A module cannot declare the opposite in the one field a
+     * consumer reads programmatically.
+     *
+     * Same reasoning that renamed libfreehsm-fips.so to libfreehsm.so in
+     * v2.0.0 and kept "FIPS" out of the tag: the standard is what the design
+     * targets, not something the artefact may assert about itself. The claim
+     * belongs in documents that can qualify it, not in a 32-octet field that
+     * cannot. */
+    fhsm_pack_field(info->libraryDescription,
+                    getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")
+                        ? "FreeHSM TEST MODE - NOT FOR PROD"
+                        : "FreeHSM C PKCS#11 module",                          32);
     info->libraryVersion[0] = FHSM_VERSION_MAJOR;
     info->libraryVersion[1] = FHSM_VERSION_MINOR;
     return FHSM_RV_OK;
@@ -1043,7 +1083,21 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
      * C_GetInfo above. Model identifies the product line, stable
      * across minor versions of the same major series. */
     fhsm_pack_field(info->manufacturerID, "Simorgh Labs",              32);
-    fhsm_pack_field(info->model,          "FreeHSM-C-v1",              16);
+    /* Same reasoning as libraryDescription in C_GetInfo: a module running with
+     * the integrity bypass says so in the token's own identity, not only on a
+     * stderr line that a pipe can swallow. 16 characters exactly, the field
+     * width.
+     *
+     * NOTE, unresolved and deliberately not changed here: the production value
+     * still reads "-v1" on a v2.0.x module. The comment above says the model
+     * is "stable across minor versions of the same major series", and the
+     * major series changed. Correcting it is an interface change -- consumers
+     * may match on this string -- so it needs a decision rather than a commit
+     * made while fixing something else. */
+    fhsm_pack_field(info->model,
+                    getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")
+                        ? "FreeHSM-TESTMODE"
+                        : "FreeHSM-C-v1",                              16);
     fhsm_pack_field(info->serialNumber,   serial,                      16);
     /* Base flags : RNG + LOGIN_REQUIRED are inherent to the module.
      * CKF_TOKEN_INITIALIZED is asserted only after a successful

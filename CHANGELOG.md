@@ -5,6 +5,39 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+* **A module running with the integrity bypass now says so in its own
+  identity.** `CK_INFO.libraryDescription` becomes
+  `FreeHSM TEST MODE - NOT FOR PROD` and `CK_TOKEN_INFO.model` becomes
+  `FreeHSM-TESTMODE` whenever `FHSM_INTEGRITY_ALLOW_UNSIGNED` is set.
+
+  The module already warned on stderr. That is not enough, and this project
+  spent a week proving why: stderr is swallowed by a pipe, a `2>/dev/null`, or
+  a harness that captures it. `libraryDescription` is what `pkcs11-tool
+  --show-info` prints, what p11-kit lists, and what an application records when
+  it logs the module it loaded.
+
+  Suggested by the reporter of #3, who had set the bypass deliberately to run a
+  third-party test suite — a legitimate use — and observed that nothing
+  downstream of his shell would ever know. The bypass is not the problem; its
+  invisibility was.
+
+* **"FIPS 140-3" removed from the product name.** `libraryDescription` read
+  `FreeHSM C (FIPS 140-3)` and now reads `FreeHSM C PKCS#11 module`. It was the
+  first thing an evaluator or a packager sees, and it read as a certification.
+  FreeHSM holds none and will not seek one. Third place the claim has been
+  removed from an artefact, after the library filename in v2.0.0 and the
+  signed tag message on 2026-09-03: the standard is what the design targets,
+  not something the artefact may assert about itself.
+
+  **Noted and deliberately not changed:** `CK_TOKEN_INFO.model` still reads
+  `FreeHSM-C-v1` on a v2.0.x module, contradicting its own comment ("stable
+  across minor versions of the same major series"). Consumers may match on that
+  string, so it needs a decision rather than a commit made while fixing
+  something else.
+
 ## [2.0.2] --- 2026-09-04
 
 Released one day after v2.0.1. Nothing in the module's cryptography changed.
