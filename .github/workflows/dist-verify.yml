@@ -36,6 +36,12 @@ name: dist-verify
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'tag = verify the released version; head = exercise the tooling on this branch'
+        type: choice
+        options: [tag, head]
+        default: tag
   push:
     paths:
       - 'Dockerfile.build'
@@ -70,8 +76,27 @@ jobs:
       # and always diverges -- the first run of this job did exactly that, and
       # the digest difference said nothing except "main is not v2.0.1", which
       # was already known.
-      - name: Check out the version this tree claims to be
+      # Two questions live in this job and they need different trees.
+      #
+      # "Does the published version still reproduce?" is about a release, and
+      # must be asked of the tagged commit -- dist/refs/vX.Y.Z.sha256 anchors
+      # exactly that one.
+      #
+      # "Does the reproducibility tooling work?" is about Dockerfile.build and
+      # the scripts, and must be asked of HEAD. Every fix to that tooling is
+      # invisible to the tagged tree until the next release, so checking out
+      # the tag makes it impossible to test a fix before shipping it -- which
+      # is how the /out permission fix and the signed-vs-unsigned fix both had
+      # to be pushed unverified.
+      - name: Choose the tree to verify
         run: |
+          if [ "${{ inputs.target }}" = "head" ]; then
+            echo "exercising the tooling on $(git rev-parse --short HEAD)"
+            echo "NOTE: a digest divergence here is expected whenever HEAD is"
+            echo "      not the tagged commit. What is being tested is whether"
+            echo "      the path RUNS."
+            exit 0
+          fi
           V=$(awk -F'"' '/FHSM_VERSION_STRING/{print $2; exit}' include/fhsm_common.h)
           [ -n "$V" ] || { echo "::error::could not read FHSM_VERSION_STRING"; exit 1; }
           if ! git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
