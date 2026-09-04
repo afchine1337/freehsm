@@ -9,6 +9,76 @@ qu'on suppose. Un « absent » sans méthode de vérification ne vaut rien.
 
 ---
 
+## 2026-09-04 — Le module tourne déjà contre les vecteurs PQC, et personne ne le savait
+
+**Question posée :** y a-t-il du nouveau côté Wycheproof sur le PQC ?
+
+**Réponse : oui, et davantage que prévu — les vecteurs sont là, ils sont
+téléchargés, ils s'exécutent, et le module les passe.** Aucun de ces quatre
+faits n'était connu avant de le mesurer.
+
+### Ce qui existe en amont
+
+Vingt-et-un fichiers PQC dans `testvectors_v1`, présents **à l'épingle que nous
+utilisons déjà** (`VECTORS_SHA` = `6d7cccd0fcb1917368579adeeac10fe802f1b521`) :
+
+| Famille | Fichiers |
+|---|---|
+| ML-DSA 44 / 65 / 87 | `verify`, `sign_seed`, `sign_noseed` — 9 |
+| ML-KEM 512 / 768 / 1024 | `test`, `encaps`, `keygen_seed`, `semi_expanded_decaps` — 12 |
+| SLH-DSA | **aucun** |
+
+`HEAD` amont est à `3fa63dd0344a`, donc l'épingle est en retard — mais pas pour
+le PQC, qui y figure déjà. Le retard reste à traiter séparément.
+
+### Ce que le module rend
+
+Run complet, `run_wycheproof.py` sans `--only`, module `/opt/freehsm/lib/libfreehsm.so`, 18,7 s :
+
+    mldsa    match=  614   viol= 0   skip= 15
+    mlkem    match=   21   viol= 0   skip=  0
+
+**Zéro violation.** Première confrontation de ce module à des vecteurs PQC
+conçus contre lui plutôt qu'aux siens. Pour situer : la même suite avait ouvert
+à 517 échecs sur le classique le 2026-07-10.
+
+Contrôle de cohérence : `rsa_pss match=1083 viol=0` dans le même run, identique
+à la valeur enregistrée depuis plusieurs versions. La chaîne mesure bien.
+
+### Ce que cela n'établit pas — trois réserves
+
+**La mesure est hors de la frontière.** Le runner affiche
+`NOTE : dev mode active (no FIPS provider)` : `run_pkcs11_check.sh` et ce
+runner posent le contournement d'intégrité, donc les fetches EVP sont servis
+par le fournisseur par défaut et non par le fournisseur FIPS. Le résultat vaut
+pour l'implémentation, pas pour la configuration évaluée. Même réserve que pour
+`coverage_matrix.sh`, et le même remède : refaire la mesure dans la frontière.
+
+**La couverture ML-KEM est mince.** 21 assertions contre 614 pour ML-DSA, sur
+douze fichiers contre neuf. Deux ordres de grandeur d'écart : soit les vecteurs
+d'encapsulation contiennent peu de cas, soit `adapters/mlkem.py` n'en lit
+qu'une partie. **Non établi**, et à regarder avant de présenter ce 21 comme une
+couverture.
+
+**SLH-DSA reste sans vecteurs publics.** Le module l'implémente, l'annonce et
+en fait un KAT au démarrage. Rien en amont ne permet de l'éprouver de
+l'extérieur. À formuler ainsi, et pas autrement : ce n'est pas « nos tests
+SLH-DSA sont insuffisants », c'est « personne n'a publié de quoi les rendre
+suffisants ». Vérifié le 2026-07-24 par sonde directe, inchangé au 2026-09-04.
+
+### À faire
+
+1. Rejouer les deux familles PQC **dans la frontière** — module signé,
+   fournisseur FIPS, sans contournement — et consigner ces chiffres-là.
+2. Comprendre le 21 de ML-KEM avant de s'en réclamer.
+3. Faire monter `VECTORS_SHA` vers `3fa63dd0344a` et rejouer : ce qui bouge est
+   nouveau en amont, ce qui ne bouge pas ne l'est pas.
+4. Signaler à Denis une incohérence d'affichage repérée au passage : six lignes
+   `[aes_gcm] viol tcId=…` sont imprimées pour des cas que le résumé compte en
+   `skip=6` et non en `viol`. Le mot imprimé et le compteur ne disent pas la
+   même chose. Nos refus d'IV courtes sont une position documentée ; ce qui est
+   en cause est l'étiquette.
+
 ## 2026-07-24 — Wycheproof : ML-DSA présent, SLH-DSA absent
 
 **Question posée :** y a-t-il des vecteurs SLH-DSA dans Wycheproof à intégrer ?
