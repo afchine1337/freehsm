@@ -23,7 +23,7 @@
 | Hardened DRBG pipeline + SP 800-90B health tests | [`RNG.md`](RNG.md) | --- | ADV_TDS.3 + FIPS §7.10.3 |
 | Side-channel posture audit (Level 1 + Level 2 gaps) | [`SIDE_CHANNEL.md`](SIDE_CHANNEL.md) | --- | AVA_VAN.5 |
 | Post-quantum support matrix (Kyber alias, Falcon, LMS, XMSS, HQC) | [`POST_QUANTUM.md`](POST_QUANTUM.md) | --- | ADV_FSP.4 |
-| Primacy audit — PQC composite claim (#118, verdict + competitor matrix) | [`PRIMACY_AUDIT_PQC_COMPOSITE.md`](PRIMACY_AUDIT_PQC_COMPOSITE.md) | --- | (marketing / positioning) |
+| PQC composite — who ships what (#118, dated landscape + the no-primacy-claims rule) | [`PRIMACY_AUDIT_PQC_COMPOSITE.md`](PRIMACY_AUDIT_PQC_COMPOSITE.md) | --- | (claim discipline) |
 | Token store on-disk format (#108 + #110, byte-level spec + invariants) | [`TOKEN_STORE_FORMAT.md`](TOKEN_STORE_FORMAT.md) | --- | ADV_TDS.3 + ADV_FSP.4 |
 | `fhsm-csr` — composite keys, requests, and the CA's own certificate (#112) | [`FHSM_CSR.md`](FHSM_CSR.md) | --- | AGD_OPE.1 |
 | `fhsm-ca` — issuance, profiles, revocation, CRLs, OCSP and the delegated responder (#112) | [`FHSM_CA.md`](FHSM_CA.md) | --- | AGD_OPE.1 |

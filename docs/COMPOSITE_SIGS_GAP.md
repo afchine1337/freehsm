@@ -35,10 +35,9 @@ SPDX-License-Identifier: Apache-2.0
 
 The mechanism works and does something defensible. What is wrong is the label on
 it: three places in this repository cite the LAMPS composite draft as the
-mechanism's reference, and the mechanism does not implement that draft. This
-matters more than a normal documentation slip, because "PQC composite signatures
-out-of-the-box" is the project's stated differentiator and the basis of the
-category claim in `PRIMACY_AUDIT_PQC_COMPOSITE.md`.
+mechanism's reference, and the mechanism does not implement that draft. Citing a
+specification one does not implement is the kind of error that costs a reader
+their time and the project its credibility, whoever the reader is.
 
 ## What the draft specifies
 
@@ -318,10 +317,11 @@ reseed intervals, which says nothing about this. The gap is real and worth
 closing on its own merits — consistency with the module's stated RNG
 guarantees — not because a specification demands it.
 
-## Claims to review before the v2.0 announcements
+## What may be said before the composite ships
 
-`PRIMACY_AUDIT_PQC_COMPOSITE.md` §5 rests on "PQC composite signatures
-out-of-the-box". That is a statement about a future release, and it stays
-truthful only if the composite that ships is the specified one. Until then, no
-announcement, README, or landing text may describe this module as implementing
-composite signatures.
+Nothing. Until a conforming implementation ships, no announcement, README or
+release note may describe this module as implementing composite signatures —
+`PRIMACY_AUDIT_PQC_COMPOSITE.md` §3 says the same thing from the other side.
+The mechanism that exists today is ML-DSA and a classical signature produced
+side by side, which is a reasonable thing to have and is not what the draft
+specifies.

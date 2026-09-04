@@ -210,13 +210,13 @@ Sur OpenSSL ≥ 3.5 (provider FIPS avec FIPS 203/204), le code exécute les vrai
 | **Reproducible build** (Dockerfile pinné)   | ✅     | `Dockerfile.build` + `make dist-verify` |
 | **Docs CC EAL4+ complètes** (ATE/AVA/ALC/AGD)| ✅    | 8 documents dans `docs/`                |
 | Tests fuzzing + coverage ≥ 95 %             | ⏳     | infra à brancher (AFL++ + lcov)         |
-| Provider OpenSSL FIPS validé                | ⏳     | dépend de la cible (cert CMVP)          |
-| Audit code par tiers (lab CC)               | ⏳     | étape commerciale                       |
-| Soumission CMVP / labo CC                   | ⏳     | étape commerciale finale                |
+| Provider OpenSSL FIPS validé                | n/a    | choix de déploiement : le module tourne contre le provider que l'exploitant installe |
+| Audit code par tiers (lab CC)               | ⏳     | étape payante                            |
+| Soumission CMVP / labo CC                   | n/a    | non prévue — voir la note sur la certification en tête de page |
 
-Légende : ✅ implémenté · 🟡 partiel/scaffold · ⏳ à faire
+Légende : ✅ implémenté · 🟡 partiel/scaffold · ⏳ à faire · n/a hors périmètre
 
-## Roadmap vers la soumission
+## Ce qui reste à faire
 
 1. ~~Compléter le mechanism dispatch~~ — **fait** (`scripts/gen_p11_thunks.py` couvre 78 mécanismes ; `make generate` régénère header + dispatch + doc).
 2. ~~Implémenter les handlers concrets dans `src/dispatch/`~~ — **fait** (10 fichiers, ~2 400 l. : digest, HMAC, AES complet, KDF, RSA/EC/EdDSA via EVP_PKEY, PQ provider-aware, KMAC, KDF concat, hybrides PQ).
@@ -224,9 +224,9 @@ Légende : ✅ implémenté · 🟡 partiel/scaffold · ⏳ à faire
 4. ~~Patcher l'intégrité~~ — **fait** (`src/fhsm_integrity.c` + section ELF `.fhsm_digest` + `scripts/sign_module.sh` two-pass, hook dans `crypto_init` avant chargement du provider FIPS).
 5. ~~Reproducible build~~ — **fait** (`Dockerfile.build` pinné par digest + `scripts/build_reproducible.sh` + `scripts/verify_reproducibility.sh` + `make dist-verify`, voir `docs/REPRODUCIBLE_BUILD.md`).
 6. ~~Documentation CC EAL4+ supplémentaire~~ — **fait** (`docs/ATE_FUN.md` + `docs/AVA_VAN.md` + `docs/ALC_CMC.md` + `docs/AGD_PRE.md` + `docs/AGD_OPE.md`).
-7. **Audit code par tiers** : engager un cabinet (idéalement déjà accrédité COFRAC ou NIAP) pour la revue de code et le penetration testing AVA_VAN.5.
-8. **Soumission CMVP** : déposer auprès d'un lab CST-L1 accrédité (Atsec, Acumen, Leidos, …). Délai typique : 12-18 mois.
-9. **Soumission CC EAL4+** : en parallèle, déposer auprès d'un CESTI accrédité (ANSSI, BSI, NIAP). Délai typique : 12-24 mois.
+7. **Audit code par tiers** : souhaitable, et payant. Ouvert à qui voudrait le faire — le code, les documents d'évaluation et la compilation reproductible sont publics précisément pour que ce soit possible sans nous demander la permission.
+8. ~~**Soumission CMVP**~~ — **abandonné, définitivement.** Un dossier CST-L1 coûte plus que ce projet n'aura jamais, et ce coût est la barrière même que le projet existe pour contourner. Les documents d'évaluation restent écrits selon la méthodologie, et publiés comme exemples travaillés.
+9. ~~**Soumission CC EAL4+**~~ — **abandonné, même raison.** Ce qu'un certificat atteste, la discipline peut le rendre vérifiable : par quiconque, gratuitement.
 
 ## Compatibilité avec le POC Python
 

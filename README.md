@@ -9,8 +9,12 @@
 > French version: see [`README.fr.md`](README.fr.md). Documentation index: [`docs/DOC_INDEX.md`](docs/DOC_INDEX.md).
 >
 > **FreeHSM** is the open-source PKCS#11 library, stewarded by **[Simorgh Labs](https://chaharsou.com)**. PKI and signing tooling on top of it is planned, not built. *(Repository renamed from `freehsm-c` to `freehsm` in July 2026; old URLs redirect.)*
+>
+> **Uncertified, and not seeking certification.** A CMVP or CC certificate costs more than this project will ever have, and that cost is precisely the barrier that keeps public bodies, universities, teaching institutions and developing countries away from auditable cryptography. The ten evaluation documents are published as worked examples — material that is hard to find outside a paid engagement. What a certificate attests, discipline can make checkable: by anyone, for free.
+>
+> This is software given away. It is not sold, it is not positioned against anyone's product, and it makes no claim to be first at anything.
 
-Native **C11** re-implementation of the FreeHSM PKCS#11 v3.2 Soft HSM, designed to pass a FIPS 140-3 Level 1 evaluation and an augmented Common Criteria EAL4+ certification (ALC_FLR.2 + AVA_VAN.5).
+Native **C11** implementation of a PKCS#11 v3.2 software HSM, written to the FIPS 140-3 Level 1 and Common Criteria EAL4+ (ALC_FLR.2 + AVA_VAN.5) methodologies — not to obtain either certificate.
 
 ## Why C ?
 

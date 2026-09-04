@@ -56,14 +56,14 @@ domains — content is already rebranded), and two small threads (#126, #116).
 
 | # | Task | Effort | Status |
 |---|---|---|---|
-| #118 | Audit primacy claim "first OSS PKI + PQC composite" | ~4h | ✅ `docs/PRIMACY_AUDIT_PQC_COMPOSITE.md` — claim revised (pivoted to "PKI + signing + composite") |
+| #118 | Check the "first OSS PKI + PQC composite" claim | ~4h | ✅ `docs/PRIMACY_AUDIT_PQC_COMPOSITE.md` — claim false, removed; document rewritten 2026-09-04 as a dated landscape survey plus a standing rule: no primacy claims |
 | — | Rebrand migration (repo `freehsm-c`→`freehsm`, brand everywhere) | ~10–12h | ✅ Content rebrand ✅, and the **repo rename is done on all three forges** — verified 2026-08-03 by `scripts/post_rename.sh --check`: mirror URLs, all three remotes, and a live 200 on `github.com/afchine1337/freehsm`. The domain purchases are **cancelled** (2026-08-03): the project uses `chaharsou.com`, already owned and already linking to the repository. Nothing pending. |
 
 ## Phase 2 — v1.5.0 (target 2026-07-20)
 
 | # | Task | Effort | Status |
 |---|---|---|---|
-| #113 | Design notes "lessons from Trustway / Safenet / CipherTrust" | ~3h | ✅ `docs/DESIGN_NOTES_COMMERCIAL_HSM.md` |
+| #113 | Design notes from operating a commercial network HSM | ~3h | ✅ `docs/DESIGN_NOTES_COMMERCIAL_HSM.md` — rewritten 2026-09-04, observations only |
 | #108 | Token-store format doc (`TOKEN_STORE_FORMAT.md`) | ~2–3h | ✅ shipped |
 | #110 | `CKO_CERTIFICATE` object support | ~3–4h | ✅ shipped (parser + store) |
 | #125 | Integrate Denis Mingulov's pkcs11-check into CI | ~3–5h | ✅ shipped — plus a full hardening campaign (**361→<50 failures, 7→0 crashes**) |
@@ -303,10 +303,9 @@ our own. The existing KATs never caught this because they are self-generated —
 they prove our verify accepts our sign, which any self-consistent construction
 satisfies, including a wrong one.
 
-**Claim discipline until then.** `PRIMACY_AUDIT_PQC_COMPOSITE.md` §5 rests on
-"PQC composite signatures out-of-the-box". That describes a future release. No
-README, announcement or landing text may say this module implements composite
-signatures until the conforming one ships.
+**Claim discipline until then.** No README, announcement or release note may say
+this module implements composite signatures until the conforming one ships. See
+`PRIMACY_AUDIT_PQC_COMPOSITE.md` §3.
 
 ## Release process
 

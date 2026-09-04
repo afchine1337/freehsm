@@ -145,19 +145,21 @@ claim of any kind about anyone else.
 
 ## 5 --- Documentation
 
-The documentation is kept up to date, and is hard to use:
+The documentation is kept current. Its structure is:
 
-* everything presented linearly in one large document
+* one large document, presented linearly
 * no quick-start path
 * no use-case walkthroughs
 * no task-oriented how-tos
 
-The reader must read a great deal before doing anything, and must reconstruct
-their own use case from reference material.
+In practice this means a reader reaches their own use case by reading reference
+material in order until they find it.
 
 Design note for FreeHSM: this is the argument for the **Diátaxis** structure
 (<https://diataxis.fr/>) — tutorials, how-to guides, reference and explanation
-kept as four distinct kinds of document rather than one linear manual.
+kept as four distinct kinds of document rather than one linear manual. The
+observation is about document architecture, and applies to this repository's own
+documentation at least as much as to anyone else's.
 
 ---
 
@@ -184,9 +186,9 @@ Supported: AES, RSA, ECDSA, AES-GCM, and **ML-KEM, ML-DSA and SLH-DSA** — the
 post-quantum primitives are present.
 
 Not supported: **Ed25519/EdDSA** and the **SHA-3 family**. Ed25519 is the
-default signature algorithm of OpenSSH, TLS 1.3 deployments, git commit signing
-and several widely used protocols; its absence is the most concrete functional
-gap observed.
+default signature algorithm of OpenSSH, of git commit signing and of several
+widely deployed protocols — which is what makes its absence worth recording
+here, since it determines which applications can use the device at all.
 
 FreeHSM ships Ed25519 (with an export-roundtrip KAT at boot since v1.3.0),
 SHA3-256/384/512 with FIPS 202 KAT vectors, and ML-KEM-768 / ML-DSA-65 /
@@ -200,7 +202,11 @@ whose primacy is **unverified** (see `docs/PRIMACY_AUDIT_PQC_COMPOSITE.md`). No
 
 ---
 
-## 8 --- Gaps observed
+## 8 --- Where the product's scope ends
+
+Three things sit outside the boundary of what the device provides. Stated as
+scope, not as deficiency — a hardware HSM that does one thing and stops is a
+defensible design; it just means the operator supplies the rest.
 
 ### Automation and infrastructure-as-code
 
@@ -269,21 +275,21 @@ Technical only. Each is either already in the roadmap or a note to add to it.
 
 ---
 
-## 11 --- Anti-patterns worth naming
+## 11 --- Two design lessons, about no one in particular
 
-Not specific to any one product.
+**Deployment share and design quality are independent variables.** An interface
+can be everywhere because of installed base and migration cost rather than
+because it is the interface anyone would design today. Both things are usually
+true at once. The lesson for a new implementation is not to be dismissive of
+what is deployed — compatibility is a real user need — but not to treat
+ubiquity as a design specification either.
 
-**"Widespread ≠ well-designed."** The most deployed interface in a category is
-not automatically the best one; installed base and migration cost explain
-persistence at least as well as merit does. The design lesson is to target the
-interface a current developer would want rather than compatibility with an old
-one.
-
-**Blurring the HSM and KMS categories.** Bundling key-management policy features
-into an HSM makes it harder for an evaluator — and for a buyer — to say what is
-actually inside the certified boundary. Keeping the PKCS#11 module and anything
-built above it as separate, clearly bounded layers is the cheaper position to
-defend later.
+**Keep the HSM layer and anything built above it separately bounded.** Where
+key-management policy features are bundled into an HSM, it becomes harder for
+an evaluator, or for anyone reading the documentation, to say what is inside the
+cryptographic boundary and what is not. Keeping the PKCS#11 module and the
+tooling above it as distinct, separately described layers is cheaper to explain
+and cheaper to evaluate.
 
 ---
 
