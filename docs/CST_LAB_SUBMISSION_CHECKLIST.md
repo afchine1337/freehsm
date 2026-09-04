@@ -1,4 +1,4 @@
-# FreeHSM C --- NIST CST Lab Submission Checklist
+# What a NIST CST Lab Asks For --- a method, not a submission
 
 > **No submission is planned.** This checklist enumerates what a CST lab or CC
 > evaluator asks for. It is kept because knowing what the evidence looks like is
@@ -9,7 +9,11 @@
 
 What a NIST-accredited Cryptographic and Security Testing (CST) lab asks for when evaluating a module against FIPS 140-3 Level 1. Used here as a specification of the evidence to produce, not as a submission plan.
 
-**Status :** This is the developer-side artifact list. The actual CST lab will issue their own Statement of Work and ask for additional items.
+**Status :** developer-side artefact list, compiled from published lab
+requirements. Anyone actually submitting would receive a Statement of Work
+asking for more; treat this as the floor of what is expected, not the ceiling.
+The checkboxes track whether the evidence exists in this repository — they do
+not track progress toward anything.
 
 ---
 

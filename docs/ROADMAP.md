@@ -2,20 +2,36 @@
 
 Authoritative, living roadmap. Provenance: the phased plan from the planning
 session, reconciled against what has actually shipped, plus the commercial-HSM
-design study (`docs/DESIGN_NOTES_COMMERCIAL_HSM.md`), the rebrand plan
+design notes (`docs/DESIGN_NOTES_COMMERCIAL_HSM.md`), the rebrand plan
 (`../REBRAND_CHECKLIST.md`), the brand reference
 (`docs/SIMORGH_LABS_BRAND_REFERENCE.md`), the pkcs11-check campaign
 (`docs/PKCS11_CHECK_CAMPAIGN.md` + `PKCS11_CHECK_FINDINGS.md`), and the
 the CC/CMVP evidence checklist (`docs/CST_LAB_SUBMISSION_CHECKLIST.md`, kept
 as a methodological reference — no submission is planned).
 
-**Mission.** FreeHSM exists to put auditable cryptography within reach of public
-bodies, universities and countries that cannot buy a certified module. It is
+**Mission.** FreeHSM exists to put auditable cryptography within reach of the
+people who cannot buy a certified module: researchers, students, teaching
+institutions, public bodies and universities, and developing countries. It is
 built to FIPS 140-3 Level 1 and CC EAL4+ requirements and documented with their
 methodologies; it holds no certificate and will not pursue one. A certificate
 costs more than this project will ever have, and that cost is precisely the
 barrier this project exists to route around. Nothing on this roadmap should read
 as working towards a submission.
+
+**Two consequences, which apply to every document in this repository.**
+
+*No value judgements about companies.* The project sells nothing and competes
+with nobody. Other people's products may be described where the description is
+checkable — a shipped interface version, a documented algorithm list, a public
+release history — and are not to be ranked, framed as weak, or used as a foil.
+The evaluation documents written to CC and CMVP methodology are published as
+worked examples of method; they are not a dossier in progress, and the
+checklists in them track what exists here, not progress towards anything.
+
+*No primacy claims.* Not "first", not "only". If a statement's value depends on
+nobody else having done it, it does not go in the README, the release notes, the
+announcements or the code comments. See `docs/PRIMACY_AUDIT_PQC_COMPOSITE.md`
+§0, which is the record of this rule being learned the hard way.
 
 Legend: ✅ done · 🟡 partial · ⏳ pending · ♻ continuous
 
