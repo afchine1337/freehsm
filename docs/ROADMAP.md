@@ -736,6 +736,62 @@ through a helper in `tools/p11_util.h` and never write the word. Reading the
 binary for a `.fhsm_digest` section answers the same question about the
 artefact rather than about the source text, and puts them where they belong.
 
+### The secure heap arena sits exactly on the system limit (measured 2026-09-04)
+
+`tests/probe_secure_heap` reads `VmLck` across `C_Initialize` and reports what
+the kernel actually locked. On Debian 13: **8192 kB, the whole arena.** So the
+Security Target's claim that key material is swap-excluded holds — and holds
+with no margin whatever, because `FHSM_SECURE_HEAP_BYTES` is 8 MiB and
+systemd's default `RLIMIT_MEMLOCK` is also 8 MiB.
+
+The module fails closed, which is the right half of the design and was verified
+by accident: an external user set `secure_heap_kb = 65536` on that same 8 MiB
+limit and `C_Initialize` returned `CKR_HOST_MEMORY` on every call.
+`CRYPTO_secure_malloc_init` returns 2 for "allocated but not locked", and
+accepting only 1 rejects it. Good — but it means any host with a few locked
+pages already, or a slightly lower limit, gets a module that will not start
+rather than one that quietly runs unlocked.
+
+**The work, in this order, and the order is the point:**
+
+1. Lower the default arena below the common system limit — 4 MiB is the obvious
+   candidate — so that locking has room on an ordinary machine. Measure what
+   the module actually uses first; 8 MiB was never justified by a measurement
+   in this repository.
+2. Only then make the lock verified and mandatory: read back `VmLck` in
+   `heap_init_once` and refuse a partial lock. Doing this *before* step 1 would
+   refuse to start on most default installations, which is not hardening.
+3. Say in AGD_PRE what the arena costs and how to raise both numbers together.
+   Raising `secure_heap_kb` alone stops the module, which is now a message but
+   should also be a documented fact.
+
+Not urgent: the property holds today on a default Debian. It is on this list
+because it holds by coincidence rather than by design, and because nothing
+before `probe_secure_heap` could have told us either way.
+
+### Verify that what is published is what was written (noted 2026-09-03)
+
+Three defects in one evening had the same shape, and none was a bug in the code
+they concerned: a GPG fingerprint nobody re-read, a release-notes section that
+`git add -A` did not pick up, and `release.yml` publishing GitHub's generated
+commit list because it had no `body_path`. In each case the content was correct
+and the path from it to the reader was not.
+
+The reproducibility anchor checks that what is *shipped* is what was *built*.
+There is no equivalent check that what is *published* is what was *written*.
+Candidates, cheapest first:
+
+* `release.yml` already fails without `RELEASE_vX.Y.Z.md` (added 2026-09-03).
+  Extend it to fail if the published body does not contain a marker string from
+  that file.
+* Have `baseline.yml` record the commit in `dist/refs/vX.Y.Z.sha256`, so a
+  digest mismatch can say "reference taken on abc1234, you are tagging def5678"
+  instead of offering two hypotheses, neither of which was right the one time
+  it mattered.
+* A `doc_audit` rule for identifiers that must match a canonical source — the
+  GPG fingerprint against `gpg --fingerprint` output being the obvious first
+  one, since it was wrong in eight files for three months.
+
 ## Continuous / parallel
 
 | # | Task | Cadence | Status |
