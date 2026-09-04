@@ -306,4 +306,17 @@ Then:
 
 This script writes nothing to git on purpose. The last line matters: a push
 that does not report the tag has not pushed the tag.
+
+Once the release is published, before you close anything:
+
+    gh issue list --state open --limit 30
+
+Tell every reporter whose fix this release carries, by name, in their issue --
+and let THEM close it. On 2026-09-03 an issue was closed on a reporter who was
+running the release while the fix existed only on main; he was right to reopen
+it. Three others had been fixed for weeks with nobody told.
+
+A fix nobody can download is not a fix, and a fix nobody hears about is not
+much better. ACKNOWLEDGEMENTS.md records who found what; keep it current in the
+same pass.
 EOF

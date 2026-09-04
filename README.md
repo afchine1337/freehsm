@@ -168,6 +168,12 @@ Legend : ✅ implemented · 🟡 partial/scaffold · ⏳ to do
 
 ---
 
+## Acknowledgements
+
+Most of what has been fixed since v1.4.0 was found by people outside this
+project, and several of those things could not have been found inside it. Who
+found what, specifically: [`ACKNOWLEDGEMENTS.md`](ACKNOWLEDGEMENTS.md).
+
 ## Maintainer & brand
 
 **Simorgh Labs — Open Source Cryptography and Digital Trust** — sponsoring entity for the FreeHSM project, which ships the PKCS#11 library together with `fhsm-token`, `fhsm-csr`, `fhsm-ca`, `fhsm-sign` and the `fhsm-service` daemon, including PQC composite signatures per IETF LAMPS. Maintained by Afchine Madjlessi (`afchine.mad@gmail.com`). All releases are GPG-signed with key `743A 6A59 04A1 461A 6464 08DE 4856 0162 DBBF 28A2` (Ed25519, unchanged across the rebrand). The PKCS#11 module reports `manufacturerID = "Simorgh Labs"` (truncated to the 32-octet field per PKCS#11 v3.2 §C.6.1). The library binary name `libfreehsm.so` and all PKCS#11 identifiers are stable — the rebrand changes no consumer-facing interface. Name and logo usage: see [`TRADEMARK.md`](TRADEMARK.md).
