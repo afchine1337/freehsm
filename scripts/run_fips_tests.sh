@@ -125,8 +125,14 @@ fi
 #
 # Read the section instead. Nothing is changed, and the answer does not
 # depend on what the module was before the script ran.
+# od, not xxd: xxd is a separate package on Debian trixie and is absent from
+# Dockerfile.build. Here it would not error loudly -- the pipeline yields an
+# empty string, which this script reads as "no .fhsm_digest section" and
+# reports as a missing section rather than a missing tool. A wrong diagnosis
+# is worse than a crash. Fifth site of the same dependency; the first was
+# removed from release.yml on 2026-09-01 and nobody swept for the others.
 digest=$(objcopy --dump-section .fhsm_digest=/dev/stdout "$LIB_SO" /dev/null \
-         2>/dev/null | xxd -p | tr -d '\n')
+         2>/dev/null | od -An -tx1 -v | tr -d ' \n')
 case "$digest" in
     "")
         bad "no .fhsm_digest section in $LIB_SO -- rebuild with src/fhsm_integrity.c"

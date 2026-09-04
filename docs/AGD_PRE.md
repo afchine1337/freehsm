@@ -161,6 +161,26 @@ openssl list -providers
 
 If not active, follow `docs/REPRODUCIBLE_BUILD.md` §3 to rebuild OpenSSL with `enable-fips` and patch `/etc/ssl/openssl.cnf` to activate the provider.
 
+#### 3.3.0 Use OpenSSL 3.5.7 or later — observed, not diagnosed
+
+**On OpenSSL 3.5.6, `C_GenerateKeyPair` for RSA-2048 fails with
+`CKR_FUNCTION_FAILED` while EC, AES, HMAC and ECDH all succeed.** The same
+module, byte for byte, generates RSA keys correctly on 3.5.7.
+
+Reported and isolated by an external user (issue #5) across several days. The
+attribution is clean — between the failing run and the passing one, only the
+OpenSSL version changed — but **the cause is not established**, and it is not
+simply "3.5.6 cannot do it": `openssl genpkey -algorithm RSA -provider fips`
+generates a key perfectly well on 3.5.6. It fails only through this module,
+which additionally loads the `base` provider, sets `fips=yes` as the default
+property, and enables OpenSSL's global secure heap. Something in that
+combination is involved; which part is unknown.
+
+A module built against 3.5.6 will therefore pass every self-test and fail the
+first RSA key generation. If you are on 3.5.6, upgrade before deploying. As of
+v2.0.2 the module prints OpenSSL's own error stack on that path, so anyone who
+meets it can send the reason rather than the symptom.
+
 #### 3.3.1 After every OpenSSL upgrade — `fipsmodule.cnf` must be regenerated
 
 **Run §3.3 again after any OpenSSL package update, before anything else.** An

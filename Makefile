@@ -800,10 +800,25 @@ ocsp-delegated:
 	@echo "[ocsp-delegated] the tree is now a PROFILE=interop build"
 
 integrity: $(LIB)
-	@scripts/sign_module.sh $(LIB)
+# Exit 3 means "already signed", which is a state and not a failure.
+# scripts/release.sh and .github/workflows/release.yml both learned to accept
+# it on 2026-09-01; the target they were working around did not, so a second
+# `make integrity` on an unchanged module stopped the build with Error 3. Any
+# other non-zero status still stops it.
+	@scripts/sign_module.sh $(LIB) || [ $$? = 3 ]
 	@echo "[integrity] $(LIB) signed ; readback :"
+# od, not xxd. xxd is its own package on Debian trixie and is absent from
+# Dockerfile.build, so this readback printed
+#
+#     [integrity] libfreehsm.so signed ; readback :
+#     /bin/sh: 2: xxd: not found
+#
+# -- a confirmation step that confirmed nothing, silently, in the one
+# environment where the signature matters most. The same dependency was
+# removed from .github/workflows/release.yml on 2026-09-01 without anyone
+# checking whether the Makefile shared it. It did.
 	@objcopy --dump-section .fhsm_digest=/dev/stdout $(LIB) /dev/null \
-	    2>/dev/null | xxd -p | tr -d '\n' ; echo
+	    2>/dev/null | od -An -tx1 -v | tr -d ' \n' ; echo
 
 # Strip-and-sign : produce a release artefact with debug info removed
 # and the digest patched. Goes hand-in-hand with `make repro`.
