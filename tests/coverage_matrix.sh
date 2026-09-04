@@ -35,9 +35,25 @@
 # 37 of 37 as of v2.0.2. If a §7.11 attestation is ever assembled, it is built
 # from that, not from this.
 #
-# The defaults here are ${VAR:-1}, so a caller may unset them and run this
-# matrix inside the boundary. Nobody has; the counts under those conditions
-# are unknown.
+# MEASURED 2026-09-04, and the answer is better than the correction above
+# assumed. Run with FHSM_COV_EVIDENCE=1 against the signed module -- integrity
+# verified, KATs enforced, system openssl.cnf and therefore the FIPS provider:
+#
+#     mode : evidence      PASS = 24   FAIL = 0   SKIP = 9   (total 33)
+#
+# Identical to the bypass run. Nothing in this matrix depends on the three
+# escapes; every assertion that passes outside the boundary passes inside it.
+#
+# So the claim this header used to make was TRUE and UNFOUNDED, which is a
+# distinction worth keeping: it was removed because nobody had checked, not
+# because it was wrong. It can be made again, on condition that the matrix
+# submitted is one produced with FHSM_COV_EVIDENCE=1 -- the default run is
+# still not evidence, and still says so.
+#
+# (The sentence replaced here said "nobody has; the counts are unknown". It was
+# written this morning and was false by the afternoon. Third comment of the day
+# corrected after being written, which is the argument for measuring before
+# describing rather than after.)
 #
 # Sections :
 #   1. Module identity   (Initialize, GetInfo, GetSlotList, GetSlotInfo)
@@ -70,13 +86,34 @@ export FHSM_TOKENS_DIR="${TOKENS_DIR}"
 # (0x6) and every assertion in this script would short-circuit. Both
 # env vars are forbidden in any real PKCS#11 deployment per
 # AGD_PRE §7.5 / §7.5bis ; do NOT carry them over to production.
-export FHSM_INTEGRITY_ALLOW_UNSIGNED="${FHSM_INTEGRITY_ALLOW_UNSIGNED:-1}"
-export FHSM_KAT_ALLOW_FAIL="${FHSM_KAT_ALLOW_FAIL:-1}"
-# Default to the system openssl.cnf-less profile so EVP fetches go to
-# the default provider in legacy mode. The test-fips-mode job is free
-# to re-export OPENSSL_CONF before invoking this script if it needs
-# the FIPS provider explicitly.
-export OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}"
+#
+# FHSM_COV_EVIDENCE=1 runs this matrix INSIDE the boundary: nothing below is
+# exported, so the module verifies its own integrity, a failing KAT stops it,
+# and EVP fetches go to whatever the system openssl.cnf provides. That is the
+# configuration a §7.11 attestation would have to be collected in.
+#
+# It exists because the header of this file said a caller could simply unset
+# the three variables, and that was false: `${VAR:-1}` substitutes on unset AND
+# on empty, so unsetting them re-applies them. The sentence was written in the
+# same commit that corrected two other comments describing paths the code did
+# not offer -- the third instance in one week, and the second by me in one day.
+#
+# Under FHSM_COV_EVIDENCE=1 the module must be signed (`make integrity`) or
+# C_Initialize will refuse, and it will say so: since v2.0.2 the unsigned case
+# names `make integrity` rather than returning a bare 0x80000002.
+#
+# OPENSSL_CONF is in the same set: pointing it at /dev/null is what keeps EVP
+# fetches on the default provider in legacy mode. Under FHSM_COV_EVIDENCE it is
+# left alone so the system configuration -- and therefore the FIPS provider --
+# applies.
+if [ "${FHSM_COV_EVIDENCE:-0}" = 1 ]; then
+    FHSM_COV_MODE="evidence"
+else
+    FHSM_COV_MODE="bypass"
+    export FHSM_INTEGRITY_ALLOW_UNSIGNED="${FHSM_INTEGRITY_ALLOW_UNSIGNED:-1}"
+    export FHSM_KAT_ALLOW_FAIL="${FHSM_KAT_ALLOW_FAIL:-1}"
+    export OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}"
+fi
 
 SO_PIN="00000000"
 USER_PIN="user0000"
@@ -110,13 +147,27 @@ record() {
 # as the same user as the script removes the issue entirely. CI in
 # the container also works correctly because the container is
 # already a security boundary.
+# One place that decides the child environment, instead of three copies of the
+# same four assignments. The copies were why FHSM_COV_EVIDENCE could not simply
+# be honoured at the top of the file: each call site re-applied ${VAR:-1} and
+# put the bypass back.
+cov_env() {
+    if [ "$FHSM_COV_MODE" = evidence ]; then
+        env \
+            FHSM_TOKENS_DIR="${FHSM_TOKENS_DIR:-${TOKENS_DIR:-/tmp/freehsm-cov}}" \
+            "$@"
+    else
+        env \
+            FHSM_INTEGRITY_ALLOW_UNSIGNED=1 \
+            FHSM_KAT_ALLOW_FAIL=1 \
+            OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}" \
+            FHSM_TOKENS_DIR="${FHSM_TOKENS_DIR:-${TOKENS_DIR:-/tmp/freehsm-cov}}" \
+            "$@"
+    fi
+}
+
 p11() {
-    env \
-        FHSM_INTEGRITY_ALLOW_UNSIGNED="${FHSM_INTEGRITY_ALLOW_UNSIGNED:-1}" \
-        FHSM_KAT_ALLOW_FAIL="${FHSM_KAT_ALLOW_FAIL:-1}" \
-        OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}" \
-        FHSM_TOKENS_DIR="${FHSM_TOKENS_DIR:-${TOKENS_DIR:-/tmp/freehsm-cov}}" \
-        "$P11_TOOL" --module "$MODULE" "$@" 2>&1
+    cov_env "$P11_TOOL" --module "$MODULE" "$@" 2>&1
 }
 
 cleanup() {
@@ -135,6 +186,7 @@ color_info "FreeHSM C --- coverage matrix"
 color_info "  module      : $MODULE"
 color_info "  tokens_dir  : $TOKENS_DIR"
 color_info "  report      : $REPORT"
+color_info "  mode        : $FHSM_COV_MODE"
 color_info "============================================================"
 
 # ---- 1. Module identity ------------------------------------------------
@@ -391,12 +443,7 @@ color_info "[8/8] Post-quantum (via dlsym harnesses)"
 # explicitly through `env` so the dlsym harnesses pick them up
 # regardless of the surrounding sudoers policy.
 pq_e2e() {
-    env \
-        FHSM_INTEGRITY_ALLOW_UNSIGNED="${FHSM_INTEGRITY_ALLOW_UNSIGNED:-1}" \
-        FHSM_KAT_ALLOW_FAIL="${FHSM_KAT_ALLOW_FAIL:-1}" \
-        OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}" \
-        FHSM_TOKENS_DIR="${FHSM_TOKENS_DIR:-${TOKENS_DIR:-/tmp/freehsm-cov}}" \
-        "$@" 2>&1
+    cov_env "$@" 2>&1
 }
 # The PQ end-to-end harnesses dlopen /opt/freehsm/lib/libfreehsm.so
 # (hardcoded), do their own C_Initialize, and expect slot 0 to already
@@ -463,12 +510,7 @@ fi
 # noticing the mech is absent and bailing at session-open time
 # (CKR_TOKEN_NOT_PRESENT, treated as "no MD5 path available" which
 # is the correct FIPS posture).
-out=$(env \
-          FHSM_MODE=fips \
-          FHSM_INTEGRITY_ALLOW_UNSIGNED="${FHSM_INTEGRITY_ALLOW_UNSIGNED:-1}" \
-          FHSM_KAT_ALLOW_FAIL="${FHSM_KAT_ALLOW_FAIL:-1}" \
-          OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}" \
-          FHSM_TOKENS_DIR="${FHSM_TOKENS_DIR:-${TOKENS_DIR:-/tmp/freehsm-cov}}" \
+out=$(FHSM_MODE=fips cov_env \
           "$P11_TOOL" --module "$MODULE" \
           --slot 0 --login --pin "$USER_PIN" \
           --hash --mechanism MD5 \

@@ -27,6 +27,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   three, refuses to run against an unsigned module, and proves the provider is
   loaded before counting. 37 of 37 at v2.0.2.
 
+  **Then measured, and the claim turns out to have been true and unfounded.**
+  `FHSM_COV_EVIDENCE=1` runs the matrix inside the boundary and gives
+  **24 / 0 / 9**, identical to the bypass run — nothing in it depends on the
+  three escapes. The item is submittable again, on condition that the matrix
+  attached is one produced in that mode; the report header now states which
+  mode produced it.
+
+  The switch had to be built first: the three defaults are `${VAR:-1}`, and
+  `:-` substitutes on unset as well as on empty, so unsetting them re-applied
+  them. The corrected header claimed a caller could simply unset them, which
+  was the third comment in a week describing a path the code did not offer —
+  and the second written by the person correcting the other two. Now one
+  `cov_env` decides the child environment instead of three copies of the same
+  four assignments, which is why the switch could not be honoured before.
+
 * **A test that checked one field and claimed another.** The matrix's identity
   assertion was a single `grep -q "FreeHSM C"` recorded as "Manufacturer
   reported" — it read the library description while claiming to check the
