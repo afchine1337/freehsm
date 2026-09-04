@@ -907,59 +907,39 @@ Consolidation points, in priority order:
 
 ---
 
-## New design decisions to fold in (study Category B)
+## New design decisions to fold in (from the commercial-HSM study)
 
 * **B1** Diátaxis documentation architecture.
-* **B2** Portable key-blob format + `fhsm-export` / `fhsm-import` (sovereignty = freedom to migrate).
+* **B2** Portable key-blob format + `fhsm-export` / `fhsm-import`, so the store format is readable without this implementation.
 * **B3** Structured JSON logs (ECS/OTel) + Prometheus `/metrics`.
-* **B4** Multi-source entropy pool (kernel DRBG + jitterentropy + TPM RNG + optional YubiKey/OpenTitan).
+* **B4** Multi-source entropy pool (kernel DRBG + jitterentropy + TPM RNG + optional YubiKey/OpenTitan) — a partial answer to a hardware TRNG, not an equivalent.
 * **B5** K8s operator + Terraform provider + Ansible collection + Helm.
-* **B6** SIEM plugins (Splunk/Datadog/Sentinel/QRadar) — Tier-4 monetization.
-* **B7** Multilingual Tier-2 support (EN/FR/Persan/Arabic).
-* **B8** Tier-2 SLA: 4h critical / 24h high / 5 business days medium-low.
+* **B6** SIEM output formats (Splunk/Datadog/Sentinel/QRadar ingestion).
+* **B7** Documentation and messages in EN/FR, Persan and Arabic as they get written.
+* **B8** *(dropped — described a support contract, not a design decision.)*
 * **B9** v3.x horizon: KMS + VM encryption + file encryption.
 
-## Marketing claims (study Category C) — ready for the v2.0-beta landing
-
-6 direct, defensible framings (verbatim in `docs/DESIGN_NOTES_COMMERCIAL_HSM.md`
-§Category C): 20-year PKCS#11 lead, 23 signed releases + 3 GHSAs in 6 weeks vs
-one version / 2 years, open token-store + migration tool, TPM tamper-resistance
-at ~100× lower TCO, one year of incumbent maintenance ≈ a full EAL4+ evidence
-package, "integrated crypto-engineering stack" vs "boxed HSM".
+*Removed 2026-09-04: three sections — marketing claims, a competitive timing
+argument, and a go-to-market calendar — all written around a product that does
+not exist and around comparisons the project has no reason to make. The
+underlying technical observations survive in
+`docs/DESIGN_NOTES_COMMERCIAL_HSM.md`, which was rewritten the same day to keep
+only what is verifiable.*
 
 ---
 
-## The strongest insight — timing is the hidden strength
+## Scope boundary — what a software module does not do
 
-Bull/Atos Trustway has been in expert-flight for years and **no OSS project has
-seriously taken over**. Each of these is individually a strong differentiator;
-together they have **no OSS or commercial equivalent on the target geography**:
+Three properties of a hardware HSM are out of reach of any software module, and
+saying so plainly is cheaper than being asked:
 
-* 6-week release cadence vs their 2 years
-* PKCS#11 v3.2 vs their v2.20
-* integrated PKI + signing vs a boxed HSM
-* DevOps-native vs zero cloud
-* multilingual vs French-only
-* **PQC composite** vs PQC-raw-only
+* a dedicated hardware TRNG
+* physical tamper detection with automatic zeroization
+* FIPS 140-3 Level 3 *physical* security — above Level 1 that axis requires
+  physical construction, so a software module is Level 1 on it by definition
 
-The French OIV / defence / defence-industry market is actively looking for a
-Proteccio alternative for exactly these reasons. The response arrives right as
-they start searching. Entry window 2026–2027 (see GTM phasing).
-
-## Go-to-market (study Category D)
-
-| Phase | Timing | Action |
-|---|---|---|
-| 1 | v2.0-beta (2026-09) | Public announce, positioning vs Proteccio (claims C1–C6) |
-| 2 | v2.0 stable (2026-12) | Reach the users this is for: public bodies, universities, teaching, and administrations without a certification budget |
-| 3 | 2027-Q1 | Present at FIC 2027 (Lille) |
-| 4 | 2027-Q2 | *(removed — an ANSSI CC EAL4+ evaluation is not affordable and is not the objective; see Mission above)* |
-| 5 | 2027-Q3/Q4 | MENA / Africa (GISEC, Black Hat MEA, Africa Cyber Defense Forum) |
-
-## Honest scope boundary (study Category E)
-
-Target the ~99% of the market that does **not** need FIPS 140-3 Level 3
-*physical* security. Not matched (and that's fine): dedicated hardware TRNG,
-physical tamper detection with auto-zeroization, Level 3 physical posture.
-Compensated with TPM measured boot + integrity attestation + audit-log tamper
-evidence; a physically compromised host is a lost host in our model.
+TPM measured boot, integrity attestation and the audit-log hash chain give
+tamper *evidence*, which is a weaker and different property than tamper
+*response*. A physically compromised host is a lost host in this model. Anyone
+whose threat model needs the three properties above needs hardware, and should
+be told so.
