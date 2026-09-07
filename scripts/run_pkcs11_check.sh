@@ -44,6 +44,56 @@ mkdir -p "$REPORTS"
 TOKENS_DIR="$(mktemp -d /tmp/fhsm-p11check.XXXXXX)"
 trap 'rm -rf "$TOKENS_DIR"' EXIT
 
+# Which harness produced these numbers?
+#
+# pkcs11-check does print its own version -- "provenance: pkcs11-check X.Y.Z"
+# near the top of its output, so it is in run.log. What it is NOT in is
+# report.jsonl, which is a raw pytest --report-log carrying pytest_version and
+# nothing else, and report.jsonl is the file that gets attached to an issue or
+# read back months later.
+#
+# On 2026-09-07 that distinction cost an hour: the CI workflows pin
+# pkcs11-check==0.1.9, this script took whatever was on PATH, a venv still held
+# 0.1.8, and two runs were compared as if only the module had changed. The
+# provenance line was sitting in run.log the whole time; nobody had a reason to
+# scroll back to it, because nothing downstream ever mentioned a version.
+#
+# Ask the interpreter named in the harness's own shebang. The ambient python3
+# may hold a different installation, or none at all -- which is exactly how
+# the wrong version got read that morning.
+p11c_version() {
+    local bin py
+    bin="$(command -v pkcs11-check)" || return 1
+    py=""
+    if head -c2 "$bin" 2>/dev/null | grep -q '#!'; then
+        py="$(head -1 "$bin" | sed 's|^#!||; s| .*||')"
+    fi
+    [ -n "$py" ] && [ -x "$py" ] || py=python3
+    "$py" - <<'PY' 2>/dev/null
+import importlib.metadata as m
+try:
+    print(m.version("pkcs11-check"))
+except Exception:
+    print("unknown")
+PY
+}
+
+HARNESS_VERSION="$(p11c_version || echo unknown)"
+[ -n "$HARNESS_VERSION" ] || HARNESS_VERSION="unknown"
+# What .github/workflows/{ci,pkcs11-check}.yml pin. Override when testing a
+# candidate; the point is that a mismatch is stated, not that it is forbidden.
+EXPECTED_VERSION="${FHSM_PKCS11CHECK_EXPECT:-0.1.9}"
+
+printf '%s\n' "$HARNESS_VERSION" > "$REPORTS/harness-version.txt"
+echo "== harness =="
+echo "  pkcs11-check : $HARNESS_VERSION   (workflows pin $EXPECTED_VERSION)"
+echo "  module       : $MODULE"
+if [ "$HARNESS_VERSION" != "$EXPECTED_VERSION" ]; then
+    echo "  NOTE : this is not the pinned version. The run is still valid --"
+    echo "         but counts from it are not comparable to a pinned run, and"
+    echo "         any finding written up from it must say which version."
+fi
+
 # Purge pkcs11-check's isolation state + per-file report cache. These
 # hidden files (gitignored, so `make clean` never touches them) carry
 # the crash/outcome records of the PREVIOUS run ; the mixed-isolation
@@ -131,5 +181,10 @@ else
     echo "  (summary script $SUMMARY_PY missing; see run.log)"
 fi
 
+# Restate the harness version here, next to the counts. The banner at the top
+# scrolls away behind several hundred lines of test output, and the counts are
+# what gets pasted into an issue or a findings document -- so the version has
+# to travel with them, not with the header nobody copies.
+echo "Harness: pkcs11-check $HARNESS_VERSION   module: $MODULE"
 echo "Report: $REPORT_FILE (findings are evidence, not a gate)"
 exit 0
