@@ -2957,6 +2957,40 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (pMechanism->mechanism == CKM_AES_KEY_WRAP
         || pMechanism->mechanism == CKM_AES_KEY_WRAP_KWP) {
         if (ukt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+
+        /* Unwrapping-key size. C_WrapKey validates this at the matching point
+         * above, with a comment saying a bad size must not "silently fall
+         * through to the 256-bit cipher name". That fix was applied to the wrap
+         * path only: here a 20-byte key still selected AES-256-WRAP. */
+        if (ukl != 16 && ukl != 24 && ukl != 32)
+            return 0x00000114UL;   /* CKR_WRAPPING_KEY_SIZE_RANGE */
+
+        /* Wrapped-blob length, checked BEFORE anything writes into pt[].
+         *
+         * EVP_DecryptUpdate takes no output-capacity argument: the caller
+         * guarantees the buffer. AES-KW yields ulWrappedKeyLen - 8 bytes, so a
+         * blob longer than sizeof(pt) + 8 writes past a 256-byte stack buffer.
+         * _FORTIFY_SOURCE and the stack canary turn that into an abort, which
+         * is how it was found (pkcs11-check Wycheproof AES-KW, 2026-09-07) --
+         * but both are build flags. A distribution build without them would
+         * take the write instead of the abort, on data that arrives from
+         * outside by the very purpose of key wrapping.
+         *
+         * RFC 3394 (KW):  blob is a multiple of 8 and at least 24
+         *                 (16 bytes of key + the 8-byte AIV).
+         * RFC 5649 (KWP): blob is a multiple of 8 and at least 16.
+         *
+         * The 256-byte ceiling is the current scope: the tail of this function
+         * imports the result as a secret key. Unwrapping a DER-encoded private
+         * key needs a larger, heap-allocated buffer and is a separate change. */
+        {
+            size_t min_blob = (pMechanism->mechanism == CKM_AES_KEY_WRAP) ? 24 : 16;
+            if (ulWrappedKeyLen < min_blob || (ulWrappedKeyLen % 8) != 0)
+                return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
+            if (ulWrappedKeyLen - 8 > sizeof(pt))
+                return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
+        }
+
         const char *cname = NULL;
         if (pMechanism->mechanism == CKM_AES_KEY_WRAP) {
             cname = (ukl == 16) ? "AES-128-WRAP" :
