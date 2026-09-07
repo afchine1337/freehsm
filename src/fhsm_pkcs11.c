@@ -2417,6 +2417,28 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         }
         EVP_PKEY_CTX_free(pctx);
 
+        /* EVP_PKEY_fromdata takes the raw bytes as given: for Ed25519 and
+         * Ed448 any string of the right length is accepted, canonical or not,
+         * on the curve or not. So C_CreateObject imported invalid public keys
+         * and reported CKR_OK -- four ACVP EDDSA-KeyVer vectors, two per curve
+         * (pkcs11-check, 2026-09-07). Nothing downstream re-checks: a key that
+         * enters the token is treated as valid by everything after.
+         *
+         * Note for the EC path above, which does not check either: it was left
+         * alone because nothing measured says it is wrong, and adding a check
+         * to a path with 3,098 passing ECDSA vectors on the strength of
+         * symmetry is how one breaks an evening's work. It is worth measuring
+         * on its own. */
+        {
+            EVP_PKEY_CTX *chk = EVP_PKEY_CTX_new_from_pkey(NULL, pkey, NULL);
+            if (!chk || EVP_PKEY_public_check(chk) != 1) {
+                if (chk) EVP_PKEY_CTX_free(chk);
+                EVP_PKEY_free(pkey);
+                return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            }
+            EVP_PKEY_CTX_free(chk);
+        }
+
     } else if (a.path == FHSM_CREATE_PATH_RSA_PUB) {
         BIGNUM *n = BN_bin2bn(a.rsa_modulus,  (int)a.rsa_modulus_len,  NULL);
         BIGNUM *e = BN_bin2bn(a.rsa_exponent, (int)a.rsa_exponent_len, NULL);
