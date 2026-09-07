@@ -6537,6 +6537,42 @@ static int mech_is_pss(uint32_t m) {
         || m == CKM_SHA512_RSA_PKCS_PSS;
 }
 
+/* Apply the caller's CK_RSA_PKCS_PSS_PARAMS to an EVP context: padding, salt
+ * length, and the mask generation function.
+ *
+ * The MGF was the missing one. C_SignInit / C_VerifyInit read `mgf` out of the
+ * parameter block into op->pss_mgf and nothing ever read it back, so OpenSSL
+ * applied its own default -- MGF1 over the signature hash. A caller asking for
+ * SHA-256 with MGF1-SHA1, which PKCS#11 v3.2 allows and which certificates in
+ * the wild use, got its signatures verified against MGF1-SHA256 and rejected.
+ * 267 Wycheproof vectors, every one of them a valid signature (2026-09-07).
+ *
+ * The OAEP path two thousand lines up has always called
+ * EVP_PKEY_CTX_set_rsa_mgf1_md. The parameter was handled on one branch and
+ * dropped on the other.
+ *
+ * One helper rather than four copies of three calls: four call sites is how a
+ * fifth one ends up missing a line. Returns an fhsm_rv_t so an unknown mgf is
+ * refused rather than silently ignored -- the fault this replaces. */
+static fhsm_rv_t pss_apply_params(EVP_PKEY_CTX *ctx, int have,
+                                  long saltlen, uint32_t mgf)
+{
+    if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PSS_PADDING) <= 0)
+        return FHSM_RV_FUNCTION_FAILED;
+    if (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx, have ? (int)saltlen : -1) <= 0)
+        return FHSM_RV_FUNCTION_FAILED;
+    /* No parameter block: leave OpenSSL's default, which is what callers that
+     * pass none have always got. */
+    if (!have || mgf == 0)
+        return FHSM_RV_OK;
+    const EVP_MD *md = mgf_md(mgf);
+    if (!md)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    int rc = EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, md);
+    EVP_MD_free((EVP_MD *)md);
+    return (rc > 0) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
 /* The mech_is_ecdsa / ecdsa_der_to_raw / ecdsa_raw_to_der helpers used
  * to live here. They were extracted to src/fhsm_ecdsa_raw.c in v1.1.14
  * to enable a libFuzzer harness on the DER <-> raw r||s conversion path
@@ -6709,14 +6745,10 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
             if (EVP_PKEY_CTX_set_rsa_padding(pkctx_raw, RSA_NO_PADDING) <= 0)
                 goto cleanup;
         }
-        if (mech_is_pss(op->mechanism)) {
-            if (EVP_PKEY_CTX_set_rsa_padding(pkctx_raw,
-                                              RSA_PKCS1_PSS_PADDING) <= 0)
-                goto cleanup;
-            int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
-            if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx_raw, saltlen) <= 0)
-                goto cleanup;
-        }
+        if (mech_is_pss(op->mechanism)
+            && pss_apply_params(pkctx_raw, op->pss_have,
+                                op->pss_saltlen, op->pss_mgf) != FHSM_RV_OK)
+            goto cleanup;
         if (EVP_PKEY_sign(pkctx_raw, sig, &out_len, data, data_len) <= 0)
             goto cleanup;
     } else {
@@ -6729,13 +6761,10 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
         EVP_PKEY_CTX *pkctx = NULL;
         if (EVP_DigestSignInit_ex(mdctx, &pkctx, hash, NULL, NULL, pkey, NULL) != 1)
             goto cleanup;
-        if (mech_is_pss(op->mechanism)) {
-            if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING) <= 0)
-                goto cleanup;
-            int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
-            if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen) <= 0)
-                goto cleanup;
-        }
+        if (mech_is_pss(op->mechanism)
+            && pss_apply_params(pkctx, op->pss_have,
+                                op->pss_saltlen, op->pss_mgf) != FHSM_RV_OK)
+            goto cleanup;
         if (EVP_DigestSign(mdctx, sig, &out_len, data, data_len) != 1)
             goto cleanup;
     }
@@ -7159,14 +7188,10 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
             if (EVP_PKEY_CTX_set_rsa_padding(pkctx_raw, RSA_NO_PADDING) <= 0)
                 goto vcleanup;
         }
-        if (mech_is_pss(op->mechanism)) {
-            if (EVP_PKEY_CTX_set_rsa_padding(pkctx_raw,
-                                              RSA_PKCS1_PSS_PADDING) <= 0)
-                goto vcleanup;
-            int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
-            if (EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx_raw, saltlen) <= 0)
-                goto vcleanup;
-        }
+        if (mech_is_pss(op->mechanism)
+            && pss_apply_params(pkctx_raw, op->pss_have,
+                                op->pss_saltlen, op->pss_mgf) != FHSM_RV_OK)
+            goto vcleanup;
         int vrv = EVP_PKEY_verify(pkctx_raw, sig_to_verify, sig_to_verify_len,
                                     pData, ulDataLen);
         verify_ok = (vrv == 1);
@@ -7183,10 +7208,20 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
         if (!mdctx) goto vcleanup;
         EVP_PKEY_CTX *pkctx = NULL;
         if (EVP_DigestVerifyInit_ex(mdctx, &pkctx, hash, NULL, NULL, pkey, NULL) == 1) {
+            /* This site discarded the return values of all three calls, so a
+             * refused parameter became a verification against whatever the
+             * context already held. Same cleanup as the vrv < 0 branch below,
+             * because vcleanup does not own mdctx here. */
             if (mech_is_pss(op->mechanism)) {
-                EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING);
-                int saltlen = op->pss_have ? (int)op->pss_saltlen : -1;
-                EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, saltlen);
+                fhsm_rv_t prv = pss_apply_params(pkctx, op->pss_have,
+                                                 op->pss_saltlen, op->pss_mgf);
+                if (prv != FHSM_RV_OK) {
+                    if (der_buf) OPENSSL_free(der_buf);
+                    EVP_MD_CTX_free(mdctx);
+                    EVP_PKEY_free(pkey);
+                    op->active = 0;
+                    return prv;
+                }
             }
             int vrv = EVP_DigestVerify(mdctx, sig_to_verify, sig_to_verify_len,
                                         pData, ulDataLen);
