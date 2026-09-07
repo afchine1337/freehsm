@@ -34,8 +34,11 @@
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import os
+import shutil
+import tempfile
 from ctypes import (
     CDLL, RTLD_GLOBAL, POINTER, Structure, byref, cast, sizeof,
     c_char, c_ubyte, c_uint8, c_ulong, c_void_p,
@@ -311,12 +314,31 @@ class P11Module:
             # forces fips=yes on every EVP fetch. In dev mode we want the
             # default provider to serve fetches with no FIPS bias.
             os.environ.setdefault("OPENSSL_CONF", "/dev/null")
-        # Default token store under /tmp so the harness is self-
-        # contained and re-runnable. The runner cleans this up.
-        os.environ.setdefault(
-            "FHSM_TOKENS_DIR",
-            os.path.join("/tmp", "freehsm-wycheproof"),
-        )
+        # Default token store : a fresh directory per run.
+        #
+        # This used to be the fixed path /tmp/freehsm-wycheproof, created
+        # 0700 and owned by whoever ran the harness first. A second user on
+        # the same machine then could not provision a token there, and could
+        # not remove the directory to recover either -- one run locked the
+        # harness for everybody else until someone with the right ownership
+        # cleaned up. Reported by @petrn in #6, who also suggested the fix.
+        #
+        # mkdtemp removes the collision instead of racing it : an interrupted
+        # run leaks one directory rather than blocking other users, and two
+        # people can run concurrently. The comment here previously claimed
+        # "the runner cleans this up" -- nothing did, so the cleanup is now
+        # registered where it cannot be forgotten.
+        #
+        # FHSM_TOKENS_DIR still takes precedence, and a directory the caller
+        # named is never removed by us. FHSM_KEEP_TOKENS=1 keeps ours too,
+        # for inspection after a failing run.
+        if not os.environ.get("FHSM_TOKENS_DIR"):
+            own = tempfile.mkdtemp(prefix="freehsm-wycheproof-")
+            os.environ["FHSM_TOKENS_DIR"] = own
+            if os.environ.get("FHSM_KEEP_TOKENS") == "1":
+                print(f"[_p11] token store kept at {own}")
+            else:
+                atexit.register(shutil.rmtree, own, ignore_errors=True)
         os.makedirs(os.environ["FHSM_TOKENS_DIR"], mode=0o700, exist_ok=True)
         self.lib = CDLL(path, mode=RTLD_GLOBAL)
 

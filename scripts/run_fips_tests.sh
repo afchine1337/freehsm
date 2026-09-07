@@ -30,9 +30,13 @@
 #
 #  WHAT THE FIRST RUN GOT WRONG, AND WHY IT IS RECORDED HERE
 #
-#  The first version counted tests that did NOT print the module's "dev mode
-#  active" notice and called them FIPS runs: 16 fell back, 21 "passed with the
+#  The first version counted tests that did NOT print the module's bypass
+#  notice and called them FIPS runs: 16 fell back, 21 "passed with the
 #  provider loaded". Both numbers were wrong, in opposite directions.
+#
+#  (The notice read "dev mode active (no FIPS provider)" until 2026-09-07.
+#  It now leads with "integrity bypass active" and names the variable that
+#  causes it -- issue #6. The greps below follow that marker.)
 #
 #    * The 21 had told us nothing. A test that never reaches crypto_init_once
 #      prints no notice, and silence was being read as proof. The script
@@ -213,7 +217,7 @@ for t in tests/test_*; do
     # Belt and braces: the notice must not appear, and it cannot now that the
     # variable is unset -- if it does, something re-set it and that is a bug
     # in this script, not in the module.
-    if printf '%s' "$out" | grep -q "dev mode active"; then
+    if printf '%s' "$out" | grep -q "integrity bypass active"; then
         printf '  \033[33m?\033[0m     %-28s fell back despite the unset\n' "$name"
         fellback=$((fellback+1))
     elif [ "$rc" = 0 ]; then
@@ -227,7 +231,7 @@ for t in tests/test_*; do
 done
 
 echo
-[ "$fellback" -eq 0 ] && ok "no test fell back to dev mode" \
+[ "$fellback" -eq 0 ] && ok "no test fell back to the integrity bypass" \
                       || bad "$fellback test(s) fell back -- the unset above did not hold"
 [ "$fail" -eq 0 ] && ok "$pass test(s) passed against the FIPS provider" \
                   || bad "$pass passed, $fail failed against the FIPS provider"
@@ -276,7 +280,7 @@ for name in $embedded; do
     out=$(FHSM_TOKENS_DIR="$D" "$SIGNDIR/$name" 2>&1); rc=$?
     rm -rf "$D"
 
-    if printf '%s' "$out" | grep -q "dev mode active"; then
+    if printf '%s' "$out" | grep -q "integrity bypass active"; then
         printf '  \033[33m?\033[0m     %-28s fell back despite being signed\n' "$name"
         fellback=$((fellback+1))
     elif [ "$rc" = 0 ]; then

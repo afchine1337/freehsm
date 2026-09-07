@@ -198,10 +198,27 @@ static void crypto_init_once(void) {
                 "[freehsm-c] WARNING : OpenSSL default provider failed "
                 "to load --- AES-GCM and other primitives will fail.\n");
         } else {
+            /* The leading "integrity bypass active" is a stable marker :
+             * scripts/run_fips_tests.sh greps for it to prove that no test
+             * fell back out of the boundary. Keep the two in step. It names
+             * the cause rather than a consequence, because the previous
+             * wording ("dev mode active (no FIPS provider)") led a reporter
+             * to believe his own OpenSSL was misconfigured when in fact our
+             * own harness had set the variable -- see issue #6. */
             fprintf(stderr,
-                "[freehsm-c] NOTE : dev mode active (no FIPS provider) --- "
-                "OpenSSL default provider services EVP fetches. "
-                "This build is NOT FIPS-conformant.\n");
+                "[freehsm-c] NOTE : integrity bypass active --- "
+                "FHSM_INTEGRITY_ALLOW_UNSIGNED is set, so this\n"
+                "  process skipped the integrity check and did not load the "
+                "OpenSSL FIPS provider ;\n"
+                "  EVP fetches are served by the default provider. This RUN "
+                "is not FIPS-conformant.\n"
+                "  The binary is unchanged : the same file, run without the "
+                "variable, loads the\n"
+                "  provider. Unset it to run inside the evaluated "
+                "configuration --- or set\n"
+                "  FHSM_EVIDENCE=1 if you are running the Wycheproof harness, "
+                "which sets the\n"
+                "  bypass itself.\n");
         }
     }
 
