@@ -61,15 +61,29 @@ trap 'rm -rf "$TOKENS_DIR"' EXIT
 # Ask the interpreter named in the harness's own shebang. The ambient python3
 # may hold a different installation, or none at all -- which is exactly how
 # the wrong version got read that morning.
-p11c_version() {
+# The interpreter that owns the harness installation.
+#
+# Not python3. On this machine `pkcs11-check` resolves to ~/.local/bin with a
+# shebang pointing into a venv, while its sibling `pkcs11-check-report` in the
+# same directory points at a python that does not have the module and fails
+# with ModuleNotFoundError. Same package, two entry points, two interpreters.
+# Asking the shebang of the one we know works, and then running everything
+# through it, sidesteps the whole question.
+harness_python() {
     local bin py
-    bin="$(command -v pkcs11-check)" || return 1
+    bin="$(command -v pkcs11-check)" || { echo python3; return; }
     py=""
     if head -c2 "$bin" 2>/dev/null | grep -q '#!'; then
         py="$(head -1 "$bin" | sed 's|^#!||; s| .*||')"
     fi
     [ -n "$py" ] && [ -x "$py" ] || py=python3
-    "$py" - <<'PY' 2>/dev/null
+    echo "$py"
+}
+
+HARNESS_PY="$(harness_python)"
+
+p11c_version() {
+    "$HARNESS_PY" - <<'PY' 2>/dev/null
 import importlib.metadata as m
 try:
     print(m.version("pkcs11-check"))
@@ -201,6 +215,39 @@ else
     echo "  (summary script $SUMMARY_PY missing; see run.log)"
 fi
 
+# The conformance report --- the richest view the harness produces, and one
+# this project had never generated.
+#
+# petrn ran it in issue #10 and reported 35 failures and 3 crashes over 111,736
+# vectors, against the 2 failures and 0 crashes our own summary was printing.
+# The counts are not in the same unit, and the vector sets are not the same
+# size, but the point stands: the tool knows how to say more about this module
+# than we were asking it. It also classifies severity, lists mechanisms that
+# are advertised and then reject the canonical operation, and separates honest
+# deviations from spec violations -- none of which our summary script does.
+#
+# Run through HARNESS_PY rather than the `pkcs11-check-report` on PATH: see the
+# note on harness_python above for why that one may be broken.
+echo
+echo "== Conformance report =="
+if "$HARNESS_PY" -c 'import pkcs11_check.report' 2>/dev/null; then
+    PROVIDER="${FHSM_REPORT_PROVIDER:-freehsm}"
+    if "$HARNESS_PY" -m pkcs11_check.report \
+            --report-log   "$REPORTS/report.jsonl" \
+            --results-json "$REPORTS/results.json" \
+            --provider     "$PROVIDER" \
+            --out          "$REPORTS" >/dev/null 2>&1; then
+        echo "  $REPORTS/$PROVIDER.md"
+        # The headline line, so the run says it without opening the file.
+        sed -n '/^passed /p' "$REPORTS/$PROVIDER.md" 2>/dev/null | sed 's/^/  /'
+    else
+        echo "  (report generation failed --- the counts above stand on their own)"
+    fi
+else
+    echo "  (pkcs11_check.report not importable --- skipped)"
+fi
+
+echo
 # Restate the harness version here, next to the counts. The banner at the top
 # scrolls away behind several hundred lines of test output, and the counts are
 # what gets pasted into an issue or a findings document -- so the version has
