@@ -624,6 +624,78 @@ module whose provider will not load fails `C_Initialize` with
 `FHSM_RV_PROVIDER_UNAVAILABLE` and the harness aborts at `C_InitToken` before a
 single test runs. A run that completes is proof the provider came up.
 
+## Re-measured on v2.0.3 (2026-09-07)
+
+Harness v0.1.9, module v2.0.3, OpenSSL 3.5.7, unsigned path:
+
+| | 2026-09-03 | 2026-09-07 |
+|---|---|---|
+| failed | 2 | 2 |
+| passed | 1700 | **1706** |
+| skipped | 2103 | **2105** |
+| crashed | 0 | 0 |
+| total | 3805 | **3813** |
+
+Eight more tests collected, no additional failures. The two that remain are R1
+and R3, the documented positions below.
+
+### What the eight are, and what they are not
+
+Not attributable from these numbers alone. Two things changed between the runs
+— the module (v2.0.2 → v2.0.3) and, possibly, OpenSSL. "Possibly", because the
+two sections above disagree with each other: the v0.1.9 re-measurement says
+*"the same OpenSSL 3.5.6"* and the provider comparison, dated the same day,
+says *"same OpenSSL 3.5.7"*. One of them is wrong and nothing recorded at the
+time can say which.
+
+So the honest statement is: eight tests appeared, the module changed, and the
+OpenSSL version may or may not have. Anyone quoting the +8 should quote that
+uncertainty with it.
+
+Fixed for next time: `scripts/run_pkcs11_check.sh` now writes
+`provenance.txt` into the report directory, carrying the harness version, the
+OpenSSL version, the module path and **the module's SHA-256** — because
+"v2.0.3" names a version, not a build. A measurement that cannot state its own
+environment cannot be compared to another one later, and the disagreement two
+paragraphs above is what that costs.
+
+### Node-id check against 2026-09-03
+
+The counts are consistent with the previous run, but consistency is not
+identity — the section above records `failed −3, passed +3, skipped +1` fitting
+two incompatible stories. So the five node-ids that matter were read from both
+reports directly:
+
+| node-id | 2026-09-03 | 2026-09-07 |
+|---|---|---|
+| `TestECDH1CofactorDerive` | passed | passed |
+| `TestEncryptOutputLengthTruncation` | passed | passed |
+| `TestDecryptOutputLengthTruncation` | passed | passed |
+| `TestTookanUnwrapAttrs` | failed, passed | failed, passed |
+| `TestGcmIvReuse` | failed | failed |
+
+Unchanged, R1 and R3 included — the one-of-three-isolation-runs behaviour noted
+above still holds for `TestTookanUnwrapAttrs`. Nothing here revises the v0.1.9
+attribution recorded in the previous section.
+
+### A false alarm, recorded because the method failed before the conclusion did
+
+A first run this morning reported the same 2 / 1706 / 2105 while the installed
+package claimed to be **0.1.8**. Read against the 2026-09-02 v0.1.8 figures (5
+failed), that suggested the three closures had come from our own fixes rather
+than from the harness, and the v0.1.9 attribution above was briefly doubted.
+
+It was not a v0.1.8 run. The testcases were being collected from the working
+clone, already at `v0.1.9`, while only the installed distribution metadata
+still read 0.1.8 — `git pull` on the clone had not reinstalled into the venv.
+Both runs executed the same code, which is why the counts matched.
+
+Two things follow. The attribution stands. And the reason an hour went into
+doubting it is that nothing downstream of a run stated which harness produced
+it: `pkcs11-check` prints `provenance: pkcs11-check X.Y.Z` on every run, but
+that line lives in `run.log` and never reached `report.jsonl`, the summary, or
+this document. Fixed the same day.
+
 **Why the two are indistinguishable, by construction rather than by luck.** The
 profile is a compile-time constant. In `fips-strict`, `C_GetMechanismList`
 advertises only approved mechanisms and the dispatch guard rejects the rest —

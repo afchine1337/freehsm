@@ -84,10 +84,30 @@ HARNESS_VERSION="$(p11c_version || echo unknown)"
 # candidate; the point is that a mismatch is stated, not that it is forbidden.
 EXPECTED_VERSION="${FHSM_PKCS11CHECK_EXPECT:-0.1.9}"
 
-printf '%s\n' "$HARNESS_VERSION" > "$REPORTS/harness-version.txt"
+# Everything a later reader needs to know whether two runs are comparable.
+#
+# The harness version is the one that bit us, but it is not the only variable.
+# docs/PKCS11_CHECK_FINDINGS.md carries two sections dated the same day, one
+# saying the run used OpenSSL 3.5.6 and the other 3.5.7; nothing recorded at
+# the time can settle which. The module digest is here for the same reason --
+# "v2.0.3" names a version, not a build.
+OPENSSL_VERSION="$(openssl version 2>/dev/null || echo unknown)"
+MODULE_SHA="$(sha256sum "$MODULE" 2>/dev/null | awk '{print $1}')"
+[ -n "$MODULE_SHA" ] || MODULE_SHA="unknown"
+
+{
+    echo "pkcs11-check $HARNESS_VERSION"
+    echo "openssl      $OPENSSL_VERSION"
+    echo "module       $MODULE"
+    echo "module-sha256 $MODULE_SHA"
+    echo "date         $(date -Is)"
+} > "$REPORTS/provenance.txt"
+
 echo "== harness =="
 echo "  pkcs11-check : $HARNESS_VERSION   (workflows pin $EXPECTED_VERSION)"
+echo "  openssl      : $OPENSSL_VERSION"
 echo "  module       : $MODULE"
+echo "  sha256       : $MODULE_SHA"
 if [ "$HARNESS_VERSION" != "$EXPECTED_VERSION" ]; then
     echo "  NOTE : this is not the pinned version. The run is still valid --"
     echo "         but counts from it are not comparable to a pinned run, and"
