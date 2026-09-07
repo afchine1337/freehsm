@@ -48,6 +48,54 @@ Third artefact the claim has come out of: the library filename in v2.0.0, the
 signed tag message on 2026-09-03, this. The standard is what the design targets,
 not something the artefact may assert about itself.
 
+Fourth, found while cleaning the documentation for this release: the English
+README's first descriptive sentence said the module was *"designed to pass a
+FIPS 140-3 Level 1 evaluation and an augmented Common Criteria EAL4+
+certification"*. The French README has said the opposite for months. Corrected
+to what is true — written to those methodologies, not to obtain either
+certificate — and the French status table, which still listed CMVP and CC lab
+submission as pending work rather than abandoned, now says so.
+
+## The documentation stopped arguing with people who are not here
+
+Several living documents were written as though this project were selling
+something.
+
+`docs/DESIGN_NOTES_COMMERCIAL_HSM.md` — notes taken from operating a commercial
+network HSM — carried an indicative price table, six ready-to-use marketing
+framings, an argument that a named company was a weakening incumbent resting on
+third-party staffing rumours, support SLAs for an offer that has never been
+sold, and a market entry window. All removed. What is kept is what can be
+checked: the interfaces the product exposes and the interface version it ships,
+its key hierarchy and restore semantics — which are good design and worth
+adopting with published primitives — its documentation structure, its release
+cadence with the trade-off stated in both directions, its cryptographic surface
+including the post-quantum algorithms it does have, and the three properties a
+hardware HSM has that no software module can have.
+
+`docs/PRIMACY_AUDIT_PQC_COMPOSITE.md` was worse, and more interesting. It did
+one good thing: in July it falsified *"first OSS PKI with PQC composite"*, which
+was live in the README at the time, and had it removed. Then, having killed one
+primacy claim, it constructed a narrower one and worked out the phrasing that
+would survive an audit. That is not the same activity as finding out what is
+true. The research it produced is kept — a dated, sourced picture of which
+projects implement composite signatures, including the correction that SoftHSM2
+does have ML-DSA and ML-KEM behind build flags, which stays visible because the
+error had been used in an argument. The conclusion is now a rule: **FreeHSM
+makes no primacy claim of any kind**, and does not describe this module as
+implementing composite signatures, because it does not.
+
+The roadmap's mission now names who this is for — researchers, students,
+teaching institutions, public bodies and universities, and countries that cannot
+buy a certified module — and states the two rules that follow: no value
+judgements about companies, and no primacy claims. Other people's products may
+be described where the description is checkable. They are not to be ranked, and
+not to be used as a foil.
+
+Nothing in the code changed for any of this. It is recorded here because a
+reader who downloads a module is entitled to know what its documentation
+claimed yesterday.
+
 ## The coverage matrix called itself evidence — twice wrongly
 
 `tests/coverage_matrix.sh` exports three escapes by default:

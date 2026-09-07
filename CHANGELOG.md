@@ -5,7 +5,7 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.0.3] --- 2026-09-07
 
 ### Fixed
 * **The coverage matrix was described as pre-certification evidence and cannot
@@ -78,6 +78,50 @@ project adheres to [Semantic Versioning](https://semver.org/).
   across minor versions of the same major series"). Consumers may match on that
   string, so it needs a decision rather than a commit made while fixing
   something else.
+
+  **Fourth place, found while cleaning the documentation for this release:** the
+  English README's first descriptive sentence said the module was "designed to
+  pass a FIPS 140-3 Level 1 evaluation and an augmented Common Criteria EAL4+
+  certification". The French README has said the opposite for months. Corrected
+  to *written to those methodologies, not to obtain either certificate*, and the
+  French status table — which still listed CMVP and CC lab submission as pending
+  work rather than abandoned — now says so. The version macro's own comment in
+  `include/fhsm_common.h` claimed a change would "invalidate the current FIPS
+  140-3 / CC certificate", six lines above a comment about a certification this
+  project will not seek; it now says what a bump actually invalidates, which is
+  the previous version's reproducibility reference.
+
+* **The documentation stopped arguing with people who are not here.**
+  `docs/DESIGN_NOTES_COMMERCIAL_HSM.md` carried an indicative price table, six
+  ready-to-use marketing framings, an argument that a named company was a
+  weakening incumbent resting on third-party staffing rumours, support SLAs for
+  an offer that has never been sold, and a market entry window. Removed. Kept:
+  what can be checked — the interfaces and interface version another product
+  ships, its key hierarchy and restore semantics (good design, worth adopting
+  with published primitives), its documentation structure, its release cadence
+  with the trade-off stated in both directions, its cryptographic surface
+  including the post-quantum algorithms it does have, and the three properties a
+  hardware HSM has that no software module can have.
+
+  `docs/PRIMACY_AUDIT_PQC_COMPOSITE.md` did one good thing and one bad one. In
+  July it falsified "first OSS PKI with PQC composite", which was live in the
+  README at the time, and had it removed. Then it constructed a narrower primacy
+  claim and worked out phrasing that would survive an audit — not the same
+  activity as finding out what is true. The research is kept: a dated, sourced
+  picture of which projects implement composite signatures, including the
+  correction that SoftHSM2 does have ML-DSA and ML-KEM behind build flags, which
+  stays visible because the error had been used in an argument. The conclusion
+  is now a rule: **no primacy claim of any kind**, in any wording.
+
+  `docs/ROADMAP.md` lost its marketing-claims, competitive-timing and
+  go-to-market sections, and its mission now names who this is for — researchers,
+  students, teaching institutions, public bodies and universities, and countries
+  that cannot buy a certified module — plus the two rules that follow: no value
+  judgements about companies, and no primacy claims. Other people's products may
+  be described where the description is checkable; they are not to be ranked or
+  used as a foil.
+
+  No code changed for any of this.
 
 ## [2.0.2] --- 2026-09-04
 
