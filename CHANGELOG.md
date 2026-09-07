@@ -5,6 +5,76 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+* **The bypass notice blamed the operator for a state the caller had set.** It
+  read `dev mode active (no FIPS provider) --- ... This build is NOT
+  FIPS-conformant`. Three problems, reported by petrn while running the
+  Wycheproof harness against v2.0.3 with OpenSSL correctly configured for FIPS.
+
+  It named no cause. `src/fhsm_crypto.c:102` is
+  `dev_mode = (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED") != NULL)`, and
+  `if (!dev_mode)` is what guards the FIPS provider load — the module does not
+  detect a missing provider, it declines to load one. The variable was set by
+  our own harness, in `tests/wycheproof/adapters/_p11.py`. So a reporter whose
+  configuration was correct was told he had no FIPS provider, with nothing
+  pointing at the test that had made that choice for him.
+
+  It said **build** where it meant **run**. The same binary, without the
+  variable, loads the provider; naming the build points at the artefact people
+  downloaded.
+
+  And `dev mode` collides with `legacy mode` (`src/fhsm_mode.c:73`, the runtime
+  mechanism profile) and with `fips-strict` / `interop` (the build profile) —
+  three orthogonal axes whose names suggest one scale. petrn asked whether the
+  first two were the same thing; they are not, and nothing said so. The naming
+  pass is open separately, alongside the pending `fips-strict` →
+  `approved-only` rename.
+
+  The notice now leads with `integrity bypass active`, names the variable, says
+  RUN, states that the binary is unchanged, and gives both ways out.
+  `scripts/run_fips_tests.sh` greps this string twice to prove no test fell
+  back out of the boundary, so both greps moved in the same commit — left
+  apart, the script would have reported "no test fell back" unconditionally.
+
+* **The Wycheproof harness locked other users out of its token store.**
+  `_p11.py` hard-coded `/tmp/freehsm-wycheproof` at mode 0700, owned by whoever
+  ran first; a second user got `FATAL : cannot provision the audit key`
+  (`rv=0x6`) and could not remove the directory to recover. Also reported by
+  petrn, who proposed both candidate fixes.
+
+  Now `tempfile.mkdtemp(prefix="freehsm-wycheproof-")`, removed via `atexit`,
+  with `FHSM_KEEP_TOKENS=1` to keep it for inspection. Taking the per-run
+  directory rather than cleanup-on-exit, because cleanup alone does not survive
+  an interrupted run and still collides between two concurrent users.
+  `FHSM_TOKENS_DIR` still takes precedence, and a directory the caller named is
+  never removed by us. The comment above the old code claimed "the runner
+  cleans this up"; nothing did.
+
+### Added
+* **`provenance.txt` in the pkcs11-check report directory** — harness version,
+  OpenSSL version, module path, module SHA-256, timestamp; the same shown in
+  the run banner and the harness version repeated beside the final counts.
+
+  `pkcs11-check` announces its version on every run, but that line lives in
+  `run.log` and never reached `report.jsonl`, which is the file that gets
+  attached to an issue. On 2026-09-07 that cost an hour: the workflows pin
+  `0.1.9`, the script took whatever was on `PATH`, a venv still held `0.1.8`,
+  and two runs were compared as though only the module had changed. The
+  OpenSSL version and the module digest are in the same file because
+  `docs/PKCS11_CHECK_FINDINGS.md` contains two sections dated the same day that
+  disagree on the OpenSSL version, and because "v2.0.3" names a version rather
+  than a build.
+
+### Changed
+* **`docs/PKCS11_CHECK_FINDINGS.md`** — entry for the 2026-09-07 run:
+  2 failed / 1706 passed / 2105 skipped / 0 crashed against harness v0.1.9,
+  eight more tests collected than on 2026-09-03 with no additional failures,
+  the five significant node-ids read from both reports rather than inferred
+  from counts, and a statement that the eight are not attributable to either
+  changed variable.
+
 ## [2.0.3] --- 2026-09-07
 
 ### Fixed
