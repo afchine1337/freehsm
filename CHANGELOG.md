@@ -67,6 +67,32 @@ project adheres to [Semantic Versioning](https://semver.org/).
   disagree on the OpenSSL version, and because "v2.0.3" names a version rather
   than a build.
 
+* **The conformance report is generated on every pkcs11-check run.** petrn
+  asked in #10 what result to expect, reporting 35 failures and 3 crashes over
+  111,736 vectors while our own summary printed 2 failures and 0 crashes. Both
+  are right: he runs `pkcs11-check-report`, which this project had never
+  generated, and his run reaches roughly 28 times more vectors than ours.
+
+  Generated here for the first time — `passed 1706/4014 · fail 2 · crash 0 ·
+  xfail 318`, the two failures being R1 and R3. It says four things the summary
+  script cannot: 12 mechanisms advertised that reject the canonical operation;
+  `CKM_ML_KEM` advertised with no canonical accept or reject observed, next to
+  the unexplained 21 ML-KEM assertions in the Wycheproof adapter; 101
+  non-conforming rejections on `CKM_AES_KEY_WRAP_KWP`, where we return
+  `CKR_ATTRIBUTE_VALUE_INVALID` instead of `CKR_WRAPPED_KEY_INVALID` or one of
+  nine others; and 22 cases where AES-GCM accepts `tagBits=0` then produces a
+  16-byte tag. Leads, not defects — the report says so itself, and says a large
+  count is usually one behaviour repeated across vectors.
+
+  Why 4,014 vectors here against 111,736 there, on the same harness version and
+  the same script, is open. Until it is answered, "0 crashes" is a weaker
+  statement than it looks.
+
+  Also factors out `harness_python()`: `pkcs11-check` resolves to a shebang
+  pointing into a venv while its sibling `pkcs11-check-report` in the same
+  directory points at a python without the module. Everything now runs through
+  the interpreter that owns the working entry point.
+
 ### Changed
 * **`docs/PKCS11_CHECK_FINDINGS.md`** — entry for the 2026-09-07 run:
   2 failed / 1706 passed / 2105 skipped / 0 crashed against harness v0.1.9,
