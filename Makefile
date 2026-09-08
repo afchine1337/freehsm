@@ -901,6 +901,13 @@ uninstall:
 clean:
 	rm -rf $(OBJDIR)
 	rm -f $(LIB) tests/test_smoke tests/*.o
+	# Every test binary, not just test_smoke. Naming one of forty meant an old
+	# binary survived `make clean && make` and then ran against a freshly built
+	# library, reporting on code it was not compiled for -- silently, since
+	# nothing compares the two. Found on 2026-09-08: test_unwrap_len kept
+	# asserting the previous buffer size and failed two cases that had just
+	# been fixed, which for a minute looked like the fix was wrong.
+	rm -f $(basename $(wildcard tests/*.c))
 	rm -f tools/freehsm-audit $(TOOLS)
 	# The service too. Leaving it behind meant a `make clean && make` handed
 	# back a binary from the previous build's flags -- a TSAN one, in the run

@@ -296,9 +296,17 @@ Run the harness first and confirm the failure count is what you expect:
     FHSM_ALLOW_UNSIGNED=1 bash scripts/run_pkcs11_check.sh \\
         ./libfreehsm.so ./reports/pkcs11-check
 
-Then:
+Then, if anything is still uncommitted -- naming the files, never 'git add -A',
+which has twice swept unrelated work into a release commit (31 lines of
+RELEASE_v2.0.0.md into bf570b1, docs/AGD_PRE.md into 5b79066, both corrected
+afterwards with note commits rather than rewritten history):
 
-    git add -A && git commit -S -m "release: $TAG"
+    git status --short          # decide what belongs in this release
+    git add <the files you just listed>
+    git commit -S -m "release: $TAG"
+
+On a clean tree, skip straight to:
+
     git tag -s $TAG -m "FreeHSM $TAG --- PKCS#11 v3.2 software HSM, Simorgh Labs"
     git tag -v $TAG
     git push origin main --follow-tags
@@ -306,6 +314,16 @@ Then:
 
 This script writes nothing to git on purpose. The last line matters: a push
 that does not report the tag has not pushed the tag.
+
+After tagging, reopen the CHANGELOG:
+
+    ## [Unreleased]
+
+    ## [$VERSION] --- $(date +%F)
+
+Renaming [Unreleased] to the version closes the only place the next commits can
+be recorded. On 2026-09-07 three landed with nothing in the project's own log
+until someone noticed hours later.
 
 Once the release is published, before you close anything:
 
