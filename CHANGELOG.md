@@ -7,7 +7,98 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+*Everything below was found in the twenty-four hours after @petrn pointed out
+in #10 that `pkcs11-check fetch-data` had never been run here. Every previous
+measurement, local and in CI, covered 4,014 vectors of 111,739 — see
+`docs/PKCS11_CHECK_FINDINGS.md`. This release is 2.1.0 rather than 2.0.4
+because it adds a capability visible through `C_GetMechanismInfo`.*
+
+### Security
+* **Stack buffer overflow in `C_UnwrapKey` on long AES-KW blobs** —
+  [GHSA-833h-crp9-f378](https://github.com/afchine1337/freehsm/security/advisories/GHSA-833h-crp9-f378),
+  High, CWE-121. Affects every release up to and including v2.0.3.
+
+  The function decrypted into `uint8_t pt[256]` on the stack.
+  `EVP_DecryptUpdate` takes no output-capacity argument and `ulWrappedKeyLen`
+  was never checked against the buffer, so any blob over 264 bytes wrote past
+  the end. In the published binaries `_FORTIFY_SOURCE` and the stack canary
+  catch it — `*** stack smashing detected ***`, exit 134 — which makes it a
+  denial of service rather than code execution. Both are compile-time flags,
+  and #7 established that distributions do not all apply the same ones; a build
+  without them takes the write instead, on a blob that by the purpose of key
+  wrapping arrives from elsewhere.
+
+  The same missing bound also **accepted nine forged blobs**
+  (`tc111-invalid` … `tc119-invalid`), creating key objects from data that
+  should have been refused. One defect, two symptoms.
+
+  The unwrapping-key size was unchecked too, so a 20-byte key silently selected
+  `AES-256-WRAP` — a validation `C_WrapKey` already had on its own side.
+
+  Fixed with `tests/test_unwrap_len.c`, which exits 134 if the bound is
+  removed. Full write-up in `SECURITY.md`.
+
+* **Invalid Ed25519 / Ed448 public keys were imported as valid.**
+  `EVP_PKEY_fromdata` accepts any octet string of the right length — canonical
+  or not, on the curve or not — and nothing downstream re-checks, so a key that
+  entered the token was treated as valid by every later operation.
+  `EVP_PKEY_public_check` now runs at import. Four ACVP EDDSA-KeyVer vectors.
+
+* **Invalid EC public keys likewise.** The Ed fix deliberately stopped short of
+  the EC branch, with a comment saying why: adding a check to a path carrying
+  15,057 passing ECDSA vectors on the strength of symmetry is how one trades
+  four failures for many more. Measured the following morning — no valid key is
+  refused — and applied.
+
+### Added
+* **`CKM_AES_KEY_WRAP` and `CKM_AES_KEY_WRAP_KWP` through `C_Encrypt` /
+  `C_Decrypt`** (#14). PKCS#11 v3.2 §6.16.3 gives both mechanisms Encrypt &
+  Decrypt as well as Wrap & Unwrap, single-part in each case. Only the wrapping
+  half existed; the module was self-consistent about it and consistently short
+  of the specification.
+
+  The dispatch table carried one `op` string per mechanism and could not express
+  two operation families. `op` now accepts several joined by `+`
+  (`wrap+encrypt`) and `fhsm_mech_flags_for()` ORs the flag sets. This is what
+  makes the release 2.1.0: `C_GetMechanismInfo` reports flags it did not
+  before.
+
+  The consequence was concrete — NIST's ACVP AES-KW and AES-KWP vectors drive
+  `C_Encrypt`, not `C_WrapKey`, and could not run at all. **7,219 of 7,231,
+  100 %.**
+
+  The optional IV parameter of §6.16.2 is honoured on neither the new path nor
+  the wrap path, which has always passed NULL; both use the SP 800-38F default.
+  #14 stays open for it.
+
 ### Fixed
+* **RSA-PSS ignored the caller's mask generation function**, rejecting 267
+  valid Wycheproof signatures. `op->pss_mgf` appeared three times in the tree —
+  declaration, reset, assignment — and never on the right-hand side of
+  anything, so OpenSSL applied its default of MGF1 over the signature hash. A
+  caller asking for SHA-256 with MGF1-SHA1, which the specification permits,
+  had its signatures verified against the wrong mask and refused.
+
+  The OAEP path has always called `EVP_PKEY_CTX_set_rsa_mgf1_md`. One branch
+  handled the parameter, the other dropped it.
+
+  Four call sites of three inline calls each became one helper,
+  `pss_apply_params()`, returning `fhsm_rv_t` so an unknown MGF is refused
+  rather than ignored. One of the four had been discarding the return value of
+  all three calls, so a parameter OpenSSL rejected became a verification against
+  whatever the context already held.
+
+* **Valid AES-KW blobs over 256 bytes were refused.** Visible only once the
+  overflow above stopped masking it: `tc10`, `tc52` and `tc107` are valid
+  vectors whose plaintext exceeds the buffer. They aborted the process, then
+  they were cleanly refused, and now they are unwrapped. The buffer is 4 KiB.
+
+  Not moved to `fhsm_secure_malloc`, where key material belongs: `C_UnwrapKey`
+  has 28 return statements, about twenty of them after the allocation point,
+  and one missed path leaks plaintext key material. That wants the function
+  restructured around a single exit — as does zeroising the buffer, which the
+  code does not do today at either size.
+
 * **The bypass notice blamed the operator for a state the caller had set.** It
   read `dev mode active (no FIPS provider) --- ... This build is NOT
   FIPS-conformant`. Three problems, reported by petrn while running the
