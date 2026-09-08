@@ -723,6 +723,151 @@ what the report contains, and both runs were equally blind to the same file.
 That does not weaken the conclusion, since the absence is identical on both
 sides, but "3805 node-ids, nothing moved" covers less than it sounds like.
 
+---
+
+# The corpus was never downloaded (2026-09-07 / 08)
+
+Everything above this line — every count in this document, from the 517 failures
+of 2026-07-10 to the 3,813 assertions of yesterday — was measured against
+**4,014 vectors**. The corpus is **111,739**.
+
+`pkcs11-check` ships its harness and fetches the third-party vector sets
+separately, with `pkcs11-check fetch-data`. Neither `scripts/run_pkcs11_check.sh`
+nor either CI workflow ever called it. `fetch-data --status` showed all four
+sources absent: wycheproof, cctv, acvp, x509-limbo.
+
+Pointed out by @petrn in issue #10, in reply to our own question about why his
+figures did not match ours. He was reporting 35 failures and 3 crashes; we were
+reporting 2 and 0, and the difference was not the module.
+
+The header of `.github/workflows/pkcs11-check.yml` had described the harness as
+">100k vendor-neutral behavioral" tests since it was written. That was the
+harness's own description, not a statement about what ran.
+
+## What the full corpus found
+
+First run with the data present, against v2.0.3:
+
+| | |
+|---|---|
+| vectors | 111,098 |
+| passed | 34,052 |
+| failed | 300 (CRITICAL 299 · HIGH 1) |
+| crashed | **2** |
+
+Four defects, one of them a memory-safety fault, none of which any previous run
+could reach.
+
+### 1. Stack buffer overflow in `C_UnwrapKey` — GHSA-833h-crp9-f378
+
+Reported as `crash (signal1)` on `test_wycheproof_aes.py`. Reproducible in
+isolation, unlike the sibling `crash (timeout)` on `test_ccm.py`, which turned
+out to be load on a machine running a multi-hour job and passes on its own in
+113 seconds.
+
+`uint8_t pt[256]` on the stack; `EVP_DecryptUpdate` takes no output-capacity
+argument; `ulWrappedKeyLen` was never checked against it. Any blob over 264
+bytes wrote past the end, caught by the stack canary as
+`*** stack smashing detected ***`, exit 134.
+
+The same missing bound accepted nine forged blobs (`tc111-invalid` …
+`tc119-invalid`) — one defect, two symptoms.
+
+Written up in `SECURITY.md`. Fixed in `4586a34` with
+`tests/test_unwrap_len.c`, which exits 134 if the bound is removed.
+
+### 2. RSA-PSS ignored the caller's MGF — 267 vectors
+
+`op->pss_mgf` appeared three times in the tree: its declaration, its reset, its
+assignment. Never on the right-hand side of anything. OpenSSL therefore applied
+its default, MGF1 over the signature hash, and every vector asking for a
+different mask generation function had its **valid** signature rejected.
+
+The OAEP path has always called `EVP_PKEY_CTX_set_rsa_mgf1_md`. One branch
+handled the parameter, the other dropped it.
+
+Four call sites became one helper, `pss_apply_params()`, which returns an
+`fhsm_rv_t` so an unknown MGF is refused rather than ignored. One of the four
+had been discarding the return value of all three calls.
+
+Measured: fail 267 → 0, 1,423 passed.
+
+### 3. Invalid EdDSA public keys accepted — 4 vectors
+
+`EVP_PKEY_fromdata` takes the raw `pub` octet string as given: for Ed25519 and
+Ed448, any string of the right length is accepted, canonical or not, on the
+curve or not. Nothing downstream re-checks. `EVP_PKEY_public_check` added after
+`fromdata`; fail 4 → 0, 18 passed, and the signature vectors that already
+passed still do.
+
+### 4. Invalid EC public keys accepted — not measured, then measured
+
+The EdDSA fix deliberately stopped at the Ed path, with a comment saying so:
+adding a check to a branch carrying 15,057 passing ECDSA vectors on the
+strength of symmetry is how one trades four failures for many more.
+
+Measured the next morning: `EVP_PKEY_public_check` on the EC path refuses no
+valid key. 15,057 passed, 0 failed. The check costs one scalar multiplication
+per **key import**, not per operation — the harness imports tens of thousands
+of keys; an application imports a few and then signs with them.
+
+## Two more, from reading the report rather than the failures
+
+### Valid AES-KW blobs over 256 bytes refused
+
+Visible only once the crash stopped masking it: `tc10`, `tc52` and `tc107` are
+*valid* vectors whose plaintext exceeds the buffer. They aborted the process;
+then they were cleanly refused; now they are unwrapped. The buffer is 4 KiB.
+
+Not moved to `fhsm_secure_malloc`, which is where key material belongs:
+`C_UnwrapKey` has 28 return statements, about twenty after the allocation
+point, and one missed path leaks plaintext key material. That wants the
+function restructured around a single exit — as does zeroising the buffer,
+which the code does not do today at either size.
+
+### `CKM_AES_KEY_WRAP` had half a mechanism — #14
+
+PKCS#11 v3.2 §6.16.3 gives the AES key wrap mechanisms both Wrap & Unwrap and
+Encrypt & Decrypt. Only wrapping existed. The module was self-consistent about
+it — table said `wrap`, `C_GetMechanismInfo` reported `CKF_WRAP`,
+`C_EncryptInit` returned `CKR_MECHANISM_INVALID` — and consistently short of the
+specification.
+
+The dispatch table carried one `op` string per mechanism and could not express
+two families; `op` now accepts `wrap+encrypt` and `fhsm_mech_flags_for()` ORs
+the sets.
+
+The consequence was concrete: NIST publishes ACVP AES-KW and AES-KWP vectors at
+the byte level, and they drive `C_Encrypt`. **7,219 of 7,231, 100 %** — a body
+of official validation vectors that could not run at all against this module
+before.
+
+## Where it stands
+
+Final full-corpus figures pending; the run started 2026-09-08 14:02 against the
+signed module carrying all six changes. What is expected to remain:
+
+- **R1** — Tookan §3.3, `C_UnwrapKey` with `CKA_SENSITIVE=False`. A documented
+  position, not a defect to fix.
+- **R3** — AES-GCM IV reuse accepted. Same.
+- The optional IV parameter of §6.16.2 is honoured on neither the wrap nor the
+  encrypt path; both pass NULL and use the SP 800-38F default. #14 stays open.
+
+## What this episode is about
+
+Not the four defects. They are ordinary, and finding them is what the harness is
+for.
+
+It is that for two months this document reported counts without stating what
+they covered, and the number it did not state was off by a factor of 28. "Zero
+crashes" over 4,014 vectors and "zero crashes" over 111,739 are different
+claims, and nothing in the report, the summary or this file distinguished them.
+
+`provenance.txt` now records the harness version, the OpenSSL version, the
+module path and its SHA-256 for every run. It should record the state of the
+data sources too — that is the same lesson one iteration later, and it is not
+done yet.
+
 **Where it would become discriminating, and that is worth doing.** Build
 `interop` *and* sign it. The module then advertises SHA-1, MD5, 3DES and
 RSA-PKCS v1.5 while the FIPS provider refuses to serve them: the mechanism list
