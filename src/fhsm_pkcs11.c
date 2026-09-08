@@ -2993,7 +2993,24 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                                           &ukv, &ukl, &ucl, &ukt);
     if (rv != FHSM_RV_OK) return rv;
 
-    uint8_t pt[256]; size_t pt_len = 0;
+    /* 4 KiB, not 256 bytes.
+     *
+     * The 256-byte buffer refused three valid Wycheproof AES-KW vectors
+     * (tc10, tc52, tc107) whose plaintext is longer than that. Those three
+     * used to abort the process; bounding the length turned the abort into a
+     * clean CKR_WRAPPED_KEY_LEN_RANGE, which is better and still wrong.
+     *
+     * Enlarging the stack buffer rather than moving to fhsm_secure_malloc is
+     * deliberate. This function has 28 return statements, about twenty of them
+     * after this point; a heap allocation would need a free on every one, and
+     * one missed path leaks plaintext key material. The heap version is worth
+     * doing with the function restructured around a single exit -- as is
+     * zeroising this buffer, which today's code does not do either. Neither is
+     * a change to make alongside four others.
+     *
+     * 4 KiB covers every AES-KW vector in the corpus and a DER-encoded RSA-4096
+     * private key, with room to spare against an 8 MiB default stack. */
+    uint8_t pt[4096]; size_t pt_len = 0;
 
     if (pMechanism->mechanism == CKM_AES_KEY_WRAP
         || pMechanism->mechanism == CKM_AES_KEY_WRAP_KWP) {

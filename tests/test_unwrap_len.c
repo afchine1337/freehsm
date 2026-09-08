@@ -133,22 +133,23 @@ int main(void)
     CK_OBJECT_HANDLE out = 0;
     CK_RV rv;
 
-    /* (1) The case that aborted: a blob whose plaintext exceeds pt[256].
-     *     512 bytes is well past the 264-byte ceiling. Reaching the next line
-     *     at all is most of what this test asserts. */
+    /* (1) The case that aborted: a blob whose plaintext exceeds pt[].
+     *     The buffer was 256 bytes when this was found and is 4096 now, so the
+     *     sizes here track it -- 8192 is well past the 4104-byte ceiling.
+     *     Reaching the next line at all is most of what this test asserts. */
     {
-        CK_BYTE blob[512];
+        static CK_BYTE blob[8192];
         memset(blob, 0xA5, sizeof blob);
         rv = C_UnwrapKey(s, &kw, kek, blob, sizeof blob, out_tmpl, 2, &out);
-        ok(rv == CKR_WRAPPED_KEY_LEN_RANGE, "512-byte blob refused, no abort");
+        ok(rv == CKR_WRAPPED_KEY_LEN_RANGE, "8192-byte blob refused, no abort");
     }
 
-    /* (2) Exactly one semiblock past the ceiling: 272 - 8 = 264 > 256. */
+    /* (2) Exactly one semiblock past the ceiling: 4112 - 8 = 4104 > 4096. */
     {
-        CK_BYTE blob[272];
+        static CK_BYTE blob[4112];
         memset(blob, 0xA5, sizeof blob);
         rv = C_UnwrapKey(s, &kw, kek, blob, sizeof blob, out_tmpl, 2, &out);
-        ok(rv == CKR_WRAPPED_KEY_LEN_RANGE, "272-byte blob refused (boundary)");
+        ok(rv == CKR_WRAPPED_KEY_LEN_RANGE, "4112-byte blob refused (boundary)");
     }
 
     /* (3) Malformed lengths RFC 3394 cannot produce. */
