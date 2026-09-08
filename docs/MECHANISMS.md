@@ -29,8 +29,10 @@
 | | | | | | _IV length fixed at 96 bits; tag length fixed at 128 bits in approved mode._ |
 | `CKM_AES_CCM` | `0x00001088` | encrypt | ✅ | `dispatch_aes_ccm` | FIPS 197, SP 800-38C |
 | `CKM_AES_CTR` | `0x00001086` | encrypt | ✅ | `dispatch_aes_ctr` | FIPS 197, SP 800-38A |
-| `CKM_AES_KEY_WRAP` | `0x00002109` | wrap | ✅ | `dispatch_aes_kw` | FIPS 197, SP 800-38F, RFC 3394 |
-| `CKM_AES_KEY_WRAP_KWP` | `0x0000210B` | wrap | ✅ | `dispatch_aes_kwp` | FIPS 197, SP 800-38F §6.3, RFC 5649 |
+| `CKM_AES_KEY_WRAP` | `0x00002109` | wrap+encrypt | ✅ | `dispatch_aes_kw` | FIPS 197, SP 800-38F, RFC 3394 |
+| | | | | | _PKCS#11 v3.2 §6.16.3: single-part wrap/unwrap AND single-part encrypt/decrypt. Encrypt input must be an exact multiple of the 8-byte semiblock; use KWP for other lengths._ |
+| `CKM_AES_KEY_WRAP_KWP` | `0x0000210B` | wrap+encrypt | ✅ | `dispatch_aes_kwp` | FIPS 197, SP 800-38F §6.3, RFC 5649 |
+| | | | | | _PKCS#11 v3.2 §6.16.3: wraps a key or encrypts a data block of any length, zero-padded per SP 800-38F §6.3._ |
 | `CKM_AES_CMAC` | `0x0000108A` | sign | ✅ | `dispatch_aes_cmac` | FIPS 197, SP 800-38B |
 | `CKM_AES_ECB` | `0x00001081` | encrypt | ✅ | `dispatch_aes_ecb` | FIPS 197, SP 800-38A |
 | | | | | | _ECB single-block only; rejected for any input > 16 bytes._ |

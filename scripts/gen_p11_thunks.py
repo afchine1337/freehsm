@@ -61,6 +61,20 @@ class Mech:
     op: str                   # "encrypt", "sign", "digest", "keygen",
                               # "keypair", "wrap", "derive", "encap",
                               # "decap"
+                              #
+                              # A mechanism may belong to more than one
+                              # operation family: join them with '+', as in
+                              # "wrap+encrypt". fhsm_mech_flags_for() splits on
+                              # it and ORs the flag sets, so C_GetMechanismInfo
+                              # reports all of them.
+                              #
+                              # This exists because PKCS#11 v3.2 §6.16 gives
+                              # CKM_AES_KEY_WRAP and CKM_AES_KEY_WRAP_KWP both
+                              # Wrap & Unwrap AND Encrypt & Decrypt, and a
+                              # single-string field could not say so. The
+                              # module advertised wrap only and refused
+                              # C_EncryptInit -- self-consistent, and short of
+                              # the specification (issue #14).
     handler: str              # C symbol of the dispatch function
     fips: str                 # "approved" | "non-approved" | "deprecated"
     key_type: Optional[str] = None      # "CKK_AES" / "CKK_RSA" / ...
@@ -107,14 +121,19 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197", "SP 800-38A")),
-    Mech("CKM_AES_KEY_WRAP",       0x00002109, "AES",  "wrap",    "dispatch_aes_kw",
+    Mech("CKM_AES_KEY_WRAP",       0x00002109, "AES",  "wrap+encrypt", "dispatch_aes_kw",
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
-         refs=("FIPS 197", "SP 800-38F", "RFC 3394")),
-    Mech("CKM_AES_KEY_WRAP_KWP",   0x0000210B, "AES",  "wrap",    "dispatch_aes_kwp",
+         refs=("FIPS 197", "SP 800-38F", "RFC 3394"),
+         notes="PKCS#11 v3.2 §6.16.3: single-part wrap/unwrap AND single-part "
+               "encrypt/decrypt. Encrypt input must be an exact multiple of the "
+               "8-byte semiblock; use KWP for other lengths."),
+    Mech("CKM_AES_KEY_WRAP_KWP",   0x0000210B, "AES",  "wrap+encrypt", "dispatch_aes_kwp",
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
-         refs=("FIPS 197", "SP 800-38F §6.3", "RFC 5649")),
+         refs=("FIPS 197", "SP 800-38F §6.3", "RFC 5649"),
+         notes="PKCS#11 v3.2 §6.16.3: wraps a key or encrypts a data block of "
+               "any length, zero-padded per SP 800-38F §6.3."),
     Mech("CKM_AES_CMAC",           0x0000108A, "AES",  "sign",    "dispatch_aes_cmac",
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,

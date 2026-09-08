@@ -1325,18 +1325,41 @@ static int fhsm_mech_advertised(const fhsm_mech_entry_t *e) {
     return e != NULL && e->handler != dispatch_reject_fips;
 }
 
-/* Generated per-mechanism operation class -> CK_MECHANISM_INFO flags. */
+/* One operation class -> CK_MECHANISM_INFO flags. */
+static CK_ULONG fhsm_mech_flags_for_one(const char *op, size_t len) {
+    #define FHSM_OP_IS(s) (len == sizeof(s) - 1 && !strncmp(op, s, len))
+    if (FHSM_OP_IS("digest"))  return CKF_DIGEST;
+    if (FHSM_OP_IS("sign"))    return CKF_SIGN | CKF_VERIFY;
+    if (FHSM_OP_IS("encrypt")) return CKF_ENCRYPT | CKF_DECRYPT;
+    if (FHSM_OP_IS("encap"))   return CKF_ENCAPSULATE | CKF_DECAPSULATE;
+    if (FHSM_OP_IS("wrap"))    return CKF_WRAP | CKF_UNWRAP_MECH;
+    if (FHSM_OP_IS("derive"))  return CKF_DERIVE;
+    if (FHSM_OP_IS("keygen"))  return CKF_GENERATE;
+    if (FHSM_OP_IS("keypair")) return CKF_GENERATE_KEY_PAIR;
+    #undef FHSM_OP_IS
+    return 0;
+}
+
+/* Generated per-mechanism operation class -> CK_MECHANISM_INFO flags.
+ *
+ * The table's `op` field may name several families joined by '+', because a
+ * mechanism can belong to more than one: PKCS#11 v3.2 §6.16 gives
+ * CKM_AES_KEY_WRAP and CKM_AES_KEY_WRAP_KWP both Wrap & Unwrap and Encrypt &
+ * Decrypt. When the field held a single string, the module could only
+ * advertise one of the two, and it advertised wrap -- consistent with what
+ * C_EncryptInit then refused, and short of the specification (#14). */
 static CK_ULONG fhsm_mech_flags_for(const char *op) {
     if (!op) return 0;
-    if (!strcmp(op, "digest"))  return CKF_DIGEST;
-    if (!strcmp(op, "sign"))    return CKF_SIGN | CKF_VERIFY;
-    if (!strcmp(op, "encrypt")) return CKF_ENCRYPT | CKF_DECRYPT;
-    if (!strcmp(op, "encap"))   return CKF_ENCAPSULATE | CKF_DECAPSULATE;
-    if (!strcmp(op, "wrap"))    return CKF_WRAP | CKF_UNWRAP_MECH;
-    if (!strcmp(op, "derive"))  return CKF_DERIVE;
-    if (!strcmp(op, "keygen"))  return CKF_GENERATE;
-    if (!strcmp(op, "keypair")) return CKF_GENERATE_KEY_PAIR;
-    return 0;
+    CK_ULONG flags = 0;
+    const char *p = op;
+    for (;;) {
+        const char *plus = strchr(p, '+');
+        size_t len = plus ? (size_t)(plus - p) : strlen(p);
+        flags |= fhsm_mech_flags_for_one(p, len);
+        if (!plus) break;
+        p = plus + 1;
+    }
+    return flags;
 }
 
 /* Coarse key-size hints by family. Precise per-mechanism reporting is
@@ -5639,6 +5662,13 @@ static int fhsm_cipher_mech_valid(CK_ULONG mech) {
         case CKM_RSA_PKCS:      /* 0x0001 */
         case CKM_RSA_X_509:     /* 0x0003 */
         case CKM_RSA_PKCS_OAEP: /* 0x0009 */
+        /* PKCS#11 v3.2 §6.16.3: the AES key wrap mechanisms carry both
+         * Wrap & Unwrap and Encrypt & Decrypt, single-part in each case.
+         * Only the wrap half was implemented, so ACVP's byte-level AES-KW
+         * and AES-KWP vectors -- which go through C_Encrypt -- could not
+         * run against this module at all (#14). */
+        case CKM_AES_KEY_WRAP:     /* 0x2109 */
+        case CKM_AES_KEY_WRAP_KWP: /* 0x210B */
             return 1;
         default:
             return 0;
@@ -5806,6 +5836,72 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         }
         *pulEncLen = bl;
         EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey); op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
+    /* --- AES-KW / AES-KWP over raw data (PKCS#11 v3.2 §6.16.3) ---
+     *
+     * "The mechanisms support only single-part operations, i.e. single part
+     * wrapping and unwrapping, and single-part encryption and decryption."
+     * Only the wrapping half existed here, so ACVP's byte-level AES-KW and
+     * AES-KWP vectors -- which drive C_Encrypt rather than C_WrapKey, because
+     * they carry raw data and not key objects -- could not run at all (#14).
+     *
+     * Output length is the arithmetic C_WrapKey already does:
+     *   KW  (RFC 3394): input a multiple of 8 and at least 16, output n + 8.
+     *   KWP (RFC 5649): any non-zero length, output roundup8(n) + 8.
+     *
+     * The optional IV parameter is not honoured here, and is not honoured on
+     * the wrap path either, which passes NULL for it as well; both then use
+     * the default initial value from SP 800-38F. Left in #14 rather than fixed
+     * in passing: it needs the same treatment at four entry points, and today
+     * a caller who supplies one is silently given the default either way. */
+    if (op->mechanism == CKM_AES_KEY_WRAP
+        || op->mechanism == CKM_AES_KEY_WRAP_KWP) {
+        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (kvl != 16 && kvl != 24 && kvl != 32) {
+            op->active = 0; return 0x00000114UL;  /* CKR_WRAPPING_KEY_SIZE_RANGE */
+        }
+        size_t need;
+        if (op->mechanism == CKM_AES_KEY_WRAP) {
+            if (ulDataLen < 16 || (ulDataLen % 8) != 0) {
+                op->active = 0; return FHSM_RV_DATA_LEN_RANGE;
+            }
+            need = (size_t)ulDataLen + 8;
+        } else {
+            if (ulDataLen == 0) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
+            need = (((size_t)ulDataLen + 7) & ~(size_t)7) + 8;
+        }
+        /* Size query and buffer-too-small leave the operation active, as
+         * everywhere else in this function. */
+        if (pEnc == NULL) { *pulEncLen = (CK_ULONG)need; return FHSM_RV_OK; }
+        if (*pulEncLen < need) { *pulEncLen = (CK_ULONG)need; return 0x00000150UL; }
+
+        const char *kwname;
+        if (op->mechanism == CKM_AES_KEY_WRAP) {
+            kwname = (kvl == 16) ? "AES-128-WRAP" :
+                     (kvl == 24) ? "AES-192-WRAP" : "AES-256-WRAP";
+        } else {
+            kwname = (kvl == 16) ? "AES-128-WRAP-PAD" :
+                     (kvl == 24) ? "AES-192-WRAP-PAD" : "AES-256-WRAP-PAD";
+        }
+        EVP_CIPHER *kwc = EVP_CIPHER_fetch(NULL, kwname, NULL);
+        if (!kwc) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        EVP_CIPHER_CTX *kwctx = EVP_CIPHER_CTX_new();
+        if (!kwctx) { EVP_CIPHER_free(kwc); op->active = 0; return FHSM_RV_HOST_MEMORY; }
+        EVP_CIPHER_CTX_set_flags(kwctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
+        int kwoutl = 0, kwfinl = 0;
+        if (EVP_EncryptInit_ex2(kwctx, kwc, kv, NULL, NULL) != 1
+            || EVP_EncryptUpdate(kwctx, pEnc, &kwoutl, pData, (int)ulDataLen) != 1
+            || EVP_EncryptFinal_ex(kwctx, pEnc + kwoutl, &kwfinl) != 1) {
+            EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
+        *pulEncLen = (CK_ULONG)(kwoutl + kwfinl);
+        op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
                                 fhsm_session_role(hSession), FHSM_RV_OK, NULL);
         return FHSM_RV_OK;
@@ -6119,6 +6215,71 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0;
         if (dr <= 0) return FHSM_RV_ENCRYPTED_DATA_INVALID;
         *pulDataLen = bl;
+        (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+        return FHSM_RV_OK;
+    }
+
+    /* --- AES-KW / AES-KWP over raw data (PKCS#11 v3.2 §6.16.3) ---
+     * The decrypt half of the branch added to C_Encrypt above. Both halves go
+     * in together: a mechanism that encrypts and cannot decrypt would be a
+     * worse state than the one being fixed.
+     *
+     * Output is ulEncLen - 8 for KW. For KWP the padding is stripped inside
+     * the cipher, so the plaintext can be shorter still; the exact figure is
+     * only known after the operation, and ulEncLen - 8 is the upper bound
+     * reported to a size query. A caller that sized its buffer from that query
+     * gets the true length back in *pulDataLen, which is the contract
+     * C_WrapKey's own comment insists on.
+     *
+     * An invalid blob is CKR_ENCRYPTED_DATA_INVALID here rather than
+     * CKR_WRAPPED_KEY_INVALID: this is the data path, not the key path. The
+     * integrity check itself is the same one, inside the cipher. */
+    if (op->mechanism == CKM_AES_KEY_WRAP
+        || op->mechanism == CKM_AES_KEY_WRAP_KWP) {
+        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (kvl != 16 && kvl != 24 && kvl != 32) {
+            op->active = 0; return 0x00000114UL;  /* CKR_WRAPPING_KEY_SIZE_RANGE */
+        }
+        size_t min_blob = (op->mechanism == CKM_AES_KEY_WRAP) ? 24 : 16;
+        if (ulEncLen < min_blob || (ulEncLen % 8) != 0) {
+            op->active = 0;
+            return 0x00000041UL;  /* CKR_ENCRYPTED_DATA_LEN_RANGE */
+        }
+        size_t upper = (size_t)ulEncLen - 8;
+        if (pData == NULL) { *pulDataLen = (CK_ULONG)upper; return FHSM_RV_OK; }
+        if (*pulDataLen < upper) { *pulDataLen = (CK_ULONG)upper; return 0x00000150UL; }
+
+        const char *kwname;
+        if (op->mechanism == CKM_AES_KEY_WRAP) {
+            kwname = (kvl == 16) ? "AES-128-WRAP" :
+                     (kvl == 24) ? "AES-192-WRAP" : "AES-256-WRAP";
+        } else {
+            kwname = (kvl == 16) ? "AES-128-WRAP-PAD" :
+                     (kvl == 24) ? "AES-192-WRAP-PAD" : "AES-256-WRAP-PAD";
+        }
+        EVP_CIPHER *kwc = EVP_CIPHER_fetch(NULL, kwname, NULL);
+        if (!kwc) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
+        EVP_CIPHER_CTX *kwctx = EVP_CIPHER_CTX_new();
+        if (!kwctx) { EVP_CIPHER_free(kwc); op->active = 0; return FHSM_RV_HOST_MEMORY; }
+        EVP_CIPHER_CTX_set_flags(kwctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
+        int kwoutl = 0, kwfinl = 0;
+        if (EVP_DecryptInit_ex2(kwctx, kwc, kv, NULL, NULL) != 1) {
+            EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        if (EVP_DecryptUpdate(kwctx, pData, &kwoutl, pEnc, (int)ulEncLen) != 1
+            || EVP_DecryptFinal_ex(kwctx, pData + kwoutl, &kwfinl) != 1) {
+            EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
+            op->active = 0;
+            (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                                    fhsm_session_role(hSession),
+                                    FHSM_RV_ENCRYPTED_DATA_INVALID, NULL);
+            return FHSM_RV_ENCRYPTED_DATA_INVALID;
+        }
+        EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
+        *pulDataLen = (CK_ULONG)(kwoutl + kwfinl);
+        op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
                                 fhsm_session_role(hSession), FHSM_RV_OK, NULL);
         return FHSM_RV_OK;
