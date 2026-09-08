@@ -214,14 +214,86 @@ and two days between fixing the cause and noticing it had already happened.
 
 ---
 
+## Self-disclosed stack buffer overflow — `C_UnwrapKey`, AES-KW (2026-09-07)
+
+**`C_UnwrapKey` wrote past a 256-byte stack buffer when given a long AES-KW
+blob.** Affects every release up to and including v2.0.3; fixed on `main` in
+`4586a34`, shipping in v2.1.0.
+
+**Cause.** The function decrypted into `uint8_t pt[256]` on the stack.
+`EVP_DecryptUpdate` takes no output-capacity argument — the caller guarantees
+the buffer — and nothing checked `ulWrappedKeyLen` against `sizeof(pt)`. AES-KW
+yields `ulWrappedKeyLen - 8` bytes, so any wrapped blob over 264 bytes wrote
+past the end.
+
+The same function's sibling branches, RSA-OAEP and RSA v1.5, both pass
+`sizeof(pt)` to their helpers. The AES-KW branch was the one that did not.
+
+**Effect, and it differs by build.**
+
+| build | outcome |
+|---|---|
+| with `_FORTIFY_SOURCE` and `-fstack-protector` (our releases) | `*** stack smashing detected ***`, `SIGABRT`, process ends |
+| without them | out-of-bounds stack write, driven by the input |
+
+In the published binaries this fails closed: the process dies rather than
+continuing on a corrupted stack. That is a denial of service against the
+calling application, not code execution. **Both protections are compile-time
+choices**, and issue #7 established that distributions do not all apply the
+same flags — a package built without them takes the write instead of the abort.
+
+**Reachability.** A wrapped blob is, by the purpose of key wrapping, data that
+arrives from somewhere else. An application that unwraps a key it received is
+passing attacker-influenced length and content to this path. The PKCS#11 model
+places the caller inside the trust boundary, but not necessarily the blob.
+
+**A second defect on the same branch.** Nine Wycheproof vectors
+(`tc111-invalid` … `tc119-invalid`) had forged blobs *accepted* — a key object
+was created from data that should have been refused. Both symptoms came from
+the single missing bound.
+
+**Fixed.** The wrapped-blob length is now validated before anything writes into
+the buffer: a multiple of 8, at least 24 for KW and 16 for KWP per RFC 3394 /
+RFC 5649, and within the buffer. The unwrapping-key size is validated too — it
+was not, so a 20-byte key silently selected `AES-256-WRAP`, a fix `C_WrapKey`
+had already received on its own side. `tests/test_unwrap_len.c` fails with exit
+134 if the bound is removed.
+
+**Detection.** There is no way to tell from the outside whether a given
+deployment has been given an over-long blob; nothing is logged when the process
+aborts. If you run an affected version and your application unwraps keys from
+an external source, treat unexplained process terminations as a candidate.
+
+**Found by** the Project Wycheproof AES-KW vectors, via `pkcs11-check` — on the
+first run made after @petrn pointed out in issue #10 that
+`pkcs11-check fetch-data` had never been run here. Every previous run, local
+and CI, had covered 4,014 vectors of 111,739 without anyone knowing.
+
+**Timeline.** Present since the AES-KW unwrap path was written; surfaced
+2026-09-07 as a reproducible abort during the first full-corpus run; cause
+identified the same evening; fixed, tested and pushed within the hour.
+
+---
+
 ## Supported versions
 
 | Version | Supported |
 |---|---|
-| `1.2.x-FIPS` | ✅ — active development + security backports (v1.2.1 is the first version not affected by the integrity self-test defect described above) |
-| `1.1.x-FIPS` | ⚠️ — security backports only ; **all v1.1.x versions are affected by the integrity self-test defect ; upgrade to v1.2.1 is strongly recommended** |
-| `1.0.x-FIPS` | ⚠️ — security fixes only until 2027-06 |
-| `< 1.0` | ❌ — end of life (Python POC, not certified) |
+| `2.1.x` | ✅ — active development. First version carrying the `C_UnwrapKey` bound described above |
+| `2.0.x` | ⚠️ — **affected by the `C_UnwrapKey` stack overflow**; upgrade to v2.1.0. v2.0.3 is otherwise current |
+| `1.5.x` – `1.6.x` | ⚠️ — affected by the same defect; no backports planned, upgrade |
+| `1.4.0` | ❌ — **published unsigned** (see above); unusable as shipped, do not work around it |
+| `1.1.x` – `1.3.x` | ❌ — end of life. All `1.1.x` are additionally affected by the integrity self-test defect |
+| `< 1.0` | ❌ — end of life (Python proof of concept) |
+
+The `-FIPS` suffix was dropped from version strings in v2.0.0: it asserted in
+the version number a certification this project does not hold and will not seek.
+Older tags carry it; it means nothing beyond the name they were released under.
+
+This table was last accurate at v1.2.1 and is corrected here as part of writing
+the entry above — a supported-versions table that stops four minor versions
+short is the one place a reader checks to find out whether an advisory concerns
+them.
 
 ---
 
