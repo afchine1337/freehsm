@@ -32,6 +32,12 @@ condition could never be met, and a `BufferError` at a typed `ctypes` boundary.
 The v0.1.9 error-attribution fix closed three FreeHSM "failures" that were never
 FreeHSM's.
 
+The tool's own conformance report — `pkcs11-check-report`, which this project
+had never generated in two months of using the harness — is what made the
+September findings visible: severity classification, mechanisms advertised but
+not operational, honest deviations separated from spec violations. Our summary
+script counted tests; his report says what they mean.
+
 ## Simon Josefsson (`jas4711`)
 
 Preparing Debian packages, and reporting what that exposed:
@@ -71,6 +77,33 @@ Followed `AGD_PRE.md` as written, on a clean machine, repeatedly:
   failing through the module on OpenSSL 3.5.6 — with a clean single-variable
   attribution that none of the maintainer's four hypotheses achieved.
 * **#6** — three Wycheproof RSA-PSS violations on v1.5.0.
+* **#10 — the single most consequential remark anyone has made to this
+  project.** Asking why his pkcs11-check figures did not match ours, he pointed
+  out that `pkcs11-check fetch-data` had never been run here. Every measurement
+  published since July — the 517 failures, the 7,392 Wycheproof assertions, the
+  "zero crashes" — covered **4,014 vectors of 111,739**. Nothing in the report,
+  the summary or our findings document said which.
+
+  The first run with the data present found a **stack buffer overflow in
+  `C_UnwrapKey`** (GHSA-833h-crp9-f378), nine forged blobs accepted by the same
+  missing bound, **267 valid RSA-PSS signatures rejected** because the caller's
+  MGF was read and never used, and four invalid EdDSA public keys imported as
+  valid — none of which any earlier run could reach.
+
+* **#11** — the `dev mode active (no FIPS provider)` notice, which told him his
+  OpenSSL had no FIPS provider when his configuration was correct and *our own
+  harness* had set the bypass. He also asked whether "dev mode" and "legacy
+  mode" were the same thing. They are not, and nothing said so: three
+  orthogonal axes with colliding names.
+* **#12** — the Wycheproof harness hard-coded `/tmp/freehsm-wycheproof` at mode
+  0700, so the first user to run it locked out everyone else on the machine. He
+  proposed both candidate fixes; the per-run directory was taken because cleanup
+  alone survives neither an interrupted run nor two concurrent users.
+* **#14** — reading the conformance report he had generated and we never had,
+  he identified why `CKM_AES_KEY_WRAP` was reported as "advertised but not
+  operational": the harness drives it through `C_Encrypt`, which we refused.
+  PKCS#11 v3.2 §6.16.3 gives the mechanism that half too. Implementing it made
+  **7,219 NIST ACVP vectors** runnable that never had been.
 
 ## `fencepost-error`
 
