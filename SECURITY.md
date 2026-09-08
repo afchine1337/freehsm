@@ -10,6 +10,8 @@ Project lead : **Afchine Madjlessi** ([`afchine.mad@gmail.com`](mailto:afchine.m
 
 ## Maintainer GPG key rotation — 2026-06-12
 
+**Advisory:** [GHSA-wgv9-m9cv-4647](https://github.com/afchine1337/freehsm/security/advisories/GHSA-wgv9-m9cv-4647) · Moderate
+
 The maintainer GPG signing key has been rotated. The previous key
 `B79726CB087375CF990E00E4A0BC5BB2FB1EE342` (Ed25519, generated
 2026-06-12 06:42 UTC) was **compromised** : an ASCII-armored export
@@ -67,6 +69,8 @@ re-verify with the new key — the signature has changed.
 ---
 
 ## Self-disclosed integrity self-test defect — v1.2.1 (2026-06-21)
+
+**Advisory:** [GHSA-6jx9-gh48-5qf6](https://github.com/afchine1337/freehsm/security/advisories/GHSA-6jx9-gh48-5qf6) · High
 
 A critical defect in the module's `§7.10.2` software / firmware integrity
 self-test (`src/fhsm_integrity.c::do_verify`) was self-discovered and
@@ -161,7 +165,29 @@ standing practice for any future evidence-bearing surface defect.
 
 ---
 
+## Raw signature double-hashing — v1.1.0 to v1.2.1 (2026-06-28)
+
+**Advisory:** [GHSA-xpxx-66pp-pf99](https://github.com/afchine1337/freehsm/security/advisories/GHSA-xpxx-66pp-pf99) · High
+
+Raw `CKM_ECDSA` and `CKM_RSA_PKCS` signatures were silently double-hashed, and
+five PKCS#11 function-list slots were left unwired. Reported externally by Denis
+Mingulov; fixed in v1.2.2, with v1.3.0 closing the remaining slots he flagged.
+
+The advisory carries the full description. This section exists because it did
+not: the advisory was published on 2026-06-28 and this file never gained an
+entry for it, so a reader working from `SECURITY.md` alone would have counted
+three disclosures where there were four.
+
+---
+
 ## Self-disclosed release-integrity defect — v1.4.0 published unsigned (2026-09-03)
+
+**No advisory, deliberately.** The other four entries here have one; this does
+not, because there is nothing in the module to advise against. The integrity
+check worked as specified and refused to run an unsigned module. What failed was
+the release path, and the remedy is to use a later version rather than to assess
+exposure. Recorded in full below all the same — the harm it caused is real and
+described at the end of this section.
 
 **v1.4.0 was published without its integrity digest.** Measured on the released
 artefact, not inferred:
@@ -215,6 +241,9 @@ and two days between fixing the cause and noticing it had already happened.
 ---
 
 ## Self-disclosed stack buffer overflow — `C_UnwrapKey`, AES-KW (2026-09-07)
+
+**Advisory:** [GHSA-833h-crp9-f378](https://github.com/afchine1337/freehsm/security/advisories/GHSA-833h-crp9-f378)
+· High · CWE-121 · no CVE requested
 
 **`C_UnwrapKey` wrote past a 256-byte stack buffer when given a long AES-KW
 blob.** Affects every release up to and including v2.0.3; fixed on `main` in
