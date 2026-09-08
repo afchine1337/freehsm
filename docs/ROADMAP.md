@@ -325,9 +325,34 @@ this module implements composite signatures until the conforming one ships. See
 
 ## Release process
 
+**Cadence: at most one release a week**, on a fixed day, with fixes gathered
+until then.
+
+Adopted 2026-09-07 after three releases in three days. Each had a good reason —
+people were debugging against published binaries, and a fix on a branch does not
+reach them — but the result did not look like a project anyone should depend on,
+and the decision to wait until Monday was made on exactly that ground.
+
+**One exception: a security fix ships when it is ready and verified.** A rule
+that forbade v1.2.2 four hours after Denis reported the raw-`CKM_ECDSA` defect
+would do more harm than the disorder it corrects. The test is whether users are
+exposed while the fix sits on a branch, not whether the calendar allows it.
+
+Everything else waits. The C_UnwrapKey overflow of 2026-09-07 did **not** take
+the exception: it fails closed in the published binaries, so it went into the
+next scheduled release with the rest, disclosed in `SECURITY.md` and
+GHSA-833h-crp9-f378 in the meantime.
+
 `scripts/release.sh <version>` runs the pre-flight checks and refuses to
 proceed until they pass. It performs **no git write operations** -- it checks,
 prints the commands, and stops.
+
+Two things the script does not yet do, both of which cost time in the 2.0.3
+cycle: reopening `[Unreleased]` in the CHANGELOG after the rename (the section
+was closed on Monday morning and three commits landed with nothing in the
+project's own log until someone noticed), and printing a `git add` that names
+files rather than `git add -A`, which has twice swept unrelated work into a
+release commit.
 
 Written after v1.6.0, which took two retags for three uninteresting and
 mechanically detectable reasons: a `sed` that did not match so the version
@@ -863,6 +888,38 @@ Candidates, cheapest first:
 | #106 | Exhaustive CC ATE_FUN test book | v2.0 stable +6mo | Worth doing for its own sake: a functional test book to CC ATE_FUN structure is both a real assurance gain and a teaching artefact. **Not for a submission** — there will not be one. |
 | #111-prep | Thread-safety of the PKCS#11 layer (blocks #111) | ~10h | 🟡 v1.6.0 — the two lazy-init races fixed, `make TSAN=1` + `tests/test_concurrency` in tree. Points 2–5 of the note (session binding, per-identity throttle, audit actor) are REST-layer work and stay with #111 |
 | #111 | Network HSM via REST API | v2.5+ | **Design decided, nothing built** — see [`REST_API_DESIGN.md`](REST_API_DESIGN.md). Four of the five prerequisites are closed, the audit log included. Measured first (`probes/rest/`): a stateless API does **not** make the login stateless, so authorisation has to live in the service on the client certificate, not on the token being logged in. Remaining: the per-identity throttle, and where the daemon's PIN comes from |
+
+### Two existing transports to weigh before building a third (noted 2026-09-08)
+
+#111 designs a REST API. Two PKCS#11-native remote transports exist, and both
+would expose this module without an application having to learn a new
+interface.
+
+**`p11-kit server`** is already installed nearly everywhere and its RPC protocol
+is long-established. Until recently it could not carry the PQC mechanisms —
+p11-kit PR #745 added ML-KEM / ML-DSA support to the RPC layer and was merged on
+2026-09-08, so the combination becomes testable once that ships.
+
+Worth doing early, because of a precedent: the `C_Login` defect where the module
+derived the KEK over `strlen(pPin)` instead of honouring `ulPinLen` was found
+*by* `p11-kit server`, whose RPC unmarshals the PIN into a buffer that is not
+NUL-terminated. Our own tools passed a `getenv()` pointer, terminated by
+accident, so everything looked correct. Putting the PQC mechanisms through the
+same layer will exercise `CK_ML_DSA_PARAMS` marshalling, PQC key sizes in
+templates and mechanism values on a path our local tests do not touch.
+
+**`pkcs11-proxy-ng`** (Denis Mingulov, Rust, Apache-2.0 or MIT) is a gRPC proxy
+with a loadable PKCS#11 shim on the client side. Two commits, no release, so not
+something to depend on — but the same author wrote `pkcs11-check`, and FreeHSM
+would make a third test backend beside SoftHSM2 and Kryoptic. The open question
+put to him: how the PIN crosses the wire. This project's standing rule is that a
+PIN never appears in a command line or an inherited environment variable, and a
+remote boundary adds a third place it must not appear.
+
+Neither replaces #111 — a REST API serves callers that are not PKCS#11
+applications — but both would give this module a network boundary sooner, and
+both stress it in ways the design note anticipates rather than in ways it
+invents.
 
 ### #111-prep — the network boundary stresses things the single-process model hides (noted 2026-07-21)
 
