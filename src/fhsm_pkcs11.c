@@ -2400,6 +2400,25 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         }
         EVP_PKEY_CTX_free(pctx);
 
+        /* Same check the Ed25519/Ed448 path below now performs, for the same
+         * reason: EVP_PKEY_fromdata builds the key from the caller's bytes and
+         * does not verify that the point is on the curve or in the right
+         * subgroup. Nothing downstream re-checks, so an invalid public key
+         * imported here is treated as valid by every later operation.
+         *
+         * The Ed fix was measured; this one was left out that night precisely
+         * because it was not, and symmetry is not evidence. Measuring it is
+         * what this commit is. */
+        {
+            EVP_PKEY_CTX *chk = EVP_PKEY_CTX_new_from_pkey(NULL, pkey, NULL);
+            if (!chk || EVP_PKEY_public_check(chk) != 1) {
+                if (chk) EVP_PKEY_CTX_free(chk);
+                EVP_PKEY_free(pkey);
+                return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            }
+            EVP_PKEY_CTX_free(chk);
+        }
+
     } else if (a.path == FHSM_CREATE_PATH_ED25519_PUB
                || a.path == FHSM_CREATE_PATH_ED448_PUB) {
         const char *algo = (a.path == FHSM_CREATE_PATH_ED25519_PUB)
