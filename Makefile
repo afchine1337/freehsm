@@ -623,6 +623,14 @@ tests/test_unwrap_len: tests/test_unwrap_len.c $(LIB)
 tests/test_hmac_multipart: tests/test_hmac_multipart.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# The advertised set and the implemented set are two structures with nothing
+# holding them equal: fhsm_mechanism_table[] carries a handler pointer that no
+# code dereferences, and the PKCS#11 entry points switch on mechanisms by hand.
+# Every defect of the week of 2026-09-07 is a symptom. This asks the module
+# which operation each advertised mechanism claims, then calls it.
+tests/test_advertised_operational: tests/test_advertised_operational.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # FIPS-approved digest/HMAC mechanisms advertised but previously not
 # callable (#125) : SHA-224, SHA-512/t, SHA-3, and their HMACs.
 tests/test_fips_digests: tests/test_fips_digests.c $(LIB)
@@ -666,7 +674,7 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 # beside the tokens, so any test that initialises the module writes there.
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
-tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tools/fhsm-token
+tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_advertised_operational tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tools/fhsm-token
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_tpm
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
@@ -704,6 +712,8 @@ tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cb
 		$(TEST_LD) ./tests/test_unwrap_len
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_hmac_multipart
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_advertised_operational
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_fips_digests
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
