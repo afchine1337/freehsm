@@ -214,6 +214,34 @@ fhsm_rv_t dispatch_rsa_pkcs_sha512(unsigned long s, unsigned long k,
                                     fhsm_slice_t in, uint8_t *o, size_t *ol)
 { (void)s; (void)k; return rsa_pkcs_sign("SHA512", p, pl, in, o, ol); }
 
+/* SHA-224 and the SHA-3 family. Unlike the three above, these were not
+ * reachable through C_Sign either: mech_hash_name() did not know them and
+ * C_SignInit refused them. Both were extended alongside this. */
+fhsm_rv_t dispatch_rsa_pkcs_sha224(unsigned long s, unsigned long k,
+                                    const void *p, size_t pl,
+                                    fhsm_slice_t in, uint8_t *o, size_t *ol)
+{ (void)s; (void)k; return rsa_pkcs_sign("SHA224", p, pl, in, o, ol); }
+
+fhsm_rv_t dispatch_rsa_pkcs_sha3_224(unsigned long s, unsigned long k,
+                                      const void *p, size_t pl,
+                                      fhsm_slice_t in, uint8_t *o, size_t *ol)
+{ (void)s; (void)k; return rsa_pkcs_sign("SHA3-224", p, pl, in, o, ol); }
+
+fhsm_rv_t dispatch_rsa_pkcs_sha3_256(unsigned long s, unsigned long k,
+                                      const void *p, size_t pl,
+                                      fhsm_slice_t in, uint8_t *o, size_t *ol)
+{ (void)s; (void)k; return rsa_pkcs_sign("SHA3-256", p, pl, in, o, ol); }
+
+fhsm_rv_t dispatch_rsa_pkcs_sha3_384(unsigned long s, unsigned long k,
+                                      const void *p, size_t pl,
+                                      fhsm_slice_t in, uint8_t *o, size_t *ol)
+{ (void)s; (void)k; return rsa_pkcs_sign("SHA3-384", p, pl, in, o, ol); }
+
+fhsm_rv_t dispatch_rsa_pkcs_sha3_512(unsigned long s, unsigned long k,
+                                      const void *p, size_t pl,
+                                      fhsm_slice_t in, uint8_t *o, size_t *ol)
+{ (void)s; (void)k; return rsa_pkcs_sign("SHA3-512", p, pl, in, o, ol); }
+
 /* ---------------------------------------------------------------------------
  * RSA-OAEP encrypt
  * ------------------------------------------------------------------------- */

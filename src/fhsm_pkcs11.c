@@ -1187,6 +1187,31 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
  * C_EncryptInit also returns CKR_MECHANISM_INVALID. Listing them is
  * useful for application probing and forward-compat.
  * ----------------------------------------------------------------------- */
+/* Mechanism code points the platform header may predate. Defined here, above
+ * every use: mech_hash_name(), C_SignInit and C_VerifyInit each switch on them,
+ * and the first of those comes well before the mapping function.
+ *
+ * Verified against the OASIS pkcs11t.h, by way of the table pkcs11-check
+ * carries. Note CKM_SHA3_224_RSA_PKCS = 0x66 and not 0x63: the SHA-3 PKCS and
+ * PSS mechanisms interleave, and 0x63 is CKM_SHA3_256_RSA_PKCS_PSS. The comment
+ * at CKM_AES_GMAC records what guessing a code point cost this module once
+ * already. */
+#ifndef CKM_SHA224_RSA_PKCS
+#define CKM_SHA224_RSA_PKCS       0x00000046UL
+#endif
+#ifndef CKM_SHA3_256_RSA_PKCS
+#define CKM_SHA3_256_RSA_PKCS     0x00000060UL
+#endif
+#ifndef CKM_SHA3_384_RSA_PKCS
+#define CKM_SHA3_384_RSA_PKCS     0x00000061UL
+#endif
+#ifndef CKM_SHA3_512_RSA_PKCS
+#define CKM_SHA3_512_RSA_PKCS     0x00000062UL
+#endif
+#ifndef CKM_SHA3_224_RSA_PKCS
+#define CKM_SHA3_224_RSA_PKCS     0x00000066UL
+#endif
+
 #define CKM_RSA_PKCS_LIST             0x00000001UL
 #define CKM_RSA_X_509_LIST            0x00000003UL
 #define CKM_RSA_PKCS_PSS_LIST         0x0000000DUL
@@ -6646,6 +6671,9 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
         case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
+        case CKM_SHA224_RSA_PKCS:
+        case CKM_SHA3_224_RSA_PKCS: case CKM_SHA3_256_RSA_PKCS:
+        case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : interop only */
@@ -6781,12 +6809,17 @@ static fhsm_rv_t aes_cmac(const uint8_t *key, size_t key_len,
 static const char *mech_hash_name(uint32_t m) {
     switch (m) {
         case CKM_SHA1_RSA_PKCS:                                 return "SHA1";
+        case CKM_SHA224_RSA_PKCS:                                return "SHA224";
         case CKM_ECDSA_SHA256: case CKM_SHA256_RSA_PKCS:
         case CKM_SHA256_RSA_PKCS_PSS:                            return "SHA256";
         case CKM_ECDSA_SHA384: case CKM_SHA384_RSA_PKCS:
         case CKM_SHA384_RSA_PKCS_PSS:                            return "SHA384";
         case CKM_ECDSA_SHA512: case CKM_SHA512_RSA_PKCS:
         case CKM_SHA512_RSA_PKCS_PSS:                            return "SHA512";
+        case CKM_SHA3_224_RSA_PKCS:                              return "SHA3-224";
+        case CKM_SHA3_256_RSA_PKCS:                              return "SHA3-256";
+        case CKM_SHA3_384_RSA_PKCS:                              return "SHA3-384";
+        case CKM_SHA3_512_RSA_PKCS:                              return "SHA3-512";
         default:                                                   return NULL;
     }
 }
@@ -7243,6 +7276,9 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
         case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
+        case CKM_SHA224_RSA_PKCS:
+        case CKM_SHA3_224_RSA_PKCS: case CKM_SHA3_256_RSA_PKCS:
+        case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : interop only */

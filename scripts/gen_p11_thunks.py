@@ -267,6 +267,34 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", key_type="CKK_RSA",
          min_key_bits=2048, max_key_bits=4096,
          refs=("FIPS 186-5", "RFC 8017 §8.2")),
+    # SHA-224 and SHA-3. These were genuinely absent, not merely unadvertised:
+    # mech_hash_name() did not know them and C_SignInit refused them, so both
+    # were extended in the same change.
+    #
+    # Code points verified against the OASIS pkcs11t.h. CKM_SHA3_224_RSA_PKCS
+    # is 0x66, not 0x63 -- the SHA-3 PKCS and PSS mechanisms interleave, and
+    # 0x63 is CKM_SHA3_256_RSA_PKCS_PSS. Guessing a code point is what put this
+    # module's CMAC and GMAC on each other's numbers once before.
+    Mech("CKM_SHA224_RSA_PKCS",    0x00000046, "RSA",  "sign",    "dispatch_rsa_pkcs_sha224",
+         fips="approved", key_type="CKK_RSA",
+         min_key_bits=2048, max_key_bits=4096,
+         refs=("FIPS 186-5", "RFC 8017 §8.2")),
+    Mech("CKM_SHA3_224_RSA_PKCS",  0x00000066, "RSA",  "sign",    "dispatch_rsa_pkcs_sha3_224",
+         fips="approved", key_type="CKK_RSA",
+         min_key_bits=2048, max_key_bits=4096,
+         refs=("FIPS 186-5", "FIPS 202", "RFC 8017 §8.2")),
+    Mech("CKM_SHA3_256_RSA_PKCS",  0x00000060, "RSA",  "sign",    "dispatch_rsa_pkcs_sha3_256",
+         fips="approved", key_type="CKK_RSA",
+         min_key_bits=2048, max_key_bits=4096,
+         refs=("FIPS 186-5", "FIPS 202", "RFC 8017 §8.2")),
+    Mech("CKM_SHA3_384_RSA_PKCS",  0x00000061, "RSA",  "sign",    "dispatch_rsa_pkcs_sha3_384",
+         fips="approved", key_type="CKK_RSA",
+         min_key_bits=2048, max_key_bits=4096,
+         refs=("FIPS 186-5", "FIPS 202", "RFC 8017 §8.2")),
+    Mech("CKM_SHA3_512_RSA_PKCS",  0x00000062, "RSA",  "sign",    "dispatch_rsa_pkcs_sha3_512",
+         fips="approved", key_type="CKK_RSA",
+         min_key_bits=2048, max_key_bits=4096,
+         refs=("FIPS 186-5", "FIPS 202", "RFC 8017 §8.2")),
 
     # === ECDSA / ECDH ==================================================
     Mech("CKM_EC_KEY_PAIR_GEN",    0x00001040, "EC",   "keypair", "dispatch_ec_keypair",

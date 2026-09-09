@@ -68,6 +68,11 @@ extern "C" {
 #define CKM_SHA256_RSA_PKCS                  0x00000040u
 #define CKM_SHA384_RSA_PKCS                  0x00000041u
 #define CKM_SHA512_RSA_PKCS                  0x00000042u
+#define CKM_SHA224_RSA_PKCS                  0x00000046u
+#define CKM_SHA3_224_RSA_PKCS                0x00000066u
+#define CKM_SHA3_256_RSA_PKCS                0x00000060u
+#define CKM_SHA3_384_RSA_PKCS                0x00000061u
+#define CKM_SHA3_512_RSA_PKCS                0x00000062u
 
 /* --- EC --- */
 #define CKM_EC_KEY_PAIR_GEN                  0x00001040u
@@ -216,6 +221,11 @@ extern fhsm_rv_t dispatch_sha1_rsa(unsigned long, unsigned long, const void*, si
 extern fhsm_rv_t dispatch_rsa_pkcs_sha256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_rsa_pkcs_sha384(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_rsa_pkcs_sha512(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_rsa_pkcs_sha224(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_rsa_pkcs_sha3_224(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_rsa_pkcs_sha3_256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_rsa_pkcs_sha3_384(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_rsa_pkcs_sha3_512(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ec_keypair(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ecdsa(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ecdsa_sha256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);

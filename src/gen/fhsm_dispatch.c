@@ -556,6 +556,16 @@ __attribute__((weak)) fhsm_rv_t dispatch_rsa_pkcs(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
+__attribute__((weak)) fhsm_rv_t dispatch_rsa_pkcs_sha224(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
 __attribute__((weak)) fhsm_rv_t dispatch_rsa_pkcs_sha256(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
@@ -567,6 +577,46 @@ __attribute__((weak)) fhsm_rv_t dispatch_rsa_pkcs_sha256(
 }
 
 __attribute__((weak)) fhsm_rv_t dispatch_rsa_pkcs_sha384(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+__attribute__((weak)) fhsm_rv_t dispatch_rsa_pkcs_sha3_224(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+__attribute__((weak)) fhsm_rv_t dispatch_rsa_pkcs_sha3_256(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+__attribute__((weak)) fhsm_rv_t dispatch_rsa_pkcs_sha3_384(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+__attribute__((weak)) fhsm_rv_t dispatch_rsa_pkcs_sha3_512(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
     fhsm_slice_t in, uint8_t *out, size_t *outlen)
@@ -829,8 +879,13 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00000043u, "CKM_SHA256_RSA_PKCS_PSS", "RSA", "sign", 1, dispatch_rsa_pss_sha256 },
     { 0x00000044u, "CKM_SHA384_RSA_PKCS_PSS", "RSA", "sign", 1, dispatch_rsa_pss_sha384 },
     { 0x00000045u, "CKM_SHA512_RSA_PKCS_PSS", "RSA", "sign", 1, dispatch_rsa_pss_sha512 },
+    { 0x00000046u, "CKM_SHA224_RSA_PKCS", "RSA", "sign", 1, dispatch_rsa_pkcs_sha224 },
     { 0x00000048u, "CKM_SHA512_224", "SHA2", "digest", 1, dispatch_sha512_224 },
     { 0x0000004Cu, "CKM_SHA512_256", "SHA2", "digest", 1, dispatch_sha512_256 },
+    { 0x00000060u, "CKM_SHA3_256_RSA_PKCS", "RSA", "sign", 1, dispatch_rsa_pkcs_sha3_256 },
+    { 0x00000061u, "CKM_SHA3_384_RSA_PKCS", "RSA", "sign", 1, dispatch_rsa_pkcs_sha3_384 },
+    { 0x00000062u, "CKM_SHA3_512_RSA_PKCS", "RSA", "sign", 1, dispatch_rsa_pkcs_sha3_512 },
+    { 0x00000066u, "CKM_SHA3_224_RSA_PKCS", "RSA", "sign", 1, dispatch_rsa_pkcs_sha3_224 },
     { 0x00000111u, "CKM_RC4", "RC4", "encrypt", 0, dispatch_reject_fips },
     { 0x00000120u, "CKM_DES_KEY_GEN", "DES", "keygen", 0, dispatch_reject_fips },
     { 0x00000131u, "CKM_DES3_KEY_GEN", "TDES", "keygen", 0, dispatch_reject_fips },
