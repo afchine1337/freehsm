@@ -5892,6 +5892,21 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         EVP_CIPHER_CTX *kwctx = EVP_CIPHER_CTX_new();
         if (!kwctx) { EVP_CIPHER_free(kwc); op->active = 0; return FHSM_RV_HOST_MEMORY; }
         EVP_CIPHER_CTX_set_flags(kwctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
+        /* This writes straight into the caller's buffer, where the decrypt
+         * path below deliberately does not.
+         *
+         * The asymmetry is not an oversight. Decryption overran pData because
+         * EVP writes more than the trimmed length before the AIV check, and
+         * because a failed integrity check must not leave unverified plaintext
+         * with the caller. Neither applies here: the wrap output length is
+         * exact -- n + 8, or roundup8(n) + 8 -- it was checked against
+         * *pulEncLen above, and there is no post-hoc check that can fail and
+         * make already-written bytes a problem.
+         *
+         * Recorded rather than "fixed" for symmetry: nothing measured says this
+         * path is wrong, and pkcs11-check's error-path probes cover the decrypt
+         * direction only. If a probe ever exercises this one, the same local
+         * buffer belongs here too. */
         int kwoutl = 0, kwfinl = 0;
         if (EVP_EncryptInit_ex2(kwctx, kwc, kv, NULL, NULL) != 1
             || EVP_EncryptUpdate(kwctx, pEnc, &kwoutl, pData, (int)ulDataLen) != 1
@@ -6250,6 +6265,27 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         if (pData == NULL) { *pulDataLen = (CK_ULONG)upper; return FHSM_RV_OK; }
         if (*pulDataLen < upper) { *pulDataLen = (CK_ULONG)upper; return 0x00000150UL; }
 
+        /* Decrypt into a local buffer, never straight into the caller's.
+         *
+         * Two reasons, and the first was measured rather than reasoned about.
+         *
+         * EVP_DecryptUpdate on AES-WRAP writes more than ulEncLen - 8 bytes
+         * into its output before the AIV check trims the result. Writing
+         * directly into pData therefore overruns a buffer the caller sized to
+         * the length we ourselves reported. pkcs11-check places a sentinel just
+         * past that length and found nine bytes of it destroyed:
+         *
+         *     C_Decrypt wrote past the minimal output buffer on a corrupted
+         *     CKM_AES_KEY_WRAP_KWP error path: guard=00000000000000004b
+         *
+         * Second, and independent of any buffer size: on a corrupted blob the
+         * caller would have received unauthenticated plaintext in its buffer
+         * alongside CKR_ENCRYPTED_DATA_INVALID. Returning the right code while
+         * leaving decrypted-but-unverified bytes behind invites exactly the
+         * mistake the code is meant to prevent.
+         *
+         * C_UnwrapKey has always done it this way, decrypting into pt[] and
+         * copying afterwards. This path was written last and did not. */
         const char *kwname;
         if (op->mechanism == CKM_AES_KEY_WRAP) {
             kwname = (kvl == 16) ? "AES-128-WRAP" :
@@ -6258,6 +6294,14 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             kwname = (kvl == 16) ? "AES-128-WRAP-PAD" :
                      (kvl == 24) ? "AES-192-WRAP-PAD" : "AES-256-WRAP-PAD";
         }
+        /* Sized like the C_UnwrapKey buffer, plus a cipher block of slack for
+         * what EVP writes before trimming. */
+        static const size_t KW_MAX = 4096;
+        if (upper > KW_MAX) {
+            op->active = 0;
+            return 0x00000041UL;  /* CKR_ENCRYPTED_DATA_LEN_RANGE */
+        }
+        uint8_t kwbuf[4096 + 32];
         EVP_CIPHER *kwc = EVP_CIPHER_fetch(NULL, kwname, NULL);
         if (!kwc) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         EVP_CIPHER_CTX *kwctx = EVP_CIPHER_CTX_new();
@@ -6268,9 +6312,10 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
             op->active = 0; return FHSM_RV_FUNCTION_FAILED;
         }
-        if (EVP_DecryptUpdate(kwctx, pData, &kwoutl, pEnc, (int)ulEncLen) != 1
-            || EVP_DecryptFinal_ex(kwctx, pData + kwoutl, &kwfinl) != 1) {
+        if (EVP_DecryptUpdate(kwctx, kwbuf, &kwoutl, pEnc, (int)ulEncLen) != 1
+            || EVP_DecryptFinal_ex(kwctx, kwbuf + kwoutl, &kwfinl) != 1) {
             EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
+            OPENSSL_cleanse(kwbuf, sizeof kwbuf);
             op->active = 0;
             (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
                                     fhsm_session_role(hSession),
@@ -6278,7 +6323,17 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             return FHSM_RV_ENCRYPTED_DATA_INVALID;
         }
         EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
-        *pulDataLen = (CK_ULONG)(kwoutl + kwfinl);
+        size_t kwgot = (size_t)(kwoutl + kwfinl);
+        /* KWP strips padding inside the cipher, so the true length can be
+         * shorter than the upper bound reported to a size query. */
+        if (*pulDataLen < kwgot) {
+            *pulDataLen = (CK_ULONG)kwgot;
+            OPENSSL_cleanse(kwbuf, sizeof kwbuf);
+            return 0x00000150UL;
+        }
+        memcpy(pData, kwbuf, kwgot);
+        OPENSSL_cleanse(kwbuf, sizeof kwbuf);
+        *pulDataLen = (CK_ULONG)kwgot;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
                                 fhsm_session_role(hSession), FHSM_RV_OK, NULL);
