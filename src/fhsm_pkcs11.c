@@ -2648,6 +2648,31 @@ typedef struct CK_ECDH1_DERIVE_PARAMS_s {
     void    *pPublicData;
 } CK_ECDH1_DERIVE_PARAMS;
 
+static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                                  CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                                  const uint8_t *secret, size_t secret_len,
+                                  CK_OBJECT_HANDLE *phKey);
+
+/* CK_KEY_DERIVATION_STRING_DATA (PKCS#11 v3.2 §6.20). Used by
+ * CONCATENATE_BASE_AND_DATA, CONCATENATE_DATA_AND_BASE and
+ * XOR_BASE_AND_DATA. CONCATENATE_BASE_AND_KEY does NOT use it: its
+ * parameter is a bare CK_OBJECT_HANDLE naming the second key. Treating the
+ * four as one shape is the mistake this comment exists to prevent. */
+typedef struct CK_KEY_DERIVATION_STRING_DATA_s {
+    void     *pData;
+    CK_ULONG  ulLen;
+} CK_KEY_DERIVATION_STRING_DATA;
+
+#define CKM_CONCATENATE_BASE_AND_KEY_OP  0x00000360UL
+#define CKM_CONCATENATE_BASE_AND_DATA_OP 0x00000362UL
+#define CKM_CONCATENATE_DATA_AND_BASE_OP 0x00000363UL
+#define CKM_XOR_BASE_AND_DATA_OP         0x00000364UL
+
+/* Upper bound on a derived secret built by concatenation. PKCS#11 sets no
+ * limit; this one is the token object store's practical ceiling and is
+ * enforced rather than assumed, since both inputs come from the caller. */
+#define FHSM_DERIVE_MAX 4096u
+
 CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                    CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
                    CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
@@ -2662,6 +2687,88 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* The concatenation family (PKCS#11 v3.2 §6.20). Advertised since the
+     * mechanism table replaced the hand-written list, with a working handler
+     * each in src/dispatch/fhsm_dispatch_concat.c that nothing called: this
+     * entry point named CKM_ECDH1_DERIVE and its cofactor variant and refused
+     * everything else. See tests/test_advertised_operational. */
+    if (pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY_OP
+        || pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA_OP
+        || pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE_OP
+        || pMechanism->mechanism == CKM_XOR_BASE_AND_DATA_OP) {
+        const uint8_t *bv = NULL; size_t bvl = 0;
+        uint32_t bcl = 0, bkt = 0;
+        fhsm_rv_t brv = fhsm_token_object_get(t, (uint32_t)hBaseKey,
+                                               &bv, &bvl, &bcl, &bkt);
+        if (brv != FHSM_RV_OK) return brv;
+        if (bcl != CKO_SECRET_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+
+        /* The second operand. BASE_AND_KEY takes a key handle; the other
+         * three take a byte string. Both are read into one pair of
+         * variables so the combining code below has a single shape. */
+        const uint8_t *ov = NULL; size_t ovl = 0;
+        if (pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY_OP) {
+            if (!pMechanism->pParameter
+                || pMechanism->ulParameterLen < sizeof(CK_OBJECT_HANDLE))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            CK_OBJECT_HANDLE h2 = 0;
+            memcpy(&h2, pMechanism->pParameter, sizeof(h2));
+            uint32_t ocl = 0, okt = 0;
+            fhsm_rv_t orv = fhsm_token_object_get(t, (uint32_t)h2,
+                                                   &ov, &ovl, &ocl, &okt);
+            if (orv != FHSM_RV_OK) return orv;
+            if (ocl != CKO_SECRET_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+            /* The second key must itself permit derivation, or a caller
+             * could read a key it may not use by concatenating it onto a
+             * one-byte base and extracting the result. */
+            { CK_RV u2 = fhsm_check_usage(t, h2, FHSM_USAGE_DERIVE);
+              if (u2 != FHSM_RV_OK) return u2; }
+        } else {
+            if (!pMechanism->pParameter
+                || pMechanism->ulParameterLen < sizeof(CK_KEY_DERIVATION_STRING_DATA))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            CK_KEY_DERIVATION_STRING_DATA sd;
+            memcpy(&sd, pMechanism->pParameter, sizeof(sd));
+            /* Same two guards the sign, encrypt and decrypt paths carry:
+             * a length no buffer can honour, and a NULL pointer with a
+             * non-zero length. */
+            if (sd.ulLen > 0x7FFFFFFFUL) return FHSM_RV_MECHANISM_PARAM_INVALID;
+            if (sd.pData == NULL && sd.ulLen != 0) return FHSM_RV_MECHANISM_PARAM_INVALID;
+            ov = sd.pData; ovl = (size_t)sd.ulLen;
+        }
+
+        size_t need = (pMechanism->mechanism == CKM_XOR_BASE_AND_DATA_OP)
+                      ? ovl : bvl + ovl;
+        if (need == 0 || need > FHSM_DERIVE_MAX)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+        uint8_t *buf = OPENSSL_malloc(need);
+        if (!buf) return FHSM_RV_HOST_MEMORY;
+        switch (pMechanism->mechanism) {
+            case CKM_CONCATENATE_BASE_AND_KEY_OP:
+            case CKM_CONCATENATE_BASE_AND_DATA_OP:
+                memcpy(buf, bv, bvl);
+                if (ovl) memcpy(buf + bvl, ov, ovl);
+                break;
+            case CKM_CONCATENATE_DATA_AND_BASE_OP:
+                if (ovl) memcpy(buf, ov, ovl);
+                memcpy(buf + ovl, bv, bvl);
+                break;
+            default: /* XOR_BASE_AND_DATA */
+                /* §6.20.4: the data length sets the output length. Where the
+                 * base is shorter, the remaining data bytes pass through --
+                 * which is what XOR against an implicit zero gives. */
+                for (size_t i = 0; i < need; ++i)
+                    buf[i] = (uint8_t)(((i < bvl) ? bv[i] : 0) ^ ov[i]);
+                break;
+        }
+        CK_RV crv = derive_store_secret(t, hSession, pTemplate, ulCount,
+                                         buf, need, phKey);
+        OPENSSL_cleanse(buf, need);
+        OPENSSL_free(buf);
+        return crv;
+    }
+
     if (pMechanism->mechanism != CKM_ECDH1_DERIVE
         && pMechanism->mechanism != CKM_ECDH1_COFACTOR_DERIVE)
         return FHSM_RV_MECHANISM_INVALID;
@@ -2746,11 +2853,30 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     EVP_PKEY_free(peer);
     EVP_PKEY_free(priv);
 
-    /* Store as a fresh CKO_SECRET_KEY object. Default flags for an ECDH
-     * derived shared secret : NOT sensitive (per PKCS#11 v3.2 §A.6.4.4 a
-     * derived key inherits attributes from the template ; if no CKA_SENSITIVE
-     * is provided, the default is FALSE for a session secret). The
-     * template may override. */
+    CK_RV srv = derive_store_secret(t, hSession, pTemplate, ulCount,
+                                     z, z_len, phKey);
+    fhsm_zeroize(z, sizeof(z));
+    return srv;
+}
+
+/* Store a derived secret as a fresh CKO_SECRET_KEY object.
+ *
+ * Extracted from C_DeriveKey's ECDH path so that the mechanisms wired in
+ * beside it share one copy. Every derive mechanism ends the same way --
+ * produce bytes, honour the template, add the object, zeroise -- and a
+ * second copy of these forty lines is how the attribute handling of two
+ * neighbouring mechanisms drifts apart.
+ *
+ * Default flags: NOT sensitive. PKCS#11 v3.2 §A.6.4.4 has a derived key
+ * inherit its attributes from the template; absent CKA_SENSITIVE, the
+ * default for a session secret is FALSE. The template may override.
+ *
+ * `secret` is zeroised by the caller, not here: the caller owns the buffer
+ * and knows its full size, which may be larger than `secret_len`. */
+static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                                  CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                                  const uint8_t *secret, size_t secret_len,
+                                  CK_OBJECT_HANDLE *phKey) {
     char label[64] = "";
     uint8_t obj_flags = 0;
     long li = find_attr(pTemplate, ulCount, CKA_LABEL);
@@ -2783,9 +2909,9 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
       }
     }
     uint32_t handle = 0;
-    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, derived_ckk, label,
-                                z, z_len, NULL, 0, obj_flags, &handle);
-    fhsm_zeroize(z, sizeof(z));
+    fhsm_rv_t rv = fhsm_token_object_add(t, CKO_SECRET_KEY, derived_ckk, label,
+                                          secret, secret_len, NULL, 0,
+                                          obj_flags, &handle);
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
