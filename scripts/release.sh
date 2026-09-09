@@ -137,6 +137,21 @@ else
     bad "build failed -- /tmp/rel_build.log"
 fi
 
+# Build the test binaries before looking for them.
+#
+# Step 7 above runs `make clean && make`, and since 2026-09-09 `make clean`
+# removes every test binary rather than just test_smoke -- a fix for old
+# binaries surviving a clean and being run against a freshly built library.
+# `make` alone does not rebuild them, so this loop found exactly one and the
+# check reported "unit tests 1/1", a perfect ratio over a single test.
+#
+# That is the same defect the harness numbers had: a count over what was found,
+# silent about what was missing. Both the build and the floor below exist so a
+# release cannot be tagged on the strength of it.
+if ! make tests >/tmp/rel_tests_build.log 2>&1; then
+    bad "make tests failed -- /tmp/rel_tests_build.log"
+fi
+
 t_pass=0; t_fail=0
 for t in tests/test_*; do
     # Skip sources, build artefacts (test_smoke.sha256, .tampered), the
@@ -169,7 +184,16 @@ for t in tests/test_*; do
     else t_fail=$((t_fail+1)); echo "        failing: $(basename "$t")"; fi
     rm -rf "$D"
 done
-[ "$t_fail" -eq 0 ] && ok "unit tests $t_pass/$t_pass" || bad "unit tests $t_pass ok, $t_fail failing"
+# A floor, for the same reason run_fips_tests.sh has one: "1/1" is a perfect
+# ratio and says nothing about the 37 tests that were not there.
+T_MIN="${FHSM_RELEASE_TESTS_MIN:-30}"
+if [ $((t_pass + t_fail)) -lt "$T_MIN" ]; then
+    bad "only $((t_pass + t_fail)) test binaries found, expected at least $T_MIN.
+        The tree is not in a state this pre-flight can judge, and a release
+        must not be tagged on it. Check /tmp/rel_tests_build.log."
+fi
+[ "$t_fail" -eq 0 ] && ok "unit tests $t_pass/$((t_pass + t_fail)) (floor: $T_MIN)" \
+                    || bad "unit tests $t_pass ok, $t_fail failing"
 
 if make test-integrity >/tmp/rel_selftest.log 2>&1; then
     ok "integrity self-test (unsigned / signed / tampered)"
