@@ -28,7 +28,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check SPDX headers
         run: bash scripts/add_copyright_header.sh --check
       - name: Verify LICENSE + NOTICE present
@@ -82,7 +82,7 @@ jobs:
       image: debian:trixie
       options: --user root
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install a Debian toolchain
         run: |
           apt-get update -qq
@@ -110,7 +110,7 @@ jobs:
       options: --user root
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build (default profile = legacy)
         run: |
@@ -187,7 +187,7 @@ jobs:
 
       - name: Upload artifacts
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: libfreehsm-so
           path: |
@@ -207,8 +207,8 @@ jobs:
       image: ghcr.io/${{ github.repository_owner }}/freehsm-c-test:debian13-pkcs11-tools
       options: --user root
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: libfreehsm-so
       - name: Install module
@@ -223,7 +223,7 @@ jobs:
           tail -1 matrix.log | grep -q "ALL ASSERTIONS PASS"
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-matrix-report
           path: |
@@ -241,8 +241,8 @@ jobs:
       image: ghcr.io/${{ github.repository_owner }}/freehsm-c-test:debian13-pkcs11-tools
       options: --user root
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: libfreehsm-so
       - name: Run in FIPS strict mode
@@ -260,7 +260,7 @@ jobs:
       image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
       options: --user root
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build 2
         env:
           SOURCE_DATE_EPOCH: '1717977600'
@@ -278,7 +278,7 @@ jobs:
           # bit-identical across independent runs.
           make integrity
           sha256sum libfreehsm.so > /tmp/build2.sha256
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: libfreehsm-so
           path: /tmp/build1/

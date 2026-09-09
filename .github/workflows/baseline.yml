@@ -52,7 +52,7 @@ jobs:
       image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
       options: --user root
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Mark workspace as safe
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -146,7 +146,7 @@ jobs:
       # the checkout, so the artefact for v2.0.1 shipped v2.0.0.sha256 with it
       # and `gh run download` refused to extract over the copy already on disk.
       # The glob would keep growing with every release.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: reproducibility-reference
           path: dist/refs/v${{ steps.v.outputs.version }}.sha256

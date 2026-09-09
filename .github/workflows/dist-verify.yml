@@ -65,7 +65,7 @@ jobs:
   dist-verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0        # tags, for the checkout below
 
@@ -124,7 +124,7 @@ jobs:
       # The log is the deliverable when this fails: the next defect on this
       # path, whatever it is, should be readable here rather than reported by
       # someone who tried the documented instructions.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: dist-verify-log
