@@ -1284,9 +1284,9 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
  *
  *  C_GetMechanismList and C_GetMechanismInfo read fhsm_mechanism_table[]
  *  (generated into src/gen/fhsm_dispatch.c by scripts/gen_p11_thunks.py),
- *  so the advertised set can never drift from what the module actually
- *  dispatches. A mechanism is advertised iff it resolves to a real
- *  handler in the active build profile :
+ *  so the advertised set cannot drift from the set of dispatch_* handlers.
+ *  A mechanism is advertised iff it resolves to a real handler in the
+ *  active build profile :
  *    - general-purpose (interop) build : every mechanism with a real
  *      handler is advertised, including non-FIPS ones (the module is a
  *      general-purpose PKCS#11 provider) ;
@@ -1300,6 +1300,21 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
  *  mechanisms (all SHA-3/SHAKE, KMAC, HKDF, EdDSA, X25519/X448,
  *  ML-KEM/ML-DSA/SLH-DSA at their correct values, ...). See
  *  docs/PKCS11_CHECK_FINDINGS.md.
+ *
+ *  What the table does NOT establish, and what the wording here used to
+ *  claim: that an advertised mechanism is operational. Nothing in this
+ *  repository dereferences fhsm_mechanism_table[].handler. The dispatch_*
+ *  functions are reference implementations; C_SignInit, C_EncryptInit,
+ *  C_DigestInit, C_DeriveKey and their siblings switch on mechanisms by
+ *  hand, and a mechanism can therefore have a handler, be advertised
+ *  because of it, and be refused by every entry point.
+ *
+ *  Fourteen are in exactly that state today -- ten derive mechanisms, both
+ *  KMACs, and both hybrids. tests/test_advertised_operational lists them,
+ *  asks C_GetMechanismInfo which operation each advertised mechanism
+ *  claims, calls it, and fails on any CKR_MECHANISM_INVALID outside that
+ *  list. Closing a gap requires deleting its entry, so the list can only
+ *  shrink.
  *
  *  Local mirror of the generated dispatch-table interface : this TU
  *  defines its own CKM_* macros (with a UL suffix) that would collide
