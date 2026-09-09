@@ -62,6 +62,10 @@ typedef enum {
     FHSM_PAIRWISE_ML_KEM   = 3,
     FHSM_PAIRWISE_ML_DSA   = 4,
     FHSM_PAIRWISE_SLH_DSA  = 5,
+    /* Ed25519 / Ed448. Pure EdDSA signs through EVP_DigestSign with a NULL
+     * digest, exactly as ML-DSA and SLH-DSA do, so this family runs the same
+     * sign-then-verify check rather than one of its own. */
+    FHSM_PAIRWISE_EDDSA    = 6,
 } fhsm_pairwise_family_t;
 
 /* Run the pair-wise consistency check on `pkey` (which must contain

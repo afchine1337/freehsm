@@ -178,6 +178,7 @@ fhsm_rv_t fhsm_pairwise_check(EVP_PKEY *pkey, fhsm_pairwise_family_t family) {
     case FHSM_PAIRWISE_ML_KEM:  return pairwise_mlkem(pkey);
     case FHSM_PAIRWISE_ML_DSA:  return pairwise_pq_sign(pkey);
     case FHSM_PAIRWISE_SLH_DSA: return pairwise_pq_sign(pkey);
+    case FHSM_PAIRWISE_EDDSA:   return pairwise_pq_sign(pkey);
     default:                    return FHSM_RV_ARGUMENTS_BAD;
     }
 }

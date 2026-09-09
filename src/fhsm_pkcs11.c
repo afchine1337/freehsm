@@ -3487,6 +3487,9 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
  * ----------------------------------------------------------------------- */
 #define CKM_RSA_PKCS_KEY_PAIR_GEN  0x00000000UL
 #define CKM_EC_KEY_PAIR_GEN        0x00001040UL
+/* 0x1055, as advertised by fhsm_mechanism_table[]. Read from the generated
+ * table rather than assumed: 0x1056 next to it is EC_MONTGOMERY. */
+#define CKM_EC_EDWARDS_KEY_PAIR_GEN 0x00001055UL
 #define CKK_RSA                    0x00000000UL
 #define CKK_EC                     0x00000003UL
 #define CKA_MODULUS_BITS           0x00000121UL
@@ -3534,6 +3537,32 @@ static const struct { const uint8_t *der; size_t len; const char *name; } ec_cur
     /* secp521r1 = P-521 : 06 05 2B 81 04 00 23 */
     { (const uint8_t*)"\x06\x05\x2B\x81\x04\x00\x23",              7, "P-521" },
 };
+
+/* CKA_EC_PARAMS for CKK_EC_EDWARDS. PKCS#11 v3.0 §2.3.5 allows either the
+ * curve OID or a PrintableString naming the curve, and callers in the field
+ * send both: OpenSC sends the OID, the pkcs11-check vectors send the string.
+ * Accepting one and not the other is how "Ed25519 keygen not available"
+ * looks from outside. */
+static const struct { const uint8_t *der; size_t len; const char *name; } ed_curves[] = {
+    /* id-Ed25519 = 1.3.101.112 : 06 03 2B 65 70 */
+    { (const uint8_t*)"\x06\x03\x2B\x65\x70",                       5, "ED25519" },
+    /* id-Ed448   = 1.3.101.113 : 06 03 2B 65 71 */
+    { (const uint8_t*)"\x06\x03\x2B\x65\x71",                       5, "ED448"   },
+    /* PrintableString "edwards25519" (12) and "edwards448" (10). The literals
+     * are split at the escape: "\x0C" followed by 'e' would be read as the
+     * single hex escape \x0CE, since a hex escape consumes every hex digit
+     * that follows it and 'e' is one. */
+    { (const uint8_t*)"\x13\x0C" "edwards25519",                   14, "ED25519" },
+    { (const uint8_t*)"\x13\x0A" "edwards448",                     12, "ED448"   },
+};
+
+static const char *match_ed_curve(const uint8_t *der, size_t len) {
+    for (size_t i = 0; i < sizeof(ed_curves)/sizeof(ed_curves[0]); ++i) {
+        if (ed_curves[i].len == len && memcmp(ed_curves[i].der, der, len) == 0)
+            return ed_curves[i].name;
+    }
+    return NULL;
+}
 
 static const char *match_curve(const uint8_t *der, size_t len) {
     for (size_t i = 0; i < sizeof(ec_curves)/sizeof(ec_curves[0]); ++i) {
@@ -3713,6 +3742,24 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, "EC", curve);
         ckk_type = CKK_EC;
         pw_family = FHSM_PAIRWISE_EC;
+    } else if (pMechanism->mechanism == CKM_EC_EDWARDS_KEY_PAIR_GEN) {
+        /* Advertised since the mechanism table replaced the hand-written
+         * list, and refused here until now: the conformance report reads
+         * "Ed25519 keygen not available" (20 vectors) and "Ed448 keygen not
+         * available" (10). The EdDSA sign and verify paths, and the Ed25519 /
+         * Ed448 import paths in C_CreateObject, have been there throughout --
+         * only the generation was missing, so a caller could use a key it
+         * could not make. Default Ed25519 when CKA_EC_PARAMS is absent. */
+        const char *alg = "ED25519";
+        long i = find_attr(pPub, ulPub, CKA_EC_PARAMS);
+        if (i >= 0 && pPub[i].pValue) {
+            const char *m = match_ed_curve(pPub[i].pValue, pPub[i].ulValueLen);
+            if (!m) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            alg = m;
+        }
+        pkey = EVP_PKEY_Q_keygen(NULL, NULL, alg);
+        ckk_type = CKK_EC_EDWARDS_CREATEOBJECT;
+        pw_family = FHSM_PAIRWISE_EDDSA;
     } else if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN) {
         /* CKA_PARAMETER_SET = ASCII "ML-KEM-512" | "ML-KEM-768" |
          * "ML-KEM-1024". Default to 768 (NIST level 3). */
@@ -5648,6 +5695,45 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
          * series: accept the caller's request, ignore it, report success. */
         if (hedge_variant > 2UL) return FHSM_RV_MECHANISM_PARAM_INVALID;
         op->pq_hedge = hedge_variant;
+    }
+    /* CK_EDDSA_PARAMS (PKCS#11 v3.0 §2.3.6) : { CK_BBOOL phFlag ; CK_ULONG
+     * ulContextDataLen ; CK_BYTE_PTR pContextData }. The block is optional --
+     * absent means pure Ed25519 / Ed448 over an empty context, which is what
+     * the signature path produces.
+     *
+     * Until Edwards key generation existed nothing external could reach this
+     * mechanism, so the block was never looked at: a NULL pContextData with a
+     * non-zero length was accepted, and so was a 2^63 length, which the
+     * signature path then truncated in silence. pkcs11-check reports all
+     * three the moment it can make an Ed25519 key
+     * (TestEddsaNullContext, TestEddsaContextLengthBoundary).
+     *
+     * The 2 GiB ceiling and the "NULL pointer with a non-zero length" guard
+     * are the same two that C_SignUpdate, C_Encrypt and C_Decrypt already
+     * carry. This is the seventh place in the series where a rule covered
+     * some of the paths that reach a state and not the rest.
+     *
+     * A context that is present and non-empty, or phFlag asking for the
+     * prehashed variant, is refused rather than dropped. This module signs
+     * pure Ed25519 / Ed448 with the empty context; returning CKR_OK on a
+     * request it does not honour would hand back a signature the caller did
+     * not ask for, over a different message than the one it believes it
+     * signed. */
+    if (op->mechanism == 0x00001057UL /* CKM_EDDSA */ && pMechanism->pParameter) {
+        struct fhsm_ck_eddsa_params {
+            unsigned char phFlag;
+            CK_ULONG      ulContextDataLen;
+            void         *pContextData;
+        } ed;
+        if (pMechanism->ulParameterLen < sizeof(ed))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        memcpy(&ed, pMechanism->pParameter, sizeof(ed));
+        if (ed.ulContextDataLen > 0x7FFFFFFFUL)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        if (ed.pContextData == NULL && ed.ulContextDataLen != 0)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        if (ed.ulContextDataLen != 0 || ed.phFlag != 0)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
     }
     /* Parameter validation (#125 input-validation) : reject wrong-size or
      * weak IVs at *Init with CKR_MECHANISM_PARAM_INVALID rather than
