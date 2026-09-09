@@ -369,6 +369,73 @@ fhsm_rv_t dispatch_aes_kwp(unsigned long session, unsigned long key,
 }
 
 /* ---------------------------------------------------------------------------
+ * AES-GMAC (SP 800-38D §6.4) --- GCM with authenticated data and no
+ * plaintext, so the output is the 16-byte authentication tag alone.
+ *
+ * Reference implementation. The operation path is C_Sign, which has handled
+ * CKM_AES_GMAC since #125; what was missing was the table entry, so
+ * C_GetMechanismList never advertised it and the harness --- which gates on
+ * that list --- reported "AES_GMAC not supported (x890)" against a module that
+ * implements it (petrn, 2026-09-09).
+ *
+ * The likely origin of the omission is recorded in fhsm_pkcs11.c around the
+ * CKM_AES_GMAC definition: this module once had the CMAC and GMAC code points
+ * inverted, and the correction put CMAC back in the table without adding GMAC
+ * beside it. A fix applied to one of two neighbours.
+ *
+ * The IV is taken from the mechanism parameter when present. GMAC over a
+ * 96-bit IV is the interoperable case; SP 800-38D permits other lengths and
+ * OpenSSL will accept them.
+ * ----------------------------------------------------------------------- */
+fhsm_rv_t dispatch_aes_gmac(unsigned long session, unsigned long key,
+                             const void *params, size_t plen,
+                             fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key;
+    fhsm_slice_t k, iv;
+    fhsm_rv_t rv = fhsm_tlv_find(params, plen, FHSM_TLV_KEY, &k);
+    if (rv != FHSM_RV_OK) return rv;
+    if (k.len != 16 && k.len != 24 && k.len != 32) return FHSM_RV_KEY_SIZE_RANGE;
+    if (*outlen < 16) return FHSM_RV_ARGUMENTS_BAD;
+
+    /* No IV in the parameter block is not an error here: the caller may be
+     * driving the reference path with defaults. A zero IV is not secret and
+     * not reusable across messages, which is the caller's responsibility in
+     * GMAC exactly as it is in GCM. */
+    static const uint8_t zero_iv[12] = { 0 };
+    if (fhsm_tlv_find(params, plen, FHSM_TLV_IV, &iv) != FHSM_RV_OK
+        || iv.data == NULL || iv.len == 0) {
+        iv.data = zero_iv;
+        iv.len  = sizeof zero_iv;
+    }
+
+    const char *cipher = (k.len == 16) ? "AES-128-GCM"
+                          : (k.len == 24) ? "AES-192-GCM"
+                                            : "AES-256-GCM";
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "GMAC", NULL);
+    if (!mac) return FHSM_RV_MECHANISM_INVALID;
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    if (!ctx) { EVP_MAC_free(mac); return FHSM_RV_HOST_MEMORY; }
+
+    OSSL_PARAM mac_params[3] = {
+        OSSL_PARAM_construct_utf8_string("cipher", (char *)cipher, 0),
+        OSSL_PARAM_construct_octet_string("iv", (void *)iv.data, iv.len),
+        OSSL_PARAM_construct_end()
+    };
+    rv = FHSM_RV_FUNCTION_FAILED;
+    size_t mac_out = 0;
+    if (EVP_MAC_init(ctx, k.data, k.len, mac_params) == 1 &&
+        EVP_MAC_update(ctx, in.data, in.len) == 1 &&
+        EVP_MAC_final(ctx, out, &mac_out, *outlen) == 1) {
+        *outlen = mac_out;   /* 16 for AES-GMAC */
+        rv = FHSM_RV_OK;
+    }
+    EVP_MAC_CTX_free(ctx);
+    EVP_MAC_free(mac);
+    return rv;
+}
+
+/* ---------------------------------------------------------------------------
  * AES-CMAC (SP 800-38B). Uses the modern EVP_MAC interface ("CMAC")
  * with the underlying cipher selected by key length.
  * ----------------------------------------------------------------------- */

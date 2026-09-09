@@ -138,6 +138,21 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197", "SP 800-38B")),
+    # Implemented since #125 and advertised only from 2026-09-09. C_Sign has
+    # handled CKM_AES_GMAC all along; this table did not list it, so
+    # C_GetMechanismList never mentioned it and pkcs11-check -- which gates on
+    # that list -- reported "AES_GMAC not supported (x890)".
+    #
+    # The likely origin: this module once had the CMAC and GMAC code points
+    # inverted (see the comment at CKM_AES_GMAC in fhsm_pkcs11.c). Correcting
+    # it put CMAC back in the table, on the line above, and left GMAC out.
+    Mech("CKM_AES_GMAC",           0x0000108E, "AES",  "sign",    "dispatch_aes_gmac",
+         fips="approved", key_type="CKK_AES",
+         min_key_bits=128, max_key_bits=256,
+         refs=("FIPS 197", "SP 800-38D §6.4"),
+         notes="GCM with AAD and no plaintext; the output is the 16-byte tag. "
+               "Distinct from CKM_AES_CMAC (SP 800-38B), whose code point "
+               "0x108A this mechanism was once confused with."),
 
     Mech("CKM_AES_ECB",            0x00001081, "AES",  "encrypt", "dispatch_aes_ecb",
          fips="approved", key_type="CKK_AES",
@@ -224,7 +239,34 @@ MECHANISMS: tuple[Mech, ...] = (
          notes="Raw RSA --- forbidden in approved mode."),
     Mech("CKM_SHA1_RSA_PKCS",      0x00000006, "RSA",  "sign",    "dispatch_sha1_rsa",
          fips="non-approved",
-         notes="SHA-1 is forbidden for signature generation per SP 800-131A rev. 2."),
+         notes="SHA-1 is forbidden for signature generation per SP 800-131A rev. 2. "
+               "Kept for interop with applications that still verify legacy "
+               "signatures; refused in the fips-strict profile."),
+    # RSASSA-PKCS1-v1_5 with SHA-2. Reachable through C_Sign since long before
+    # this line existed -- mech_hash_name(), C_SignInit and C_VerifyInit all
+    # knew these three -- but absent from this table, so C_GetMechanismList
+    # never advertised them and roughly 7,600 ACVP and Wycheproof vectors were
+    # reported as "not supported by the module" (petrn, 2026-09-09).
+    #
+    # The exact inverse of #14, where a mechanism was advertised and not
+    # operational. The advertised set and the implemented set are two lists and
+    # nothing holds them equal on its own.
+    #
+    # Still the signature scheme of the overwhelming majority of X.509
+    # certificates in circulation, and approved by FIPS 186-5. A module meant
+    # for teaching and for PKI work cannot interoperate without it.
+    Mech("CKM_SHA256_RSA_PKCS",    0x00000040, "RSA",  "sign",    "dispatch_rsa_pkcs_sha256",
+         fips="approved", key_type="CKK_RSA",
+         min_key_bits=2048, max_key_bits=4096,
+         refs=("FIPS 186-5", "RFC 8017 §8.2")),
+    Mech("CKM_SHA384_RSA_PKCS",    0x00000041, "RSA",  "sign",    "dispatch_rsa_pkcs_sha384",
+         fips="approved", key_type="CKK_RSA",
+         min_key_bits=2048, max_key_bits=4096,
+         refs=("FIPS 186-5", "RFC 8017 §8.2")),
+    Mech("CKM_SHA512_RSA_PKCS",    0x00000042, "RSA",  "sign",    "dispatch_rsa_pkcs_sha512",
+         fips="approved", key_type="CKK_RSA",
+         min_key_bits=2048, max_key_bits=4096,
+         refs=("FIPS 186-5", "RFC 8017 §8.2")),
 
     # === ECDSA / ECDH ==================================================
     Mech("CKM_EC_KEY_PAIR_GEN",    0x00001040, "EC",   "keypair", "dispatch_ec_keypair",

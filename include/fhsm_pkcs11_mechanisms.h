@@ -30,6 +30,7 @@ extern "C" {
 #define CKM_AES_KEY_WRAP                     0x00002109u
 #define CKM_AES_KEY_WRAP_KWP                 0x0000210Bu
 #define CKM_AES_CMAC                         0x0000108Au
+#define CKM_AES_GMAC                         0x0000108Eu
 #define CKM_AES_ECB                          0x00001081u
 
 /* --- SHA2 --- */
@@ -64,6 +65,9 @@ extern "C" {
 #define CKM_RSA_PKCS                         0x00000001u
 #define CKM_RSA_X_509                        0x00000003u
 #define CKM_SHA1_RSA_PKCS                    0x00000006u
+#define CKM_SHA256_RSA_PKCS                  0x00000040u
+#define CKM_SHA384_RSA_PKCS                  0x00000041u
+#define CKM_SHA512_RSA_PKCS                  0x00000042u
 
 /* --- EC --- */
 #define CKM_EC_KEY_PAIR_GEN                  0x00001040u
@@ -182,6 +186,7 @@ extern fhsm_rv_t dispatch_aes_ctr(unsigned long, unsigned long, const void*, siz
 extern fhsm_rv_t dispatch_aes_kw(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_kwp(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_cmac(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_aes_gmac(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_ecb(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha384(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
@@ -208,6 +213,9 @@ extern fhsm_rv_t dispatch_rsa_oaep(unsigned long, unsigned long, const void*, si
 extern fhsm_rv_t dispatch_rsa_pkcs(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_rsa_x509(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha1_rsa(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_rsa_pkcs_sha256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_rsa_pkcs_sha384(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_rsa_pkcs_sha512(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ec_keypair(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ecdsa(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ecdsa_sha256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);

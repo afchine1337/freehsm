@@ -150,14 +150,25 @@ fhsm_rv_t dispatch_rsa_pss(unsigned long s, unsigned long k,
                             fhsm_slice_t in, uint8_t *o, size_t *ol)
 { (void)s; (void)k; return rsa_pss_sign(FHSM_HASH_SHA256, p, pl, in, o, ol); }
 
-/* SHA1-RSA-PKCS (non-FIPS ; interop only) : PKCS#1 v1.5 RSA signature
- * over a SHA-1 digest of the message. Reference impl ; the operation
- * path is C_Sign (mech_hash_name -> "SHA1", default PKCS#1 v1.5). #125. */
-fhsm_rv_t dispatch_sha1_rsa(unsigned long s, unsigned long k,
-                             const void *params, size_t plen,
-                             fhsm_slice_t in, uint8_t *out, size_t *outlen)
+/* RSASSA-PKCS1-v1_5 over a digest of the message (PKCS#11 v3.2 §6.1.9).
+ *
+ * Reference implementations; the operation path is C_Sign, which reads the
+ * digest from mech_hash_name() and takes PKCS#1 v1.5 padding by default.
+ *
+ * These mechanisms were reachable through C_Sign long before they were
+ * advertised: mech_hash_name(), C_SignInit and C_VerifyInit all knew
+ * CKM_SHA256_RSA_PKCS and its siblings, but fhsm_mechanism_table[] did not, so
+ * C_GetMechanismList never mentioned them. pkcs11-check gates on the advertised
+ * list, so roughly 7,600 ACVP and Wycheproof vectors were reported as "not
+ * supported by the module" against an implementation that was there all along
+ * (reported by petrn, 2026-09-09).
+ *
+ * The inverse of the #14 defect, and the same lesson: the advertised set and
+ * the implemented set are two lists, and nothing keeps them equal on its own. */
+static fhsm_rv_t rsa_pkcs_sign(const char *digest,
+                                const void *params, size_t plen,
+                                fhsm_slice_t in, uint8_t *out, size_t *outlen)
 {
-    (void)s; (void)k;
     fhsm_slice_t pem;
     fhsm_rv_t rv = fhsm_tlv_find(params, plen, FHSM_TLV_PEM, &pem);
     if (rv != FHSM_RV_OK) return rv;
@@ -167,9 +178,9 @@ fhsm_rv_t dispatch_sha1_rsa(unsigned long s, unsigned long k,
     if (!ctx) { EVP_PKEY_free(pk); return FHSM_RV_HOST_MEMORY; }
     EVP_PKEY_CTX *pkctx = NULL;
     fhsm_rv_t r = FHSM_RV_FUNCTION_FAILED;
-    EVP_MD *md = EVP_MD_fetch(NULL, "SHA1", NULL);
+    EVP_MD *md = EVP_MD_fetch(NULL, digest, NULL);
     if (!md) goto out;
-    if (EVP_DigestSignInit_ex(ctx, &pkctx, "SHA1", NULL, NULL, pk, NULL) != 1) goto out;
+    if (EVP_DigestSignInit_ex(ctx, &pkctx, digest, NULL, NULL, pk, NULL) != 1) goto out;
     if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PADDING) <= 0) goto out;
     if (EVP_DigestSign(ctx, out, outlen, in.data, in.len) != 1) goto out;
     r = FHSM_RV_OK;
@@ -179,6 +190,29 @@ out:
     EVP_PKEY_free(pk);
     return r;
 }
+
+/* SHA-1 stays non-approved: SP 800-131A rev. 2 forbids it for signature
+ * generation. It is reachable in the interop profile only, which is what
+ * legacy callers need and what fips-strict must refuse. */
+fhsm_rv_t dispatch_sha1_rsa(unsigned long s, unsigned long k,
+                             const void *p, size_t pl,
+                             fhsm_slice_t in, uint8_t *o, size_t *ol)
+{ (void)s; (void)k; return rsa_pkcs_sign("SHA1", p, pl, in, o, ol); }
+
+fhsm_rv_t dispatch_rsa_pkcs_sha256(unsigned long s, unsigned long k,
+                                    const void *p, size_t pl,
+                                    fhsm_slice_t in, uint8_t *o, size_t *ol)
+{ (void)s; (void)k; return rsa_pkcs_sign("SHA256", p, pl, in, o, ol); }
+
+fhsm_rv_t dispatch_rsa_pkcs_sha384(unsigned long s, unsigned long k,
+                                    const void *p, size_t pl,
+                                    fhsm_slice_t in, uint8_t *o, size_t *ol)
+{ (void)s; (void)k; return rsa_pkcs_sign("SHA384", p, pl, in, o, ol); }
+
+fhsm_rv_t dispatch_rsa_pkcs_sha512(unsigned long s, unsigned long k,
+                                    const void *p, size_t pl,
+                                    fhsm_slice_t in, uint8_t *o, size_t *ol)
+{ (void)s; (void)k; return rsa_pkcs_sign("SHA512", p, pl, in, o, ol); }
 
 /* ---------------------------------------------------------------------------
  * RSA-OAEP encrypt
