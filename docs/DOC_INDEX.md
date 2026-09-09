@@ -24,6 +24,7 @@
 | Side-channel posture audit (Level 1 + Level 2 gaps) | [`SIDE_CHANNEL.md`](SIDE_CHANNEL.md) | --- | AVA_VAN.5 |
 | Post-quantum support matrix (Kyber alias, Falcon, LMS, XMSS, HQC) | [`POST_QUANTUM.md`](POST_QUANTUM.md) | --- | ADV_FSP.4 |
 | PQC composite — who ships what (#118, dated landscape + the no-primacy-claims rule) | [`PRIMACY_AUDIT_PQC_COMPOSITE.md`](PRIMACY_AUDIT_PQC_COMPOSITE.md) | --- | (claim discipline) |
+| Cross-validating two PKCS#11 modules — using FreeHSM as a reference to test another module, including a hardware HSM | [`CROSS_VALIDATION.md`](CROSS_VALIDATION.md) | --- | (method) |
 | Token store on-disk format (#108 + #110, byte-level spec + invariants) | [`TOKEN_STORE_FORMAT.md`](TOKEN_STORE_FORMAT.md) | --- | ADV_TDS.3 + ADV_FSP.4 |
 | `fhsm-csr` — composite keys, requests, and the CA's own certificate (#112) | [`FHSM_CSR.md`](FHSM_CSR.md) | --- | AGD_OPE.1 |
 | `fhsm-ca` — issuance, profiles, revocation, CRLs, OCSP and the delegated responder (#112) | [`FHSM_CA.md`](FHSM_CA.md) | --- | AGD_OPE.1 |
