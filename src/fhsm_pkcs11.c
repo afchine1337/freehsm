@@ -6584,6 +6584,23 @@ gcm_out:
 #ifndef CKM_SHA224_HMAC_INIT_VAL
 #define CKM_SHA224_HMAC_INIT_VAL  0x00000256UL
 #endif
+#ifndef CKM_SHA_1_HMAC_INIT_VAL
+#define CKM_SHA_1_HMAC_INIT_VAL   0x00000221UL
+#endif
+/* The truncated SHA-512 HMACs sit in the digest block beside CKM_SHA512_224
+ * (0x48) and CKM_SHA512_256 (0x4C), not in the 0x2xx HMAC block. */
+#ifndef CKM_SHA512_224_HMAC_INIT_VAL
+#define CKM_SHA512_224_HMAC_INIT_VAL 0x00000049UL
+#endif
+#ifndef CKM_SHA512_256_HMAC_INIT_VAL
+#define CKM_SHA512_256_HMAC_INIT_VAL 0x0000004DUL
+#endif
+/* 0x2B6, not 0x2B8: the note in gen_p11_thunks.py records that 0x2B8 is
+ * CKM_SHA3_224_KEY_GEN, and advertising a key-generation point as a MAC is
+ * what #125 TestMechFlagBehavioralConformance caught here once. */
+#ifndef CKM_SHA3_224_HMAC_INIT_VAL
+#define CKM_SHA3_224_HMAC_INIT_VAL 0x000002B6UL
+#endif
 #ifndef CKM_SHA3_256_HMAC_INIT_VAL
 #define CKM_SHA3_256_HMAC_INIT_VAL 0x000002B1UL
 #endif
@@ -6601,10 +6618,18 @@ gcm_out:
  * callable, so SHA-3 / SHA-224 HMACs returned CKR_MECHANISM_INVALID). */
 static int fhsm_hmac_hash_of(uint32_t mech, fhsm_hash_t *hash, size_t *maclen) {
     switch (mech) {
+        /* HMAC-SHA-1 is not the SHA-1 that SP 800-131A rev. 2 withdrew. The
+         * withdrawal covers digital signature generation; §4 keeps SHA-1
+         * acceptable inside HMAC, and the OpenSSL FIPS provider fetches it.
+         * run_fips_tests.sh is what confirms that, not this comment. */
+        case CKM_SHA_1_HMAC_INIT_VAL:    *hash = FHSM_HASH_SHA1;     *maclen = 20; return 1;
         case CKM_SHA224_HMAC_INIT_VAL:   *hash = FHSM_HASH_SHA224;   *maclen = 28; return 1;
+        case CKM_SHA512_224_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA512_224; *maclen = 28; return 1;
+        case CKM_SHA512_256_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA512_256; *maclen = 32; return 1;
         case CKM_SHA256_HMAC_INIT_VAL:   *hash = FHSM_HASH_SHA256;   *maclen = 32; return 1;
         case CKM_SHA384_HMAC_INIT_VAL:   *hash = FHSM_HASH_SHA384;   *maclen = 48; return 1;
         case CKM_SHA512_HMAC_INIT_VAL:   *hash = FHSM_HASH_SHA512;   *maclen = 64; return 1;
+        case CKM_SHA3_224_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA3_224; *maclen = 28; return 1;
         case CKM_SHA3_256_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA3_256; *maclen = 32; return 1;
         case CKM_SHA3_384_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA3_384; *maclen = 48; return 1;
         case CKM_SHA3_512_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA3_512; *maclen = 64; return 1;
@@ -6615,10 +6640,14 @@ static int fhsm_hmac_hash_of(uint32_t mech, fhsm_hash_t *hash, size_t *maclen) {
 /* EVP_MAC HMAC "digest" parameter name for a hash. #125 multipart HMAC. */
 static const char *hmac_digest_name(fhsm_hash_t h) {
     switch (h) {
-        case FHSM_HASH_SHA224:   return "SHA224";
+        case FHSM_HASH_SHA1:       return "SHA1";
+        case FHSM_HASH_SHA224:     return "SHA224";
+        case FHSM_HASH_SHA512_224: return "SHA512-224";
+        case FHSM_HASH_SHA512_256: return "SHA512-256";
         case FHSM_HASH_SHA256:   return "SHA256";
         case FHSM_HASH_SHA384:   return "SHA384";
         case FHSM_HASH_SHA512:   return "SHA512";
+        case FHSM_HASH_SHA3_224: return "SHA3-224";
         case FHSM_HASH_SHA3_256: return "SHA3-256";
         case FHSM_HASH_SHA3_384: return "SHA3-384";
         case FHSM_HASH_SHA3_512: return "SHA3-512";
@@ -6657,10 +6686,14 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     switch (pMechanism->mechanism) {
+        case CKM_SHA_1_HMAC_INIT_VAL:
         case CKM_SHA224_HMAC_INIT_VAL:
+        case CKM_SHA512_224_HMAC_INIT_VAL:
+        case CKM_SHA512_256_HMAC_INIT_VAL:
         case CKM_SHA256_HMAC_INIT_VAL:
         case CKM_SHA384_HMAC_INIT_VAL:
         case CKM_SHA512_HMAC_INIT_VAL:
+        case CKM_SHA3_224_HMAC_INIT_VAL:
         case CKM_SHA3_256_HMAC_INIT_VAL:
         case CKM_SHA3_384_HMAC_INIT_VAL:
         case CKM_SHA3_512_HMAC_INIT_VAL:
@@ -7262,10 +7295,14 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     switch (pMechanism->mechanism) {
+        case CKM_SHA_1_HMAC_INIT_VAL:
         case CKM_SHA224_HMAC_INIT_VAL:
+        case CKM_SHA512_224_HMAC_INIT_VAL:
+        case CKM_SHA512_256_HMAC_INIT_VAL:
         case CKM_SHA256_HMAC_INIT_VAL:
         case CKM_SHA384_HMAC_INIT_VAL:
         case CKM_SHA512_HMAC_INIT_VAL:
+        case CKM_SHA3_224_HMAC_INIT_VAL:
         case CKM_SHA3_256_HMAC_INIT_VAL:
         case CKM_SHA3_384_HMAC_INIT_VAL:
         case CKM_SHA3_512_HMAC_INIT_VAL:
@@ -7927,22 +7964,30 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519)
         return composite_ph_update(op, pPart, (size_t)ulPartLen);
 
-    if (op->mechanism != CKM_SHA256_HMAC_INIT_VAL) {
-        /* Asymmetric multipart not implemented in this scaffold. */
-        return FHSM_RV_MECHANISM_INVALID;
-    }
     if (!op->mac_ctx) {
         const uint8_t *kv = NULL; size_t kvl = 0;
         uint32_t cl = 0, kt = 0;
         fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv != FHSM_RV_OK) return rv;
+        /* Select the digest from the mechanism, as C_SignUpdate does. This
+         * path kept the SHA-256 that #125 removed from its sign neighbour,
+         * so multipart verify refused every other HMAC while multipart sign
+         * produced them: the fix had been applied to one of two callers.
+         * Asymmetric multipart remains unimplemented and is refused by
+         * fhsm_hmac_hash_of() returning 0, not by naming one mechanism. */
+        fhsm_hash_t uhash; size_t umac;
+        if (!fhsm_hmac_hash_of(op->mechanism, &uhash, &umac))
+            return FHSM_RV_MECHANISM_INVALID;
+        const char *dn = hmac_digest_name(uhash);
+        if (!dn) return FHSM_RV_MECHANISM_INVALID;
         EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
         if (!mac) return FHSM_RV_MECHANISM_INVALID;
         EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
         EVP_MAC_free(mac);
         if (!ctx) return FHSM_RV_HOST_MEMORY;
         OSSL_PARAM params[2];
-        char digest_name[] = "SHA256";
+        char digest_name[16];
+        snprintf(digest_name, sizeof digest_name, "%s", dn);
         params[0] = OSSL_PARAM_construct_utf8_string("digest", digest_name, 0);
         params[1] = OSSL_PARAM_construct_end();
         if (EVP_MAC_init(ctx, kv, kvl, params) != 1) {
@@ -7981,12 +8026,17 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
                                 fhsm_session_role(hSession), crv, "alg", "composite-multipart", NULL);
         return crv;
     }
-    if (op->mechanism != CKM_SHA256_HMAC_INIT_VAL) {
+    /* The MAC length comes from the mechanism's hash, as it does in
+     * C_SignFinal. This path carried mac[32] and FHSM_HASH_SHA256 in the
+     * empty-input branch, so a SHA-384 or SHA-512 multipart verify could not
+     * be expressed at all -- the counterpart of the C_VerifyUpdate gate. */
+    fhsm_hash_t fhash; size_t fmac;
+    if (!fhsm_hmac_hash_of(op->mechanism, &fhash, &fmac)) {
         if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
         op->active = 0;
         return FHSM_RV_MECHANISM_INVALID;
     }
-    uint8_t mac[32];
+    uint8_t mac[EVP_MAX_MD_SIZE];
     size_t mac_len = 0;
     fhsm_rv_t rv = FHSM_RV_OK;
     if (!op->mac_ctx) {
@@ -7996,7 +8046,7 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
         rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv == FHSM_RV_OK) {
             mac_len = sizeof(mac);
-            rv = fhsm_hmac(FHSM_HASH_SHA256, FHSM_SLICE(kv, kvl),
+            rv = fhsm_hmac(fhash, FHSM_SLICE(kv, kvl),
                             FHSM_SLICE("", 0), mac, &mac_len);
         }
     } else {
@@ -8005,10 +8055,14 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
         EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL;
     }
     op->active = 0;
-    if (rv != FHSM_RV_OK) return rv;
-    if (ulSigLen != mac_len) return FHSM_RV_SIGNATURE_INVALID;
-    return (fhsm_ct_memcmp(mac, pSig, mac_len) == 0) ? FHSM_RV_OK
-                                                       : FHSM_RV_SIGNATURE_INVALID;
+    if (rv != FHSM_RV_OK) { OPENSSL_cleanse(mac, sizeof mac); return rv; }
+    /* Compare against the length the mechanism defines, not just against
+     * whatever came out: a caller that presents a truncated signature must
+     * not be able to have it accepted on a short compare. */
+    int ok = (ulSigLen == mac_len) && (mac_len == fmac) &&
+             (fhsm_ct_memcmp(mac, pSig, mac_len) == 0);
+    OPENSSL_cleanse(mac, sizeof mac);
+    return ok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
 }
 
 /* AES-GCM Update/Final via EVP_CIPHER_CTX. */

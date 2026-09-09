@@ -49,9 +49,14 @@
         return fhsm_hmac(alg, k, in, out, outlen);                            \
     }
 
+HMAC_HANDLER(dispatch_hmac_sha1,       FHSM_HASH_SHA1)
+HMAC_HANDLER(dispatch_hmac_sha224,     FHSM_HASH_SHA224)
+HMAC_HANDLER(dispatch_hmac_sha512_224, FHSM_HASH_SHA512_224)
+HMAC_HANDLER(dispatch_hmac_sha512_256, FHSM_HASH_SHA512_256)
 HMAC_HANDLER(dispatch_hmac_sha256,   FHSM_HASH_SHA256)
 HMAC_HANDLER(dispatch_hmac_sha384,   FHSM_HASH_SHA384)
 HMAC_HANDLER(dispatch_hmac_sha512,   FHSM_HASH_SHA512)
+HMAC_HANDLER(dispatch_hmac_sha3_224, FHSM_HASH_SHA3_224)
 HMAC_HANDLER(dispatch_hmac_sha3_256, FHSM_HASH_SHA3_256)
 HMAC_HANDLER(dispatch_hmac_sha3_384, FHSM_HASH_SHA3_384)
 HMAC_HANDLER(dispatch_hmac_sha3_512, FHSM_HASH_SHA3_512)

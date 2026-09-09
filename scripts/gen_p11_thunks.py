@@ -191,12 +191,31 @@ MECHANISMS: tuple[Mech, ...] = (
     # exposed via SLH-DSA parameter sets and the (unused) KAT handlers remain.
 
     # === HMAC ==========================================================
+    # SHA-224 and the two truncated SHA-512 variants. Code points read from
+    # the OASIS pkcs11t.h: SHA512_224_HMAC 0x49 and SHA512_256_HMAC 0x4D sit
+    # in the digest block beside CKM_SHA512_224 (0x48) and CKM_SHA512_256
+    # (0x4C), not in the 0x2xx HMAC block with the others.
+    # HMAC-SHA-1 is approved. SP 800-131A rev. 2 withdrew SHA-1 for digital
+    # signature generation, not for use inside HMAC -- which is why this row
+    # says "approved" while every SHA-1 signature mechanism in this file says
+    # "non-approved". The FIPS provider fetching it is the actual evidence.
+    Mech("CKM_SHA_1_HMAC",         0x00000221, "HMAC", "sign",    "dispatch_hmac_sha1",
+         fips="approved", refs=("FIPS 198-1", "SP 800-131A rev. 2")),
+    Mech("CKM_SHA224_HMAC",        0x00000256, "HMAC", "sign",    "dispatch_hmac_sha224",
+         fips="approved", refs=("FIPS 198-1", "FIPS 180-4")),
+    Mech("CKM_SHA512_224_HMAC",    0x00000049, "HMAC", "sign",    "dispatch_hmac_sha512_224",
+         fips="approved", refs=("FIPS 198-1", "FIPS 180-4")),
+    Mech("CKM_SHA512_256_HMAC",    0x0000004D, "HMAC", "sign",    "dispatch_hmac_sha512_256",
+         fips="approved", refs=("FIPS 198-1", "FIPS 180-4")),
     Mech("CKM_SHA256_HMAC",        0x00000251, "HMAC", "sign",    "dispatch_hmac_sha256",
          fips="approved", refs=("FIPS 198-1", "FIPS 180-4")),
     Mech("CKM_SHA384_HMAC",        0x00000261, "HMAC", "sign",    "dispatch_hmac_sha384",
          fips="approved", refs=("FIPS 198-1", "FIPS 180-4")),
     Mech("CKM_SHA512_HMAC",        0x00000271, "HMAC", "sign",    "dispatch_hmac_sha512",
          fips="approved", refs=("FIPS 198-1", "FIPS 180-4")),
+    # 0x2B6, not 0x2B8 -- see the SHAKE note above: 0x2B8 is CKM_SHA3_224_KEY_GEN.
+    Mech("CKM_SHA3_224_HMAC",      0x000002B6, "HMAC", "sign",    "dispatch_hmac_sha3_224",
+         fips="approved", refs=("FIPS 198-1", "FIPS 202")),
     Mech("CKM_SHA3_256_HMAC",      0x000002B1, "HMAC", "sign",    "dispatch_hmac_sha3_256",
          fips="approved", refs=("FIPS 198-1", "FIPS 202")),
     Mech("CKM_SHA3_384_HMAC",      0x000002C1, "HMAC", "sign",    "dispatch_hmac_sha3_384",

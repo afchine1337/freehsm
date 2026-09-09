@@ -356,6 +356,26 @@ __attribute__((weak)) fhsm_rv_t dispatch_hkdf_keygen(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
+__attribute__((weak)) fhsm_rv_t dispatch_hmac_sha1(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+__attribute__((weak)) fhsm_rv_t dispatch_hmac_sha224(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
 __attribute__((weak)) fhsm_rv_t dispatch_hmac_sha256(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
@@ -367,6 +387,16 @@ __attribute__((weak)) fhsm_rv_t dispatch_hmac_sha256(
 }
 
 __attribute__((weak)) fhsm_rv_t dispatch_hmac_sha384(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+__attribute__((weak)) fhsm_rv_t dispatch_hmac_sha3_224(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
     fhsm_slice_t in, uint8_t *out, size_t *outlen)
@@ -407,6 +437,26 @@ __attribute__((weak)) fhsm_rv_t dispatch_hmac_sha3_512(
 }
 
 __attribute__((weak)) fhsm_rv_t dispatch_hmac_sha512(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+__attribute__((weak)) fhsm_rv_t dispatch_hmac_sha512_224(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+__attribute__((weak)) fhsm_rv_t dispatch_hmac_sha512_256(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
     fhsm_slice_t in, uint8_t *out, size_t *outlen)
@@ -881,7 +931,9 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00000045u, "CKM_SHA512_RSA_PKCS_PSS", "RSA", "sign", 1, dispatch_rsa_pss_sha512 },
     { 0x00000046u, "CKM_SHA224_RSA_PKCS", "RSA", "sign", 1, dispatch_rsa_pkcs_sha224 },
     { 0x00000048u, "CKM_SHA512_224", "SHA2", "digest", 1, dispatch_sha512_224 },
+    { 0x00000049u, "CKM_SHA512_224_HMAC", "HMAC", "sign", 1, dispatch_hmac_sha512_224 },
     { 0x0000004Cu, "CKM_SHA512_256", "SHA2", "digest", 1, dispatch_sha512_256 },
+    { 0x0000004Du, "CKM_SHA512_256_HMAC", "HMAC", "sign", 1, dispatch_hmac_sha512_256 },
     { 0x00000060u, "CKM_SHA3_256_RSA_PKCS", "RSA", "sign", 1, dispatch_rsa_pkcs_sha3_256 },
     { 0x00000061u, "CKM_SHA3_384_RSA_PKCS", "RSA", "sign", 1, dispatch_rsa_pkcs_sha3_384 },
     { 0x00000062u, "CKM_SHA3_512_RSA_PKCS", "RSA", "sign", 1, dispatch_rsa_pkcs_sha3_512 },
@@ -892,9 +944,11 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00000133u, "CKM_DES3_CBC", "TDES", "encrypt", 0, dispatch_reject_fips },
     { 0x00000210u, "CKM_MD5", "MD5", "digest", 0, dispatch_reject_fips },
     { 0x00000220u, "CKM_SHA_1", "SHA1", "digest", 0, dispatch_reject_fips },
+    { 0x00000221u, "CKM_SHA_1_HMAC", "HMAC", "sign", 1, dispatch_hmac_sha1 },
     { 0x00000250u, "CKM_SHA256", "SHA2", "digest", 1, dispatch_sha256 },
     { 0x00000251u, "CKM_SHA256_HMAC", "HMAC", "sign", 1, dispatch_hmac_sha256 },
     { 0x00000255u, "CKM_SHA224", "SHA2", "digest", 1, dispatch_sha224 },
+    { 0x00000256u, "CKM_SHA224_HMAC", "HMAC", "sign", 1, dispatch_hmac_sha224 },
     { 0x00000260u, "CKM_SHA384", "SHA2", "digest", 1, dispatch_sha384 },
     { 0x00000261u, "CKM_SHA384_HMAC", "HMAC", "sign", 1, dispatch_hmac_sha384 },
     { 0x00000270u, "CKM_SHA512", "SHA2", "digest", 1, dispatch_sha512 },
@@ -902,6 +956,7 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x000002B0u, "CKM_SHA3_256", "SHA3", "digest", 1, dispatch_sha3_256 },
     { 0x000002B1u, "CKM_SHA3_256_HMAC", "HMAC", "sign", 1, dispatch_hmac_sha3_256 },
     { 0x000002B5u, "CKM_SHA3_224", "SHA3", "digest", 1, dispatch_sha3_224 },
+    { 0x000002B6u, "CKM_SHA3_224_HMAC", "HMAC", "sign", 1, dispatch_hmac_sha3_224 },
     { 0x000002C0u, "CKM_SHA3_384", "SHA3", "digest", 1, dispatch_sha3_384 },
     { 0x000002C1u, "CKM_SHA3_384_HMAC", "HMAC", "sign", 1, dispatch_hmac_sha3_384 },
     { 0x000002D0u, "CKM_SHA3_512", "SHA3", "digest", 1, dispatch_sha3_512 },
