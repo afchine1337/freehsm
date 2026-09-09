@@ -71,16 +71,21 @@ extern "C" {
  * version --- which is why the baseline is taken after this bump, never
  * before.
  * ----------------------------------------------------------------------- */
+/* MINOR, not PATCH: CKM_AES_KEY_WRAP and CKM_AES_KEY_WRAP_KWP now report
+ * CKF_ENCRYPT|CKF_DECRYPT through C_GetMechanismInfo, which they did not
+ * before (#14). A capability an application can observe was added, so
+ * semantic versioning puts this at 2.1.0 rather than 2.0.4 --- even though
+ * the release is mostly defect repair. */
 #define FHSM_VERSION_MAJOR   2
-#define FHSM_VERSION_MINOR   0
-#define FHSM_VERSION_PATCH   3
+#define FHSM_VERSION_MINOR   1
+#define FHSM_VERSION_PATCH   0
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
  * a certification this project holds and will not seek. The profile a
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
-#define FHSM_VERSION_STRING  "2.0.3"
+#define FHSM_VERSION_STRING  "2.1.0"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including

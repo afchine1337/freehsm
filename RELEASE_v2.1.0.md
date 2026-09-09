@@ -128,6 +128,30 @@ Visible only once the overflow stopped hiding it: `tc10`, `tc52` and `tc107` are
 process; bounding the length turned that into a clean refusal, which was better
 and still wrong. The buffer is now 4 KiB and they are unwrapped.
 
+## Measured
+
+Full corpus, signed module, FIPS provider loaded:
+
+| | v2.0.3 | v2.1.0 |
+|---|---|---|
+| vectors | 111,739 | 111,739 |
+| passed | 34,886 | **42,363** |
+| failed | 2 | 2 |
+| crashed | 0 | 0 |
+
+The two remaining failures are the two documented positions: the Tookan §3.3
+unwrap case and AES-GCM IV reuse. Both are decisions written down in
+`docs/PKCS11_CHECK_FINDINGS.md`, not defects awaiting a fix.
+
+The 7,477 additional passes are the ACVP AES-KW vectors that became reachable.
+
+One thing this table does not show, and should. The first full run against the
+AES-KW encrypt code reported **eight crashes** — `C_Decrypt` writing past the
+caller's buffer on a corrupted KWP blob, and leaving unverified plaintext there
+besides. That code was eighteen hours old and had shipped nowhere. It was found
+by the run made before tagging rather than after, which is the whole reason for
+making it in that order.
+
 ## What this release does not do
 
 **The optional IV parameter of §6.16.2** — 8 bytes for KW, 4 for KWP, or NULL

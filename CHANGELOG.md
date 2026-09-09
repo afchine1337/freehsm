@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.0] --- 2026-09-09
+
 *Everything below was found in the twenty-four hours after @petrn pointed out
 in #10 that `pkcs11-check fetch-data` had never been run here. Every previous
 measurement, local and in CI, covered 4,014 vectors of 111,739 — see
@@ -99,6 +101,26 @@ because it adds a capability visible through `C_GetMechanismInfo`.*
   restructured around a single exit — as does zeroising the buffer, which the
   code does not do today at either size.
 
+* **`C_Decrypt` wrote into the caller's buffer before the AES-KWP integrity
+  check** — a regression introduced by the AES-KW work above and caught by the
+  first full-corpus run against it, before any release carried it.
+
+  `EVP_DecryptUpdate` on AES-WRAP writes more than `ulEncLen - 8` bytes before
+  the AIV check trims the result, so writing straight into `pData` overran a
+  buffer the caller had sized to the length we ourselves reported. pkcs11-check
+  places a sentinel just past that length and found nine bytes destroyed:
+  `guard=00000000000000004b`, eight crashes on `test_error_path_kwp.py`.
+
+  Independently of any size: on a corrupted blob the caller was left holding
+  decrypted-but-unverified plaintext alongside `CKR_ENCRYPTED_DATA_INVALID`.
+
+  Now decrypted into a local buffer, checked, then copied, with
+  `OPENSSL_cleanse` on every exit — which is what `C_UnwrapKey` has always
+  done. The encrypt direction still writes into the caller's buffer and a
+  comment says why: its output length is exact and no post-hoc check can fail
+  after the write. Nothing measured says that path is wrong, and the probes
+  cover the decrypt direction only.
+
 * **The bypass notice blamed the operator for a state the caller had set.** It
   read `dev mode active (no FIPS provider) --- ... This build is NOT
   FIPS-conformant`. Three problems, reported by petrn while running the
@@ -143,7 +165,7 @@ because it adds a capability visible through `C_GetMechanismInfo`.*
   never removed by us. The comment above the old code claimed "the runner
   cleans this up"; nothing did.
 
-### Added
+### Tooling and CI
 * **`provenance.txt` in the pkcs11-check report directory** — harness version,
   OpenSSL version, module path, module SHA-256, timestamp; the same shown in
   the run banner and the harness version repeated beside the final counts.
@@ -183,6 +205,37 @@ because it adds a capability visible through `C_GetMechanismInfo`.*
   pointing into a venv while its sibling `pkcs11-check-report` in the same
   directory points at a python without the module. Everything now runs through
   the interpreter that owns the working entry point.
+
+* **The CI harness job never downloaded the vector sets.** `pkcs11-check`
+  ships its engine and fetches wycheproof / cctv / acvp / x509-limbo
+  separately; nothing called `fetch-data`. The workflow's own header described
+  the harness as ">100k vendor-neutral behavioral checks" while running four
+  thousand of them.
+
+  Two regimes now: pushes run the embedded corpus in minutes, scheduled and
+  manual runs fetch the full one — cached between runs, keyed on the harness
+  version, with the timeout raised to 330 minutes. Every run writes
+  `corpus.txt` and prints it at the top of the step summary, above the counts.
+  A number without its scope is what this job published for two months.
+
+* **`run_fips_tests.sh` scored a tree it could not judge.** It printed
+  `Total against the provider: 1 of 1` — a perfect ratio — after `make clean`
+  started removing every test binary and `make` alone did not rebuild them.
+  One test discovered, one passed, green. Below `FHSM_FIPS_TESTS_MIN`
+  (default 30) it now refuses a verdict and exits non-zero, and the total line
+  prints the floor beside the count.
+
+* **`make clean` removed one test binary of forty.** The rule named
+  `tests/test_smoke` and the object files; everything else survived, so an old
+  binary could run against a freshly built library and report on code it was
+  not compiled for. Found when `test_unwrap_len` kept asserting a buffer size
+  that had just changed.
+
+* **`scripts/release.sh`** stopped printing `git add -A`, which had twice swept
+  unrelated work into a release commit, and now names the files after a
+  `git status --short`. Its post-tag instructions include reopening
+  `[Unreleased]`, whose absence left three commits out of the project's own log
+  on 2026-09-07.
 
 ### Changed
 * **`docs/PKCS11_CHECK_FINDINGS.md`** — entry for the 2026-09-07 run:

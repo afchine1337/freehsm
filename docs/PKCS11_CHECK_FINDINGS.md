@@ -844,8 +844,46 @@ before.
 
 ## Where it stands
 
-Final full-corpus figures pending; the run started 2026-09-08 14:02 against the
-signed module carrying all six changes. What is expected to remain:
+Final full-corpus run, 2026-09-09, signed module, FIPS provider, all seven
+changes:
+
+| | v2.0.3 (2026-09-07) | v2.1.0 |
+|---|---|---|
+| vectors | 111,739 | 111,739 |
+| passed | 34,886 | **42,363** |
+| failed | 2 | **2** |
+| CRITICAL | 1 | 1 |
+| HIGH | 1 | 1 |
+| crashed | 0 | **0** |
+| xfail | 27,693 | 20,223 |
+
+The 7,477 additional passes are the ACVP AES-KW and AES-KWP vectors that #14
+made reachable, which is close to the 7,219 that file reports on its own.
+
+**One measurement in between is worth recording, because it is why this
+document says "seven changes" and not six.** The first full run against the #14
+code reported **8 crashes**, all on `test_error_path_kwp.py`:
+
+    C_Decrypt wrote past the minimal output buffer on a corrupted
+    CKM_AES_KEY_WRAP_KWP error path: guard=00000000000000004b
+
+`EVP_DecryptUpdate` on AES-WRAP writes more than `ulEncLen - 8` bytes before
+the AIV check trims the result, so writing into the caller's buffer overran a
+buffer sized to the length we ourselves reported — and left unverified
+plaintext there on the error path. `C_UnwrapKey` has always decrypted into a
+local buffer and copied afterwards; the new path did not.
+
+That regression existed for about eighteen hours, on `main`, in no release. It
+was found by the run that exists to be made before tagging, which is the entire
+argument for making it before rather than after.
+
+An earlier run the same morning reported 90,056 vectors instead of 111,739 with
+no explanation. Its report directory was in `/tmp` and did not survive a
+reboot, so the discrepancy cannot be investigated and is recorded as an
+unexplained measurement rather than a finding. Reports now go to
+`~/Documents/dev/freehsm-reports/`.
+
+What remains:
 
 - **R1** — Tookan §3.3, `C_UnwrapKey` with `CKA_SENSITIVE=False`. A documented
   position, not a defect to fix.
