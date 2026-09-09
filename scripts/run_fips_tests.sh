@@ -304,8 +304,33 @@ else
         does not serve looks exactly like this."
 fi
 
+# --- 6. a floor on discovery ---------------------------------------------
+#
+# Everything above counts what was found. Nothing counted what was missing.
+#
+# On 2026-09-09 this script printed "Total against the provider: 1 of 1" --- a
+# perfect ratio, which reads as success --- because `make clean` had just
+# started removing every test binary (a fix for old binaries surviving a clean)
+# and `make` alone does not rebuild them. One test was discovered, it passed,
+# and the script congratulated itself. Had the output not been read closely,
+# three hours of full-corpus run would have followed on an unverified tree.
+#
+# The remedy is not a better ratio. A ratio over an unstated denominator is the
+# defect this project has spent a week removing from its own measurements. What
+# is needed is a floor: below this many binaries, the tree is not in a state
+# this script can judge, and it must say so rather than score it.
+EXPECTED_MIN="${FHSM_FIPS_TESTS_MIN:-30}"
+total_found=$((pass + spass + fail + sfail))
+if [ "$total_found" -lt "$EXPECTED_MIN" ]; then
+    bad "only $total_found test binaries discovered, expected at least $EXPECTED_MIN.
+        Almost certainly the tests are not built --- run 'make tests' and retry.
+        No verdict is given on this tree: a green result over a handful of
+        tests is worse than a red one, because it looks like an answer."
+fi
+
 echo
-echo "  Total against the provider: $((pass + spass)) of $((pass + spass + fail + sfail))"
+echo "  Total against the provider: $((pass + spass)) of $total_found" \
+     "(floor: $EXPECTED_MIN)"
 echo "  Not counted: test_integrity, which make test-integrity drives through"
 echo "               unsigned / signed / tampered on its own."
 
