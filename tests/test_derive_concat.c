@@ -201,6 +201,31 @@ int main(void)
         rv = C_DeriveKey(s, &m, hbase, out_tmpl, 4, &out);
         ok(rv == CKR_MECHANISM_PARAM_INVALID, "missing parameter block refused");
     }
+    /* (6) The base key must be a CKK_GENERIC_SECRET. A typed symmetric key is
+     *     not a substitute, which is the mirror of the rule the module
+     *     already applies the other way round for AES mechanisms. This first
+     *     shipped without the check: the branch validated the object class
+     *     and stopped, so a CKK_AES base was accepted. */
+    {
+        CK_BYTE t_true2 = 1;
+        CK_ATTRIBUTE aes_tmpl[] = {
+            { CKA_CLASS,       &(CK_ULONG){CKO_SECRET_KEY}, sizeof(CK_ULONG) },
+            { CKA_KEY_TYPE,    &(CK_ULONG){0x1FUL /* CKK_AES */}, sizeof(CK_ULONG) },
+            { CKA_VALUE,       (void*)"\x42\x42\x42\x42\x42\x42\x42\x42"
+                               "\x42\x42\x42\x42\x42\x42\x42\x42", 16 },
+            { CKA_DERIVE,      &t_true2, 1 },
+            { CKA_EXTRACTABLE, &t_true2, 1 },
+        };
+        CK_OBJECT_HANDLE haes = 0;
+        if (C_CreateObject(s, aes_tmpl, 5, &haes) != CKR_OK || haes == 0) {
+            ok(0, "wrong-key setup: C_CreateObject(CKK_AES)");
+        } else {
+            CK_MECHANISM m = { CKM_CONCATENATE_BASE_AND_DATA, &sd, sizeof sd };
+            rv = C_DeriveKey(s, &m, haes, out_tmpl, 4, &out);
+            ok(rv == 0x63UL /* CKR_KEY_TYPE_INCONSISTENT */,
+               "CKK_AES base key refused as CKR_KEY_TYPE_INCONSISTENT");
+        }
+    }
 
     if (C_Finalize) C_Finalize(NULL);
     printf("\n%s\n", fails ? "FAILURES" : "all good");

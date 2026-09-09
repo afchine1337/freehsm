@@ -2652,6 +2652,9 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                   CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                                   const uint8_t *secret, size_t secret_len,
                                   CK_OBJECT_HANDLE *phKey);
+/* Defined with the other *Init guards, some three thousand lines below. */
+static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
+                                       CK_ULONG mech);
 
 /* CK_KEY_DERIVATION_STRING_DATA (PKCS#11 v3.2 §6.20). Used by
  * CONCATENATE_BASE_AND_DATA, CONCATENATE_DATA_AND_BASE and
@@ -2702,6 +2705,15 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                                                &bv, &bvl, &bcl, &bkt);
         if (brv != FHSM_RV_OK) return brv;
         if (bcl != CKO_SECRET_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        /* The mechanism <-> key-type gate that C_SignInit, C_EncryptInit and
+         * C_DecryptInit all apply. This branch checked the object class and
+         * stopped there, so a CKK_AES base key was accepted where the
+         * mechanism takes a generic secret -- the same "wired to some of the
+         * paths and not the rest" shape the rest of this file documents,
+         * introduced here rather than inherited. Found by pkcs11-check on
+         * the run after the mechanisms were wired in. */
+        { CK_RV tc = fhsm_check_key_mech_type(t, hBaseKey, pMechanism->mechanism);
+          if (tc != FHSM_RV_OK) return tc; }
 
         /* The second operand. BASE_AND_KEY takes a key handle; the other
          * three take a byte string. Both are read into one pair of
@@ -5957,6 +5969,15 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x108A: case 0x108E:                           /* AES CMAC/GMAC */
             want = 0x1F; break;                             /* CKK_AES */
         case 0x0133: want = 0x15; break;                    /* DES3_CBC -> CKK_DES3 */
+        case 0x0360: case 0x0362: case 0x0363: case 0x0364: /* v3.2 §6.20 combiners */
+            /* The base key of a combiner is a CKK_GENERIC_SECRET. This is the
+             * mirror of the AES rule below -- if a generic secret is not a
+             * substitute for a typed key, a typed key is not a substitute for
+             * a generic secret either, and holding only one half of that is
+             * how the two rules drift apart. pkcs11-check imports a CKK_AES
+             * key as the base and expects CKR_KEY_TYPE_INCONSISTENT
+             * (TestWrongKeyType test_registry_derive_wrong_key_type). */
+            want = 0x10; break;                             /* CKK_GENERIC_SECRET */
         case 0x0251: case 0x0261: case 0x0271: case 0x0256: /* SHA{256,384,512,224}_HMAC */
         case 0x02B1: case 0x02C1: case 0x02D1: case 0x02B6: /* SHA3_{256,384,512,224}_HMAC */
         case 0x0221:                                        /* SHA_1_HMAC */
