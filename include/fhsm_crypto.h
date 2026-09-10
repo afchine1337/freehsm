@@ -135,6 +135,12 @@ typedef enum fhsm_hash_e {
 
 size_t fhsm_hash_size(fhsm_hash_t h);
 
+/* The OpenSSL algorithm name for a hash ("SHA2-256", "SHA3-224", ...).
+ * NULL for an unknown identifier. Exposed so that callers building an
+ * OSSL_PARAM digest name -- C_DeriveKey's HKDF path among them -- use the
+ * same table as fhsm_hmac() and fhsm_pbkdf2() rather than a second copy. */
+const char *fhsm_hash_openssl_name(fhsm_hash_t h);
+
 fhsm_rv_t fhsm_hash_oneshot(fhsm_hash_t alg,
                              fhsm_slice_t data,
                              uint8_t *out,

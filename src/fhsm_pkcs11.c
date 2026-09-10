@@ -67,6 +67,7 @@
 #include <openssl/bn.h>       /* BN_bin2bn (C_CreateObject RSA path) */
 #include <openssl/core.h>     /* OSSL_PARAM */
 #include <openssl/core_names.h>
+#include <openssl/kdf.h>      /* EVP_KDF_HKDF_MODE_* : C_DeriveKey HKDF path */
 #include <openssl/param_build.h> /* OSSL_PARAM_BLD */
 #include <openssl/err.h>      /* ERR_peek_last_error (ML-KEM debug only) */
 #include <openssl/ecdsa.h>    /* ECDSA_SIG_new / d2i / i2d  for raw r||s conversion */
@@ -2058,6 +2059,37 @@ CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession, unsigned char *pSeed,
 #define CKM_SHA384                 0x00000260UL
 #define CKM_SHA512                 0x00000270UL
 
+/* Map a PKCS#11 digest mechanism to the module's hash identifier. Returns 1
+ * when the mechanism is known, 0 otherwise, and sets *non_approved for the
+ * ones the fips-strict profile withdraws.
+ *
+ * This was the body of C_DigestInit's switch. It is a function because
+ * CK_HKDF_PARAMS.prfHashMechanism carries the same values and needs the same
+ * table: a second copy is how one of the two ends up knowing about SHA3-224
+ * and the other not. The profile decision stays with each caller, since a
+ * digest that may not be produced on its own can still be legitimate inside
+ * a construction -- HMAC-SHA-1 being the case already settled. */
+static int digest_mech_to_hash(CK_ULONG mech, fhsm_hash_t *h, int *non_approved) {
+    *non_approved = 0;
+    switch (mech) {
+        case CKM_SHA256:   *h = FHSM_HASH_SHA256;     return 1;
+        case CKM_SHA384:   *h = FHSM_HASH_SHA384;     return 1;
+        case CKM_SHA512:   *h = FHSM_HASH_SHA512;     return 1;
+        /* FIPS 180-4 / 202, advertised by the dispatch table. #125. */
+        case 0x00000255UL: *h = FHSM_HASH_SHA224;     return 1; /* CKM_SHA224 */
+        case 0x00000048UL: *h = FHSM_HASH_SHA512_224; return 1; /* CKM_SHA512_224 */
+        case 0x0000004CUL: *h = FHSM_HASH_SHA512_256; return 1; /* CKM_SHA512_256 */
+        case 0x000002B5UL: *h = FHSM_HASH_SHA3_224;   return 1; /* CKM_SHA3_224 */
+        case 0x000002B0UL: *h = FHSM_HASH_SHA3_256;   return 1; /* CKM_SHA3_256 */
+        case 0x000002C0UL: *h = FHSM_HASH_SHA3_384;   return 1; /* CKM_SHA3_384 */
+        case 0x000002D0UL: *h = FHSM_HASH_SHA3_512;   return 1; /* CKM_SHA3_512 */
+        /* Legacy digests : interop build only. #125. */
+        case 0x00000220UL: *h = FHSM_HASH_SHA1; *non_approved = 1; return 1;
+        case 0x00000210UL: *h = FHSM_HASH_MD5;  *non_approved = 1; return 1;
+        default: return 0;
+    }
+}
+
 CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -2070,29 +2102,11 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
      * TestDigestInitErrors::test_mechanism_param_invalid). */
     if (pMechanism->pParameter != NULL || pMechanism->ulParameterLen != 0)
         return FHSM_RV_MECHANISM_PARAM_INVALID;
-    switch (pMechanism->mechanism) {
-        case CKM_SHA256: op->hash = FHSM_HASH_SHA256; break;
-        case CKM_SHA384: op->hash = FHSM_HASH_SHA384; break;
-        case CKM_SHA512: op->hash = FHSM_HASH_SHA512; break;
-        /* Additional FIPS-approved digests (FIPS 180-4 / 202) : advertised
-         * by the dispatch table ; now callable in both profiles. #125. */
-        case 0x00000255UL: op->hash = FHSM_HASH_SHA224;     break; /* CKM_SHA224 */
-        case 0x00000048UL: op->hash = FHSM_HASH_SHA512_224; break; /* CKM_SHA512_224 */
-        case 0x0000004CUL: op->hash = FHSM_HASH_SHA512_256; break; /* CKM_SHA512_256 */
-        case 0x000002B5UL: op->hash = FHSM_HASH_SHA3_224;   break; /* CKM_SHA3_224 */
-        case 0x000002B0UL: op->hash = FHSM_HASH_SHA3_256;   break; /* CKM_SHA3_256 */
-        case 0x000002C0UL: op->hash = FHSM_HASH_SHA3_384;   break; /* CKM_SHA3_384 */
-        case 0x000002D0UL: op->hash = FHSM_HASH_SHA3_512;   break; /* CKM_SHA3_512 */
-        /* Non-FIPS legacy digests : executable only in the interop /
-         * general-purpose build (rejected under fips-strict). #125. */
-        case 0x00000220UL: /* CKM_SHA_1 */
-            if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
-            op->hash = FHSM_HASH_SHA1; break;
-        case 0x00000210UL: /* CKM_MD5 */
-            if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
-            op->hash = FHSM_HASH_MD5; break;
-        default:         return FHSM_RV_MECHANISM_INVALID;
-    }
+    { int non_approved = 0;
+      if (!digest_mech_to_hash(pMechanism->mechanism, &op->hash, &non_approved))
+          return FHSM_RV_MECHANISM_INVALID;
+      if (non_approved && fhsm_build_fips_strict)
+          return FHSM_RV_MECHANISM_INVALID; }
     op->active = 1;
     op->mechanism = (uint32_t)pMechanism->mechanism;
     return FHSM_RV_OK;
@@ -2651,6 +2665,7 @@ typedef struct CK_ECDH1_DERIVE_PARAMS_s {
 static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                   CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                                   const uint8_t *secret, size_t secret_len,
+                                  uint32_t default_class,
                                   CK_OBJECT_HANDLE *phKey);
 /* Defined with the other *Init guards, some three thousand lines below. */
 static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
@@ -2665,6 +2680,33 @@ typedef struct CK_KEY_DERIVATION_STRING_DATA_s {
     void     *pData;
     CK_ULONG  ulLen;
 } CK_KEY_DERIVATION_STRING_DATA;
+
+/* CK_HKDF_PARAMS (PKCS#11 v3.2 §6.32). Field order and types read from the
+ * OASIS layout by way of pkcs11-check's raw/types_std.py, not assumed:
+ * hSaltKey sits between the salt bytes and the info, so getting the order
+ * wrong reads a length as a handle. */
+typedef struct CK_HKDF_PARAMS_s {
+    unsigned char    bExtract;
+    unsigned char    bExpand;
+    CK_ULONG         prfHashMechanism;
+    CK_ULONG         ulSaltType;
+    void            *pSalt;
+    CK_ULONG         ulSaltLen;
+    CK_OBJECT_HANDLE hSaltKey;
+    void            *pInfo;
+    CK_ULONG         ulInfoLen;
+} CK_HKDF_PARAMS;
+
+/* Salt types are flags: 1, 2, 4. Note that pkcs11-check's own
+ * raw/pack_mechanisms.py carries a comment saying "CKF_HKDF_SALT_KEY = 3";
+ * its raw/types_std.py says 0x04, which is the OASIS value and what is
+ * implemented here. */
+#define CKF_HKDF_SALT_NULL  0x00000001UL
+#define CKF_HKDF_SALT_DATA  0x00000002UL
+#define CKF_HKDF_SALT_KEY   0x00000004UL
+
+#define CKM_HKDF_DERIVE_OP               0x0000402AUL
+#define CKM_HKDF_DATA_OP                 0x0000402BUL
 
 #define CKM_CONCATENATE_BASE_AND_KEY_OP  0x00000360UL
 #define CKM_CONCATENATE_BASE_AND_DATA_OP 0x00000362UL
@@ -2690,6 +2732,124 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* HKDF (RFC 5869, PKCS#11 v3.2 §6.32). Advertised with a handler in
+     * src/dispatch/fhsm_dispatch_kdf.c that nothing called; 660 vectors in
+     * the conformance report read "HKDF derive failed for valid vector ...
+     * CKR_MECHANISM_INVALID". */
+    if (pMechanism->mechanism == CKM_HKDF_DERIVE_OP
+        || pMechanism->mechanism == CKM_HKDF_DATA_OP) {
+        if (!pMechanism->pParameter
+            || pMechanism->ulParameterLen < sizeof(CK_HKDF_PARAMS))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        CK_HKDF_PARAMS hp;
+        memcpy(&hp, pMechanism->pParameter, sizeof(hp));
+
+        /* §6.32.1: at least one of bExtract and bExpand must be set. */
+        if (!hp.bExtract && !hp.bExpand) return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+        fhsm_hash_t hh; int hh_non_approved = 0;
+        if (!digest_mech_to_hash(hp.prfHashMechanism, &hh, &hh_non_approved))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        if (hh_non_approved && fhsm_build_fips_strict)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+        /* The input keying material is the base key. */
+        const uint8_t *ikm = NULL; size_t ikm_len = 0;
+        uint32_t hcl = 0, hkt = 0;
+        fhsm_rv_t hrv = fhsm_token_object_get(t, (uint32_t)hBaseKey,
+                                               &ikm, &ikm_len, &hcl, &hkt);
+        if (hrv != FHSM_RV_OK) return hrv;
+        if (hcl != CKO_SECRET_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+
+        /* Salt: absent, caller-supplied bytes, or the value of another key.
+         * The three cases are named by ulSaltType and anything else is a
+         * parameter error rather than a silent fall-through to "no salt",
+         * which would derive a different key than the caller asked for. */
+        const uint8_t *salt = NULL; size_t salt_len = 0;
+        switch (hp.ulSaltType) {
+            case CKF_HKDF_SALT_NULL:
+                break;
+            case CKF_HKDF_SALT_DATA:
+                if (hp.ulSaltLen > 0x7FFFFFFFUL) return FHSM_RV_MECHANISM_PARAM_INVALID;
+                if (hp.pSalt == NULL && hp.ulSaltLen != 0) return FHSM_RV_MECHANISM_PARAM_INVALID;
+                salt = hp.pSalt; salt_len = (size_t)hp.ulSaltLen;
+                break;
+            case CKF_HKDF_SALT_KEY: {
+                uint32_t scl = 0, skt = 0;
+                fhsm_rv_t srv2 = fhsm_token_object_get(t, (uint32_t)hp.hSaltKey,
+                                                        &salt, &salt_len, &scl, &skt);
+                if (srv2 != FHSM_RV_OK) return srv2;
+                if (scl != CKO_SECRET_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+                /* The salt key is read, so it must permit derivation -- the
+                 * same reasoning as the second key of the 6.20 combiners. */
+                { CK_RV su = fhsm_check_usage(t, hp.hSaltKey, FHSM_USAGE_DERIVE);
+                  if (su != FHSM_RV_OK) return su; }
+                break;
+            }
+            default:
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+        }
+        if (hp.ulInfoLen > 0x7FFFFFFFUL) return FHSM_RV_MECHANISM_PARAM_INVALID;
+        if (hp.pInfo == NULL && hp.ulInfoLen != 0) return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+        /* Output length. Extract-only yields the PRK, whose length is the
+         * hash output and which CKA_VALUE_LEN may not override; the other
+         * two modes take it from the template. */
+        size_t want_len = 0;
+        if (hp.bExtract && !hp.bExpand) {
+            want_len = fhsm_hash_size(hh);
+        } else {
+            long vi = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+            if (vi < 0 || !pTemplate[vi].pValue
+                || pTemplate[vi].ulValueLen != sizeof(CK_ULONG))
+                return CKR_TEMPLATE_INCOMPLETE;
+            CK_ULONG req = 0; memcpy(&req, pTemplate[vi].pValue, sizeof(CK_ULONG));
+            want_len = (size_t)req;
+        }
+        if (want_len == 0 || want_len > FHSM_DERIVE_MAX)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+
+        int mode = (hp.bExtract && hp.bExpand) ? EVP_KDF_HKDF_MODE_EXTRACT_AND_EXPAND
+                 : (hp.bExtract)               ? EVP_KDF_HKDF_MODE_EXTRACT_ONLY
+                                                : EVP_KDF_HKDF_MODE_EXPAND_ONLY;
+        EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
+        if (!kdf) return FHSM_RV_MECHANISM_INVALID;
+        EVP_KDF_CTX *kctx = EVP_KDF_CTX_new(kdf);
+        EVP_KDF_free(kdf);
+        if (!kctx) return FHSM_RV_HOST_MEMORY;
+        OSSL_PARAM kp[6];
+        int np = 0;
+        kp[np++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_MODE, &mode);
+        kp[np++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
+                       (char*)fhsm_hash_openssl_name(hh), 0);
+        kp[np++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
+                       (void*)ikm, ikm_len);
+        if (salt_len)
+            kp[np++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT,
+                           (void*)salt, salt_len);
+        if (hp.ulInfoLen)
+            kp[np++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
+                           hp.pInfo, (size_t)hp.ulInfoLen);
+        kp[np] = OSSL_PARAM_construct_end();
+
+        uint8_t *okm = OPENSSL_malloc(want_len);
+        if (!okm) { EVP_KDF_CTX_free(kctx); return FHSM_RV_HOST_MEMORY; }
+        int derived = EVP_KDF_derive(kctx, okm, want_len, kp);
+        EVP_KDF_CTX_free(kctx);
+        if (derived != 1) {
+            OPENSSL_cleanse(okm, want_len); OPENSSL_free(okm);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        CK_RV hstore = derive_store_secret(t, hSession, pTemplate, ulCount,
+                                            okm, want_len,
+                                            (pMechanism->mechanism == CKM_HKDF_DATA_OP)
+                                              ? CKO_DATA : CKO_SECRET_KEY,
+                                            phKey);
+        OPENSSL_cleanse(okm, want_len);
+        OPENSSL_free(okm);
+        return hstore;
+    }
+
     /* The concatenation family (PKCS#11 v3.2 §6.20). Advertised since the
      * mechanism table replaced the hand-written list, with a working handler
      * each in src/dispatch/fhsm_dispatch_concat.c that nothing called: this
@@ -2775,7 +2935,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                 break;
         }
         CK_RV crv = derive_store_secret(t, hSession, pTemplate, ulCount,
-                                         buf, need, phKey);
+                                         buf, need, CKO_SECRET_KEY, phKey);
         OPENSSL_cleanse(buf, need);
         OPENSSL_free(buf);
         return crv;
@@ -2866,7 +3026,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     EVP_PKEY_free(priv);
 
     CK_RV srv = derive_store_secret(t, hSession, pTemplate, ulCount,
-                                     z, z_len, phKey);
+                                     z, z_len, CKO_SECRET_KEY, phKey);
     fhsm_zeroize(z, sizeof(z));
     return srv;
 }
@@ -2888,7 +3048,29 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                   CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                                   const uint8_t *secret, size_t secret_len,
+                                  uint32_t default_class,
                                   CK_OBJECT_HANDLE *phKey) {
+    /* CKM_HKDF_DATA derives a data object, CKM_HKDF_DERIVE and the 6.20
+     * combiners derive a key. The caller passes the class its mechanism
+     * implies and the template may state it explicitly; anything other than
+     * those two classes is CKR_TEMPLATE_INCONSISTENT rather than being
+     * quietly turned into a secret key.
+     *
+     * This function hard-coded CKO_SECRET_KEY when it was extracted, because
+     * ECDH was its only caller. Wiring CKM_HKDF_DATA onto it without this
+     * would have produced a secret key for a mechanism defined to produce
+     * data -- announced as implemented, and wrong in a way no CKR_ would
+     * reveal. */
+    uint32_t obj_class = default_class;
+    { long ci = find_attr(pTemplate, ulCount, CKA_CLASS);
+      if (ci >= 0 && pTemplate[ci].pValue
+          && pTemplate[ci].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG req = 0; memcpy(&req, pTemplate[ci].pValue, sizeof(CK_ULONG));
+          if (req != CKO_SECRET_KEY && req != CKO_DATA)
+              return CKR_TEMPLATE_INCONSISTENT;
+          obj_class = (uint32_t)req;
+      }
+    }
     char label[64] = "";
     uint8_t obj_flags = 0;
     long li = find_attr(pTemplate, ulCount, CKA_LABEL);
@@ -2921,7 +3103,7 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
       }
     }
     uint32_t handle = 0;
-    fhsm_rv_t rv = fhsm_token_object_add(t, CKO_SECRET_KEY, derived_ckk, label,
+    fhsm_rv_t rv = fhsm_token_object_add(t, obj_class, derived_ckk, label,
                                           secret, secret_len, NULL, 0,
                                           obj_flags, &handle);
     if (rv != FHSM_RV_OK) return rv;
@@ -2929,7 +3111,7 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
-    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
+    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(obj_class, pTemplate, ulCount));
     (void)fhsm_audit_event(FHSM_EV_DERIVE, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, NULL);
     return FHSM_RV_OK;

@@ -372,6 +372,9 @@ static const char *hash_name(fhsm_hash_t h) {
     }
 }
 
+/* Public face of hash_name(). One table, several callers. */
+const char *fhsm_hash_openssl_name(fhsm_hash_t h) { return hash_name(h); }
+
 fhsm_rv_t fhsm_aes_gcm_encrypt(fhsm_slice_t key,
                                 fhsm_slice_t iv,
                                 fhsm_slice_t aad,

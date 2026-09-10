@@ -111,8 +111,6 @@ static const struct { CK_ULONG ckm; const char *name; const char *why; } KNOWN_G
     { 0x000003B0UL, "CKM_PKCS5_PBKD2",               "C_DeriveKey: ECDH1 only" },
     { 0x00001052UL, "CKM_X25519_DERIVE",             "C_DeriveKey: ECDH1 only" },
     { 0x00001054UL, "CKM_X448_DERIVE",               "C_DeriveKey: ECDH1 only" },
-    { 0x0000402AUL, "CKM_HKDF_DERIVE",               "C_DeriveKey: ECDH1 only" },
-    { 0x0000402BUL, "CKM_HKDF_DATA",                 "C_DeriveKey: ECDH1 only" },
     /* KMAC and the two hybrids: handlers exist, the entry points do not know
      * the mechanism. No external harness has ever reported these three --
      * pkcs11-check tests what it has vectors for, and it has none here. */
