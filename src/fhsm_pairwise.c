@@ -49,6 +49,61 @@ static const uint8_t s_digest_sha256[32] = {
 };
 
 /* ---------------------------------------------------------------------------
+ * X25519 / X448 : recompute the public key from the private key alone and
+ * compare it with the one generation produced.
+ *
+ * The other families here are round trips -- sign then verify, encrypt then
+ * decrypt, encapsulate then decapsulate. A Montgomery key does none of those:
+ * it exists only for key agreement, and there is no second party at key
+ * generation time. SP 800-56A describes the check for a key-agreement pair as
+ * regenerating the public key from the private one and comparing, which is
+ * what this does.
+ *
+ * The caveat, stated because it is easy to overlook: OpenSSL derives the
+ * public key from the private one using the same code that generated it, so
+ * this detects corruption of the pair -- a truncated scalar, a mismatched
+ * half, a memory fault between generation and storage -- and not a fault in
+ * the scalar multiplication itself. That is true of every check in this file:
+ * pairwise_pq_sign() verifies with the same implementation that signed.
+ * ----------------------------------------------------------------------- */
+static fhsm_rv_t pairwise_ecm(EVP_PKEY *pkey) {
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    uint8_t priv[64], pub_gen[64], pub_recomputed[64];
+    size_t priv_len = 0, pub_gen_len = 0, pub_recomputed_len = 0;
+    EVP_PKEY *from_priv = NULL;
+    const char *alg = NULL;
+
+    if (EVP_PKEY_is_a(pkey, "X25519"))     alg = "X25519";
+    else if (EVP_PKEY_is_a(pkey, "X448"))  alg = "X448";
+    else goto done;
+
+    if (EVP_PKEY_get_raw_private_key(pkey, NULL, &priv_len) != 1
+        || priv_len == 0 || priv_len > sizeof(priv)) goto done;
+    if (EVP_PKEY_get_raw_private_key(pkey, priv, &priv_len) != 1) goto done;
+
+    pub_gen_len = sizeof(pub_gen);
+    if (EVP_PKEY_get_raw_public_key(pkey, pub_gen, &pub_gen_len) != 1) goto done;
+
+    /* The recomputation: a key object built from the private half alone. */
+    from_priv = EVP_PKEY_new_raw_private_key_ex(NULL, alg, NULL, priv, priv_len);
+    if (!from_priv) goto done;
+    pub_recomputed_len = sizeof(pub_recomputed);
+    if (EVP_PKEY_get_raw_public_key(from_priv, pub_recomputed,
+                                     &pub_recomputed_len) != 1) goto done;
+
+    if (pub_recomputed_len == pub_gen_len
+        && CRYPTO_memcmp(pub_recomputed, pub_gen, pub_gen_len) == 0)
+        rv = FHSM_RV_OK;
+
+done:
+    EVP_PKEY_free(from_priv);
+    OPENSSL_cleanse(priv, sizeof priv);
+    OPENSSL_cleanse(pub_gen, sizeof pub_gen);
+    OPENSSL_cleanse(pub_recomputed, sizeof pub_recomputed);
+    return rv;
+}
+
+/* ---------------------------------------------------------------------------
  * RSA : public encrypt + private decrypt round trip.
  * Uses PKCS#1 v1.5 padding for simplicity (any padding works for this
  * test, but PKCS#1 v1.5 is the minimum baseline).
@@ -179,6 +234,7 @@ fhsm_rv_t fhsm_pairwise_check(EVP_PKEY *pkey, fhsm_pairwise_family_t family) {
     case FHSM_PAIRWISE_ML_DSA:  return pairwise_pq_sign(pkey);
     case FHSM_PAIRWISE_SLH_DSA: return pairwise_pq_sign(pkey);
     case FHSM_PAIRWISE_EDDSA:   return pairwise_pq_sign(pkey);
+    case FHSM_PAIRWISE_ECM:     return pairwise_ecm(pkey);
     default:                    return FHSM_RV_ARGUMENTS_BAD;
     }
 }

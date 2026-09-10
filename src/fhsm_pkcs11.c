@@ -3810,6 +3810,8 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 /* 0x1055, as advertised by fhsm_mechanism_table[]. Read from the generated
  * table rather than assumed: 0x1056 next to it is EC_MONTGOMERY. */
 #define CKM_EC_EDWARDS_KEY_PAIR_GEN 0x00001055UL
+#define CKM_EC_MONTGOMERY_KEY_PAIR_GEN 0x00001056UL
+#define CKK_EC_MONTGOMERY_KT        0x00000041UL  /* CKK_EC_MONTGOMERY */
 #define CKK_RSA                    0x00000000UL
 #define CKK_EC                     0x00000003UL
 #define CKA_MODULUS_BITS           0x00000121UL
@@ -3880,6 +3882,28 @@ static const char *match_ed_curve(const uint8_t *der, size_t len) {
     for (size_t i = 0; i < sizeof(ed_curves)/sizeof(ed_curves[0]); ++i) {
         if (ed_curves[i].len == len && memcmp(ed_curves[i].der, der, len) == 0)
             return ed_curves[i].name;
+    }
+    return NULL;
+}
+
+/* CKA_EC_PARAMS for CKK_EC_MONTGOMERY. Only the curve OIDs, whose values
+ * RFC 8410 fixes: id-X25519 = 1.3.101.110, id-X448 = 1.3.101.111.
+ *
+ * The Edwards table beside this one also accepts a PrintableString naming the
+ * curve, because the pkcs11-check vectors were seen sending that form. No
+ * such observation exists for Montgomery, and the exact spelling is not
+ * something to invent -- an entry with the wrong string or the wrong length
+ * byte would sit here looking verified. If a caller turns up sending one, the
+ * measurement will say so and the entry gets added then. */
+static const struct { const uint8_t *der; size_t len; const char *name; } ecm_curves[] = {
+    { (const uint8_t*)"\x06\x03\x2B\x65\x6E",                       5, "X25519" },
+    { (const uint8_t*)"\x06\x03\x2B\x65\x6F",                       5, "X448"   },
+};
+
+static const char *match_ecm_curve(const uint8_t *der, size_t len) {
+    for (size_t i = 0; i < sizeof(ecm_curves)/sizeof(ecm_curves[0]); ++i) {
+        if (ecm_curves[i].len == len && memcmp(ecm_curves[i].der, der, len) == 0)
+            return ecm_curves[i].name;
     }
     return NULL;
 }
@@ -4080,6 +4104,22 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, alg);
         ckk_type = CKK_EC_EDWARDS_CREATEOBJECT;
         pw_family = FHSM_PAIRWISE_EDDSA;
+    } else if (pMechanism->mechanism == CKM_EC_MONTGOMERY_KEY_PAIR_GEN) {
+        /* Advertised and refused until now, like its Edwards neighbour. The
+         * keys it makes are what CKM_X25519_DERIVE and CKM_X448_DERIVE will
+         * need; those two are still in
+         * tests/test_advertised_operational's KNOWN_GAPS. Default X25519 when
+         * CKA_EC_PARAMS is absent. */
+        const char *alg = "X25519";
+        long i = find_attr(pPub, ulPub, CKA_EC_PARAMS);
+        if (i >= 0 && pPub[i].pValue) {
+            const char *m = match_ecm_curve(pPub[i].pValue, pPub[i].ulValueLen);
+            if (!m) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            alg = m;
+        }
+        pkey = EVP_PKEY_Q_keygen(NULL, NULL, alg);
+        ckk_type = CKK_EC_MONTGOMERY_KT;
+        pw_family = FHSM_PAIRWISE_ECM;
     } else if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN) {
         /* CKA_PARAMETER_SET = ASCII "ML-KEM-512" | "ML-KEM-768" |
          * "ML-KEM-1024". Default to 768 (NIST level 3). */

@@ -66,6 +66,11 @@ typedef enum {
      * digest, exactly as ML-DSA and SLH-DSA do, so this family runs the same
      * sign-then-verify check rather than one of its own. */
     FHSM_PAIRWISE_EDDSA    = 6,
+    /* X25519 / X448. Not a round trip: a Montgomery key only agrees, and
+     * there is no second party at generation time. The public key is
+     * recomputed from the private one and compared, as SP 800-56A describes
+     * for a key-agreement pair. */
+    FHSM_PAIRWISE_ECM      = 7,
 } fhsm_pairwise_family_t;
 
 /* Run the pair-wise consistency check on `pkey` (which must contain
