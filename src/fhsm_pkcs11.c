@@ -4354,6 +4354,50 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
                 else { memcpy(out, oid, oid_len); *out_len = oid_len; rc = 0; }
             }
         }
+    } else if (kt == CKK_EC_EDWARDS_CREATEOBJECT
+               && (type == CKA_EC_PARAMS_QUERY || type == CKA_EC_POINT)) {
+        /* Edwards keys had neither attribute. This branch tested kt == CKK_EC
+         * only, so an application could generate or import an Ed25519 key and
+         * never read its public part back -- which leaves the key unusable for
+         * a certificate request or for publication, whatever the signature
+         * path can do with it. pkcs11-check reads CKA_EC_PARAMS after
+         * generation (TestEdDSAKeyGeneration::test_ed25519_ec_params) and got
+         * nothing; CKA_EC_POINT was missing beside it, unasked.
+         *
+         * Which curve is read from the key rather than remembered: an Ed448
+         * key answering with the Ed25519 OID would be worse than answering
+         * nothing. */
+        int is_25519 = EVP_PKEY_is_a(pkey, "ED25519");
+        if (is_25519 || EVP_PKEY_is_a(pkey, "ED448")) {
+            if (type == CKA_EC_PARAMS_QUERY) {
+                const uint8_t *oid = is_25519
+                    ? (const uint8_t*)"\x06\x03\x2B\x65\x70"
+                    : (const uint8_t*)"\x06\x03\x2B\x65\x71";
+                if (*out_len < 5) { *out_len = 5; rc = -2; }
+                else { memcpy(out, oid, 5); *out_len = 5; rc = 0; }
+            } else {
+                /* CKA_EC_POINT is the RFC 8032 public key, DER-wrapped as an
+                 * OCTET STRING. The import path accepts both that and the
+                 * bare form, because both are in use; what is produced here
+                 * is the one the specification describes. */
+                uint8_t raw[64]; size_t raw_len = 0;
+                if (EVP_PKEY_get_octet_string_param(pkey, "pub", raw,
+                                                     sizeof(raw), &raw_len) != 1)
+                    raw_len = 0;
+                if (raw_len > 0 && raw_len <= 127) {
+                    size_t total = 2 + raw_len;
+                    if (*out_len < total) { *out_len = total; rc = -2; }
+                    else {
+                        out[0] = 0x04;
+                        out[1] = (uint8_t)raw_len;
+                        memcpy(out + 2, raw, raw_len);
+                        *out_len = total;
+                        rc = 0;
+                    }
+                }
+                OPENSSL_cleanse(raw, sizeof raw);
+            }
+        }
     }
     EVP_PKEY_free(pkey);
     return rc;

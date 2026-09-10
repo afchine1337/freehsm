@@ -68,6 +68,12 @@ static const char *ec_oid_to_group(const uint8_t *oid, size_t oid_len) {
 static const uint8_t k_ed25519_oid[] = { 0x06, 0x03, 0x2b, 0x65, 0x70 };
 static const uint8_t k_ed448_oid[]   = { 0x06, 0x03, 0x2b, 0x65, 0x71 };
 
+/* RFC 8032 public key lengths. Used to tell a bare CKA_EC_POINT from a
+ * DER-wrapped one: the wrapper adds at least two bytes, so an exact match
+ * on these can only be the bare form. */
+#define FHSM_ED25519_PUBKEY_LEN 32u
+#define FHSM_ED448_PUBKEY_LEN   57u
+
 /* ---------------------------------------------------------------------------
  * Read a CK_ULONG from an attribute's pValue, assuming the value is at
  * least sizeof(unsigned long) bytes. Returns 0 on failure.
@@ -156,12 +162,39 @@ static fhsm_parse_rv_t parse_ed_pub(
     else
         return FHSM_PARSE_ATTRIBUTE_VALUE_INVALID;
 
+    /* CKA_EC_POINT for an Edwards key arrives in two shapes in the field: the
+     * DER OCTET STRING the specification describes, and the bare RFC 8032
+     * public key. Both are in use -- pkcs11-check's CCTV suite sends the bare
+     * form, OpenSC sends the wrapper -- and accepting only one is
+     * indistinguishable, from outside, from not supporting Ed25519 import at
+     * all: 397 vectors reported "CCTV Ed25519 public-key import not
+     * operational: CKR_ATTRIBUTE_VALUE_INVALID".
+     *
+     * C_DeriveKey's ECDH path already accepts a SPKI, a wrapped point and a
+     * bare point, with a comment explaining why. That tolerance was never
+     * carried across to this parser.
+     *
+     * The bare form is admitted only at exactly the curve's key length, which
+     * is unambiguous: a DER OCTET STRING carrying 32 bytes is 34 bytes long,
+     * so no wrapped value can be mistaken for a bare one. A wrapper that is
+     * malformed rather than absent still fails, since it will not have the
+     * exact length either. */
+    const uint8_t *raw = (const uint8_t *)t[ipt].pValue;
+    size_t raw_len = (size_t)t[ipt].ulValueLen;
+    const size_t bare_len = (ed_path == FHSM_CREATE_PATH_ED25519_PUB)
+                            ? FHSM_ED25519_PUBKEY_LEN : FHSM_ED448_PUBKEY_LEN;
+
     const uint8_t *point = NULL;
     size_t point_len = 0;
-    if (!fhsm_strip_octet_string_inline(
-            (const uint8_t *)t[ipt].pValue, (size_t)t[ipt].ulValueLen,
-            &point, &point_len))
+    if (fhsm_strip_octet_string_inline(raw, raw_len, &point, &point_len)) {
+        /* Wrapped: the payload must still be the curve's key length. */
+        if (point_len != bare_len) return FHSM_PARSE_ATTRIBUTE_VALUE_INVALID;
+    } else if (raw_len == bare_len) {
+        point = raw;
+        point_len = raw_len;
+    } else {
         return FHSM_PARSE_ATTRIBUTE_VALUE_INVALID;
+    }
     attrs->ec_point     = point;
     attrs->ec_point_len = point_len;
     attrs->ec_group     = NULL;     /* curve identity carried by the path */
