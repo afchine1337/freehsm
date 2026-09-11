@@ -68,6 +68,8 @@
 #include <openssl/core.h>     /* OSSL_PARAM */
 #include <openssl/core_names.h>
 #include <openssl/kdf.h>      /* EVP_KDF_HKDF_MODE_* : C_DeriveKey HKDF path */
+#include <openssl/ec.h>       /* EC_GROUP / EC_POINT : EC private-key import */
+#include <openssl/objects.h>  /* OBJ_sn2nid, NID_undef */
 #include <openssl/param_build.h> /* OSSL_PARAM_BLD */
 #include <openssl/err.h>      /* ERR_peek_last_error (ML-KEM debug only) */
 #include <openssl/ecdsa.h>    /* ECDSA_SIG_new / d2i / i2d  for raw r||s conversion */
@@ -2282,6 +2284,19 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 #ifndef CKK_RSA_CREATEOBJECT
 #define CKK_RSA_CREATEOBJECT 0x00000000UL  /* CKK_RSA */
 #endif
+#ifndef CKK_EC_MONTGOMERY_KT
+#define CKK_EC_MONTGOMERY_KT 0x00000041UL  /* CKK_EC_MONTGOMERY */
+#endif
+/* Defined near C_GenerateKeyPair, used by C_CreateObject a thousand lines
+ * earlier: the private-key import path needs the same curve tables that the
+ * generation path matches CKA_EC_PARAMS against, so that a curve the module
+ * can generate is a curve it can also be given. */
+static const char *match_curve(const uint8_t *der, size_t len);
+static const char *match_ed_curve(const uint8_t *der, size_t len);
+static const char *match_ecm_curve(const uint8_t *der, size_t len);
+static EVP_PKEY *fhsm_ec_priv_from_scalar(const char *curve,
+                                           const uint8_t *d, size_t d_len);
+
 #ifndef CKK_EC_EDWARDS_CREATEOBJECT
 #define CKK_EC_EDWARDS_CREATEOBJECT 0x00000040UL  /* CKK_EC_EDWARDS */
 #endif
@@ -2419,18 +2434,72 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     if (a.path == FHSM_CREATE_PATH_VERBATIM) {
         uint8_t flags = (a.cko == CKO_PRIVATE_KEY) ? FHSM_OBJF_SENSITIVE : 0;
         flags |= trusted_flag;   /* CKA_LOCAL stays 0: imported, not generated */
+
+        /* An asymmetric private key is NOT verbatim material.
+         *
+         * PKCS#11 v3.0 §2.3.3 defines CKA_VALUE for a CKK_EC private key as
+         * the X9.62 private value d -- a big-endian integer -- with the curve
+         * in CKA_EC_PARAMS. For CKK_EC_EDWARDS and CKK_EC_MONTGOMERY it is
+         * the RFC 8032 / RFC 7748 private key bytes. None of those is what
+         * this module stores: every reader here calls d2i_AutoPrivateKey(),
+         * which wants DER.
+         *
+         * So a standards-conforming import was accepted, stored as the raw
+         * scalar, and failed at every later use with CKR_FUNCTION_FAILED.
+         * Key generation was unaffected because it produces DER itself, which
+         * is why the defect survived: the module could always use the keys it
+         * made, and never the ones it was given. 7,185 Wycheproof ECDH
+         * vectors reported it as "advertised ECDH derive is not operational",
+         * across secp384r1, secp521r1 and the brainpool curves.
+         *
+         * The conversion happens here rather than in fhsm_create_attrs.c,
+         * which is deliberately free of any OpenSSL dependency. */
+        const uint8_t *store_data = a.value_data;
+        size_t store_len = a.value_len;
+        uint8_t *der = NULL;
+        if (a.cko == CKO_PRIVATE_KEY && a.value_data && a.value_len) {
+            EVP_PKEY *ipk = NULL;
+            if (a.ckk == CKK_EC_CREATEOBJECT) {
+                long pi = find_attr(pTemplate, ulCount, CKA_EC_PARAMS);
+                if (pi < 0 || !pTemplate[pi].pValue) return CKR_TEMPLATE_INCOMPLETE;
+                const char *curve = match_curve(pTemplate[pi].pValue,
+                                                 pTemplate[pi].ulValueLen);
+                if (!curve) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                ipk = fhsm_ec_priv_from_scalar(curve, a.value_data, a.value_len);
+            } else if (a.ckk == CKK_EC_EDWARDS_CREATEOBJECT
+                       || a.ckk == CKK_EC_MONTGOMERY_KT) {
+                long pi = find_attr(pTemplate, ulCount, CKA_EC_PARAMS);
+                if (pi < 0 || !pTemplate[pi].pValue) return CKR_TEMPLATE_INCOMPLETE;
+                const char *alg = (a.ckk == CKK_EC_EDWARDS_CREATEOBJECT)
+                    ? match_ed_curve(pTemplate[pi].pValue, pTemplate[pi].ulValueLen)
+                    : match_ecm_curve(pTemplate[pi].pValue, pTemplate[pi].ulValueLen);
+                if (!alg) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                ipk = EVP_PKEY_new_raw_private_key_ex(NULL, alg, NULL,
+                                                       a.value_data, a.value_len);
+            }
+            if (a.ckk == CKK_EC_CREATEOBJECT
+                || a.ckk == CKK_EC_EDWARDS_CREATEOBJECT
+                || a.ckk == CKK_EC_MONTGOMERY_KT) {
+                if (!ipk) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                int dlen = i2d_PrivateKey(ipk, &der);
+                EVP_PKEY_free(ipk);
+                if (dlen <= 0) { OPENSSL_free(der); return FHSM_RV_FUNCTION_FAILED; }
+                store_data = der;
+                store_len = (size_t)dlen;
+            }
+        }
+
         uint32_t handle = 0;
         fhsm_rv_t rv = fhsm_token_object_add(
             t, (uint32_t)a.cko, (uint32_t)a.ckk,
-            a.label, a.value_data, a.value_len,
+            a.label, store_data, store_len,
             a.id_data, a.id_len, flags, &handle);
+        if (der) { OPENSSL_cleanse(der, store_len); OPENSSL_free(der); }
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
         { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
           if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
-    { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
-      if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
         (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
         return FHSM_RV_OK;
     }
@@ -2452,8 +2521,6 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
         { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
           if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
-    { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
-      if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
         (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
         return FHSM_RV_OK;
     }
@@ -2717,6 +2784,12 @@ typedef struct CK_HKDF_PARAMS_s {
  * limit; this one is the token object store's practical ceiling and is
  * enforced rather than assumed, since both inputs come from the caller. */
 #define FHSM_DERIVE_MAX 4096u
+
+/* Largest ECDH shared secret the module can produce: the field size of the
+ * largest curve it supports. P-521 is ceil(521/8) = 66 bytes; brainpoolP512
+ * is 64. 128 leaves room for a larger curve without making the guard
+ * meaningless -- a nonsensical length still gets refused. */
+#define FHSM_ECDH_Z_MAX 128u
 
 CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                    CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
@@ -2997,9 +3070,35 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (!pctx || EVP_PKEY_fromdata_init(pctx) != 1
             || EVP_PKEY_fromdata(pctx, &peer, EVP_PKEY_PUBLIC_KEY, peer_params) != 1) {
             if (pctx) EVP_PKEY_CTX_free(pctx);
-            EVP_PKEY_free(priv); return FHSM_RV_FUNCTION_FAILED;
+            /* The peer point came from the caller's parameter block, so a
+             * point that will not parse is bad input, not an internal
+             * failure. This returned CKR_FUNCTION_FAILED, which tells a
+             * caller the module broke rather than that its argument was
+             * wrong. */
+            EVP_PKEY_free(priv); return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         }
         EVP_PKEY_CTX_free(pctx);
+    }
+
+    /* The peer's point must be on the curve, checked deliberately rather than
+     * left to whatever OpenSSL happens to reject downstream.
+     *
+     * This is the invalid-curve attack: a peer that offers a point on a
+     * different, weaker curve learns the private scalar modulo that curve's
+     * small order, and repeats until the scalar is recovered. The module did
+     * refuse such points -- the derive failed somewhere -- but refusing by
+     * accident is not a defence, it is a coincidence that holds until the
+     * accident stops happening. pkcs11-check flags it on the return code:
+     * "ECDH derive with off_curve EC public point (invalid-curve attack) ...
+     * got CKR_FUNCTION_FAILED". */
+    {
+        EVP_PKEY_CTX *chk = EVP_PKEY_CTX_new_from_pkey(NULL, peer, NULL);
+        int on_curve = (chk != NULL && EVP_PKEY_public_check(chk) == 1);
+        EVP_PKEY_CTX_free(chk);
+        if (!on_curve) {
+            EVP_PKEY_free(peer); EVP_PKEY_free(priv);
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        }
     }
 
     /* Derive the shared secret. */
@@ -3010,13 +3109,22 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         EVP_PKEY_free(peer); EVP_PKEY_free(priv);
         return FHSM_RV_FUNCTION_FAILED;
     }
+    /* The shared secret is the size of the curve's field, not of a hash
+     * output. P-521 gives ceil(521/8) = 66 bytes, so the 64 this carried --
+     * a byte count borrowed from the digest paths -- refused every P-521
+     * agreement with CKR_FUNCTION_FAILED. 637 Wycheproof secp521r1 vectors
+     * reported it as "advertised ECDH derive is not operational".
+     *
+     * The bound stays, because z is on the stack and z_len comes from
+     * OpenSSL: it is raised to a value no supported curve can exceed rather
+     * than removed. */
     size_t z_len = 0;
     EVP_PKEY_derive(dctx, NULL, &z_len);
-    if (z_len == 0 || z_len > 64) {
+    if (z_len == 0 || z_len > FHSM_ECDH_Z_MAX) {
         EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(peer); EVP_PKEY_free(priv);
         return FHSM_RV_FUNCTION_FAILED;
     }
-    uint8_t z[64];
+    uint8_t z[FHSM_ECDH_Z_MAX];
     if (EVP_PKEY_derive(dctx, z, &z_len) != 1) {
         EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(peer); EVP_PKEY_free(priv);
         return FHSM_RV_FUNCTION_FAILED;
@@ -3811,7 +3919,6 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
  * table rather than assumed: 0x1056 next to it is EC_MONTGOMERY. */
 #define CKM_EC_EDWARDS_KEY_PAIR_GEN 0x00001055UL
 #define CKM_EC_MONTGOMERY_KEY_PAIR_GEN 0x00001056UL
-#define CKK_EC_MONTGOMERY_KT        0x00000041UL  /* CKK_EC_MONTGOMERY */
 #define CKK_RSA                    0x00000000UL
 #define CKK_EC                     0x00000003UL
 #define CKA_MODULUS_BITS           0x00000121UL
@@ -3906,6 +4013,78 @@ static const char *match_ecm_curve(const uint8_t *der, size_t len) {
             return ecm_curves[i].name;
     }
     return NULL;
+}
+
+/* Build an EC private key from the X9.62 private value d and a curve name.
+ *
+ * The public point is computed here (d * G) rather than left to
+ * EVP_PKEY_fromdata: given only "group" and "priv", OpenSSL's behaviour has
+ * varied across 3.x, and a key object whose public half is absent or lazily
+ * filled is not something to rely on in an import path. EC_GROUP and
+ * EC_POINT are current API in 3.x; it is EC_KEY that is deprecated.
+ *
+ * Returns NULL if the scalar is out of range for the curve, which is the
+ * answer for a d of zero, a d >= n, or a truncated value. */
+static EVP_PKEY *fhsm_ec_priv_from_scalar(const char *curve,
+                                           const uint8_t *d, size_t d_len) {
+    EVP_PKEY *out = NULL;
+    EC_GROUP *group = NULL;
+    EC_POINT *pub = NULL;
+    BIGNUM *priv = NULL;
+    OSSL_PARAM_BLD *bld = NULL;
+    OSSL_PARAM *params = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+    uint8_t *pub_oct = NULL;
+    size_t pub_len = 0;
+
+    int nid = EC_curve_nist2nid(curve);
+    if (nid == NID_undef) nid = OBJ_sn2nid(curve);
+    if (nid == NID_undef) goto done;
+    group = EC_GROUP_new_by_curve_name(nid);
+    if (!group) goto done;
+
+    /* d_len is caller-supplied. BN_bin2bn takes an int, so the value is
+     * bounded before the conversion rather than cast across it: no private
+     * scalar of any supported curve exceeds 66 bytes, and a length that does
+     * is a malformed attribute, not a large key. */
+    if (d_len == 0 || d_len > 132) goto done;
+    priv = BN_bin2bn(d, (int)d_len, NULL);
+    if (!priv || BN_is_zero(priv)) goto done;
+    if (BN_cmp(priv, EC_GROUP_get0_order(group)) >= 0) goto done;
+
+    pub = EC_POINT_new(group);
+    if (!pub || EC_POINT_mul(group, pub, priv, NULL, NULL, NULL) != 1) goto done;
+    pub_len = EC_POINT_point2oct(group, pub, POINT_CONVERSION_UNCOMPRESSED,
+                                  NULL, 0, NULL);
+    if (pub_len == 0) goto done;
+    pub_oct = OPENSSL_malloc(pub_len);
+    if (!pub_oct) goto done;
+    if (EC_POINT_point2oct(group, pub, POINT_CONVERSION_UNCOMPRESSED,
+                            pub_oct, pub_len, NULL) != pub_len) goto done;
+
+    bld = OSSL_PARAM_BLD_new();
+    if (!bld) goto done;
+    if (OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME,
+                                         (char*)curve, 0) != 1
+        || OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, priv) != 1
+        || OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY,
+                                             pub_oct, pub_len) != 1) goto done;
+    params = OSSL_PARAM_BLD_to_param(bld);
+    if (!params) goto done;
+
+    ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+    if (!ctx || EVP_PKEY_fromdata_init(ctx) != 1) goto done;
+    if (EVP_PKEY_fromdata(ctx, &out, EVP_PKEY_KEYPAIR, params) != 1) out = NULL;
+
+done:
+    EVP_PKEY_CTX_free(ctx);
+    OSSL_PARAM_free(params);
+    OSSL_PARAM_BLD_free(bld);
+    OPENSSL_free(pub_oct);
+    EC_POINT_free(pub);
+    BN_clear_free(priv);
+    EC_GROUP_free(group);
+    return out;
 }
 
 static const char *match_curve(const uint8_t *der, size_t len) {

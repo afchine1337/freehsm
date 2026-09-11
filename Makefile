@@ -645,6 +645,14 @@ tests/test_derive_concat: tests/test_derive_concat.c $(LIB)
 tests/test_derive_hkdf: tests/test_derive_hkdf.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl $(LDFLAGS)
 
+# ECDH end to end on each supported curve: generate, read the public point,
+# derive, then import a private key the standards-conforming way (X9.62 d +
+# CKA_EC_PARAMS) and derive with that. The import half is what 7,185
+# Wycheproof vectors were failing on, invisibly, because C_CreateObject
+# accepted the key and only its use failed.
+tests/probe_ecdh_curves: tests/probe_ecdh_curves.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # FIPS-approved digest/HMAC mechanisms advertised but previously not
 # callable (#125) : SHA-224, SHA-512/t, SHA-3, and their HMACs.
 tests/test_fips_digests: tests/test_fips_digests.c $(LIB)
@@ -688,7 +696,7 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 # beside the tokens, so any test that initialises the module writes there.
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
-tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_advertised_operational tests/test_derive_concat tests/test_derive_hkdf tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tools/fhsm-token
+tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_advertised_operational tests/test_derive_concat tests/test_derive_hkdf tests/probe_ecdh_curves tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tools/fhsm-token
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_tpm
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
@@ -732,6 +740,8 @@ tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cb
 		$(TEST_LD) ./tests/test_derive_concat
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_derive_hkdf
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/probe_ecdh_curves
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_fips_digests
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
