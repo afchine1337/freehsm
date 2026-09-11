@@ -967,7 +967,7 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00000363u, "CKM_CONCATENATE_DATA_AND_BASE", "KDF-concat", "derive", 1, dispatch_concat_data_and_base },
     { 0x00000364u, "CKM_XOR_BASE_AND_DATA", "KDF-concat", "derive", 1, dispatch_xor_base_and_data },
     { 0x00000384u, "CKM_NIST_PRF_KDF", "KDF", "derive", 1, dispatch_nist_prf_kdf },
-    { 0x000003B0u, "CKM_PKCS5_PBKD2", "PBKDF2", "derive", 1, dispatch_pbkdf2 },
+    { 0x000003B0u, "CKM_PKCS5_PBKD2", "PBKDF2", "keygen", 1, dispatch_pbkdf2 },
     { 0x00001040u, "CKM_EC_KEY_PAIR_GEN", "EC", "keypair", 1, dispatch_ec_keypair },
     { 0x00001041u, "CKM_ECDSA", "EC", "sign", 1, dispatch_ecdsa },
     { 0x00001044u, "CKM_ECDSA_SHA256", "EC", "sign", 1, dispatch_ecdsa_sha256 },

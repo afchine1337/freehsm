@@ -141,6 +141,11 @@ size_t fhsm_hash_size(fhsm_hash_t h);
  * same table as fhsm_hmac() and fhsm_pbkdf2() rather than a second copy. */
 const char *fhsm_hash_openssl_name(fhsm_hash_t h);
 
+/* Largest output fhsm_pbkdf2() will produce. RFC 2898 bounds PBKDF2 at
+ * (2^32 - 1) * hLen, which is no bound at all; this one exists so the
+ * callers' stack buffers have a number to be sized against. */
+#define FHSM_PBKDF2_MAX_OUT 256u
+
 fhsm_rv_t fhsm_hash_oneshot(fhsm_hash_t alg,
                              fhsm_slice_t data,
                              uint8_t *out,

@@ -393,10 +393,16 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", refs=("SP 800-56C rev. 2",)),
 
     # === PBKDF2 / SP 800-132 ==========================================
-    Mech("CKM_PKCS5_PBKD2",        0x000003B0, "PBKDF2","derive", "dispatch_pbkdf2",
+    # "keygen", not "derive". PKCS#11 v3.2 6.28 defines CKM_PKCS5_PBKD2 as a
+    # key generation mechanism used with C_GenerateKey, and the flag that
+    # follows from the operation is CKF_GENERATE. Advertising CKF_DERIVE sent
+    # callers to C_DeriveKey, where the mechanism does not exist.
+    Mech("CKM_PKCS5_PBKD2",        0x000003B0, "PBKDF2","keygen", "dispatch_pbkdf2",
          fips="approved",
          refs=("SP 800-132", "PKCS #5 v2.1"),
-         notes="Minimum 200_000 iterations enforced by fhsm_pbkdf2()."),
+         notes="C_GenerateKey with CK_PKCS5_PBKD2_PARAMS2. fhsm_pbkdf2() "
+               "enforces the SP 800-132 minimum of 1,000 iterations; the "
+               "token's own KEK passes 200,000."),
 
     # === DRBG / RNG ===================================================
     Mech("CKM_NIST_PRF_KDF",       0x00000384, "KDF",  "derive",  "dispatch_nist_prf_kdf",

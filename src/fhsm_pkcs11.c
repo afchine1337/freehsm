@@ -1597,6 +1597,15 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
 #define CKA_PUBLIC_EXPONENT 0x00000122UL
 #define CKA_EC_POINT        0x00000181UL
 #define CKA_EC_PARAMS_QUERY 0x00000180UL  /* alias for query path */
+/* Template return codes. Here rather than beside C_CreateObject, which is
+ * where they used to live: C_GenerateKey is two hundred lines earlier and
+ * needs them too. */
+#ifndef CKR_TEMPLATE_INCOMPLETE
+#define CKR_TEMPLATE_INCOMPLETE   0x000000D0UL
+#endif
+#ifndef CKR_TEMPLATE_INCONSISTENT
+#define CKR_TEMPLATE_INCONSISTENT 0x000000D1UL
+#endif
 #define CKA_ENCRYPT_ATTR    0x00000104UL
 #define CKA_DECRYPT_ATTR    0x00000105UL
 #define CKA_WRAP_ATTR       0x00000106UL
@@ -2157,6 +2166,90 @@ CK_RV C_Digest(CK_SESSION_HANDLE hSession, unsigned char *pData,
 #define CKM_AES_KEY_GEN     0x00001080UL
 #define CKM_GENERIC_SECRET_KEY_GEN  0x00000350UL
 
+/* CK_PKCS5_PBKD2_PARAMS2 (PKCS#11 v2.40 and later). Field order and types
+ * read from the OASIS layout by way of pkcs11-check's raw/types_std.py.
+ *
+ * The trap this struct is famous for: the older CK_PKCS5_PBKD2_PARAMS ends
+ * with a CK_ULONG *pointer* to the password length, PARAMS2 with the length
+ * itself. Reading one as the other dereferences a length or takes a pointer
+ * for a count. Only PARAMS2 is accepted here, and the size check below is
+ * what refuses the older shape rather than misreading it. */
+typedef struct CK_PKCS5_PBKD2_PARAMS2_s {
+    CK_ULONG  saltSource;
+    void     *pSaltSourceData;
+    CK_ULONG  ulSaltSourceDataLen;
+    CK_ULONG  iterations;
+    CK_ULONG  prf;
+    void     *pPrfData;
+    CK_ULONG  ulPrfDataLen;
+    void     *pPassword;
+    CK_ULONG  ulPasswordLen;
+} CK_PKCS5_PBKD2_PARAMS2;
+
+#define CKZ_SALT_SPECIFIED               0x00000001UL
+#define CKM_PKCS5_PBKD2_OP               0x000003B0UL
+
+/* Derive the key material for CKM_PKCS5_PBKD2. Returns a CKR_ on failure.
+ *
+ * The password arrives in the caller's parameter block and is not copied
+ * anywhere: it is handed straight to fhsm_pbkdf2() and never stored. Nothing
+ * here logs it, and the derived key carries no trace of it. */
+static CK_RV pbkd2_material(CK_MECHANISM *pMechanism,
+                             uint8_t *out, size_t out_len) {
+    if (!pMechanism->pParameter
+        || pMechanism->ulParameterLen < sizeof(CK_PKCS5_PBKD2_PARAMS2))
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    CK_PKCS5_PBKD2_PARAMS2 p;
+    memcpy(&p, pMechanism->pParameter, sizeof(p));
+
+    /* CKZ_SALT_SPECIFIED is the only source PKCS#11 defines; the others were
+     * reserved and never assigned. An unknown value is refused rather than
+     * treated as "no salt", which would derive a different key in silence. */
+    if (p.saltSource != CKZ_SALT_SPECIFIED)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (p.ulSaltSourceDataLen > 0x7FFFFFFFUL) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (!p.pSaltSourceData && p.ulSaltSourceDataLen != 0)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (p.ulPasswordLen > 0x7FFFFFFFUL) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (!p.pPassword && p.ulPasswordLen != 0)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    /* pPrfData is unused -- no PRF defined here takes any -- but its length
+     * still has to be honourable. It was left unchecked, so a 2^63 value
+     * passed through and the failure surfaced as CKR_FUNCTION_FAILED instead
+     * of naming the bad parameter. The field being ignored is not a reason to
+     * accept nonsense in it. */
+    if (p.ulPrfDataLen > 0x7FFFFFFFUL) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (!p.pPrfData && p.ulPrfDataLen != 0)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+    fhsm_hash_t h;
+    switch (p.prf) {
+        case 1: h = FHSM_HASH_SHA1;       break;  /* CKP_PKCS5_PBKD2_HMAC_SHA1 */
+        case 3: h = FHSM_HASH_SHA224;     break;
+        case 4: h = FHSM_HASH_SHA256;     break;
+        case 5: h = FHSM_HASH_SHA384;     break;
+        case 6: h = FHSM_HASH_SHA512;     break;
+        case 7: h = FHSM_HASH_SHA512_224; break;
+        case 8: h = FHSM_HASH_SHA512_256; break;
+        /* 2 is CKP_PKCS5_PBKD2_HMAC_GOSTR3411, which this module does not
+         * implement. Naming it here rather than letting it fall to the
+         * default keeps "not implemented" distinct from "not a PRF". */
+        case 2:
+        default: return FHSM_RV_MECHANISM_PARAM_INVALID;
+    }
+    /* HMAC-SHA-1 inside PBKDF2 is what essentially every PKCS#12 file in
+     * existence uses. SP 800-131A rev. 2 withdrew SHA-1 for signature
+     * generation, not for HMAC -- the same reading already applied to
+     * CKM_SHA_1_HMAC. */
+
+    fhsm_slice_t pw   = FHSM_SLICE(p.pPassword ? p.pPassword : "", p.ulPasswordLen);
+    fhsm_slice_t salt = FHSM_SLICE(p.pSaltSourceData ? p.pSaltSourceData : "",
+                                    p.ulSaltSourceDataLen);
+    fhsm_rv_t rv = fhsm_pbkdf2(h, pw, salt, (uint32_t)p.iterations, out, out_len);
+    if (rv == FHSM_RV_FIPS_NOT_APPROVED) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    return rv;
+}
+
 CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                     CK_OBJECT_HANDLE *phKey) {
@@ -2187,7 +2280,41 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * key, no CKA_VALUE_LEN. Previously keyed off 0x130, which is
      * CKM_DES2_KEY_GEN -- so a caller asking for DES2 got a 24-byte DES3 key
      * and a caller asking for real DES3 got CKR_MECHANISM_INVALID (#125). */
-    if (pMechanism->mechanism == 0x00000131UL) {
+    /* CKM_PKCS5_PBKD2 is a key *generation* mechanism (PKCS#11 v3.2 §6.28),
+     * used with C_GenerateKey. The dispatch table advertised it under "derive"
+     * and therefore with CKF_DERIVE, which sent every caller to C_DeriveKey
+     * and every probe to the wrong entry point -- on top of the mechanism not
+     * being implemented at all. Corrected in gen_p11_thunks.py alongside this.
+     *
+     * The length comes from CKA_VALUE_LEN and is not restricted to the
+     * 16/24/32 the symmetric generators take: PBKDF2 produces whatever length
+     * is asked for, and a PKCS#12 file decides that, not this module. */
+    const int is_pbkd2 = (pMechanism->mechanism == CKM_PKCS5_PBKD2_OP);
+    if (is_pbkd2) {
+        /* Unlike the symmetric generators, the mechanism does not decide the
+         * key type here -- the template does. PBES2 derives an AES key, and
+         * this returned CKK_GENERIC_SECRET regardless, so the key came back
+         * with the wrong CKA_KEY_TYPE and was then refused by the
+         * mechanism<->key-type gate the moment anyone tried to decrypt with
+         * it: 1,343 vectors reading "advertised PBES2 decrypt is not
+         * operational: CKR_KEY_TYPE_INCONSISTENT". One cause, reported twice
+         * -- once as a wrong read-back, once as an unusable key. */
+        key_type = CKK_GENERIC_SECRET;
+        { long kt = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+          if (kt >= 0 && pTemplate[kt].pValue
+              && pTemplate[kt].ulValueLen == sizeof(CK_ULONG)) {
+              CK_ULONG req = 0; memcpy(&req, pTemplate[kt].pValue, sizeof(CK_ULONG));
+              key_type = (uint32_t)req;
+          }
+        }
+        long j = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+        if (j < 0 || !pTemplate[j].pValue
+            || pTemplate[j].ulValueLen != sizeof(CK_ULONG))
+            return CKR_TEMPLATE_INCOMPLETE;
+        CK_ULONG req = 0; memcpy(&req, pTemplate[j].pValue, sizeof(CK_ULONG));
+        if (req == 0 || req > FHSM_PBKDF2_MAX_OUT) return FHSM_RV_KEY_SIZE_RANGE;
+        key_len = (uint32_t)req;
+    } else if (pMechanism->mechanism == 0x00000131UL) {
         if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
         key_type = CKK_DES3; key_len = 24;
     } else {
@@ -2237,8 +2364,17 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             obj_flags |= FHSM_OBJF_EXTRACTABLE;
     }
 
-    uint8_t key[64];
-    fhsm_rv_t rv = fhsm_rng_bytes(key, key_len);
+    /* Sized for PBKDF2's output, not for a hash: the symmetric generators
+     * above use at most 32 of these bytes. */
+    uint8_t key[FHSM_PBKDF2_MAX_OUT];
+    fhsm_rv_t rv;
+    if (is_pbkd2) {
+        CK_RV pr = pbkd2_material(pMechanism, key, key_len);
+        if (pr != FHSM_RV_OK) { OPENSSL_cleanse(key, sizeof key); return pr; }
+        rv = FHSM_RV_OK;
+    } else {
+        rv = fhsm_rng_bytes(key, key_len);
+    }
     if (rv != FHSM_RV_OK) return rv;
 
     uint32_t handle = 0;
@@ -2301,12 +2437,10 @@ static EVP_PKEY *fhsm_ec_priv_from_scalar(const char *curve,
 #ifndef CKK_EC_EDWARDS_CREATEOBJECT
 #define CKK_EC_EDWARDS_CREATEOBJECT 0x00000040UL  /* CKK_EC_EDWARDS */
 #endif
-#ifndef CKR_TEMPLATE_INCOMPLETE
-#define CKR_TEMPLATE_INCOMPLETE   0x000000D0UL
-#endif
-#ifndef CKR_TEMPLATE_INCONSISTENT
-#define CKR_TEMPLATE_INCONSISTENT 0x000000D1UL
-#endif
+/* CKR_TEMPLATE_INCOMPLETE / _INCONSISTENT moved to the constants block near
+ * the top of this TU. They were defined here, a couple of hundred lines below
+ * C_GenerateKey, which is the third place tonight where something in this
+ * file was defined after its first use. */
 
 /* Curve-OID-to-group-name lookup and DER OCTET STRING wrapper stripper
  * used to live here. As part of the v1.2.0 C_CreateObject decomposition,

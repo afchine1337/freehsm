@@ -541,8 +541,26 @@ fhsm_rv_t fhsm_hmac(fhsm_hash_t alg, fhsm_slice_t key, fhsm_slice_t data,
 fhsm_rv_t fhsm_pbkdf2(fhsm_hash_t alg, fhsm_slice_t password, fhsm_slice_t salt,
                        uint32_t iterations, uint8_t *out, size_t out_len) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
-    if (iterations < 200000) return FHSM_RV_FIPS_NOT_APPROVED;
-    if (out_len == 0 || out_len > 64) return FHSM_RV_ARGUMENTS_BAD;
+    /* SP 800-132 §5.2 sets the minimum iteration count at 1,000 and says to
+     * choose as large a value as the application can bear.
+     *
+     * This refused anything under 200,000, which is the value the module
+     * chooses for its own token key-encryption key -- a caller's choice
+     * written into the primitive. The effect was that CKM_PKCS5_PBKD2 could
+     * never open a real PKCS#12 file: those are produced with 2,048 or
+     * 10,000 iterations by the tools that write them, and the module would
+     * have refused every one while advertising the mechanism.
+     *
+     * The policy now sits where policy belongs, with each caller.
+     * fhsm_token.c passes 200,000 explicitly and is unchanged, so the
+     * module is exactly as strict about its own key material as before, and
+     * no longer strict about a file someone hands it. */
+    if (iterations < 1000) return FHSM_RV_FIPS_NOT_APPROVED;
+    /* PBKDF2 produces whatever length is asked for -- RFC 2898 bounds it at
+     * (2^32 - 1) * hLen, which is to say not at all in practice. 64 was the
+     * size of one hash output, a number that belongs to the other functions
+     * in this file and not to this one. */
+    if (out_len == 0 || out_len > FHSM_PBKDF2_MAX_OUT) return FHSM_RV_ARGUMENTS_BAD;
     const char *name = hash_name(alg);
     if (!name) return FHSM_RV_ARGUMENTS_BAD;
 
@@ -551,7 +569,23 @@ fhsm_rv_t fhsm_pbkdf2(fhsm_hash_t alg, fhsm_slice_t password, fhsm_slice_t salt,
     EVP_KDF_CTX *ctx = EVP_KDF_CTX_new(kdf);
     if (!ctx) { EVP_KDF_free(kdf); return FHSM_RV_HOST_MEMORY; }
 
-    OSSL_PARAM params[5];
+    /* OSSL_KDF_PARAM_PKCS5 = 1 turns off the limits OpenSSL's PBKDF2 applies
+     * on its own: a salt of at least 128 bits, at least 1,000 iterations, and
+     * a minimum password length.
+     *
+     * Those are the SP 800-132 recommendations, and they are right for new
+     * key material. They are also not what exists: a PKCS#12 file is written
+     * with an 8-byte salt, and refusing it means the module cannot open the
+     * files it was asked to open. With the limits left on, every PBES2 vector
+     * failed inside OpenSSL with no way to tell a policy refusal from a
+     * malfunction -- the module reported CKR_FUNCTION_FAILED either way.
+     *
+     * So the policy moves here, where it can be stated: this function refuses
+     * fewer than 1,000 iterations above, and lets the caller choose the salt.
+     * The token's own key-encryption key passes 200,000 iterations and a
+     * 16-byte salt, and is unaffected by any of this. */
+    int pkcs5_relax = 1;
+    OSSL_PARAM params[6];
     int p = 0;
     params[p++] = OSSL_PARAM_construct_utf8_string("digest", (char*)name, 0);
     params[p++] = OSSL_PARAM_construct_octet_string("pass",
@@ -559,6 +593,7 @@ fhsm_rv_t fhsm_pbkdf2(fhsm_hash_t alg, fhsm_slice_t password, fhsm_slice_t salt,
     params[p++] = OSSL_PARAM_construct_octet_string("salt",
                     (void*)salt.data, salt.len);
     params[p++] = OSSL_PARAM_construct_uint32("iter", &iterations);
+    params[p++] = OSSL_PARAM_construct_int("pkcs5", &pkcs5_relax);
     params[p]   = OSSL_PARAM_construct_end();
 
     fhsm_rv_t rv = (EVP_KDF_derive(ctx, out, out_len, params) == 1)

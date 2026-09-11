@@ -191,8 +191,8 @@
 
 | Mechanism | Value | Op | FIPS | Handler | Reference |
 |---|---|---|---|---|---|
-| `CKM_PKCS5_PBKD2` | `0x000003B0` | derive | ✅ | `dispatch_pbkdf2` | SP 800-132, PKCS #5 v2.1 |
-| | | | | | _Minimum 200_000 iterations enforced by fhsm_pbkdf2()._ |
+| `CKM_PKCS5_PBKD2` | `0x000003B0` | keygen | ✅ | `dispatch_pbkdf2` | SP 800-132, PKCS #5 v2.1 |
+| | | | | | _C_GenerateKey with CK_PKCS5_PBKD2_PARAMS2. fhsm_pbkdf2() enforces the SP 800-132 minimum of 1,000 iterations; the token's own KEK passes 200,000._ |
 
 ## RC4
 
