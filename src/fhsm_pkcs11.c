@@ -69,7 +69,8 @@
 #include <openssl/core_names.h>
 #include <openssl/kdf.h>      /* EVP_KDF_HKDF_MODE_* : C_DeriveKey HKDF path */
 #include <openssl/ec.h>       /* EC_GROUP / EC_POINT : EC private-key import */
-#include <openssl/objects.h>  /* OBJ_sn2nid, NID_undef */
+#include <openssl/objects.h>  /* OBJ_sn2nid / OBJ_obj2nid, NID_undef */
+#include <openssl/asn1.h>     /* d2i_ASN1_OBJECT : CKA_EC_PARAMS resolution */
 #include <openssl/param_build.h> /* OSSL_PARAM_BLD */
 #include <openssl/err.h>      /* ERR_peek_last_error (ML-KEM debug only) */
 #include <openssl/ecdsa.h>    /* ECDSA_SIG_new / d2i / i2d  for raw r||s conversion */
@@ -4087,12 +4088,53 @@ done:
     return out;
 }
 
-static const char *match_curve(const uint8_t *der, size_t len) {
+/* CKA_EC_PARAMS -> curve name.
+ *
+ * The three NIST curves above are matched from the table, because they are
+ * the approved set and must resolve identically in both profiles. Anything
+ * else is handed to OpenSSL's own OID registry rather than added to the
+ * table: the brainpool family alone is seven more entries, each a
+ * hand-encoded DER OID, and this module has already paid once for a code
+ * point written from memory. OBJ_obj2nid knows them all, and every curve
+ * OpenSSL gains, this gains.
+ *
+ * Curves resolved that way are not FIPS-approved -- SP 800-186 lists the
+ * approved set, and brainpool is not in it -- so they are available in the
+ * interop build and refused under fips-strict, exactly as SHA-1 and MD5 are
+ * in C_DigestInit. The caller decides nothing; the profile does.
+ *
+ * Returned names are static storage owned by OpenSSL (OBJ_nid2sn) or by the
+ * table, so the caller may hold them for the duration of the call. */
+static const char *match_curve_ex(const uint8_t *der, size_t len,
+                                   int *non_approved) {
+    if (non_approved) *non_approved = 0;
     for (size_t i = 0; i < sizeof(ec_curves)/sizeof(ec_curves[0]); ++i) {
         if (ec_curves[i].len == len && memcmp(ec_curves[i].der, der, len) == 0)
             return ec_curves[i].name;
     }
-    return NULL;
+    if (!der || len == 0 || len > 64) return NULL;
+    const uint8_t *p = der;
+    ASN1_OBJECT *obj = d2i_ASN1_OBJECT(NULL, &p, (long)len);
+    if (!obj) return NULL;
+    int nid = OBJ_obj2nid(obj);
+    ASN1_OBJECT_free(obj);
+    if (nid == NID_undef) return NULL;
+    /* Only accept a NID that names an EC curve: OBJ_obj2nid resolves any OID
+     * OpenSSL knows, including hash and signature algorithms, and a caller
+     * sending one of those into CKA_EC_PARAMS is making a mistake that should
+     * be refused rather than turned into a curve name lookup failure later. */
+    EC_GROUP *g = EC_GROUP_new_by_curve_name(nid);
+    if (!g) return NULL;
+    EC_GROUP_free(g);
+    if (non_approved) *non_approved = 1;
+    return OBJ_nid2sn(nid);
+}
+
+static const char *match_curve(const uint8_t *der, size_t len) {
+    int na = 0;
+    const char *name = match_curve_ex(der, len, &na);
+    if (name && na && fhsm_build_fips_strict) return NULL;
+    return name;
 }
 
 /* Validate a CKA_PARAMETER_SET value against the known PQC parameter-set
@@ -4547,30 +4589,31 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
             }
         }
     } else if (kt == CKK_EC && type == CKA_EC_PARAMS_QUERY) {
-        /* Recover the curve OID as DER. */
+        /* Recover the curve OID as DER.
+         *
+         * This carried three hand-encoded OIDs and knew no other curve, so a
+         * key on any curve outside that list came back with CKA_EC_PARAMS
+         * missing -- the same asymmetry the Edwards keys had, where import
+         * worked and read-back did not. Now the OID is produced from the
+         * curve's NID, so whatever match_curve_ex() can accept, this can
+         * report. */
         char curve_name[64] = {0}; size_t cn_len = 0;
         if (EVP_PKEY_get_utf8_string_param(pkey, "group",
                                             curve_name, sizeof(curve_name),
                                             &cn_len) == 1) {
-            /* Map known curves to their pre-encoded OID. */
-            const uint8_t *oid = NULL; size_t oid_len = 0;
-            if (strcmp(curve_name, "P-256") == 0 ||
-                strcmp(curve_name, "prime256v1") == 0 ||
-                strcmp(curve_name, "secp256r1") == 0) {
-                oid = (const uint8_t*)"\x06\x08\x2A\x86\x48\xCE\x3D\x03\x01\x07";
-                oid_len = 10;
-            } else if (strcmp(curve_name, "P-384") == 0 ||
-                       strcmp(curve_name, "secp384r1") == 0) {
-                oid = (const uint8_t*)"\x06\x05\x2B\x81\x04\x00\x22";
-                oid_len = 7;
-            } else if (strcmp(curve_name, "P-521") == 0 ||
-                       strcmp(curve_name, "secp521r1") == 0) {
-                oid = (const uint8_t*)"\x06\x05\x2B\x81\x04\x00\x23";
-                oid_len = 7;
-            }
-            if (oid) {
-                if (*out_len < oid_len) { *out_len = oid_len; rc = -2; }
-                else { memcpy(out, oid, oid_len); *out_len = oid_len; rc = 0; }
+            int nid = EC_curve_nist2nid(curve_name);
+            if (nid == NID_undef) nid = OBJ_sn2nid(curve_name);
+            if (nid == NID_undef) nid = OBJ_txt2nid(curve_name);
+            ASN1_OBJECT *obj = (nid != NID_undef) ? OBJ_nid2obj(nid) : NULL;
+            if (obj) {
+                uint8_t *der = NULL;
+                int dlen = i2d_ASN1_OBJECT(obj, &der);
+                if (dlen > 0) {
+                    if (*out_len < (size_t)dlen) { *out_len = (size_t)dlen; rc = -2; }
+                    else { memcpy(out, der, (size_t)dlen);
+                           *out_len = (size_t)dlen; rc = 0; }
+                    OPENSSL_free(der);
+                }
             }
         }
     } else if (kt == CKK_EC_EDWARDS_CREATEOBJECT
