@@ -347,15 +347,29 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_EDDSA",              0x00001057, "EdDSA","sign",    "dispatch_eddsa",
          fips="approved", key_type="CKK_EC_EDWARDS",
          refs=("FIPS 186-5", "RFC 8032")),
+    # The three Montgomery mechanisms are interop-only, and the reason is not
+    # a reading of a standard but a measurement: the OpenSSL FIPS provider
+    # does not implement X25519 or X448 at all. EVP_PKEY_Q_keygen returns
+    # "Algorithm (X25519 : 112) unsupported" from inner_evp_generic_fetch.
+    # SP 800-186 does not list them among the approved curves either.
+    #
+    # They were marked approved, so a fips-strict build advertised three
+    # mechanisms it could not perform -- the exact defect this table exists to
+    # prevent, introduced while fixing others. tests/test_advertised_operational
+    # could not catch it: it does not probe key generation, and the two derives
+    # need a key of a type the strict build cannot make.
     Mech("CKM_EC_MONTGOMERY_KEY_PAIR_GEN", 0x00001056, "ECM", "keypair", "dispatch_ecm_keypair",
-         fips="approved", key_type="CKK_EC_MONTGOMERY",
-         refs=("SP 800-56A rev. 3 (X25519/X448 added in rev. 3 §5.7.1)",)),
+         fips="non-approved", key_type="CKK_EC_MONTGOMERY",
+         refs=("RFC 7748",),
+         notes="Absent from the OpenSSL FIPS provider; interop profile only."),
     Mech("CKM_X25519_DERIVE",      0x00001052, "ECM",  "derive",  "dispatch_x25519",
-         fips="approved", key_type="CKK_EC_MONTGOMERY",
-         refs=("SP 800-56A rev. 3", "RFC 7748")),
+         fips="non-approved", key_type="CKK_EC_MONTGOMERY",
+         refs=("RFC 7748",),
+         notes="Absent from the OpenSSL FIPS provider; interop profile only."),
     Mech("CKM_X448_DERIVE",        0x00001054, "ECM",  "derive",  "dispatch_x448",
-         fips="approved", key_type="CKK_EC_MONTGOMERY",
-         refs=("SP 800-56A rev. 3", "RFC 7748")),
+         fips="non-approved", key_type="CKK_EC_MONTGOMERY",
+         refs=("RFC 7748",),
+         notes="Absent from the OpenSSL FIPS provider; interop profile only."),
 
     # === ML-KEM (FIPS 203) ============================================
     Mech("CKM_ML_KEM_KEY_PAIR_GEN", 0x0000000f, "ML-KEM", "keypair", "dispatch_ml_kem_keypair",

@@ -2907,6 +2907,12 @@ typedef struct CK_HKDF_PARAMS_s {
 #define CKF_HKDF_SALT_DATA  0x00000002UL
 #define CKF_HKDF_SALT_KEY   0x00000004UL
 
+/* 0x1052 and 0x1054, as advertised by fhsm_mechanism_table[]. 0x1053 between
+ * them is CKM_X25519_KEY_PAIR_GEN, which this module does not use: the
+ * Montgomery generator is CKM_EC_MONTGOMERY_KEY_PAIR_GEN at 0x1056. */
+#define CKM_X25519_DERIVE_OP             0x00001052UL
+#define CKM_X448_DERIVE_OP               0x00001054UL
+
 #define CKM_HKDF_DERIVE_OP               0x0000402AUL
 #define CKM_HKDF_DATA_OP                 0x0000402BUL
 
@@ -3149,7 +3155,16 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return crv;
     }
 
-    if (pMechanism->mechanism != CKM_ECDH1_DERIVE
+    /* X25519 / X448 share this path. They take the same
+     * CK_ECDH1_DERIVE_PARAMS and the same EVP_PKEY_derive; what differs is
+     * the key type expected of the base key and the shape of the peer's
+     * public data, which is the bare RFC 7748 key rather than an X9.62
+     * point. They were reachable only once C_GenerateKeyPair could make a
+     * Montgomery key, which is why they waited. */
+    const int is_ecm_derive = (pMechanism->mechanism == CKM_X25519_DERIVE_OP
+                               || pMechanism->mechanism == CKM_X448_DERIVE_OP);
+    if (!is_ecm_derive
+        && pMechanism->mechanism != CKM_ECDH1_DERIVE
         && pMechanism->mechanism != CKM_ECDH1_COFACTOR_DERIVE)
         return FHSM_RV_MECHANISM_INVALID;
     if (!pMechanism->pParameter
@@ -3166,7 +3181,27 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hBaseKey,
                                           &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
-    if (cl != CKO_PRIVATE_KEY || kt != CKK_EC) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (cl != CKO_PRIVATE_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    /* Which agreement this is comes from the key, not from the mechanism.
+     *
+     * CKM_X25519_DERIVE and CKM_X448_DERIVE name the curve themselves and
+     * require a Montgomery key. But CKM_ECDH1_DERIVE is also used with
+     * Montgomery keys in the field -- it is how SoftHSM exposes X25519, and
+     * how pkcs11-check's vectors ask for it: 1,026 of them arrived here as
+     * C_DeriveKey(CKM_ECDH1_DERIVE) with an x25519 or x448 base key and were
+     * refused with CKR_KEY_TYPE_INCONSISTENT.
+     *
+     * Refusing that would have been defensible by the letter of §2.3.7 and
+     * useless in practice. So the base key's type selects the path, and the
+     * mechanism only has to be compatible with it. */
+    const int base_is_ecm = (kt == CKK_EC_MONTGOMERY_KT);
+    /* Same reason as CKM_EC_MONTGOMERY_KEY_PAIR_GEN: the FIPS provider has no
+     * X25519 or X448 to fetch. A Montgomery key cannot exist in a strict
+     * build, but a caller could still present one imported from elsewhere. */
+    if (base_is_ecm && fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+    if (is_ecm_derive && !base_is_ecm) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (!base_is_ecm && kt != (uint32_t)CKK_EC)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
     const uint8_t *dp = kv;
     EVP_PKEY *priv = d2i_AutoPrivateKey(NULL, &dp, (long)kvl);
     if (!priv) return FHSM_RV_FUNCTION_FAILED;
@@ -3180,7 +3215,35 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * fall back to raw point via fromdata if that fails. */
     EVP_PKEY *peer = NULL;
     const uint8_t *pdata = p->pPublicData;
-    peer = d2i_PUBKEY(NULL, &pdata, (long)p->ulPublicDataLen);
+    if (base_is_ecm) {
+        /* RFC 7748: the peer's public key is 32 bytes for X25519, 56 for
+         * X448, with no point encoding and no wrapper. The exact length is
+         * required rather than tolerated -- there is no ambiguity to be
+         * tolerant about here, unlike CKA_EC_POINT where two shapes are both
+         * in use, and a wrong length means deriving from something that is
+         * not the peer's key.
+         *
+         * The curve is read from the private key, so that CKM_ECDH1_DERIVE
+         * with an X448 key resolves to X448 without the mechanism saying so.
+         * A CKM_X25519_DERIVE against an X448 key is refused by the length
+         * check, which is the honest place for it. */
+        const char *alg = EVP_PKEY_is_a(priv, "X25519") ? "X25519"
+                        : EVP_PKEY_is_a(priv, "X448")   ? "X448" : NULL;
+        if (!alg) { EVP_PKEY_free(priv); return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        size_t want = (alg[1] == '2') ? 32u : 56u;
+        if (pMechanism->mechanism == CKM_X25519_DERIVE_OP && want != 32u) {
+            EVP_PKEY_free(priv); return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        }
+        if (pMechanism->mechanism == CKM_X448_DERIVE_OP && want != 56u) {
+            EVP_PKEY_free(priv); return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        }
+        if ((size_t)p->ulPublicDataLen != want) {
+            EVP_PKEY_free(priv); return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        }
+        peer = EVP_PKEY_new_raw_public_key_ex(NULL, alg, NULL, pdata, want);
+        if (!peer) { EVP_PKEY_free(priv); return FHSM_RV_ATTRIBUTE_VALUE_INVALID; }
+    }
+    if (!peer) peer = d2i_PUBKEY(NULL, &pdata, (long)p->ulPublicDataLen);
     if (!peer) {
         /* Strip a DER OCTET STRING wrapper if present, then assume raw
          * uncompressed point. */
@@ -4460,6 +4523,17 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         ckk_type = CKK_EC_EDWARDS_CREATEOBJECT;
         pw_family = FHSM_PAIRWISE_EDDSA;
     } else if (pMechanism->mechanism == CKM_EC_MONTGOMERY_KEY_PAIR_GEN) {
+        /* The OpenSSL FIPS provider does not implement X25519 or X448 at all
+         * -- EVP_PKEY_Q_keygen fails with "Algorithm (X25519 : 112)
+         * unsupported". They are not in SP 800-186's approved set, so this is
+         * the provider being correct rather than incomplete.
+         *
+         * Refused here in the strict profile rather than attempted and
+         * failed. Advertising a mechanism that cannot work is the defect this
+         * project has spent a week removing, and it was introduced here two
+         * commits ago: tests/test_advertised_operational does not probe key
+         * generation, so its ratchet could not catch it. */
+        if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
         /* Advertised and refused until now, like its Edwards neighbour. The
          * keys it makes are what CKM_X25519_DERIVE and CKM_X448_DERIVE will
          * need; those two are still in
@@ -4750,7 +4824,7 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
                 }
             }
         }
-    } else if (kt == CKK_EC_EDWARDS_CREATEOBJECT
+    } else if ((kt == CKK_EC_EDWARDS_CREATEOBJECT || kt == CKK_EC_MONTGOMERY_KT)
                && (type == CKA_EC_PARAMS_QUERY || type == CKA_EC_POINT)) {
         /* Edwards keys had neither attribute. This branch tested kt == CKK_EC
          * only, so an application could generate or import an Ed25519 key and
@@ -4763,12 +4837,28 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
          * Which curve is read from the key rather than remembered: an Ed448
          * key answering with the Ed25519 OID would be worse than answering
          * nothing. */
-        int is_25519 = EVP_PKEY_is_a(pkey, "ED25519");
-        if (is_25519 || EVP_PKEY_is_a(pkey, "ED448")) {
+        /* RFC 8410 assigns the four curves consecutive OIDs. The key is asked
+         * which one it is rather than the answer being inferred from
+         * CKA_KEY_TYPE, for the same reason as everywhere else in this file:
+         * an X448 key answering with the X25519 OID would be worse than
+         * answering nothing.
+         *
+         * This branch has now forgotten a family twice -- Edwards when only
+         * CKK_EC was handled, Montgomery when Edwards was added -- so the
+         * mapping is a table rather than a chain of ifs. */
+        static const struct { const char *alg; uint8_t oid_last; } ECX[] = {
+            { "X25519",  0x6E }, { "X448",  0x6F },
+            { "ED25519", 0x70 }, { "ED448", 0x71 },
+        };
+        const uint8_t *oid = NULL;
+        uint8_t oid_buf[5] = { 0x06, 0x03, 0x2B, 0x65, 0x00 };
+        for (size_t k = 0; k < sizeof ECX / sizeof ECX[0]; ++k) {
+            if (EVP_PKEY_is_a(pkey, ECX[k].alg)) {
+                oid_buf[4] = ECX[k].oid_last; oid = oid_buf; break;
+            }
+        }
+        if (oid) {
             if (type == CKA_EC_PARAMS_QUERY) {
-                const uint8_t *oid = is_25519
-                    ? (const uint8_t*)"\x06\x03\x2B\x65\x70"
-                    : (const uint8_t*)"\x06\x03\x2B\x65\x71";
                 if (*out_len < 5) { *out_len = 5; rc = -2; }
                 else { memcpy(out, oid, 5); *out_len = 5; rc = 0; }
             } else {

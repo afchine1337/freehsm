@@ -25,6 +25,7 @@ typedef struct { CK_ULONG type; void *pValue; CK_ULONG ulValueLen; } CK_ATTRIBUT
 typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; } CK_MECHANISM;
 typedef struct { CK_ULONG kdf; CK_ULONG ulSharedDataLen; void *pSharedData;
                  CK_ULONG ulPublicDataLen; void *pPublicData; } CK_ECDH1_DERIVE_PARAMS;
+typedef struct { CK_ULONG ulMinKeySize, ulMaxKeySize; CK_FLAGS flags; } CK_MECHANISM_INFO;
 
 #define CKR_OK              0UL
 #define CKF_RW              6UL
@@ -70,6 +71,7 @@ static const struct { const char *name; const CK_BYTE *oid; CK_ULONG oid_len;
 };
 
 static CK_RV (*C_CreateObject)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
+static CK_RV (*C_GetMechanismInfo)(CK_SLOT_ID,CK_ULONG,CK_MECHANISM_INFO*);
 
 int main(void)
 {
@@ -79,6 +81,7 @@ int main(void)
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
     SYM(C_Login); SYM(C_InitPIN); SYM(C_GenerateKeyPair);
     SYM(C_GetAttributeValue); SYM(C_DeriveKey); SYM(C_CreateObject);
+    SYM(C_GetMechanismInfo);
     if (!C_GenerateKeyPair || !C_DeriveKey) { fprintf(stderr,"missing symbols\n"); return 2; }
 
     CK_BYTE label[32]; memset(label,' ',32); memcpy(label,"ecdhprobe",9);
@@ -189,6 +192,90 @@ int main(void)
         if (rv_gen != CKR_OK || rv_pt != CKR_OK || rv_drv != CKR_OK
             || strcmp(imp_s, "OK") != 0 || strcmp(drv2_s, "OK") != 0)
             fails++;
+    }
+
+    /* X25519 agreement, which has no X9.62 point and no CKA_EC_POINT to read:
+     * the peer's public key is 32 raw bytes. Two key pairs are generated and
+     * each derives against the other's public key; the two shared secrets
+     * must be equal, which is the property the mechanism exists for and the
+     * only one worth asserting here. */
+    {
+        CK_BYTE t_true = 1, t_false = 0;
+        CK_BYTE x_oid[] = { 0x06,0x03,0x2B,0x65,0x6E };   /* id-X25519 */
+        CK_ATTRIBUTE pub_t[] = {
+            { CKA_EC_PARAMS, x_oid, sizeof x_oid },
+            { CKA_DERIVE,    &t_true, 1 },
+        };
+        CK_ATTRIBUTE prv_t[] = {
+            { CKA_DERIVE,      &t_true, 1 },
+            { CKA_EXTRACTABLE, &t_true, 1 },
+        };
+        /* Ask the module whether it has the mechanism at all rather than
+         * assuming. A fips-strict build does not: the OpenSSL FIPS provider
+         * has no X25519, so the three Montgomery mechanisms are interop-only.
+         * Skipping on the module's own answer is also what keeps this probe
+         * honest if that ever changes. */
+        CK_MECHANISM_INFO mi;
+        if (!C_GetMechanismInfo
+            || C_GetMechanismInfo(0, 0x1056UL, &mi) != CKR_OK) {
+            printf("\n%-20s  not advertised in this profile -- skipped\n", "X25519");
+            goto done_x25519;
+        }
+        CK_MECHANISM kg = { 0x1056UL /* CKM_EC_MONTGOMERY_KEY_PAIR_GEN */, NULL, 0 };
+        CK_OBJECT_HANDLE pubA = 0, prvA = 0, pubB = 0, prvB = 0;
+        CK_RV ga = C_GenerateKeyPair(s, &kg, pub_t, 2, prv_t, 2, &pubA, &prvA);
+        CK_RV gb = C_GenerateKeyPair(s, &kg, pub_t, 2, prv_t, 2, &pubB, &prvB);
+        printf("\n%-20s  keygen A=0x%lx B=0x%lx\n", "X25519",
+               (unsigned long)ga, (unsigned long)gb);
+        if (ga != CKR_OK || gb != CKR_OK) { fails++; }
+        else {
+            CK_BYTE ptA[64], ptB[64];
+            CK_ATTRIBUTE qa[] = { { CKA_EC_POINT, ptA, sizeof ptA } };
+            CK_ATTRIBUTE qb[] = { { CKA_EC_POINT, ptB, sizeof ptB } };
+            CK_RV ra = C_GetAttributeValue(s, pubA, qa, 1);
+            CK_RV rb = C_GetAttributeValue(s, pubB, qb, 1);
+            printf("%-20s  CKA_EC_POINT A=0x%lx (%lu) B=0x%lx (%lu)\n", "",
+                   (unsigned long)ra, (unsigned long)qa[0].ulValueLen,
+                   (unsigned long)rb, (unsigned long)qb[0].ulValueLen);
+            /* The raw 32 bytes, however the module chose to present them. */
+            CK_BYTE *rawA = ptA, *rawB = ptB;
+            CK_ULONG rawAl = qa[0].ulValueLen, rawBl = qb[0].ulValueLen;
+            if (rawAl == 34 && rawA[0] == 0x04) { rawA += 2; rawAl = 32; }
+            if (rawBl == 34 && rawB[0] == 0x04) { rawB += 2; rawBl = 32; }
+
+            CK_BYTE zA[64], zB[64];
+            CK_ULONG zAl = sizeof zA, zBl = sizeof zB;
+            CK_ULONG vl = 32;
+            CK_ATTRIBUTE out_t[] = {
+                { CKA_CLASS,       &(CK_ULONG){CKO_SECRET_KEY},     sizeof(CK_ULONG) },
+                { CKA_KEY_TYPE,    &(CK_ULONG){CKK_GENERIC_SECRET}, sizeof(CK_ULONG) },
+                { CKA_VALUE_LEN,   &vl, sizeof(CK_ULONG) },
+                { CKA_EXTRACTABLE, &t_true,  1 },
+                { CKA_SENSITIVE,   &t_false, 1 },
+            };
+            CK_ECDH1_DERIVE_PARAMS pa = { CKD_NULL, 0, NULL, rawBl, rawB };
+            CK_ECDH1_DERIVE_PARAMS pb = { CKD_NULL, 0, NULL, rawAl, rawA };
+            CK_MECHANISM ma = { 0x1052UL, &pa, sizeof pa };
+            CK_MECHANISM mb = { 0x1052UL, &pb, sizeof pb };
+            CK_OBJECT_HANDLE kA = 0, kB = 0;
+            CK_RV da = C_DeriveKey(s, &ma, prvA, out_t, 5, &kA);
+            CK_RV db = C_DeriveKey(s, &mb, prvB, out_t, 5, &kB);
+            printf("%-20s  derive A=0x%lx B=0x%lx\n", "",
+                   (unsigned long)da, (unsigned long)db);
+            int agree = 0;
+            if (da == CKR_OK && db == CKR_OK) {
+                CK_ATTRIBUTE va[] = { { 0x11UL /* CKA_VALUE */, zA, zAl } };
+                CK_ATTRIBUTE vb[] = { { 0x11UL, zB, zBl } };
+                if (C_GetAttributeValue(s, kA, va, 1) == CKR_OK
+                    && C_GetAttributeValue(s, kB, vb, 1) == CKR_OK
+                    && va[0].ulValueLen == vb[0].ulValueLen
+                    && memcmp(zA, zB, va[0].ulValueLen) == 0)
+                    agree = 1;
+            }
+            printf("%-20s  both parties agree on Z: %s\n", "", agree ? "OK" : "FAIL");
+            if (!agree) fails++;
+        }
+    done_x25519: ;
     }
 
     printf("\n0x0=OK  0x5=FUNCTION_FAILED  0x13=ATTRIBUTE_VALUE_INVALID"

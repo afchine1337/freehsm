@@ -4,8 +4,8 @@
 
 **Profile generated**: `fips-strict`
 **Total mechanisms**: 90
-**Approved**: 78
-**Non-approved**: 12
+**Approved**: 75
+**Non-approved**: 15
 
 ## Reading this table
 
@@ -84,9 +84,12 @@
 
 | Mechanism | Value | Op | FIPS | Handler | Reference |
 |---|---|---|---|---|---|
-| `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` | `0x00001056` | keypair | ✅ | `dispatch_ecm_keypair` | SP 800-56A rev. 3 (X25519/X448 added in rev. 3 §5.7.1) |
-| `CKM_X25519_DERIVE` | `0x00001052` | derive | ✅ | `dispatch_x25519` | SP 800-56A rev. 3, RFC 7748 |
-| `CKM_X448_DERIVE` | `0x00001054` | derive | ✅ | `dispatch_x448` | SP 800-56A rev. 3, RFC 7748 |
+| `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` | `0x00001056` | keypair | ❌ | `dispatch_ecm_keypair` | RFC 7748 |
+| | | | | | _Absent from the OpenSSL FIPS provider; interop profile only._ |
+| `CKM_X25519_DERIVE` | `0x00001052` | derive | ❌ | `dispatch_x25519` | RFC 7748 |
+| | | | | | _Absent from the OpenSSL FIPS provider; interop profile only._ |
+| `CKM_X448_DERIVE` | `0x00001054` | derive | ❌ | `dispatch_x448` | RFC 7748 |
+| | | | | | _Absent from the OpenSSL FIPS provider; interop profile only._ |
 
 ## EdDSA
 
