@@ -109,11 +109,51 @@ OPENSSL_VERSION="$(openssl version 2>/dev/null || echo unknown)"
 MODULE_SHA="$(sha256sum "$MODULE" 2>/dev/null | awk '{print $1}')"
 [ -n "$MODULE_SHA" ] || MODULE_SHA="unknown"
 
+# Is this module built from the tree as it stands?
+#
+# On 2026-09-11 a twenty-minute run measured a binary built before the change
+# it was meant to test. The report was exact and the conclusion was drawn
+# from it: the counts had not moved, so the fix had not worked. The fix was
+# fine; the module was stale. Nothing in the report could have said so --
+# module-sha256 was recorded and compared to nothing.
+#
+# The cheap test is mtime: if any source, header or the generator is newer
+# than the module, the module cannot be the module those sources produce.
+# It costs no build, and it catches precisely the failure that happened.
+# Source files are compared, not the sha256 of a rebuild: a rebuild inside a
+# measurement script would change what is being measured.
+#
+# A run against a module from somewhere else -- a released artefact, another
+# machine -- is legitimate and common, so a module outside this tree is
+# reported and not refused. Only a local module older than the local sources
+# is refused, because that one is always a mistake.
+STALE=""
+if [ -z "${FHSM_ALLOW_STALE_MODULE:-}" ]; then
+    NEWER="$(find src include scripts Makefile -newer "$MODULE" \
+                  \( -name '*.c' -o -name '*.h' -o -name '*.py' -o -name 'Makefile' \) \
+                  -print 2>/dev/null | head -5)"
+    if [ -n "$NEWER" ]; then
+        STALE="yes"
+        echo "FATAL: $MODULE is older than the sources in this tree." >&2
+        echo "" >&2
+        echo "$NEWER" | sed 's/^/  newer: /' >&2
+        echo "" >&2
+        echo "  Measuring it would describe a binary that no longer exists." >&2
+        echo "  Run: make && make integrity" >&2
+        echo "" >&2
+        echo "  If the module is deliberately from elsewhere -- a released" >&2
+        echo "  artefact, another machine -- set FHSM_ALLOW_STALE_MODULE=1," >&2
+        echo "  and say so in whatever the run is written up as." >&2
+        exit 2
+    fi
+fi
+
 {
     echo "pkcs11-check $HARNESS_VERSION"
     echo "openssl      $OPENSSL_VERSION"
     echo "module       $MODULE"
     echo "module-sha256 $MODULE_SHA"
+    echo "module-vs-tree $([ -n "$STALE" ] && echo "STALE (override)" || echo "up to date")"
     echo "date         $(date -Is)"
 } > "$REPORTS/provenance.txt"
 
