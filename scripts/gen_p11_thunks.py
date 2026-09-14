@@ -362,14 +362,32 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="non-approved", key_type="CKK_EC_MONTGOMERY",
          refs=("RFC 7748",),
          notes="Absent from the OpenSSL FIPS provider; interop profile only."),
-    Mech("CKM_X25519_DERIVE",      0x00001052, "ECM",  "derive",  "dispatch_x25519",
-         fips="non-approved", key_type="CKK_EC_MONTGOMERY",
-         refs=("RFC 7748",),
-         notes="Absent from the OpenSSL FIPS provider; interop profile only."),
-    Mech("CKM_X448_DERIVE",        0x00001054, "ECM",  "derive",  "dispatch_x448",
-         fips="non-approved", key_type="CKK_EC_MONTGOMERY",
-         refs=("RFC 7748",),
-         notes="Absent from the OpenSSL FIPS provider; interop profile only."),
+    # === X25519 / X448 derive: removed, 2026-09-14 ====================
+    #
+    # CKM_X25519_DERIVE (0x1052) and CKM_X448_DERIVE (0x1054) do not exist.
+    # PKCS#11 v3.2 defines no such mechanisms, and those two values are
+    # taken:
+    #
+    #     0x1052  CKM_ECMQV_DERIVE
+    #     0x1054  CKM_RSA_AES_KEY_WRAP
+    #
+    # So this module was answering C_GetMechanismList with ECMQV's code
+    # point and performing X25519 under it. That is the CMAC/GMAC inversion
+    # exactly, not a variant of it: a caller asking for ECMQV would have got
+    # a Montgomery agreement, and one asking for RSA-AES key wrap would have
+    # got X448.
+    #
+    # Montgomery key agreement in PKCS#11 goes through CKM_ECDH1_DERIVE with
+    # a CKK_EC_MONTGOMERY base key. That is how pkcs11-check's 1,026 vectors
+    # ask for it, how SoftHSM exposes it, and it is implemented and measured
+    # in C_DeriveKey -- the base key's type selects the path. Nothing is lost
+    # by removing these two; the capability was reachable by the correct
+    # mechanism before they went in.
+    #
+    # Found by scripts/check_mech_codepoints.py, written the same day after
+    # KMAC turned up on unassigned values, and run against the OASIS header
+    # for the first time. It found this three days after it was introduced,
+    # by the author of both.
 
     # === ML-KEM (FIPS 203) ============================================
     Mech("CKM_ML_KEM_KEY_PAIR_GEN", 0x0000000f, "ML-KEM", "keypair", "dispatch_ml_kem_keypair",
@@ -418,9 +436,21 @@ MECHANISMS: tuple[Mech, ...] = (
                "enforces the SP 800-132 minimum of 1,000 iterations; the "
                "token's own KEK passes 200,000."),
 
-    # === DRBG / RNG ===================================================
-    Mech("CKM_NIST_PRF_KDF",       0x00000384, "KDF",  "derive",  "dispatch_nist_prf_kdf",
-         fips="approved", refs=("SP 800-108",)),
+    # === CKM_NIST_PRF_KDF: removed, 2026-09-14 ========================
+    #
+    # 0x384 is unassigned. PKCS#11 v3.2 has no CKM_NIST_PRF_KDF; the
+    # SP 800-108 family it defines is CKM_SP800_108_COUNTER_KDF,
+    # CKM_SP800_108_FEEDBACK_KDF and CKM_SP800_108_DOUBLE_PIPELINE_KDF, at
+    # their own values, with CK_SP800_108_KDF_PARAMS.
+    #
+    # This was the last of the KNOWN_GAPS derive entries and the next thing
+    # due to be implemented. It would have been implemented on a code point
+    # that does not exist -- the work would have been correct and the
+    # mechanism unreachable by any conforming caller, which is the shape
+    # KMAC had.
+    #
+    # If the SP 800-108 KDFs are wanted, they come back under their real
+    # names and values, not this one.
 
     # === Generic secret =============================================
     Mech("CKM_GENERIC_SECRET_KEY_GEN", 0x00000350, "GENERIC", "keygen", "dispatch_generic_secret_keygen",

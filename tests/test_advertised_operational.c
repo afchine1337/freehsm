@@ -118,7 +118,6 @@ static const struct { CK_ULONG ckm; const char *name; const char *why; } KNOWN_G
      * nothing else, while ten derive mechanisms are advertised with a
      * dispatch_* handler each. The handlers exist and are not called: no
      * code in this repository dereferences fhsm_mechanism_table[].handler. */
-    { 0x00000384UL, "CKM_NIST_PRF_KDF",              "C_DeriveKey: ECDH1 only" },
     /* KMAC and the two hybrids: handlers exist, the entry points do not know
      * the mechanism. No external harness has ever reported these three --
      * pkcs11-check tests what it has vectors for, and it has none here. */

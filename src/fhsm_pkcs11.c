@@ -2927,12 +2927,6 @@ typedef struct CK_HKDF_PARAMS_s {
 #define CKF_HKDF_SALT_DATA  0x00000002UL
 #define CKF_HKDF_SALT_KEY   0x00000004UL
 
-/* 0x1052 and 0x1054, as advertised by fhsm_mechanism_table[]. 0x1053 between
- * them is CKM_X25519_KEY_PAIR_GEN, which this module does not use: the
- * Montgomery generator is CKM_EC_MONTGOMERY_KEY_PAIR_GEN at 0x1056. */
-#define CKM_X25519_DERIVE_OP             0x00001052UL
-#define CKM_X448_DERIVE_OP               0x00001054UL
-
 #define CKM_HKDF_DERIVE_OP               0x0000402AUL
 #define CKM_HKDF_DATA_OP                 0x0000402BUL
 
@@ -3175,16 +3169,11 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return crv;
     }
 
-    /* X25519 / X448 share this path. They take the same
-     * CK_ECDH1_DERIVE_PARAMS and the same EVP_PKEY_derive; what differs is
-     * the key type expected of the base key and the shape of the peer's
-     * public data, which is the bare RFC 7748 key rather than an X9.62
-     * point. They were reachable only once C_GenerateKeyPair could make a
-     * Montgomery key, which is why they waited. */
-    const int is_ecm_derive = (pMechanism->mechanism == CKM_X25519_DERIVE_OP
-                               || pMechanism->mechanism == CKM_X448_DERIVE_OP);
-    if (!is_ecm_derive
-        && pMechanism->mechanism != CKM_ECDH1_DERIVE
+    /* Montgomery agreement arrives here too, under CKM_ECDH1_DERIVE with a
+     * CKK_EC_MONTGOMERY base key. That is how PKCS#11 expresses it: there is
+     * no CKM_X25519_DERIVE. This file briefly defined one at 0x1052, which is
+     * CKM_ECMQV_DERIVE's value -- see the note in gen_p11_thunks.py. */
+    if (pMechanism->mechanism != CKM_ECDH1_DERIVE
         && pMechanism->mechanism != CKM_ECDH1_COFACTOR_DERIVE)
         return FHSM_RV_MECHANISM_INVALID;
     if (!pMechanism->pParameter
@@ -3219,7 +3208,6 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * X25519 or X448 to fetch. A Montgomery key cannot exist in a strict
      * build, but a caller could still present one imported from elsewhere. */
     if (base_is_ecm && fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
-    if (is_ecm_derive && !base_is_ecm) return FHSM_RV_KEY_TYPE_INCONSISTENT;
     if (!base_is_ecm && kt != (uint32_t)CKK_EC)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     const uint8_t *dp = kv;
@@ -3243,20 +3231,13 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * in use, and a wrong length means deriving from something that is
          * not the peer's key.
          *
-         * The curve is read from the private key, so that CKM_ECDH1_DERIVE
-         * with an X448 key resolves to X448 without the mechanism saying so.
-         * A CKM_X25519_DERIVE against an X448 key is refused by the length
-         * check, which is the honest place for it. */
+         * The curve is read from the private key. Nothing else could name it:
+         * CKM_ECDH1_DERIVE does not say which curve, and the base key is the
+         * only thing in the call that knows. */
         const char *alg = EVP_PKEY_is_a(priv, "X25519") ? "X25519"
                         : EVP_PKEY_is_a(priv, "X448")   ? "X448" : NULL;
         if (!alg) { EVP_PKEY_free(priv); return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         size_t want = (alg[1] == '2') ? 32u : 56u;
-        if (pMechanism->mechanism == CKM_X25519_DERIVE_OP && want != 32u) {
-            EVP_PKEY_free(priv); return FHSM_RV_KEY_TYPE_INCONSISTENT;
-        }
-        if (pMechanism->mechanism == CKM_X448_DERIVE_OP && want != 56u) {
-            EVP_PKEY_free(priv); return FHSM_RV_KEY_TYPE_INCONSISTENT;
-        }
         if ((size_t)p->ulPublicDataLen != want) {
             EVP_PKEY_free(priv); return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         }

@@ -255,8 +255,11 @@ int main(void)
             };
             CK_ECDH1_DERIVE_PARAMS pa = { CKD_NULL, 0, NULL, rawBl, rawB };
             CK_ECDH1_DERIVE_PARAMS pb = { CKD_NULL, 0, NULL, rawAl, rawA };
-            CK_MECHANISM ma = { 0x1052UL, &pa, sizeof pa };
-            CK_MECHANISM mb = { 0x1052UL, &pb, sizeof pb };
+            /* CKM_ECDH1_DERIVE. There is no CKM_X25519_DERIVE in PKCS#11 --
+             * 0x1052, which this probe used, is CKM_ECMQV_DERIVE. Montgomery
+             * agreement is expressed by the base key's type. */
+            CK_MECHANISM ma = { CKM_ECDH1_DERIVE, &pa, sizeof pa };
+            CK_MECHANISM mb = { CKM_ECDH1_DERIVE, &pb, sizeof pb };
             CK_OBJECT_HANDLE kA = 0, kB = 0;
             CK_RV da = C_DeriveKey(s, &ma, prvA, out_t, 5, &kA);
             CK_RV db = C_DeriveKey(s, &mb, prvB, out_t, 5, &kB);

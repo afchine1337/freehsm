@@ -536,16 +536,6 @@ __attribute__((weak)) fhsm_rv_t dispatch_ml_kem_keypair(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
-__attribute__((weak)) fhsm_rv_t dispatch_nist_prf_kdf(
-    unsigned long session, unsigned long key,
-    const void *params, size_t plen,
-    fhsm_slice_t in, uint8_t *out, size_t *outlen)
-{
-    (void)session; (void)key; (void)params; (void)plen;
-    (void)in; (void)out; (void)outlen;
-    return FHSM_RV_FUNCTION_FAILED;
-}
-
 __attribute__((weak)) fhsm_rv_t dispatch_pbkdf2(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
@@ -856,26 +846,6 @@ __attribute__((weak)) fhsm_rv_t dispatch_slh_dsa_keypair(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
-__attribute__((weak)) fhsm_rv_t dispatch_x25519(
-    unsigned long session, unsigned long key,
-    const void *params, size_t plen,
-    fhsm_slice_t in, uint8_t *out, size_t *outlen)
-{
-    (void)session; (void)key; (void)params; (void)plen;
-    (void)in; (void)out; (void)outlen;
-    return FHSM_RV_FUNCTION_FAILED;
-}
-
-__attribute__((weak)) fhsm_rv_t dispatch_x448(
-    unsigned long session, unsigned long key,
-    const void *params, size_t plen,
-    fhsm_slice_t in, uint8_t *out, size_t *outlen)
-{
-    (void)session; (void)key; (void)params; (void)plen;
-    (void)in; (void)out; (void)outlen;
-    return FHSM_RV_FUNCTION_FAILED;
-}
-
 __attribute__((weak)) fhsm_rv_t dispatch_xor_base_and_data(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
@@ -946,7 +916,6 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00000362u, "CKM_CONCATENATE_BASE_AND_DATA", "KDF-concat", "derive", 1, dispatch_concat_base_and_data },
     { 0x00000363u, "CKM_CONCATENATE_DATA_AND_BASE", "KDF-concat", "derive", 1, dispatch_concat_data_and_base },
     { 0x00000364u, "CKM_XOR_BASE_AND_DATA", "KDF-concat", "derive", 1, dispatch_xor_base_and_data },
-    { 0x00000384u, "CKM_NIST_PRF_KDF", "KDF", "derive", 1, dispatch_nist_prf_kdf },
     { 0x000003B0u, "CKM_PKCS5_PBKD2", "PBKDF2", "keygen", 1, dispatch_pbkdf2 },
     { 0x00001040u, "CKM_EC_KEY_PAIR_GEN", "EC", "keypair", 1, dispatch_ec_keypair },
     { 0x00001041u, "CKM_ECDSA", "EC", "sign", 1, dispatch_ecdsa },
@@ -955,8 +924,6 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00001046u, "CKM_ECDSA_SHA512", "EC", "sign", 1, dispatch_ecdsa_sha512 },
     { 0x00001050u, "CKM_ECDH1_DERIVE", "EC", "derive", 1, dispatch_ecdh1 },
     { 0x00001051u, "CKM_ECDH1_COFACTOR_DERIVE", "EC", "derive", 1, dispatch_ecdh1_cofactor },
-    { 0x00001052u, "CKM_X25519_DERIVE", "ECM", "derive", 0, dispatch_reject_fips },
-    { 0x00001054u, "CKM_X448_DERIVE", "ECM", "derive", 0, dispatch_reject_fips },
     { 0x00001055u, "CKM_EC_EDWARDS_KEY_PAIR_GEN", "EdDSA", "keypair", 1, dispatch_eddsa_keypair },
     { 0x00001056u, "CKM_EC_MONTGOMERY_KEY_PAIR_GEN", "ECM", "keypair", 0, dispatch_reject_fips },
     { 0x00001057u, "CKM_EDDSA", "EdDSA", "sign", 1, dispatch_eddsa },

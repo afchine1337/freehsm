@@ -94,8 +94,6 @@ extern "C" {
 
 /* --- ECM --- */
 #define CKM_EC_MONTGOMERY_KEY_PAIR_GEN       0x00001056u
-#define CKM_X25519_DERIVE                    0x00001052u
-#define CKM_X448_DERIVE                      0x00001054u
 
 /* --- ML-KEM --- */
 #define CKM_ML_KEM_KEY_PAIR_GEN              0x0000000Fu
@@ -116,9 +114,6 @@ extern "C" {
 
 /* --- PBKDF2 --- */
 #define CKM_PKCS5_PBKD2                      0x000003B0u
-
-/* --- KDF --- */
-#define CKM_NIST_PRF_KDF                     0x00000384u
 
 /* --- GENERIC --- */
 #define CKM_GENERIC_SECRET_KEY_GEN           0x00000350u
@@ -242,8 +237,6 @@ extern fhsm_rv_t dispatch_ecdh1_cofactor(unsigned long, unsigned long, const voi
 extern fhsm_rv_t dispatch_eddsa_keypair(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_eddsa(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ecm_keypair(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
-extern fhsm_rv_t dispatch_x25519(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
-extern fhsm_rv_t dispatch_x448(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ml_kem_keypair(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ml_kem_encap(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_ml_dsa_keypair(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
@@ -254,7 +247,6 @@ extern fhsm_rv_t dispatch_hkdf(unsigned long, unsigned long, const void*, size_t
 extern fhsm_rv_t dispatch_hkdf_data(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_hkdf_keygen(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_pbkdf2(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
-extern fhsm_rv_t dispatch_nist_prf_kdf(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_generic_secret_keygen(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_concat_base_and_key(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_concat_base_and_data(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
