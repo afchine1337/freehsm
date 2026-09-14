@@ -505,15 +505,12 @@ fhsm_rv_t dispatch_ecdh1(unsigned long s, unsigned long k,
                           uint8_t *o, size_t *ol)
 { (void)s; (void)k; (void)in; return ecdh_derive(p, pl, o, ol); }
 
-fhsm_rv_t dispatch_x25519(unsigned long s, unsigned long k,
-                           const void *p, size_t pl, fhsm_slice_t in,
-                           uint8_t *o, size_t *ol)
-{ (void)s; (void)k; (void)in; return ecdh_derive(p, pl, o, ol); }
-
-fhsm_rv_t dispatch_x448(unsigned long s, unsigned long k,
-                         const void *p, size_t pl, fhsm_slice_t in,
-                         uint8_t *o, size_t *ol)
-{ (void)s; (void)k; (void)in; return ecdh_derive(p, pl, o, ol); }
+/* dispatch_x25519 / dispatch_x448 removed 2026-09-14 with
+ * CKM_X25519_DERIVE (0x1052) and CKM_X448_DERIVE (0x1054), which are
+ * CKM_ECMQV_DERIVE's and CKM_RSA_AES_KEY_WRAP's code points. Both were
+ * one-line facades over ecdh_derive(), identical to dispatch_ecdh1 above,
+ * so nothing is lost: Montgomery agreement reaches C_DeriveKey through
+ * CKM_ECDH1_DERIVE, which is how PKCS#11 expresses it. */
 
 /* ---------------------------------------------------------------------------
  * ECDH1 with cofactor multiplication (PKCS#11 §6.4.6.3). Same wire-

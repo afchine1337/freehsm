@@ -195,7 +195,6 @@ LIB_SRC = \
     src/dispatch/fhsm_dispatch_kdf.c  \
     src/dispatch/fhsm_dispatch_pkey.c \
     src/dispatch/fhsm_dispatch_pq.c   \
-    src/dispatch/fhsm_dispatch_kmac.c   \
     src/dispatch/fhsm_dispatch_concat.c \
     src/dispatch/fhsm_dispatch_hybrid.c \
     src/dispatch/fhsm_dispatch_composite.c \

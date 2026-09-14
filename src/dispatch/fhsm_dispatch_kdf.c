@@ -154,51 +154,20 @@ fhsm_rv_t dispatch_hkdf_keygen(unsigned long session, unsigned long key,
     return fhsm_rng_bytes(out, *outlen);
 }
 
-/* ---- SP 800-108 PRF KDF (KBKDF counter mode with HMAC-SHA-2 PRF) ---- */
-fhsm_rv_t dispatch_nist_prf_kdf(unsigned long session, unsigned long key,
-                                  const void *params, size_t plen,
-                                  fhsm_slice_t in, uint8_t *out, size_t *outlen)
-{
-    (void)session; (void)key; (void)in;
-    fhsm_slice_t Ki, info, alg;
-    fhsm_rv_t rv;
-    /* Ki = key derivation key (CKK_HMAC). */
-    if ((rv = fhsm_tlv_find(params, plen, FHSM_TLV_KEY, &Ki)) != FHSM_RV_OK) return rv;
-    /* info = fixed input data (SP 800-108 §5.1 : Label || 0x00 || Context || L). */
-    fhsm_tlv_find_optional(params, plen, FHSM_TLV_INFO, &info);
-    fhsm_tlv_find_optional(params, plen, FHSM_TLV_HASH_ALG, &alg);
-    fhsm_hash_t h = parse_hash_alg(alg.len ? &alg : NULL);
-    if (out == NULL || outlen == NULL || *outlen == 0) return FHSM_RV_ARGUMENTS_BAD;
-
-    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "KBKDF", NULL);
-    if (!kdf) return FHSM_RV_MECHANISM_INVALID;
-    EVP_KDF_CTX *ctx = EVP_KDF_CTX_new(kdf);
-    if (!ctx) { EVP_KDF_free(kdf); return FHSM_RV_HOST_MEMORY; }
-
-    char mode[] = "counter";
-    char mac[]  = "HMAC";
-    OSSL_PARAM p[7];
-    int pi = 0;
-    p[pi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE,   mode, 0);
-    p[pi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MAC,    mac,  0);
-    p[pi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
-                    (char*)hash_oqs_name(h), 0);
-    p[pi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
-                    (void*)Ki.data, Ki.len);
-    if (info.len) {
-        p[pi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
-                        (void*)info.data, info.len);
-    }
-    p[pi] = OSSL_PARAM_construct_end();
-
-    rv = (EVP_KDF_derive(ctx, out, *outlen, p) == 1)
-          ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
-    EVP_KDF_CTX_free(ctx);
-    EVP_KDF_free(kdf);
-    return rv;
-}
-
-/* ---- Generic secret keygen ---- */
+/* ---- SP 800-108 PRF KDF: handler removed, 2026-09-14 ----
+ *
+ * dispatch_nist_prf_kdf() went with CKM_NIST_PRF_KDF, whose code point
+ * (0x384) PKCS#11 does not assign. See the note in gen_p11_thunks.py.
+ *
+ * The implementation was KBKDF counter mode over HMAC, taking the fixed
+ * input as one opaque blob. That is SP 800-108 §5.1's layout and not what
+ * PKCS#11 asks for: CK_SP800_108_KDF_PARAMS carries a *list* of
+ * CK_PRF_DATA_PARAM describing where the iteration variable, the counter
+ * and the DKM length sit within the PRF input. So the code would have had
+ * to be rewritten anyway, for CKM_SP800_108_COUNTER_KDF and its two
+ * siblings, at their real values.
+ *
+ * ---- Generic secret keygen ---- */
 fhsm_rv_t dispatch_generic_secret_keygen(unsigned long session, unsigned long key,
                                             const void *params, size_t plen,
                                             fhsm_slice_t in, uint8_t *out, size_t *outlen)
