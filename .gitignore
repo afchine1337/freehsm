@@ -52,6 +52,9 @@ tests/*.gcno
 tests/*.gcda
 tests/*.gcov
 tests/*.sha256
+# The name sign_module.sh writes since the integrity digest became SHA-384
+# (2026-09-14). tests/test_integrity signs itself, so it produces one too.
+tests/*.integrity-sha384
 tests/*.tampered
 tests/fuzz/
 fuzz/fuzz_*
@@ -149,6 +152,7 @@ dist/refs/*
 
 # Distributed artefacts (signed at release time)
 libfreehsm.so.sha256
+libfreehsm.so.integrity-sha384
 
 # Editor / IDE
 .vscode/

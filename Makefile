@@ -961,6 +961,7 @@ clean:
 	# sitting next to one that does, is the same trap as the stale test binary
 	# below -- it looks like a current answer to a current question.
 	rm -f $(LIB).sha256 $(LIB).integrity-sha384
+	rm -f tests/*.sha256 tests/*.integrity-sha384
 	# Every test binary, not just test_smoke. Naming one of forty meant an old
 	# binary survived `make clean && make` and then ran against a freshly built
 	# library, reporting on code it was not compiled for -- silently, since
