@@ -64,11 +64,29 @@ extern "C" {
  * accepts in development mode under FHSM_INTEGRITY_ALLOW_UNSIGNED).
  *
  * Declared in fhsm_integrity.c with __attribute__((section(".fhsm_digest"))). */
-extern const volatile uint8_t fhsm_module_integrity_digest[32];
+extern const volatile uint8_t fhsm_module_integrity_digest[48];
 
 /* Size of the trailing section, used by the verifier to skip the
- * digest bytes when re-computing the hash. Build-time constant. */
-#define FHSM_INTEGRITY_DIGEST_LEN  32
+ * digest bytes when re-computing the hash. Build-time constant.
+ *
+ * SHA-384, 48 bytes, since 2026-09-14. It was SHA-256.
+ *
+ * CNSA 2.0 deprecates SHA-256 and requires SHA-384 or SHA-512, and issue
+ * #16 makes the point that the cost of this change only goes up: every
+ * published reference digest, every signing pipeline and every consumer
+ * that has learned the length is one more thing to move later. Doing it
+ * while the module is young is the whole argument, and it is a good one.
+ *
+ * The declaration above carries 48 literally rather than this macro, and
+ * must be kept with it: the array's size is part of the linker section's
+ * size, and an extern whose length disagrees with its definition is a
+ * mismatch no compiler will see across translation units.
+ *
+ * Note that this is the module's own integrity digest. The .sha256 files
+ * under dist/refs and in the release workflow are artefact receipts -- a
+ * different question, with a different threat model, deliberately not
+ * changed here. */
+#define FHSM_INTEGRITY_DIGEST_LEN  48
 
 /* Section name --- used by both the linker map and the sign script. */
 #define FHSM_INTEGRITY_SECTION     ".fhsm_digest"

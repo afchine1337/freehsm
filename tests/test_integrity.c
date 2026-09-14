@@ -92,8 +92,13 @@ int main(int argc, char **argv) {
             return fail("signed binary", "fhsm_integrity_is_signed() = 0");
         if (rv != FHSM_RV_OK) {
             const uint8_t *got = fhsm_integrity_last_computed();
-            char hex[65];
-            for (int i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", got[i]);
+            /* Sized from the constant, not from 32: this printed half a
+             * SHA-384 the moment the digest changed, and a diagnostic that
+             * silently truncates is worse than none when the thing being
+             * diagnosed is a digest mismatch. */
+            char hex[FHSM_INTEGRITY_DIGEST_LEN * 2 + 1];
+            for (int i = 0; i < FHSM_INTEGRITY_DIGEST_LEN; ++i)
+                snprintf(hex + i * 2, 3, "%02x", got[i]);
             fprintf(stderr, "  computed digest = %s\n", hex);
             fprintf(stderr, "  image           = %s\n", fhsm_integrity_so_path());
             return fail("signed binary must verify",

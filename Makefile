@@ -955,6 +955,12 @@ uninstall:
 clean:
 	rm -rf $(OBJDIR)
 	rm -f $(LIB) tests/test_smoke tests/*.o
+	# The signing sidecars, including the name the script used before the
+	# integrity digest became SHA-384 on 2026-09-14. A file called
+	# libfreehsm.so.sha256 holding a digest of a module that no longer exists,
+	# sitting next to one that does, is the same trap as the stale test binary
+	# below -- it looks like a current answer to a current question.
+	rm -f $(LIB).sha256 $(LIB).integrity-sha384
 	# Every test binary, not just test_smoke. Naming one of forty meant an old
 	# binary survived `make clean && make` and then ran against a freshly built
 	# library, reporting on code it was not compiled for -- silently, since

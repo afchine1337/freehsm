@@ -258,8 +258,11 @@ static fhsm_rv_t do_verify(void) {
     }
     memset(buf + off, 0, len);
 
-    /* Compute SHA-256 over the masked buffer. */
-    EVP_MD *md = EVP_MD_fetch(NULL, "SHA2-256", NULL);
+    /* Compute SHA-384 over the masked buffer.
+     *
+     * Was SHA-2-256 until 2026-09-14. CNSA 2.0 deprecates SHA-256 and
+     * requires SHA-384 or SHA-512; see FHSM_INTEGRITY_DIGEST_LEN. */
+    EVP_MD *md = EVP_MD_fetch(NULL, "SHA2-384", NULL);
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
     unsigned int n = 0;
