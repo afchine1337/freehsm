@@ -1058,6 +1058,108 @@ compliance note is still recorded so the channel is reported. Only
 classification now say the same thing, arrived at independently. That is a better
 outcome than a report would have been.
 
+# Two found without a harness (2026-09-12 / 14)
+
+Both were found by the module's own checks rather than by pkcs11-check, and
+neither could have been found by it. Recorded here because this file is where
+the project keeps what it learns, and because the pattern they share is more
+useful than either one.
+
+## The ratchet had a blind spot exactly where it was needed
+
+`tests/test_advertised_operational` asks `C_GetMechanismInfo` which operation
+each advertised mechanism claims, calls it, and fails on
+`CKR_MECHANISM_INVALID`. It was written on 2026-09-09 to make
+"advertised but not operational" a build failure rather than a finding.
+
+It skipped `CKF_GENERATE` and `CKF_GENERATE_KEY_PAIR`, on the reasoning that
+key generation needs a per-mechanism template and a generic probe would report
+noise. Ten of 78 mechanisms were outside its reach.
+
+Three days later `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` was added, marked approved,
+and advertised in a build whose FIPS provider has no X25519 at all:
+
+```
+inner_evp_generic_fetch: unsupported:
+Algorithm (X25519 : 112), Properties (<null>)
+```
+
+The test written to make that impossible could not see it. `run_fips_tests.sh`
+caught it instead, because it runs without the integrity bypass and therefore
+inside the evaluated configuration — the one place in this project where the
+two providers differ visibly.
+
+**The reasoning was wrong in a way worth stating.** The template does not have
+to be correct. Only `CKR_MECHANISM_INVALID` counts as a failure, so the probe
+only needs to *reach* the mechanism switch, and every entry point runs its
+generic template checks first and its switch after. A template that is wrong
+for the mechanism comes back `CKR_ATTRIBUTE_VALUE_INVALID` or
+`CKR_TEMPLATE_INCONSISTENT` — which means the mechanism was recognised, which
+is the whole question. The key-pair probe now carries both `CKA_MODULUS_BITS`
+and `CKA_EC_PARAMS`: wrong for every mechanism, right for the question.
+
+On the first run after the extension:
+
+```
+0x402c  advertises GenerateKey but C_GenerateKey returns CKR_MECHANISM_INVALID
+```
+
+`CKM_HKDF_KEY_GEN`, advertised since the mechanism table replaced the
+hand-written list and refused by `C_GenerateKey` for just as long. No harness
+ever reported it. It was not noticed earlier the same evening either, while
+`CKM_HKDF_DERIVE` and `CKM_HKDF_DATA` were being implemented with all three
+sitting together in the same table.
+
+Now `119` operations probed across `78` mechanisms, `0` outside the ratchet's
+reach.
+
+## KMAC was advertised on code points that do not exist
+
+`CKM_KMAC128` = `0x4080` and `CKM_KMAC256` = `0x4081`. Neither is a PKCS#11
+mechanism. The OASIS v3.2 `pkcs11t.h` contains no KMAC of any spelling, and
+the standard mechanism range it defines ends at `CKM_PUB_KEY_FROM_PRIV_KEY` =
+`0x403A`.
+
+The table entries cited SP 800-185 §4 — the standard for the algorithm, which
+says nothing about a PKCS#11 code point. A reference to the right document for
+the wrong question reads like a verification that happened.
+
+**Unassigned is worse than wrong.** OASIS may assign `0x4080`. An application
+written against this module would then ask for one mechanism and be handed
+another — the CMAC/GMAC inversion recorded at `CKM_AES_GMAC`, pointed forward
+instead of back.
+
+Removed rather than moved into `CKM_VENDOR_DEFINED` (`0x80000000`), where the
+two hybrids correctly live, because nobody has asked for KMAC and nothing
+external could reach it. pkcs11-check's own KMAC tests resolve mechanism names
+through a table with no KMAC entry, so they skip against every module — which
+is why no report in this file ever mentioned them. Reported upstream.
+
+**How it was found.** By starting to implement the two mechanisms, and
+checking their code points against the OASIS table first, per the rule this
+project wrote for itself after the GMAC incident. That rule had not yet caught
+anything. It has now, and what it caught was our own.
+
+## What these two have in common
+
+Neither was findable by measurement. The first was invisible because the
+instrument did not look there; the second because no instrument could — the
+mechanism was unreachable by name from outside.
+
+Both were found by reading the module against its own rules: one by asking why
+ten mechanisms were exempt from a check meant to be exhaustive, the other by
+following a verification rule to a source. Harnesses find what they have
+vectors for. This file has spent two months recording what that misses, and
+these are two more.
+
+## A note on the history
+
+`CKM_HKDF_KEY_GEN` and the ratchet extension were committed inside
+`b850db7` (X25519) and `bf849db` (KMAC removal), whose messages describe
+neither. A prepared commit for them was never run, and `git status` was not
+re-read before the commit that swept them up. The history is public and was
+not rewritten; this section is the record instead.
+
 What survives from our side, and is worth keeping: the 105 600-probe measurement
 of *our* module's behaviour, and `tests/test_cbc_pad_oracle.c`. Neither depends
 on the harness. The one residue upstream is cosmetic — the docstring of
