@@ -44,7 +44,7 @@ def main():
               "wrong file, or its format changed", file=sys.stderr)
         return 2
 
-    bad, ok, skipped = [], 0, 0
+    bad, ok, unchecked = [], 0, 0
     for pattern in args.sources:
         for f in glob.glob(pattern):
             for m in re.finditer(r'^\s*#define\s+(CK[A-Z]+_\w+)\s+(0x[0-9A-Fa-f]+)',
@@ -52,7 +52,25 @@ def main():
                 name, val = m.group(1), int(m.group(2), 16)
                 base = SUFFIXES.sub('', name)
                 if base not in spec:
-                    skipped += 1           # vendor / module-local constant
+                    # Counted, not checked.
+                    #
+                    # The reference is pkcs11-check's types_std.py, a partial
+                    # extraction of the OASIS header, so a name it does not
+                    # carry may be ours or may be one the extraction missed.
+                    # This script cannot tell the two apart and passes both.
+                    #
+                    # On 2026-09-14 that let CKM_KMAC128/256 through on
+                    # unassigned values and CKM_X25519_DERIVE / CKM_X448_DERIVE
+                    # through on CKM_ECMQV_DERIVE's and
+                    # CKM_RSA_AES_KEY_WRAP's. All five were filed here, under
+                    # a label that makes an invented code point look
+                    # deliberate.
+                    #
+                    # Mechanisms are now checked against the full OASIS header
+                    # by scripts/check_mech_codepoints.py, which can tell the
+                    # difference. This counter is left as a count and its name
+                    # corrected: it is not evidence that anything is local.
+                    unchecked += 1
                     continue
                 if val == spec[base]:
                     ok += 1
@@ -61,7 +79,9 @@ def main():
                              if v == val and k.split('_')[0] == base.split('_')[0]]
                     bad.append((name, val, spec[base], clash[0] if clash else "?", f))
 
-    print(f"[audit_constants] {ok} conform, {skipped} module-local, {len(bad)} divergent")
+    print(f"[audit_constants] {ok} conform, {unchecked} not in the reference "
+          f"(unchecked here -- see check_mech_codepoints.py), "
+          f"{len(bad)} divergent")
     if bad:
         print(f"\n{'constant':<38} {'module':>9} {'spec':>9}  {'module value actually means':<34} file")
         print("-" * 132)

@@ -62,6 +62,36 @@ jobs:
           test -f "$SPEC" || { echo "spec table not found at $SPEC"; exit 1; }
           python3 scripts/audit_constants.py --spec "$SPEC"
 
+      # Mechanism code points, against the OASIS header rather than the
+      # harness's extraction of it. GATING.
+      #
+      # The audit above cannot do this job and was never able to. Its
+      # reference, types_std.py, is a partial extraction, so a name it does
+      # not know is ambiguous -- it may be ours or it may be one the
+      # extraction missed. It therefore counts an unknown name as
+      # "module-local" and passes it.
+      #
+      # On 2026-09-14 that let three through: CKM_KMAC128 and CKM_KMAC256 on
+      # unassigned values, and CKM_X25519_DERIVE / CKM_X448_DERIVE on
+      # CKM_ECMQV_DERIVE's and CKM_RSA_AES_KEY_WRAP's. Each was silently
+      # filed under "module-local", a label that makes an invented code point
+      # look deliberate. The comment above this step said it closed the
+      # class. It closed half of it: a name the reference knows, checked; a
+      # name it does not, skipped.
+      #
+      # The OASIS header carries all 542 names, so "not in the header" means
+      # something here.
+      - name: PKCS#11 mechanism code points
+        run: |
+          # No pin is possible for a URL. If the oracle cannot be fetched the
+          # step fails: a gate that cannot reach its reference must go red,
+          # not green, which is the whole lesson of the step it follows.
+          curl -sSfL --retry 3 -o /tmp/pkcs11t.h \
+            https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/include/pkcs11-v3.2/pkcs11t.h
+          grep -q 'CKM_VENDOR_DEFINED' /tmp/pkcs11t.h \
+            || { echo "fetched file is not a pkcs11t.h"; exit 1; }
+          python3 scripts/check_mech_codepoints.py /tmp/pkcs11t.h
+
   # Build under a distribution's own flags, not ours.
   #
   # Issue #7: a Debian maintainer could not compile FreeHSM, with an error this
