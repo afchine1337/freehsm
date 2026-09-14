@@ -3,123 +3,187 @@
 # Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 # ===========================================================================
-"""Check every mechanism and key-type code point against the OASIS header.
+"""Check every PKCS#11 constant in this module against the OASIS header.
 
-On 2026-09-14 this module was found to advertise CKM_KMAC128 = 0x4080 and
-CKM_KMAC256 = 0x4081. Neither is a PKCS#11 mechanism: the OASIS v3.2
-pkcs11t.h has no KMAC of any spelling, and the standard range it defines
-ends at CKM_PUB_KEY_FROM_PRIV_KEY = 0x403A. The entries had sat in the
-table citing SP 800-185 -- the standard for the algorithm, which says
-nothing about a code point.
+Mechanisms from the generator's table, and every CK*_ constant #defined in
+src/ and include/: name must exist in the header, value must match.
 
-That was found by hand, by applying a rule this project wrote for itself
-after advertising CMAC under CKM_AES_XCBC_MAC's value. The rule had been in
-the comments for two months and had caught nothing, because a rule that
-depends on someone remembering to apply it is a habit, not a check.
+## Why this exists alongside audit_constants.py
+
+audit_constants.py compares against pkcs11-check's raw/types_std.py, a
+partial extraction of the OASIS header. A name that table does not carry is
+ambiguous -- it may be a module-local alias, or one the extraction missed --
+so that script counts it and moves on. 32 constants were in that category.
+
+On 2026-09-14 five real defects were sitting in it:
+
+    CKM_KMAC128       0x4080   unassigned
+    CKM_KMAC256       0x4081   unassigned
+    CKM_NIST_PRF_KDF  0x384    unassigned
+    CKM_X25519_DERIVE 0x1052   is CKM_ECMQV_DERIVE
+    CKM_X448_DERIVE   0x1054   is CKM_RSA_AES_KEY_WRAP
+
+The last two were the CMAC/GMAC inversion in service: C_GetMechanismList
+answered with ECMQV's code point and the module performed X25519 under it.
+
+The header carries all 542 names, so here "not in the reference" means
+something, and the skip category disappears.
+
+## What counts as a failure
+
+  - a name the header knows, with a different value
+  - a name the header does not know, below CKM_VENDOR_DEFINED (0x80000000)
+  - a vendor-range value that collides with a standard name
+
+Module-local aliases are recognised by suffix -- the module #defines
+CKM_SHA256_RSA_PKCS_LIST, CKA_EC_PARAMS_QUERY, CKM_HKDF_KEY_GEN_OP and so
+on to avoid colliding with a platform header -- and are checked against
+their base name, which is the point of having them.
+
+## What this does not check
+
+Whether the mechanism is implemented. That is
+tests/test_advertised_operational's job, and the two questions are
+different: KMAC was implemented correctly on a code point that does not
+exist, which is exactly why it looked finished.
 
 Usage:
     python3 scripts/check_mech_codepoints.py path/to/pkcs11t.h
 
-The header is not vendored here -- it carries its own licence and a network
-dependency inside a check is its own kind of fragility. Fetch it from:
+The header is not vendored -- it carries its own licence, and a network
+dependency inside a check is its own fragility. Fetch it from:
 
     https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/include/pkcs11-v3.2/pkcs11t.h
 
-Exit status 0 when every value matches, 1 otherwise.
-
-What is checked:
-  - a mechanism named in gen_p11_thunks.py must exist in the header, and
-    its value must match
-  - a value at or above CKM_VENDOR_DEFINED (0x80000000) is exempt from
-    existing, because that range is ours by definition -- but it must NOT
-    collide with a standard name
-  - a mechanism absent from the header and below the vendor range is the
-    KMAC case, and is what this script exists to refuse
-
-What is not checked: whether the mechanism is implemented. That is
-tests/test_advertised_operational's job, and the two questions are
-different -- KMAC was implemented correctly on a code point that does not
-exist, which is exactly why it looked finished.
+Exit status 0 when everything matches, 1 otherwise.
 """
 from __future__ import annotations
 
+import glob
 import re
 import sys
 from pathlib import Path
 
 VENDOR_DEFINED = 0x80000000
 
-DEFINE_RE = re.compile(
-    r"^\s*#define\s+(CK[MK]_[A-Za-z0-9_]+)\s+0x([0-9a-fA-F]+)UL", re.M
+# Module-local shadow aliases. Same list as audit_constants.py; a name
+# ending in one of these is checked against the name without it.
+SUFFIXES = re.compile(
+    r"_(LIST|ATTR|OP|QUERY|KT|TMPL|MECH|INIT_VAL|CREATEOBJECT)$")
+
+# Local names whose base spelling differs from the header's. Each line is a
+# stated equivalence, checked like any other: the value still has to match.
+# They are listed rather than pattern-matched so that adding one is a
+# decision someone made, not a rule that quietly absorbs the next mistake.
+ALIASES = {
+    "CKM_SHA1":                "CKM_SHA_1",
+    "CKM_SHA1_HMAC":           "CKM_SHA_1_HMAC",
+    "CKM_ECDSA_BARE":          "CKM_ECDSA",
+    "CKM_RSA_KEY_PAIR_GEN":    "CKM_RSA_PKCS_KEY_PAIR_GEN",
+    "CKA_ALWAYS_AUTH":         "CKA_ALWAYS_AUTHENTICATE",
+}
+
+# CKF_ is not one namespace. Slot, token, session and mechanism flags are
+# disjoint spaces that overlap by design -- CKF_HW = 0x1 as a mechanism flag
+# and CKF_TOKEN_PRESENT = 0x1 as a slot flag are both correct. So a CKF_
+# value is checked against its own name and never reported as "this value is
+# really that other name", which for this prefix would be noise.
+NO_VALUE_HINT = ("CKF",)
+
+HEADER_RE = re.compile(
+    r"^\s*#define\s+(CK[A-Z]+_[A-Za-z0-9_]+)\s+0x([0-9a-fA-F]+)UL", re.M
 )
-MECH_RE = re.compile(
-    r'Mech\(\s*"(CKM_[A-Za-z0-9_]+)"\s*,\s*(0x[0-9a-fA-F]+)', re.M
+# CKA_WRAP_TEMPLATE and friends are defined as (CKF_ARRAY_ATTRIBUTE|0x212UL).
+# Missing this form is what made CKA_UNWRAP_TEMPLATE_ATTR look invented.
+HEADER_ARRAY_RE = re.compile(
+    r"^\s*#define\s+(CKA_[A-Za-z0-9_]+)\s+\(\s*CKF_ARRAY_ATTRIBUTE\s*\|\s*"
+    r"0x([0-9a-fA-F]+)UL\s*\)", re.M
 )
+CKF_ARRAY_ATTRIBUTE = 0x40000000
+SOURCE_RE = re.compile(
+    r"^\s*#define\s+(CK[A-Z]+_[A-Za-z0-9_]+)\s+(0x[0-9a-fA-F]+)", re.M
+)
+MECH_RE = re.compile(r'Mech\(\s*"(CKM_[A-Za-z0-9_]+)"\s*,\s*(0x[0-9a-fA-F]+)', re.M)
 
 
-def load_header(path: Path) -> dict[str, int]:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    out: dict[str, int] = {}
-    for name, value in DEFINE_RE.findall(text):
-        out[name] = int(value, 16)
-    if not out:
-        sys.exit(f"{path}: no CKM_/CKK_ defines found -- wrong file?")
-    return out
-
-
-def load_table(path: Path) -> list[tuple[str, int]]:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    entries = [(n, int(v, 16)) for n, v in MECH_RE.findall(text)]
-    if not entries:
-        sys.exit(f"{path}: no Mech(...) entries found -- wrong file?")
-    return entries
+def family(name: str) -> str:
+    return name.split("_", 1)[0]
 
 
 def main() -> int:
     if len(sys.argv) != 2:
-        sys.exit(__doc__.strip().splitlines()[0] + "\n\nusage: "
-                 "check_mech_codepoints.py path/to/pkcs11t.h")
+        sys.exit("usage: check_mech_codepoints.py path/to/pkcs11t.h")
 
     here = Path(__file__).resolve().parent
-    header = load_header(Path(sys.argv[1]))
-    table = load_table(here / "gen_p11_thunks.py")
-    by_value = {v: k for k, v in header.items() if k.startswith("CKM_")}
+    root = here.parent
+
+    text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+    header = {n: int(v, 16) for n, v in HEADER_RE.findall(text)}
+    for n, v in HEADER_ARRAY_RE.findall(text):
+        header[n] = CKF_ARRAY_ATTRIBUTE | int(v, 16)
+    if "CKM_VENDOR_DEFINED" not in header:
+        sys.exit(f"{sys.argv[1]}: does not look like a pkcs11t.h")
+
+    # value -> names, per family, for saying what a wrong value actually means
+    by_value: dict[tuple[str, int], str] = {}
+    for n, v in header.items():
+        by_value.setdefault((family(n), v), n)
+
+    entries: list[tuple[str, int, str]] = []
+    for n, v in MECH_RE.findall((here / "gen_p11_thunks.py").read_text()):
+        entries.append((n, int(v, 16), "gen_p11_thunks.py"))
+    for pattern in ("src/*.c", "src/**/*.c", "include/*.h"):
+        for f in glob.glob(str(root / pattern), recursive=True):
+            src = Path(f).read_text(encoding="utf-8", errors="replace")
+            for n, v in SOURCE_RE.findall(src):
+                entries.append((n, int(v, 16), Path(f).name))
+    if not entries:
+        sys.exit("no constants found -- run from the repository")
 
     problems: list[str] = []
-    vendor = 0
+    checked = vendor = 0
+    seen: set[tuple[str, int, str]] = set()
 
-    for name, value in table:
+    for name, value, where in entries:
+        if (name, value, where) in seen:
+            continue
+        seen.add((name, value, where))
+        base = SUFFIXES.sub("", name)
+        base = ALIASES.get(base, base)
+        hint = family(base) not in NO_VALUE_HINT
+
         if value >= VENDOR_DEFINED:
             vendor += 1
-            clash = by_value.get(value)
+            clash = by_value.get((family(base), value)) if hint else None
             if clash:
                 problems.append(
-                    f"{name} = {value:#x} is in the vendor range but collides "
-                    f"with {clash}")
+                    f"{name} = {value:#x} ({where}) is in the vendor range "
+                    f"but collides with {clash}")
             continue
 
-        want = header.get(name)
+        want = header.get(base)
         if want is None:
-            other = by_value.get(value)
-            detail = (f"; {value:#x} is {other} in the header"
-                      if other else f"; {value:#x} is unassigned")
-            problems.append(
-                f"{name} is not a PKCS#11 mechanism{detail}")
+            other = by_value.get((family(base), value)) if hint else None
+            detail = (f"; {value:#x} is {other}" if other
+                      else f"; {value:#x} is unassigned")
+            problems.append(f"{name} ({where}) is not a PKCS#11 constant{detail}")
         elif want != value:
+            other = by_value.get((family(base), value)) if hint else None
             problems.append(
-                f"{name} = {value:#x} but the header says {want:#x}")
+                f"{name} = {value:#x} ({where}) but the header says {want:#x}"
+                + (f"; {value:#x} is {other}" if other else ""))
+        else:
+            checked += 1
 
-    print(f"{len(table)} mechanisms in the table, {vendor} vendor-defined, "
+    print(f"{checked} constants match, {vendor} vendor-defined, "
           f"{len(header)} names in the header")
-
     if problems:
         print()
-        for p in problems:
+        for p in sorted(problems):
             print(f"  FAIL  {p}")
         print(f"\n{len(problems)} problem(s)")
         return 1
-
-    print("all code points match the header")
+    print("nothing unchecked")
     return 0
 
 
