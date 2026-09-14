@@ -64,7 +64,10 @@
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
-#include <openssl/sha.h>
+/* openssl/sha.h is gone with SHA256(): the conditioner goes through EVP so
+ * that a FIPS build conditions its entropy with the validated
+ * implementation. See condition_and_seed(). */
+#include <openssl/crypto.h>   /* OPENSSL_cleanse */
 
 /* x86 / x86_64 RDRAND --- guarded by the CPU feature flag, queried at
  * init via __builtin_cpu_supports. On non-Intel arches we just skip. */
@@ -210,8 +213,30 @@ static size_t entropy_tsc_jitter(uint8_t *dst, size_t cap) {
 }
 
 /* ---------------------------------------------------------------------------
- * Conditioner : SHA-256 the union of all sources.
- * Output : 32 bytes of conditioned entropy.
+ * Conditioner : SHA-384 the union of all sources.
+ * Output : 48 bytes of conditioned entropy.
+ *
+ * What this hash is for, since it is easy to read it as the generator: the
+ * generator is OpenSSL's CTR_DRBG-AES-256. This conditions the four raw
+ * sources into one block that is handed to RAND_add as additional input
+ * with an entropy estimate of 0. The property being asked of it is entropy
+ * preservation, which SP 800-90B §3.1.5.1.1 grants to a vetted hash --
+ * not collision resistance.
+ *
+ * Changed from SHA-256 on 2026-09-14 (issue #16, CNSA 2.0). The CNSA
+ * argument is weaker here than for a signature or an integrity digest,
+ * precisely because of the paragraph above. It is done anyway because
+ * there is no cost, and because "no SHA-256 anywhere" is a posture that
+ * can be stated and audited, where "SHA-256 only where it does not
+ * matter" invites the next reader to decide for themselves whether their
+ * case matters.
+ *
+ * The bigger change is EVP. This called SHA256(), the one-shot legacy
+ * API, which computes the hash in libcrypto and never reaches a provider.
+ * In a FIPS build the entropy conditioning was therefore not performed by
+ * the validated implementation -- nothing to do with CNSA, and not
+ * something the FIPS self-tests would report, since they exercise the
+ * mechanisms the module advertises and this is internal plumbing.
  * ----------------------------------------------------------------------- */
 static fhsm_rv_t condition_and_seed(void) {
     uint8_t pool[512];     /* large enough for the four sources */
@@ -223,16 +248,38 @@ static fhsm_rv_t condition_and_seed(void) {
     off += entropy_tsc_jitter(pool + off, sizeof(pool) - off);
     if (off == 0) return FHSM_RV_RNG_FAILURE;
 
-    uint8_t cond[32];
-    SHA256(pool, off, cond);
+    uint8_t cond[48];
+    unsigned int cond_len = 0;
+    EVP_MD *md = EVP_MD_fetch(NULL, "SHA2-384", NULL);
+    EVP_MD_CTX *mdctx = md ? EVP_MD_CTX_new() : NULL;
+    int hashed = mdctx
+              && EVP_DigestInit_ex2(mdctx, md, NULL) == 1
+              && EVP_DigestUpdate(mdctx, pool, off) == 1
+              && EVP_DigestFinal_ex(mdctx, cond, &cond_len) == 1
+              && cond_len == sizeof(cond);
+    EVP_MD_CTX_free(mdctx);
+    EVP_MD_free(md);
+    if (!hashed) {
+        /* A conditioner that cannot run must not be worked around by
+         * seeding with the raw pool: that would feed unconditioned,
+         * unevenly-distributed samples straight into the DRBG and report
+         * success. */
+        OPENSSL_cleanse(pool, sizeof(pool));
+        OPENSSL_cleanse(cond, sizeof(cond));
+        return FHSM_RV_RNG_FAILURE;
+    }
+
     /* Feed conditioned entropy to OpenSSL's DRBG. The estimate
      * argument is 0 (we don't claim entropy quantitatively to avoid
      * over-counting) --- OpenSSL still uses it as additional input. */
     RAND_add(cond, sizeof(cond), 0.0);
 
-    /* Wipe transient buffers. */
-    memset(pool, 0, sizeof(pool));
-    memset(cond, 0, sizeof(cond));
+    /* Wipe transient buffers. OPENSSL_cleanse, not memset: these hold raw
+     * and conditioned entropy, they are dead at the end of the function,
+     * and a memset on a dead local is exactly what a compiler is entitled
+     * to remove. */
+    OPENSSL_cleanse(pool, sizeof(pool));
+    OPENSSL_cleanse(cond, sizeof(cond));
 
     g_last_reseed_t       = time(NULL);
     g_bytes_since_reseed  = 0;
@@ -396,8 +443,13 @@ fhsm_rv_t fhsm_drbg_bytes(uint8_t *out, size_t n) {
         if (rv != FHSM_RV_OK) {
             /* Clear everything produced so far, not just the failing chunk:
              * output that preceded a health failure is not output we stand
-             * behind. */
-            memset(out, 0, done + want);
+             * behind.
+             *
+             * OPENSSL_cleanse, not memset. `out` is the caller's buffer and
+             * so not dead here, which makes elision less likely than for a
+             * local -- but "less likely" is not a property to rely on when
+             * the bytes are DRBG output that failed a health test. */
+            OPENSSL_cleanse(out, done + want);
             pthread_mutex_unlock(&g_mtx);
             return rv;
         }
