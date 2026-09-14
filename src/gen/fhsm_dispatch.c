@@ -486,26 +486,6 @@ __attribute__((weak)) fhsm_rv_t dispatch_hybrid_x25519_ml_kem_768(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
-__attribute__((weak)) fhsm_rv_t dispatch_kmac128(
-    unsigned long session, unsigned long key,
-    const void *params, size_t plen,
-    fhsm_slice_t in, uint8_t *out, size_t *outlen)
-{
-    (void)session; (void)key; (void)params; (void)plen;
-    (void)in; (void)out; (void)outlen;
-    return FHSM_RV_FUNCTION_FAILED;
-}
-
-__attribute__((weak)) fhsm_rv_t dispatch_kmac256(
-    unsigned long session, unsigned long key,
-    const void *params, size_t plen,
-    fhsm_slice_t in, uint8_t *out, size_t *outlen)
-{
-    (void)session; (void)key; (void)params; (void)plen;
-    (void)in; (void)out; (void)outlen;
-    return FHSM_RV_FUNCTION_FAILED;
-}
-
 __attribute__((weak)) fhsm_rv_t dispatch_md5(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
@@ -994,8 +974,6 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x0000402Au, "CKM_HKDF_DERIVE", "HKDF", "derive", 1, dispatch_hkdf },
     { 0x0000402Bu, "CKM_HKDF_DATA", "HKDF", "derive", 1, dispatch_hkdf_data },
     { 0x0000402Cu, "CKM_HKDF_KEY_GEN", "HKDF", "keygen", 1, dispatch_hkdf_keygen },
-    { 0x00004080u, "CKM_KMAC128", "KMAC", "sign", 1, dispatch_kmac128 },
-    { 0x00004081u, "CKM_KMAC256", "KMAC", "sign", 1, dispatch_kmac256 },
     { 0x80004200u, "CKM_HYBRID_X25519_ML_KEM_768", "Hybrid-KEM", "encap", 1, dispatch_hybrid_x25519_ml_kem_768 },
     { 0x80004201u, "CKM_HYBRID_ED25519_ML_DSA_65", "Hybrid-Sig", "sign", 1, dispatch_hybrid_ed25519_ml_dsa_65 },
     { 0x80004202u, "CKM_COMPOSITE_MLDSA65_ED25519", "Composite-Sig", "sign", 0, dispatch_reject_fips },

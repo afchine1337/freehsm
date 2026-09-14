@@ -2188,6 +2188,11 @@ typedef struct CK_PKCS5_PBKD2_PARAMS2_s {
 
 #define CKZ_SALT_SPECIFIED               0x00000001UL
 #define CKM_PKCS5_PBKD2_OP               0x000003B0UL
+/* Code points read from the OASIS table, not inferred: 0x402C sits beside
+ * CKM_HKDF_DERIVE (0x402A) and CKM_HKDF_DATA (0x402B), and CKK_HKDF is 0x42,
+ * next to CKK_EC_MONTGOMERY at 0x41. */
+#define CKM_HKDF_KEY_GEN_OP              0x0000402CUL
+#define CKK_HKDF_KT                      0x00000042UL
 
 /* Derive the key material for CKM_PKCS5_PBKD2. Returns a CKR_ on failure.
  *
@@ -2321,13 +2326,28 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         switch (pMechanism->mechanism) {
             case CKM_AES_KEY_GEN:            key_type = CKK_AES;            break;
             case CKM_GENERIC_SECRET_KEY_GEN: key_type = CKK_GENERIC_SECRET; break;
+            /* CKM_HKDF_KEY_GEN (PKCS#11 v3.2 §6.32.1): random key material
+             * for use as HKDF input, typed CKK_HKDF (0x42). Advertised with
+             * CKF_GENERATE and refused here -- found by extending
+             * tests/test_advertised_operational to key generation, on the
+             * first run after the extension, having been invisible for as
+             * long as the mechanism has been in the table. */
+            case CKM_HKDF_KEY_GEN_OP:        key_type = CKK_HKDF_KT;        break;
             default:                          return FHSM_RV_MECHANISM_INVALID;
         }
         long j = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
         if (j < 0) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         key_len = (uint32_t)(*(CK_ULONG*)pTemplate[j].pValue);
-        if (key_len != 16 && key_len != 24 && key_len != 32)
+        if (key_type == CKK_HKDF_KT) {
+            /* HKDF input keying material has no block size to respect: RFC
+             * 5869 takes an IKM of any length. The 16/24/32 below belongs to
+             * the ciphers, and applying it here would refuse a perfectly
+             * ordinary 20- or 64-byte secret. */
+            if (key_len == 0 || key_len > FHSM_PBKDF2_MAX_OUT)
+                return FHSM_RV_KEY_SIZE_RANGE;
+        } else if (key_len != 16 && key_len != 24 && key_len != 32) {
             return FHSM_RV_KEY_SIZE_RANGE;
+        }
     }
     long i;
 

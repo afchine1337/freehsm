@@ -70,12 +70,21 @@ typedef struct { CK_ULONG ulMinKeySize, ulMaxKeySize; CK_FLAGS flags; } CK_MECHA
 #define CKF_DERIVE                 0x00080000UL
 #define CKF_ENCAPSULATE            0x10000000UL
 #define CKF_DECAPSULATE            0x20000000UL
-/* Operations this test does not probe. Key generation needs a per-mechanism
- * template and wrapping needs a second key of the right type, so a generic
- * probe would report noise instead of the property under test. A mechanism
- * that advertises only these is counted, not failed. */
-#define CKF_UNPROBED (CKF_GENERATE | CKF_GENERATE_KEY_PAIR | CKF_WRAP | \
-                      CKF_UNWRAP  | CKF_SIGN_RECOVER | CKF_VERIFY_RECOVER)
+/* Operations this test does not probe. Wrapping needs a second key of the
+ * right type, and the recover operations do not exist here.
+ *
+ * Key generation used to be in this list, on the reasoning that it needs a
+ * per-mechanism template. That reasoning was wrong, and it cost something:
+ * CKM_EC_MONTGOMERY_KEY_PAIR_GEN was advertised in a build whose provider
+ * has no X25519, and this test could not see it.
+ *
+ * The template does not have to be right. Only CKR_MECHANISM_INVALID counts
+ * as a failure here, so the probe only needs to reach the mechanism switch --
+ * every entry point runs its generic template checks first and its mechanism
+ * switch after. A template that is wrong for the mechanism comes back
+ * CKR_ATTRIBUTE_VALUE_INVALID or CKR_TEMPLATE_INCONSISTENT, which means the
+ * mechanism was recognised, which is the whole question. */
+#define CKF_UNPROBED (CKF_WRAP | CKF_UNWRAP | CKF_SIGN_RECOVER | CKF_VERIFY_RECOVER)
 #define CKA_CLASS                  0UL
 #define CKA_KEY_TYPE               0x100UL
 #define CKA_VALUE_LEN              0x161UL
@@ -84,6 +93,8 @@ typedef struct { CK_ULONG ulMinKeySize, ulMaxKeySize; CK_FLAGS flags; } CK_MECHA
 #define CKA_ENCRYPT                0x104UL
 #define CKA_DECRYPT                0x105UL
 #define CKA_DERIVE                 0x10CUL
+#define CKA_MODULUS_BITS           0x121UL
+#define CKA_EC_PARAMS              0x180UL
 #define CKO_SECRET_KEY             4UL
 #define CKK_GENERIC_SECRET         0x10UL
 #define CKM_GENERIC_SECRET_KEY_GEN 0x350UL
@@ -111,8 +122,6 @@ static const struct { CK_ULONG ckm; const char *name; const char *why; } KNOWN_G
     /* KMAC and the two hybrids: handlers exist, the entry points do not know
      * the mechanism. No external harness has ever reported these three --
      * pkcs11-check tests what it has vectors for, and it has none here. */
-    { 0x00004080UL, "CKM_KMAC128",                   "C_SignInit / C_VerifyInit" },
-    { 0x00004081UL, "CKM_KMAC256",                   "C_SignInit / C_VerifyInit" },
     { 0x80004200UL, "CKM_HYBRID_X25519_ML_KEM_768",  "C_EncapsulateKey" },
     { 0x80004201UL, "CKM_HYBRID_ED25519_ML_DSA_65",  "C_SignInit / C_VerifyInit" },
     { 0, NULL, NULL }
@@ -147,13 +156,15 @@ int main(void)
     CK_RV (*C_DigestInit)(CK_SESSION_HANDLE,CK_MECHANISM*);
     CK_RV (*C_DeriveKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
     CK_RV (*C_EncapsulateKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*,CK_BYTE*,CK_ULONG*);
+    CK_RV (*C_GenerateKeyPair)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_ATTRIBUTE*,CK_ULONG,
+                               CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*,CK_OBJECT_HANDLE*);
     #define SYM(n) *(void**)&n = dlsym(h,#n)
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
     SYM(C_Login); SYM(C_InitPIN); SYM(C_GenerateKey);
     SYM(C_GetMechanismList); SYM(C_GetMechanismInfo);
     SYM(C_SignInit); SYM(C_VerifyInit); SYM(C_EncryptInit);
     SYM(C_DecryptInit); SYM(C_DigestInit); SYM(C_DeriveKey);
-    SYM(C_EncapsulateKey);
+    SYM(C_EncapsulateKey); SYM(C_GenerateKeyPair);
     if (!C_GetMechanismList || !C_GetMechanismInfo || !C_DeriveKey) {
         fprintf(stderr, "missing symbols\n"); return 2;
     }
@@ -218,6 +229,8 @@ int main(void)
             { "C_DigestInit",  CKF_DIGEST,  0, 0 },
             { "C_DeriveKey",   CKF_DERIVE,  0, 0 },
             { "C_EncapsulateKey", CKF_ENCAPSULATE, 0, 0 },
+            { "C_GenerateKey",    CKF_GENERATE,    0, 0 },
+            { "C_GenerateKeyPair", CKF_GENERATE_KEY_PAIR, 0, 0 },
         };
         if (info.flags & CKF_SIGN)    { probe[0].rv = C_SignInit(s,&m,key);    probe[0].tried = 1; }
         if (info.flags & CKF_VERIFY)  { probe[1].rv = C_VerifyInit(s,&m,key);  probe[1].tried = 1; }
@@ -230,9 +243,32 @@ int main(void)
             probe[6].rv = C_EncapsulateKey(s,&m,key,ktmpl,3,&out,ct,&ctlen);
             probe[6].tried = 1;
         }
+        if (info.flags & CKF_GENERATE) {
+            probe[7].rv = C_GenerateKey(s,&m,ktmpl,8,&out);
+            probe[7].tried = 1;
+        }
+        if ((info.flags & CKF_GENERATE_KEY_PAIR) && C_GenerateKeyPair) {
+            /* A public template carrying both CKA_MODULUS_BITS and
+             * CKA_EC_PARAMS is wrong for every mechanism and right for the
+             * question: whichever one the mechanism wants, it finds, and the
+             * other is surplus. A mechanism that refuses the pair still had
+             * to recognise itself to do so. */
+            CK_ULONG bits = 2048;
+            static const CK_BYTE p256[] =
+                { 0x06,0x08,0x2A,0x86,0x48,0xCE,0x3D,0x03,0x01,0x07 };
+            CK_ATTRIBUTE pubt[] = {
+                { CKA_MODULUS_BITS, &bits, sizeof bits },
+                { CKA_EC_PARAMS,    (void*)p256, sizeof p256 },
+                { CKA_VERIFY,       &t_true, 1 },
+            };
+            CK_ATTRIBUTE prvt[] = { { CKA_SIGN, &t_true, 1 } };
+            CK_OBJECT_HANDLE pub = 0, prv = 0;
+            probe[8].rv = C_GenerateKeyPair(s,&m,pubt,3,prvt,1,&pub,&prv);
+            probe[8].tried = 1;
+        }
 
         int any = 0, unreachable = 0;
-        for (size_t k = 0; k < 7; ++k) {
+        for (size_t k = 0; k < 9; ++k) {
             if (!probe[k].tried) continue;
             any = 1; checked++;
             if (probe[k].rv != CKR_MECHANISM_INVALID) continue;

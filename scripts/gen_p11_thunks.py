@@ -447,14 +447,33 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved",
          refs=("PKCS#11 v3.2 §6.20.4",)),
 
-    # === KMAC (SP 800-185, MAC streaming variant) =====================
-    Mech("CKM_KMAC128", 0x00004080, "KMAC", "sign", "dispatch_kmac128",
-         fips="approved",
-         refs=("SP 800-185 §4",),
-         notes="Streaming-friendly via EVP_MAC_init/update/final ; PKCS#11 v3.2 §6.22."),
-    Mech("CKM_KMAC256", 0x00004081, "KMAC", "sign", "dispatch_kmac256",
-         fips="approved",
-         refs=("SP 800-185 §4",)),
+    # === KMAC: removed, 2026-09-14 ====================================
+    #
+    # CKM_KMAC128 (0x4080) and CKM_KMAC256 (0x4081) were advertised here and
+    # are not PKCS#11 mechanisms. The OASIS v3.2 pkcs11t.h contains no KMAC
+    # of any spelling; the standard mechanism range it defines ends at
+    # CKM_PUB_KEY_FROM_PRIV_KEY = 0x403A, and 0x4080 is unassigned.
+    #
+    # The entries cited SP 800-185 §4, which is the standard for the
+    # algorithm and says nothing about a PKCS#11 code point. A reference to
+    # the right document for the wrong question reads like a verification
+    # that did not happen.
+    #
+    # Unassigned is worse than wrong: OASIS may assign 0x4080 to something,
+    # and an application written against this module would then ask for one
+    # mechanism and be given another. That is the CMAC/GMAC inversion
+    # recorded at CKM_AES_GMAC, aimed forward instead of back.
+    #
+    # The implementation was correct -- KMAC through EVP_MAC with the
+    # customization string and SP 800-185's minimum key lengths -- which is
+    # exactly why it could sit here looking finished. It is removed rather
+    # than moved into CKM_VENDOR_DEFINED (0x80000000), where the two hybrids
+    # live, because no caller has asked for it: nothing external could even
+    # reach it, pkcs11-check's own KMAC tests resolve mechanism names through
+    # a table that has no KMAC entry either, so they skip against every
+    # module.
+    #
+    # If PKCS#11 assigns KMAC a code point, it comes back with that value.
 
     # === Hybrid KEM (post-quantum + classical) ========================
     Mech("CKM_HYBRID_X25519_ML_KEM_768", 0x80004200, "Hybrid-KEM",
