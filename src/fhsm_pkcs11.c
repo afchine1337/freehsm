@@ -1729,7 +1729,27 @@ typedef struct fhsm_op_s {
     int         gcm_have;
     uint8_t     gcm_iv[512];
     size_t      gcm_iv_len;
-    uint8_t     gcm_aad[4096];
+    /* Heap, not a 4096-byte array in every operation slot.
+     *
+     * petrn, issue #15: PKCS#11 v3.2 allows 0 <= ulAADLen <= 2^32-1 and the
+     * ACVP CCM vectors carry up to 8192 bytes, so a fixed 4096 refused valid
+     * input with CKR_MECHANISM_PARAM_INVALID. His suggestion -- absorb the
+     * AAD into the CBC-MAC rather than storing it -- is the right shape and
+     * is not reachable through EVP: CCM needs the total plaintext length
+     * before it will accept any AAD, and at C_EncryptInit that length does
+     * not exist yet.
+     *
+     * The AAD has to be copied at all because the mechanism parameter block
+     * belongs to the caller and PKCS#11 only guarantees it for the duration
+     * of the *Init call.
+     *
+     * Ownership: the operation slots are static and indexed by session
+     * handle, never destroyed, only reused. So there is exactly one place
+     * that must release this -- op_init(), at the top, before the slot is
+     * used again -- plus fhsm_session_ops_reset() so a closed session does
+     * not hold it. Not "every exit path", which is what made this look like
+     * a bigger change than it is. */
+    uint8_t    *gcm_aad;
     size_t      gcm_aad_len;
     size_t      gcm_tag_len;   /* in BYTES (ulTagBits / 8) */
     /* Post-quantum context string captured at VerifyInit / SignInit.
@@ -6206,6 +6226,38 @@ _Static_assert(sizeof(g_finds)    / sizeof(g_finds[0])    == FHSM_MAX_SESSIONS, 
 _Static_assert(sizeof(g_oaep_enc) / sizeof(g_oaep_enc[0]) == FHSM_MAX_SESSIONS, "g_oaep_enc");
 _Static_assert(sizeof(g_oaep_dec) / sizeof(g_oaep_dec[0]) == FHSM_MAX_SESSIONS, "g_oaep_dec");
 
+/* Release an operation's AAD buffer. Idempotent, and the only function that
+ * frees it: called from op_init() before a slot is reused, and from
+ * fhsm_session_ops_reset() when the session goes away.
+ *
+ * Cleansed rather than freed outright. AAD is authenticated, not encrypted,
+ * so it is not secret by construction -- but it is caller data sitting in a
+ * static-lifetime slot until the next operation, and there is no reason to
+ * leave it there. */
+/* Ceiling on a caller-supplied AAD.
+ *
+ * PKCS#11 v3.2 allows ulAADLen up to 2^32-1 and RFC 3610 allows far more.
+ * This module is loaded into the calling application's process, so honouring
+ * that literally means allocating up to 4 GB on the strength of a length
+ * field -- a denial of service with extra steps, available to any caller.
+ *
+ * 1 MiB is two orders of magnitude above the largest AAD in any test corpus
+ * the module is measured against (ACVP CCM tops out at 8192 bytes) and small
+ * enough that a wrong length is refused rather than honoured. It is a
+ * documented deviation, stated in docs/MECHANISMS.md rather than left for
+ * someone to discover the way 4096 was discovered.
+ *
+ * The number is here, once, instead of being the size of an array. */
+#define FHSM_AAD_MAX (1024u * 1024u)
+
+static void op_free_aad(fhsm_op_t *op) {
+    if (!op || !op->gcm_aad) { if (op) op->gcm_aad_len = 0; return; }
+    OPENSSL_cleanse(op->gcm_aad, op->gcm_aad_len);
+    OPENSSL_free(op->gcm_aad);
+    op->gcm_aad = NULL;
+    op->gcm_aad_len = 0;
+}
+
 static void fhsm_session_ops_reset(CK_SESSION_HANDLE h) {
     if (h == 0 || h >= FHSM_MAX_SESSIONS) return;
     fhsm_op_t *tabs[] = { &g_op_enc[h], &g_op_dec[h], &g_op_sig[h],
@@ -6215,6 +6267,8 @@ static void fhsm_session_ops_reset(CK_SESSION_HANDLE h) {
         EVP_CIPHER_CTX_free((EVP_CIPHER_CTX *)op->cipher_ctx);
         EVP_MD_CTX_free((EVP_MD_CTX *)op->md_ctx);
         EVP_MAC_CTX_free((EVP_MAC_CTX *)op->mac_ctx);
+        /* Before the memset, which would otherwise lose the pointer. */
+        op_free_aad(op);
         memset(op, 0, sizeof(*op));
     }
     memset(&g_oaep_enc[h], 0, sizeof(g_oaep_enc[h]));
@@ -6272,6 +6326,10 @@ static CK_RV fhsm_check_usage(fhsm_token_t *t, CK_OBJECT_HANDLE hKey, uint8_t bi
 static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                          CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey) {
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
+    /* The slot is being reused. Whatever AAD the previous operation left is
+     * released here -- the one place that has to do it, because the slots
+     * are static and no exit path destroys them. */
+    op_free_aad(op);
     op->key_handle = (uint32_t)hKey;
     /* resolve_mech downgrades CKM_AES_GMAC (0x108E) to CKM_AES_CMAC (0x108A)
      * iff FHSM_OPENSC_GMAC_ALIAS=1 is set in the environment. Done here so
@@ -6313,12 +6371,16 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             if ((iv_len && !iv_ptr) || (aad_len && !aad_ptr))
                 return FHSM_RV_MECHANISM_PARAM_INVALID;
             if (iv_len > sizeof(op->gcm_iv)
-                || aad_len > sizeof(op->gcm_aad)
+                || aad_len > FHSM_AAD_MAX
                 || tag_bits > 128 || (tag_bits & 7)) {
                 return FHSM_RV_ARGUMENTS_BAD;
             }
             if (iv_len && iv_ptr) memcpy(op->gcm_iv,  iv_ptr,  iv_len);
-            if (aad_len && aad_ptr) memcpy(op->gcm_aad, aad_ptr, aad_len);
+            if (aad_len && aad_ptr) {
+                op->gcm_aad = OPENSSL_malloc(aad_len);
+                if (!op->gcm_aad) return FHSM_RV_HOST_MEMORY;
+                memcpy(op->gcm_aad, aad_ptr, aad_len);
+            }
             op->gcm_iv_len  = iv_len;
             op->gcm_aad_len = aad_len;
             op->gcm_tag_len = tag_bits / 8;
@@ -6473,11 +6535,15 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         if (mac_len != 4 && mac_len != 6 && mac_len != 8 && mac_len != 10
             && mac_len != 12 && mac_len != 14 && mac_len != 16)
             return FHSM_RV_MECHANISM_PARAM_INVALID;
-        if (aad_len > sizeof(op->gcm_aad) || (aad_len && !aad))
+        if (aad_len > FHSM_AAD_MAX || (aad_len && !aad))
             return FHSM_RV_MECHANISM_PARAM_INVALID;
         memcpy(op->gcm_iv, nonce, nonce_len);
         op->gcm_iv_len  = nonce_len;
-        if (aad_len) memcpy(op->gcm_aad, aad, aad_len);
+        if (aad_len) {
+            op->gcm_aad = OPENSSL_malloc(aad_len);
+            if (!op->gcm_aad) return FHSM_RV_HOST_MEMORY;
+            memcpy(op->gcm_aad, aad, aad_len);
+        }
         op->gcm_aad_len = aad_len;
         op->gcm_tag_len = mac_len;
         op->gcm_have    = 1;
