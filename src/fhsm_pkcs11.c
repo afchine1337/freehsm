@@ -6407,24 +6407,50 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             }
         }
         if (iv_len > sizeof(op->gcm_iv)) return FHSM_RV_ARGUMENTS_BAD;
+        /* A minimum, which this branch did not have: anything from one byte
+         * upwards was taken for an IV and the operation proceeded. The
+         * harness sends a single 0x00 as its malformed parameter block and
+         * got CKR_OK -- twice, on sign and on verify.
+         *
+         * 12 is not a new rule. It is what the GCM path above already
+         * requires of a raw IV, and it is SP 800-38D's 96-bit standard case.
+         * A GMAC nonce shorter than that is not a nonce, and accepting one
+         * silently is how a caller ends up authenticating under a value it
+         * never chose. */
+        if (iv_len < 12) return FHSM_RV_MECHANISM_PARAM_INVALID;
         memcpy(op->gcm_iv, iv_src, iv_len);
         op->gcm_iv_len = iv_len;
         op->gcm_have   = 1;
     }
-    /* AES-GMAC without an IV : implicit downgrade to AES-CMAC. CKM_AES_GMAC
-     * per PKCS#11 v3.2 §6.10.6 requires an IV in pParameter ; if the caller
-     * provided none (e.g. OpenSC's pkcs11-tool, which sends the spec-
-     * 0x108A code point for its 'AES-CMAC' CLI string -- which is correct --
-     * with no
-     * pParameter at all), we infer the caller meant CMAC and route the
-     * operation through the CMAC path. This makes the v1.1.18 transition
-     * backward-compatible : any caller using 0x108A as a CMAC
-     * alias keeps working unchanged. Callers who actually want real
-     * AES-GMAC always pass an IV. The FHSM_OPENSC_GMAC_ALIAS env var
-     * (handled in resolve_mech above) is a separate forced override for
-     * callers that DO pass a garbage non-empty pParameter but mean CMAC. */
+    /* AES-GMAC without an IV is refused. It used to become AES-CMAC.
+     *
+     * PKCS#11 v3.2 §6.10.6 requires an IV in pParameter, so a caller that
+     * sends none has made a mistake. The mistake was answered by performing
+     * a different algorithm and returning CKR_OK -- the caller asked for
+     * GMAC and got CMAC, with nothing in the return value to say so. That is
+     * the shape this file denounces at CKM_AES_GMAC a few hundred lines up,
+     * where the module once advertised CMAC under another mechanism's code
+     * point, and it was reintroduced here as a kindness.
+     *
+     * The kindness was to callers written against that bug. The comment this
+     * replaces justified it by OpenSC's pkcs11-tool, which sends 0x108A for
+     * its "AES-CMAC" string -- and 0x108A *is* CKM_AES_CMAC, so those callers
+     * reach the CMAC path directly and never touch this branch. What reached
+     * it was a caller sending 0x108E, GMAC's code point, meaning CMAC: which
+     * is to say a caller built against the inverted table. Compatibility with
+     * a defect, paid for by every other caller in silent algorithm
+     * substitution.
+     *
+     * pkcs11-check reports it twice, CRITICAL, on sign and on verify:
+     * "AES_GMAC C_SignInit with missing required params: accepted invalid
+     * (CKR_OK) -- must reject".
+     *
+     * FHSM_OPENSC_GMAC_ALIAS, handled in resolve_mech above, remains the way
+     * to ask for the old behaviour. An operator who genuinely depends on it
+     * now has to say so, which is the difference between a policy and an
+     * accident. */
     if (op->mechanism == CKM_AES_GMAC && !op->gcm_have) {
-        op->mechanism = CKM_AES_CMAC;
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
     }
     /* AES-CCM (SP 800-38C) : parse CK_CCM_PARAMS { ulDataLen; pNonce;
      * ulNonceLen; pAAD; ulAADLen; ulMACLen } (6 CK_ULONG-sized words = 48
