@@ -1044,6 +1044,101 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
                                               : FHSM_RV_PIN_INCORRECT;
 }
 
+/* Verify a PIN without changing the login state. C_Login(CKU_CONTEXT_SPECIFIC)
+ * needs exactly this and fhsm_token_login() cannot provide it: its first act,
+ * when the requested role is already the current one, is to return
+ * FHSM_RV_USER_ALREADY_LOGGED_IN -- deliberately, so that a re-login is not
+ * counted as a brute-force attempt -- and it returns it *before* the PIN is
+ * looked at. Re-authenticating through that path would have accepted any PIN
+ * at all, which is the failure mode the re-authentication exists to prevent.
+ *
+ * What is verified is knowledge of the PIN: the wrapped DEK is unwrapped into
+ * a scratch buffer and the GCM tag either verifies or it does not. The live
+ * DEK is not touched, t->logged_in is not touched, and the scratch is
+ * cleansed on both paths.
+ *
+ * The counters ARE touched, on purpose: a wrong PIN here is a wrong PIN, and
+ * an attacker with a session handle should not get an unthrottled oracle by
+ * asking for re-authentication instead of authentication.
+ *
+ * No TPM cross-check. That check binds *unsealing the token* to the platform
+ * and has already run at C_Login(CKU_USER); repeating it here would let a PCR
+ * that moved mid-session fail an operation on a token that is legitimately
+ * open, and buy nothing -- the caller reaching this point has already proved
+ * PIN knowledge, which is all §5.6 asks of them. */
+fhsm_rv_t fhsm_token_verify_pin(fhsm_token_t *t, fhsm_role_t role,
+                                 const char *pin, size_t pin_len) {
+    if (!t || !pin) return FHSM_RV_ARGUMENTS_BAD;
+    if (role != FHSM_ROLE_SO && role != FHSM_ROLE_USER)
+        return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+
+    /* Throttle before PBKDF2, as in fhsm_token_login. */
+    uint64_t now = now_ms();
+    uint64_t *until = (role == FHSM_ROLE_SO) ? &t->throttle_so_until_ms
+                                              : &t->throttle_user_until_ms;
+    uint32_t *fails = (role == FHSM_ROLE_SO) ? &t->failed_so : &t->failed_user;
+    if (*fails >= FHSM_PIN_MAX_FAILED) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_PIN_LOCKED;
+    }
+    if (now < *until) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_PIN_THROTTLED;
+    }
+    if (role == FHSM_ROLE_USER && !t->user_initialized) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+
+    const uint8_t *salt  = (role == FHSM_ROLE_SO) ? t->salt_so       : t->salt_user;
+    const uint8_t *nonce = (role == FHSM_ROLE_SO) ? t->so_wrap_nonce : t->user_wrap_nonce;
+    const uint8_t *ct    = (role == FHSM_ROLE_SO) ? t->so_wrap_ct    : t->user_wrap_ct;
+
+    uint8_t kek[32];
+    fhsm_rv_t rv = fhsm_pbkdf2(FHSM_HASH_SHA256,
+                                FHSM_SLICE(pin, pin_len),
+                                FHSM_SLICE(salt, 16),
+                                t->pbkdf2_iter, kek, sizeof(kek));
+    if (rv != FHSM_RV_OK) {
+        pthread_mutex_unlock(&t->mu);
+        return rv;
+    }
+
+    uint8_t *scratch = fhsm_secure_zalloc(DEK_LEN);
+    if (!scratch) {
+        fhsm_zeroize(kek, sizeof(kek));
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_HOST_MEMORY;
+    }
+    size_t pt_len = DEK_LEN;
+    fhsm_rv_t dec_rv = fhsm_aes_gcm_decrypt(
+            FHSM_SLICE(kek, sizeof(kek)),
+            FHSM_SLICE(nonce, 12),
+            FHSM_SLICE(t->serial, strlen(t->serial)),
+            FHSM_SLICE(ct, 32),
+            ct + 32,                /* tag */
+            scratch, &pt_len);
+    fhsm_zeroize(kek, sizeof(kek));
+    int verified = (dec_rv == FHSM_RV_OK && pt_len == DEK_LEN);
+    fhsm_zeroize(scratch, DEK_LEN);
+    fhsm_secure_free(scratch);
+
+    if (verified) {
+        *fails = 0;
+        *until = 0;
+        write_atomic(t);
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_OK;
+    }
+    (*fails)++;
+    *until = now + throttle_delay_ms(*fails);
+    write_atomic(t);
+    pthread_mutex_unlock(&t->mu);
+    return (*fails >= FHSM_PIN_MAX_FAILED) ? FHSM_RV_PIN_LOCKED
+                                              : FHSM_RV_PIN_INCORRECT;
+}
+
 void fhsm_token_logout(fhsm_token_t *t) {
     if (!t) return;
     pthread_mutex_lock(&t->mu);

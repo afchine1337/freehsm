@@ -109,6 +109,19 @@ void fhsm_token_close(fhsm_token_t *t);
 fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
                             const char *pin, size_t pin_len);
 
+/* Verify a PIN without logging in and without changing the login state.
+ * Used by C_Login(CKU_CONTEXT_SPECIFIC) to re-authenticate the user for one
+ * active operation on a key whose CKA_ALWAYS_AUTHENTICATE is set (PKCS#11
+ * v3.2 §5.6). fhsm_token_login() cannot serve: it short-circuits with
+ * FHSM_RV_USER_ALREADY_LOGGED_IN before examining the PIN.
+ *
+ * Same failure counters and throttle as fhsm_token_login, so this is not an
+ * unthrottled PIN oracle. Returns FHSM_RV_OK, FHSM_RV_PIN_INCORRECT,
+ * FHSM_RV_PIN_LOCKED or FHSM_RV_PIN_THROTTLED. `pin` is pin_len bytes and is
+ * not a C string, as everywhere else. */
+fhsm_rv_t fhsm_token_verify_pin(fhsm_token_t *t, fhsm_role_t role,
+                                 const char *pin, size_t pin_len);
+
 /* End the current session: zeroize the in-memory DEK, increment audit
  * sequence number. The on-disk file is not touched. */
 void fhsm_token_logout(fhsm_token_t *t);

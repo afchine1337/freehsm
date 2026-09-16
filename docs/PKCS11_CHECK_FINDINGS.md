@@ -1174,6 +1174,79 @@ from a stale copy — a sandbox working tree, stale remote-tracking refs, and th
 checkout. The first two cost nothing. This one was addressed to a person. Refresh
 before reading, and check the upstream fix before writing the upstream report.
 
+## `CKA_ALWAYS_AUTHENTICATE` was stored, reported, and enforced nowhere (2026-09-16)
+
+The full corpus, on the run of 2026-09-15, returned a failure that had not
+appeared before:
+
+```
+C_Sign on a CKA_ALWAYS_AUTHENTICATE=True key without
+CKU_CONTEXT_SPECIFIC login                                    [CRITICAL]
+```
+
+It is new to the report and not new to the module. It appeared now for the same
+reason yesterday's GMAC findings did: the corpus reaches a test once the tests
+before it stop failing. The defect is older than its first measurement, which is
+the third time in two weeks that sentence has been true here.
+
+### What the module did
+
+`C_GenerateKeyPair` read `CKA_ALWAYS_AUTHENTICATE` from the private template and
+stored it as `FHSM_OBJF_ALWAYS_AUTH`. `C_GetAttributeValue` read it back as
+`TRUE`. `C_Sign` never consulted it. And `C_Login(CKU_CONTEXT_SPECIFIC)`
+returned `CKR_FUNCTION_NOT_SUPPORTED` whenever an operation was active, with a
+comment saying why:
+
+> the module stores `CKA_ALWAYS_AUTHENTICATE` but does not yet gate operations
+> on it, so accepting a re-authentication would claim a control that nothing
+> enforces. Refusing what we cannot enforce, as elsewhere.
+
+That reasoning is sound and it addressed the smaller half of the problem. The
+refusal made the module honest about the one call it did not implement, and
+left it silent about the control it was not applying. An application that set
+the attribute and then read it back to confirm — which is what a careful
+application does — was told it held a protection it did not hold. A missing
+feature is discovered; a false confirmation is acted upon.
+
+### What it does now
+
+The attribute is read once, at `op_init`, into per-operation state, so every
+`C_*Init` gets the same answer from the same place. `C_Login(CKU_CONTEXT_SPECIFIC)`
+verifies the PIN and marks the session's active operations as re-authenticated.
+`C_Sign`, `C_SignUpdate`, `C_SignFinal`, `C_Decrypt`, `C_DecryptUpdate` and
+`C_DecryptFinal` refuse with `CKR_USER_NOT_LOGGED_IN` until it has.
+
+Three details worth stating rather than leaving to be inferred:
+
+* **The PIN is really verified.** `fhsm_token_login` could not be reused: its
+  first act, when the requested role is already the current one, is to return
+  `CKR_USER_ALREADY_LOGGED_IN` — before the PIN is read. Re-authenticating
+  through it would have accepted any PIN at all, which is the exact failure the
+  re-authentication exists to prevent. `fhsm_token_verify_pin` was added for
+  this, with the same failure counter and throttle as the login path so that
+  asking to re-authenticate is not an unthrottled PIN oracle.
+* **One re-authentication authorises one operation, not one call.** The flag is
+  cleared by `op_init`, so the next `C_SignInit` starts unauthorised. Clearing
+  it per call instead would have broken the ordinary size query — `C_Sign(NULL)`
+  then `C_Sign(buf)` — where the first call produces no signature.
+* **The scope is stated, not implied.** The gate is on the operations that have
+  an Init step for the re-authentication to attach to. `C_UnwrapKey` and
+  `C_DeriveKey` are single calls with no moment between "initialised" and
+  "used", so they are not gated and the module does not claim they are.
+
+### The shape, again
+
+`C_GenerateKeyPair` honoured the attribute on the private template.
+`C_CreateObject` did not — so the same key imported rather than generated read
+back `FALSE`, and the one place the flag was stored was reached by one of the
+two ways in. That is the recurring defect of this file, found this time by
+looking for it rather than by being told.
+
+`tests/test_always_authenticate.c` checks both directions of the loop: that the
+gate refuses, that a correct PIN opens it, that a wrong PIN does not, that the
+authorisation dies with the operation, and that a key without the attribute is
+untouched.
+
 ## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
 
 The module does not detect an IV reused with the same GCM key across

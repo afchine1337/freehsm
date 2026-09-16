@@ -808,6 +808,9 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE hSession, CK_VOID_PTR pInfo) {
  * this session, 0 if none, -1 if the handle is out of range. Defined below,
  * next to the per-session operation slots; C_Login appears before them. */
 static int fhsm_session_has_active_op(CK_SESSION_HANDLE h);
+/* Mark this session's active operations as re-authenticated. Defined with the
+ * operation slots, below; C_Login appears before them. */
+static void fhsm_session_ctx_auth_grant(CK_SESSION_HANDLE h);
 
 CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
                CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen) {
@@ -819,15 +822,51 @@ CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
      * which is what fell out of the role mapping before (#125
      * TestAlwaysAuthenticateEnforcement).
      *
-     * When an operation IS active we return CKR_FUNCTION_NOT_SUPPORTED: the
-     * module stores CKA_ALWAYS_AUTHENTICATE but does not yet gate operations
-     * on it, so accepting a re-authentication would claim a control that
-     * nothing enforces. Refusing what we cannot enforce, as elsewhere. */
+     * This used to return CKR_FUNCTION_NOT_SUPPORTED when an operation was
+     * active, reasoning that the module stored CKA_ALWAYS_AUTHENTICATE but
+     * did not gate anything on it, so accepting a re-authentication would
+     * claim a control nothing enforced.
+     *
+     * Half of that was right and the wrong half was the one that mattered.
+     * Refusing here did not close the hole; it left C_Sign succeeding on a
+     * key marked CKA_ALWAYS_AUTHENTICATE=TRUE with no re-authentication at
+     * all, while C_GetAttributeValue reported the attribute as TRUE. An
+     * application that set it, then read it back to check, was told it had a
+     * protection it did not have -- which is worse than not offering the
+     * attribute, because the reassurance is false rather than absent. The
+     * refusal made the module honest about the one call it did not support
+     * and silent about the control it was not applying.
+     *
+     * So the gate exists now (op_require_ctx_auth) and this call feeds it. */
     if (userType == 2 /*CKU_CONTEXT_SPECIFIC*/) {
         int act = fhsm_session_has_active_op(hSession);
         if (act < 0) return FHSM_RV_SESSION_HANDLE_INVALID;
-        return act ? 0x00000054UL   /* CKR_FUNCTION_NOT_SUPPORTED */
-                   : FHSM_RV_OPERATION_NOT_INITIALIZED;
+        if (!act) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+        fhsm_token_t *ctx_t = fhsm_session_token(hSession);
+        if (!ctx_t) return FHSM_RV_SESSION_HANDLE_INVALID;
+        /* §5.6 re-authenticates the *user*. A session that never logged in as
+         * CKU_USER has no context to re-establish. */
+        if (fhsm_token_current_role(ctx_t) != FHSM_ROLE_USER)
+            return FHSM_RV_USER_NOT_LOGGED_IN;
+        /* Not fhsm_session_login(): it would short-circuit on
+         * FHSM_RV_USER_ALREADY_LOGGED_IN without looking at the PIN, which
+         * would make the re-authentication accept anything. */
+        fhsm_rv_t ctx_rv = fhsm_token_verify_pin(ctx_t, FHSM_ROLE_USER,
+                                                  (const char *)pPin, ulPinLen);
+        {
+            char ctx_len_str[24];   /* 20 digits of an unsigned long, and room */
+            snprintf(ctx_len_str, sizeof(ctx_len_str), "%lu", ulPinLen);
+            (void)fhsm_audit_event(
+                (ctx_rv == FHSM_RV_OK)            ? FHSM_EV_LOGIN_OK :
+                (ctx_rv == FHSM_RV_PIN_LOCKED)    ? FHSM_EV_LOGIN_LOCKED :
+                (ctx_rv == FHSM_RV_PIN_THROTTLED) ? FHSM_EV_LOGIN_THROTTLED :
+                                                     FHSM_EV_LOGIN_FAIL,
+                -1, (int)hSession, FHSM_ROLE_USER, ctx_rv,
+                "role", "CONTEXT_SPECIFIC", "pin_len", ctx_len_str, NULL);
+        }
+        if (ctx_rv != FHSM_RV_OK) return ctx_rv;
+        fhsm_session_ctx_auth_grant(hSession);
+        return FHSM_RV_OK;
     }
 
     fhsm_role_t role = (userType == 0 /*CKU_SO*/) ? FHSM_ROLE_SO :
@@ -1768,6 +1807,24 @@ typedef struct fhsm_op_s {
      * v1.1.14 but discarded until now; see the forwarding in the ML-DSA /
      * SLH-DSA sign branch. */
     unsigned long pq_hedge;
+    /* CKA_ALWAYS_AUTHENTICATE (PKCS#11 v3.2 §5.6). Set at op_init from the
+     * key's stored flags, so every operation that takes a key handle gets the
+     * same answer from the same place -- the alternative, testing the flag at
+     * each entry point, is the shape that has produced a rule wired to some of
+     * the paths reaching a state and not the rest, repeatedly, in this file.
+     *
+     * required: the key carries the attribute; the operation may be
+     *           initialised but not completed until re-authentication.
+     * done:     C_Login(CKU_CONTEXT_SPECIFIC) has verified the PIN for this
+     *           operation. Scoped to the operation, not to the call: it is
+     *           cleared by op_init and by fhsm_session_ops_reset, so the next
+     *           C_SignInit starts unauthorised again. One re-authentication
+     *           authorises one operation, which is what §5.6 says; clearing
+     *           it per call would break the ordinary size-query sequence
+     *           C_Sign(NULL) then C_Sign(buf), where the first call produces
+     *           no signature. */
+    int         ctx_auth_required;
+    int         ctx_auth_done;
 } fhsm_op_t;
 /* All five together, and above the post-fork reset rather than around it.
  * Two were declared here and three below the reset, so the reset could only
@@ -1831,6 +1888,47 @@ static int fhsm_session_has_active_op(CK_SESSION_HANDLE h) {
     if (h == 0 || h >= sizeof(g_op_sig)/sizeof(g_op_sig[0])) return -1;
     return (g_op_enc[h].active || g_op_dec[h].active || g_op_sig[h].active
             || g_op_dig[h].active || g_op_ver[h].active) ? 1 : 0;
+}
+
+/* Record that C_Login(CKU_CONTEXT_SPECIFIC) has re-authenticated the user for
+ * this session's active operations. Declared next to C_Login, which runs
+ * before the operation slots are declared.
+ *
+ * Every active operation, not one of them: C_Login carries a session handle
+ * and nothing else, so there is no operation selector in the call to honour.
+ * A session holding two operations at once and re-authenticating for one of
+ * them is not a case PKCS#11 §5.6 distinguishes, and inventing a rule for it
+ * here would be a rule no caller could predict. */
+static void fhsm_session_ctx_auth_grant(CK_SESSION_HANDLE h) {
+    if (h == 0 || h >= FHSM_MAX_SESSIONS) return;
+    fhsm_op_t *tabs[] = { &g_op_enc[h], &g_op_dec[h], &g_op_sig[h],
+                          &g_op_dig[h], &g_op_ver[h] };
+    for (size_t i = 0; i < sizeof(tabs) / sizeof(tabs[0]); ++i)
+        if (tabs[i]->active) tabs[i]->ctx_auth_done = 1;
+}
+
+/* The gate itself. Called by the operations that consume a key under an
+ * initialised context -- C_Sign / C_SignUpdate / C_SignFinal and
+ * C_Decrypt / C_DecryptUpdate / C_DecryptFinal.
+ *
+ * CKR_USER_NOT_LOGGED_IN is what §5.6 specifies, and the operation is
+ * terminated because that is the general rule for an error returned by
+ * C_Sign / C_Decrypt (anything but CKR_BUFFER_TOO_SMALL). A caller that
+ * wants the signature calls C_Login(CKU_CONTEXT_SPECIFIC) between the Init
+ * and the Sign, which is the order §5.6 prescribes.
+ *
+ * Scope, stated rather than implied: the attribute is enforced on the
+ * operations that have an Init step to hang the re-authentication on.
+ * C_UnwrapKey and C_DeriveKey are single calls with no such anchor -- there
+ * is no moment between "initialised" and "used" in which the application
+ * could re-authenticate -- so they are not gated here, and the module does
+ * not claim they are. */
+static CK_RV op_require_ctx_auth(fhsm_op_t *op) {
+    if (op->ctx_auth_required && !op->ctx_auth_done) {
+        op->active = 0;
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    return FHSM_RV_OK;
 }
 
 static fhsm_op_t *op_slot(fhsm_op_t *table, CK_SESSION_HANDLE h) {
@@ -2592,6 +2690,19 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         trusted_flag |= (uint8_t)ut;
     }
 
+    /* CKA_ALWAYS_AUTHENTICATE on an imported private key (§5.6). Honoured at
+     * C_GenerateKeyPair since the attribute was stored at all, and not here --
+     * so a key imported with it set read back FALSE and got no protection,
+     * while the same key generated on the token read back TRUE. Same rule,
+     * two ways in, wired to one of them. Now both. */
+    uint8_t always_auth_flag = 0;
+    {
+        long ai = find_attr(pTemplate, ulCount, CKA_ALWAYS_AUTHENTICATE_TMPL);
+        if (ai >= 0 && pTemplate[ai].pValue && pTemplate[ai].ulValueLen == 1
+            && *(unsigned char *)pTemplate[ai].pValue)
+            always_auth_flag = FHSM_OBJF_ALWAYS_AUTH;
+    }
+
     /* === Parser stage : pure C, no OpenSSL. ============================
      * The CK_ATTRIBUTE layout is bit-identical to fhsm_attr_t (see
      * include/fhsm_attr_utils.h) ; the cast below is therefore safe. */
@@ -2609,6 +2720,10 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     if (a.path == FHSM_CREATE_PATH_VERBATIM) {
         uint8_t flags = (a.cko == CKO_PRIVATE_KEY) ? FHSM_OBJF_SENSITIVE : 0;
         flags |= trusted_flag;   /* CKA_LOCAL stays 0: imported, not generated */
+        /* The attribute is defined for private keys only (§4.9), so it is
+         * applied where it means something and ignored elsewhere rather than
+         * stored on an object that would never consult it. */
+        if (a.cko == CKO_PRIVATE_KEY) flags |= always_auth_flag;
 
         /* An asymmetric private key is NOT verbatim material.
          *
@@ -6331,6 +6446,19 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * are static and no exit path destroys them. */
     op_free_aad(op);
     op->key_handle = (uint32_t)hKey;
+    /* CKA_ALWAYS_AUTHENTICATE, read once here rather than at each entry point
+     * (§5.6). Every C_*Init reaches op_init, so the flag is carried by every
+     * operation that holds a key handle, whether or not that operation is one
+     * the gate currently applies to. */
+    op->ctx_auth_required = 0;
+    op->ctx_auth_done     = 0;
+    {
+        fhsm_token_t *tk = fhsm_session_token(hSession);
+        uint8_t of = 0;
+        if (tk && fhsm_token_object_get_flags(tk, (uint32_t)hKey, &of) == FHSM_RV_OK
+            && (of & FHSM_OBJF_ALWAYS_AUTH))
+            op->ctx_auth_required = 1;
+    }
     /* resolve_mech downgrades CKM_AES_GMAC (0x108E) to CKM_AES_CMAC (0x108A)
      * iff FHSM_OPENSC_GMAC_ALIAS=1 is set in the environment. Done here so
      * the rest of op_init / C_Sign / C_Verify see a single resolved value. */
@@ -7209,6 +7337,8 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
                 unsigned char *pData, CK_ULONG *pulDataLen) {
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
+    { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     /* Argument robustness (symmetry with C_Encrypt) : pulDataLen is the
@@ -8190,6 +8320,8 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
               unsigned char *pSignature, CK_ULONG *pulSignatureLen) {
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
+    { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     /* Reject an absurd input length before touching the data (#125 isize).
      * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
      * input-validation tranche -- it was simply never wired to the sign,
@@ -8850,6 +8982,8 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                    CK_ULONG ulPartLen) {
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
+    { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     /* Reject an absurd input length before touching the data (#125 isize).
      * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
      * input-validation tranche -- it was simply never wired to the sign,
@@ -8910,6 +9044,8 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
                   CK_ULONG *pulSigLen) {
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
+    { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     if (!pulSigLen) return FHSM_RV_ARGUMENTS_BAD;
 
     /* Composite: finish PH(M) and sign the digest. */
@@ -9262,6 +9398,8 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
                       CK_ULONG ulEncLen, unsigned char *pPart, CK_ULONG *pulPartLen) {
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
+    { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     /* pulPartLen is dereferenced on every path ; reject NULL rather
@@ -9291,6 +9429,8 @@ CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
                      CK_ULONG *pulLastLen) {
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
+    { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
     if (pLast == NULL) { *pulLastLen = 0; return FHSM_RV_OK; }
     /* No multipart context : C_DecryptInit was called but no
