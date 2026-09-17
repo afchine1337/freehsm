@@ -49,6 +49,7 @@ typedef struct {
 #define CKR_OK                        0UL
 #define CKR_TEMPLATE_INCOMPLETE       0xD0UL
 #define CKR_MECHANISM_PARAM_INVALID   0x71UL
+#define CKR_ATTRIBUTE_VALUE_INVALID   0x13UL
 #define CKF_RW                        6UL
 #define CKA_CLASS                     0UL
 #define CKA_VALUE                     0x11UL
@@ -65,6 +66,7 @@ typedef struct {
 #define CKM_HKDF_DATA    0x402BUL
 #define CKM_SHA256       0x250UL
 #define CKM_SHA384       0x260UL
+#define CKM_SHA512       0x270UL
 #define CKF_HKDF_SALT_NULL 1UL
 #define CKF_HKDF_SALT_DATA 2UL
 #define CKF_HKDF_SALT_KEY  4UL
@@ -323,9 +325,111 @@ int main(void)
         rv = C_DeriveKey(s, &m, hikm, out42, 5, &out);
         ok(rv == CKR_MECHANISM_PARAM_INVALID, "unknown prfHashMechanism refused");
 
-        p = (CK_HKDF_PARAMS){ 1, 1, CKM_SHA256, CKF_HKDF_SALT_NULL, NULL,0,0, NULL,0 };
+    }
+    /* (8) expand with no CKA_VALUE_LEN : the hash length, not a refusal.
+     *
+     * This case asserted CKR_TEMPLATE_INCOMPLETE until 2026-09-17 -- it was
+     * written the same day as the code, from the same reading of the spec,
+     * and so it confirmed the reading rather than testing it. What §6.62.3
+     * actually says is "CKA_VALUE_LEN *should* be set", where §6.62.5 writes
+     * "must" for CKM_HKDF_KEY_GEN two sections later. The module was stricter
+     * than the standard, and the one test that covered the case agreed with
+     * the module because both came from one pair of eyes on one afternoon.
+     *
+     * The corpus reported it as "advertised but rejected a canonical op:
+     * CKM_HKDF_DATA" -- naming one of the two mechanisms, since HKDF_DERIVE
+     * was accepted by some other test and fell out of the set algebra. Both
+     * behaved identically; tests/probe_hkdf_data.c established that before
+     * anything was changed. */
+    {
+        CK_HKDF_PARAMS p = { 1, 1, CKM_SHA256, CKF_HKDF_SALT_NULL,
+                             NULL, 0, 0, NULL, 0 };
+        CK_MECHANISM m = { CKM_HKDF_DERIVE, &p, sizeof p };
         rv = C_DeriveKey(s, &m, hikm, out_novlen, 4, &out);
-        ok(rv == CKR_TEMPLATE_INCOMPLETE, "expand without CKA_VALUE_LEN refused");
+        ok(rv == CKR_OK, "expand without CKA_VALUE_LEN accepted (§6.62.3 'should')");
+        if (rv == CKR_OK) {
+            gotlen = sizeof got;
+            ok(read_value(s, out, got, &gotlen) && gotlen == 32,
+               "and yields the hash length, as extract-only already did");
+            hkdf_ref(EVP_KDF_HKDF_MODE_EXTRACT_AND_EXPAND, "SHA2-256",
+                     ikm, sizeof ikm, NULL, 0, NULL, 0, want, 32);
+            ok(memcmp(got, want, 32) == 0, "those 32 bytes match the reference");
+        }
+
+        /* The harness's own shape, verbatim from test_hkdf_extended.py:
+         * CKA_CLASS=CKO_SECRET_KEY, CKK_GENERIC_SECRET, extract and expand,
+         * salt and info present, no CKA_VALUE_LEN. Its _hkdf_derive and
+         * _hkdf_data_derive helpers carry identical templates, so both
+         * mechanisms are checked here rather than only the one the report
+         * happened to name. */
+        CK_ULONG mechs[2] = { CKM_HKDF_DERIVE, CKM_HKDF_DATA };
+        for (int mi = 0; mi < 2; ++mi) {
+            CK_HKDF_PARAMS hp = { 1, 1, CKM_SHA256, CKF_HKDF_SALT_DATA,
+                                  salt, sizeof salt, 0, info, sizeof info };
+            CK_MECHANISM hm = { mechs[mi], &hp, sizeof hp };
+            rv = C_DeriveKey(s, &hm, hikm, out_novlen, 4, &out);
+            ok(rv == CKR_OK, mi == 0 ? "harness shape: CKM_HKDF_DERIVE accepted"
+                                      : "harness shape: CKM_HKDF_DATA accepted");
+            if (rv == CKR_OK) {
+                gotlen = sizeof got;
+                read_value(s, out, got, &gotlen);
+                hkdf_ref(EVP_KDF_HKDF_MODE_EXTRACT_AND_EXPAND, "SHA2-256",
+                         ikm, sizeof ikm, salt, sizeof salt, info, sizeof info,
+                         want, 32);
+                ok(gotlen == 32 && memcmp(got, want, 32) == 0,
+                   mi == 0 ? "  32 bytes, matching the reference"
+                           : "  32 bytes, identical to CKM_HKDF_DERIVE's");
+            }
+        }
+    }
+
+    /* (9) The ceiling is RFC 5869's, not the concatenation family's.
+     *
+     * §2.3 caps HKDF-Expand at 255 * HashLen: 8160 bytes under SHA-256. The
+     * module applied FHSM_DERIVE_MAX (4096) here until 2026-09-17, because
+     * HKDF had been wired onto the bound the §6.20 combiners already used.
+     * Nine Wycheproof vectors sit between the two numbers and were refused.
+     *
+     * Both edges are checked, since a ceiling asserted only from below is a
+     * ceiling nobody has found. */
+    {
+        static CK_BYTE big_got[16384], big_want[16384];
+        CK_ULONG cap = 255UL * 32UL;         /* SHA-256 */
+        CK_ATTRIBUTE big_t[] = {
+            { CKA_CLASS,       &(CK_ULONG){CKO_SECRET_KEY},     sizeof(CK_ULONG) },
+            { CKA_KEY_TYPE,    &(CK_ULONG){CKK_GENERIC_SECRET}, sizeof(CK_ULONG) },
+            { CKA_VALUE_LEN,   &cap, sizeof(CK_ULONG) },
+            { CKA_EXTRACTABLE, &t_true,  1 },
+            { CKA_SENSITIVE,   &t_false, 1 },
+        };
+        CK_HKDF_PARAMS p = { 1, 1, CKM_SHA256, CKF_HKDF_SALT_DATA,
+                             salt, sizeof salt, 0, info, sizeof info };
+        CK_MECHANISM m = { CKM_HKDF_DERIVE, &p, sizeof p };
+
+        rv = C_DeriveKey(s, &m, hikm, big_t, 5, &out);
+        ok(rv == CKR_OK, "255*HashLen (8160 bytes) accepted under SHA-256");
+        if (rv == CKR_OK) {
+            CK_ULONG n = sizeof big_got;
+            CK_ATTRIBUTE q[] = { { CKA_VALUE, big_got, n } };
+            ok(C_GetAttributeValue(s, out, q, 1) == CKR_OK
+               && q[0].ulValueLen == 8160, "8160 bytes returned");
+            hkdf_ref(EVP_KDF_HKDF_MODE_EXTRACT_AND_EXPAND, "SHA2-256",
+                     ikm, sizeof ikm, salt, sizeof salt, info, sizeof info,
+                     big_want, 8160);
+            ok(memcmp(big_got, big_want, 8160) == 0,
+               "and they match the reference to the last byte");
+        }
+
+        cap = 255UL * 32UL + 1UL;
+        rv = C_DeriveKey(s, &m, hikm, big_t, 5, &out);
+        ok(rv == CKR_ATTRIBUTE_VALUE_INVALID,
+           "one byte past 255*HashLen refused (RFC 5869 §2.3)");
+
+        /* SHA-512 moves the ceiling with the hash, so a constant would show. */
+        cap = 255UL * 64UL;
+        p.prfHashMechanism = CKM_SHA512;
+        rv = C_DeriveKey(s, &m, hikm, big_t, 5, &out);
+        ok(rv == CKR_OK, "the ceiling follows the hash: 16320 under SHA-512");
     }
 
     if (C_Finalize) C_Finalize(NULL);

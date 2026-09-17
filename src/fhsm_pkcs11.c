@@ -3155,22 +3155,81 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (hp.ulInfoLen > 0x7FFFFFFFUL) return FHSM_RV_MECHANISM_PARAM_INVALID;
         if (hp.pInfo == NULL && hp.ulInfoLen != 0) return FHSM_RV_MECHANISM_PARAM_INVALID;
 
-        /* Output length. Extract-only yields the PRK, whose length is the
-         * hash output and which CKA_VALUE_LEN may not override; the other
-         * two modes take it from the template. */
+        /* Output length.
+         *
+         * Extract-only yields the PRK, whose length is the hash output and
+         * which CKA_VALUE_LEN may not override. Where bExpand is set, the
+         * template decides -- and when it says nothing, the hash length is
+         * supplied rather than the request refused.
+         *
+         * That last clause was CKR_TEMPLATE_INCOMPLETE until 2026-09-17, which
+         * was stricter than PKCS#11 v3.2 §6.62.3 asks:
+         *
+         *   "If bExpand is set to true, CKA_VALUE_LEN *should* be set to the
+         *    desired key length."
+         *
+         * "should", where §6.62.5 two sections later writes "CKA_VALUE_LEN
+         * must be set in the template" for CKM_HKDF_KEY_GEN. The same document
+         * says "must" a few lines away when it means must, so the weaker word
+         * here is a choice and not an accident, and refusing turned a caller's
+         * permitted omission into an error.
+         *
+         * It was also the familiar shape: extract-only already supplied the
+         * hash length for a template that stated nothing, and the neighbouring
+         * branch demanded it. One rule, wired to one of the two paths that
+         * reach it.
+         *
+         * The cost, stated rather than discovered: a caller who simply forgot
+         * CKA_VALUE_LEN now gets the hash length instead of a diagnosis. That
+         * is the trade §6.62.3 made by writing "should", and the corpus found
+         * it as "advertised but rejected a canonical op: CKM_HKDF_DATA" --
+         * naming one of the two mechanisms, because the other happened to be
+         * accepted by some other test and so fell out of the set algebra. */
         size_t want_len = 0;
         if (hp.bExtract && !hp.bExpand) {
             want_len = fhsm_hash_size(hh);
         } else {
             long vi = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
-            if (vi < 0 || !pTemplate[vi].pValue
-                || pTemplate[vi].ulValueLen != sizeof(CK_ULONG))
+            if (vi < 0) {
+                want_len = fhsm_hash_size(hh);
+            } else if (!pTemplate[vi].pValue
+                       || pTemplate[vi].ulValueLen != sizeof(CK_ULONG)) {
+                /* Present but malformed is still a template error: the caller
+                 * stated a length and did not state one. */
                 return CKR_TEMPLATE_INCOMPLETE;
-            CK_ULONG req = 0; memcpy(&req, pTemplate[vi].pValue, sizeof(CK_ULONG));
-            want_len = (size_t)req;
+            } else {
+                CK_ULONG req = 0; memcpy(&req, pTemplate[vi].pValue, sizeof(CK_ULONG));
+                want_len = (size_t)req;
+            }
         }
-        if (want_len == 0 || want_len > FHSM_DERIVE_MAX)
-            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        /* HKDF's own ceiling, not the concatenation family's.
+         *
+         * RFC 5869 §2.3 caps HKDF-Expand at 255 * HashLen -- 8160 bytes under
+         * SHA-256, 16320 under SHA-512. Extract-only yields exactly HashLen
+         * and cannot exceed it.
+         *
+         * This was FHSM_DERIVE_MAX (4096) until 2026-09-17, because HKDF was
+         * wired onto the check the §6.20 combiners already used. Nine
+         * Wycheproof vectors -- hkdf_sha256 tc24/47/73, hkdf_sha384 and
+         * hkdf_sha512 tc21/44/67 -- ask for outputs between 4096 and the RFC
+         * cap and were refused with CKR_ATTRIBUTE_VALUE_INVALID. One constant
+         * serving two mechanisms whose legitimate ranges differ; the same
+         * shape as the rules this file keeps finding half-wired, arriving this
+         * time as a bound.
+         *
+         * FHSM_DERIVE_MAX stays where it belongs. Its stated reason -- "the
+         * token object store's practical ceiling" -- describes a store that
+         * changed in #110: FHSM_OBJ_VALUE_MAX has been 2 MiB since the v2
+         * format, and 4096 outlived the fact that justified it. Left alone
+         * here rather than raised on the way past, since the combiners bound
+         * something else: two caller-supplied inputs concatenated, where a
+         * ceiling is a defence and not a transcription of a spec. */
+        {
+            size_t hkdf_max = hp.bExpand ? 255u * fhsm_hash_size(hh)
+                                         : fhsm_hash_size(hh);
+            if (want_len == 0 || want_len > hkdf_max)
+                return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        }
 
         int mode = (hp.bExtract && hp.bExpand) ? EVP_KDF_HKDF_MODE_EXTRACT_AND_EXPAND
                  : (hp.bExtract)               ? EVP_KDF_HKDF_MODE_EXTRACT_ONLY

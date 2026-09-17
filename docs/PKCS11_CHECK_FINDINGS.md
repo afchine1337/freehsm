@@ -1247,6 +1247,139 @@ gate refuses, that a correct PIN opens it, that a wrong PIN does not, that the
 authorisation dies with the operation, and that a key without the attribute is
 untouched.
 
+## `CKM_HKDF_DATA` — a test that agreed with the code it was written beside (2026-09-17)
+
+The corpus reported:
+
+```
+advertised but rejected a canonical op (1): CKM_HKDF_DATA
+```
+
+That line is set algebra, computed in `report/capability.py` as
+`advertised ∩ rejected − accepted`: the mechanism was refused at least once
+and accepted nowhere. It says the module refuses something. It does not say
+what, and there were two candidates — a missing `CKA_VALUE_LEN` and the
+`CKA_DERIVE` usage gate on the base key.
+
+`tests/probe_hkdf_data.c` was written to ask rather than reason, reproducing
+the harness's own call shapes:
+
+```
+base key: CKK_GENERIC_SECRET, CKA_DERIVE=TRUE
+  A  HKDF_DATA   extract+expand, no CKA_VALUE_LEN    0xd0  CKR_TEMPLATE_INCOMPLETE
+  B  HKDF_DERIVE extract+expand, no CKA_VALUE_LEN    0xd0  CKR_TEMPLATE_INCOMPLETE
+  C  HKDF_DATA   extract+expand, CKA_VALUE_LEN=32    0x0   CKR_OK  (32 bytes)
+  D  HKDF_DATA   extract only,   no CKA_VALUE_LEN    0x0   CKR_OK  (32 bytes)
+  E  HKDF_DATA   expand only,    CKA_VALUE_LEN=32    0x0   CKR_OK  (32 bytes)
+base key: CKA_DERIVE=FALSE
+  F  HKDF_DATA   extract+expand, CKA_VALUE_LEN=32    0x68  CKR_KEY_FUNCTION_NOT_PERMITTED
+```
+
+A and B agree, so nothing about it is specific to `CKM_HKDF_DATA`. C succeeds,
+so the missing `CKA_VALUE_LEN` is the whole of it. F is a correct refusal on a
+different rule and is not involved — the harness's base key carries
+`CKA_DERIVE`.
+
+### Why only one of the two was named
+
+`pkcs11-check`'s `_hkdf_derive` and `_hkdf_data_derive` helpers carry
+**identical** attribute templates; neither sets `CKA_VALUE_LEN`. The module
+refused both. `CKM_HKDF_DERIVE` stayed off the list because some other test
+accepted it, and the set difference removed it. The report named the mechanism
+that happened to have no second test, not the one that behaved differently.
+Reading the line as "HKDF_DATA is broken and HKDF_DERIVE is fine" would have
+sent the fix to the wrong place.
+
+### What the spec says
+
+PKCS#11 v3.2 §6.62.3, verbatim:
+
+> If bExpand is set to true, CKA_VALUE_LEN **should** be set to the desired key
+> length. If it is false CKA_VALUE_LEN may be set to the length of the hash,
+> but that is not necessary as the mechanism will supply this value.
+
+"should" — where §6.62.5, two sections later, writes "CKA_VALUE_LEN **must** be
+set in the template" for `CKM_HKDF_KEY_GEN`. The same document uses "must" a
+few lines away when it means must. Our `CKR_TEMPLATE_INCOMPLETE` was stricter
+than the standard, and turned a caller's permitted omission into an error.
+
+It was also the recurring shape once more: extract-only already supplied the
+hash length for a template that said nothing (case D), and the neighbouring
+branch demanded it. One rule, wired to one of the two paths that reach it.
+
+Now the hash length is supplied in both. The cost is stated rather than left to
+be discovered: a caller who simply forgot `CKA_VALUE_LEN` gets 32 bytes instead
+of a diagnosis. That is the trade §6.62.3 made by writing "should".
+
+### The part worth keeping
+
+`tests/test_derive_hkdf.c` case (7) had asserted
+`CKR_TEMPLATE_INCOMPLETE` for exactly this input. It was written the same
+afternoon as the code, from the same reading of the spec, and so it confirmed
+the reading instead of testing it. A test written beside the code it tests, by
+the same pair of eyes, on the same day, checks that the code does what its
+author meant — not that its author read the standard correctly. The corpus is
+what read the standard back to us, three days later.
+
+## HKDF carried the concatenation family's ceiling (2026-09-17)
+
+Found in the same scoped run as the `CKA_VALUE_LEN` fix above, and only
+because the scope gave HKDF a view the full corpus drowns: nine records in the
+xfail bucket, three per hash, on approved hashes and vectors marked valid.
+
+```
+hkdf_sha256_test.json:tc24, tc47, tc73
+hkdf_sha384_test.json:tc21, tc44, tc67
+hkdf_sha512_test.json:tc21, tc44, tc67
+    CKR_ATTRIBUTE_VALUE_INVALID; expected CKR_OK
+```
+
+They ask for outputs between 4096 bytes and RFC 5869 §2.3's cap of
+255 × HashLen — 8160 under SHA-256, 16320 under SHA-512. The module applied
+`FHSM_DERIVE_MAX`, which is 4096 and was written for the §6.20 combiners;
+HKDF was wired onto it when HKDF was implemented. One constant, two mechanisms
+whose legitimate ranges differ. The recurring shape, arriving this time as a
+bound rather than a rule.
+
+`FHSM_DERIVE_MAX` is left where it is. Its stated reason — "the token object
+store's practical ceiling" — describes a store that changed in #110:
+`FHSM_OBJ_VALUE_MAX` has been 2 MiB since the v2 format, so 4096 outlived the
+fact that justified it. That is worth knowing and is not worth changing on the
+way past: the combiners bound two caller-supplied inputs being concatenated,
+where a ceiling is a defence rather than a transcription of a spec.
+
+### Two readings that were wrong on the way
+
+**The summary's example is not the summary's rule.** The report line read:
+
+```
+[93] not_operational — e.g. HKDF derive failed for valid vector
+     hkdf_sha1_test.json:tc1-valid: Unexpected CK_RV CKR_MECHANISM_PARAM_INVALID
+     | by param: hash=sha-1 (84), hash=sha-256 (3), hash=sha-384 (3), hash=sha-512 (3)
+```
+
+and the `CKR_` in it was carried over to all ninety-three. It belongs to the
+one example after "e.g.", a SHA-1 record. The nine return
+`CKR_ATTRIBUTE_VALUE_INVALID`, which has exactly one source in the HKDF branch
+and named the defect immediately. Reading `report.jsonl` rather than the
+rendered summary is what settled it, and should have been the first move.
+
+**A probe run beside the configuration under test measures nothing about it.**
+The first probe invocation carried `FHSM_INTEGRITY_ALLOW_UNSIGNED=1`, so it
+ran against the default provider while the corpus had measured the signed
+module against the FIPS provider. The result happened to be identical, so
+nothing was concluded wrongly — but it was luck, not method, and this file has
+recorded the same mistake three times before under "measuring something
+adjacent to the object under test".
+
+### The SHA-1 eighty-four
+
+The remaining 84 are every valid vector in `hkdf_sha1_test.json`, refused
+because `digest_mech_to_hash` rejects a non-approved PRF under `fips-strict`.
+That is the profile working as designed and not a defect; it is recorded here
+so that the number is explained rather than left looking like a hole, and so
+that a decision to change it would be a decision rather than a drift.
+
 ## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
 
 The module does not detect an IV reused with the same GCM key across
