@@ -220,3 +220,4 @@ src/gen/.profile.stamp
 probes/*/0[0-9]_*
 !probes/*/0[0-9]_*.c
 tests/bench_capacity
+tests/probe_pqc_pub_lengths
