@@ -2727,6 +2727,29 @@ static CK_RV fhsm_check_trusted_attr(CK_SESSION_HANDLE hSession,
 static int fhsm_pset_read(CK_ATTRIBUTE *tmpl, CK_ULONG n, CK_ULONG mech,
                            char *out, size_t out_sz);
 
+/* The parameter set whose raw *private* key is `len` bytes, within the family
+ * the key type names.
+ *
+ * Measured with tests/probe_pqc_key_lengths against the provider this module
+ * loads, on 2026-09-18, and not recalled. The six are distinct and none of
+ * them collides with a public-key length, which is what lets CKA_PARAMETER_SET
+ * stay optional on import.
+ *
+ * The public-key equivalent lives in fhsm_create_attrs.c because the parser
+ * resolves it there; this one is here because private keys are parsed
+ * verbatim and only the builder needs to know. */
+static const char *fhsm_pqc_alg_from_priv_len(size_t len, CK_ULONG ckk) {
+    static const struct { size_t len; const char *alg; } tbl[] = {
+        { 1632, "ML-KEM-512"  }, { 2400, "ML-KEM-768" }, { 3168, "ML-KEM-1024" },
+        { 2560, "ML-DSA-44"   }, { 4032, "ML-DSA-65"  }, { 4896, "ML-DSA-87"   },
+    };
+    const char *want = (ckk == CKK_ML_KEM) ? "ML-KEM" : "ML-DSA";
+    for (size_t i = 0; i < sizeof(tbl)/sizeof(tbl[0]); ++i)
+        if (tbl[i].len == len && strncmp(tbl[i].alg, want, 6) == 0)
+            return tbl[i].alg;
+    return NULL;
+}
+
 CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                       CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                       CK_OBJECT_HANDLE *phObject) {
@@ -2815,6 +2838,15 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         uint8_t *der = NULL;
         if (a.cko == CKO_PRIVATE_KEY && a.value_data && a.value_len) {
             EVP_PKEY *ipk = NULL;
+            /* Set by every branch that builds an EVP_PKEY from raw material,
+             * and read once below.
+             *
+             * The key-type list used to appear twice -- once to choose the
+             * branch, once to decide whether to serialise -- and adding a
+             * family meant remembering both. That is the shape this file has
+             * been repairing all week, so the second list is now a flag the
+             * first one sets. */
+            int from_raw = 0;
             if (a.ckk == CKK_EC_CREATEOBJECT) {
                 long pi = find_attr(pTemplate, ulCount, CKA_EC_PARAMS);
                 if (pi < 0 || !pTemplate[pi].pValue) return CKR_TEMPLATE_INCOMPLETE;
@@ -2822,6 +2854,35 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                                                  pTemplate[pi].ulValueLen);
                 if (!curve) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 ipk = fhsm_ec_priv_from_scalar(curve, a.value_data, a.value_len);
+                from_raw = 1;
+            } else if (a.ckk == CKK_ML_KEM || a.ckk == CKK_ML_DSA) {
+                /* The PQC half of the rule stated in the comment above.
+                 *
+                 * It was written for EC, Edwards and Montgomery, and ML-KEM
+                 * and ML-DSA were never wired to it -- so a raw ML-DSA
+                 * private key from an ACVP vector was accepted, stored as
+                 * sent, and failed at first use with CKR_FUNCTION_FAILED.
+                 * Exactly what the comment describes, on the families it does
+                 * not name. 199 vectors of test_acvp_mldsa::TestMlDsaSigGen
+                 * reported it, and only after the public-key import of the
+                 * same day let those tests run at all.
+                 *
+                 * The set comes from CKA_PARAMETER_SET when given and from
+                 * the length otherwise; when both speak they must agree. */
+                char pset[64] = "";
+                CK_ULONG fam = (a.ckk == CKK_ML_KEM) ? CKM_ML_KEM_KEY_PAIR_GEN
+                                                      : CKM_ML_DSA_KEY_PAIR_GEN;
+                int pr = fhsm_pset_read(pTemplate, ulCount, fam, pset, sizeof pset);
+                if (pr < 0) return CKR_TEMPLATE_INCONSISTENT;
+                const char *by_len = fhsm_pqc_alg_from_priv_len(a.value_len, a.ckk);
+                const char *by_name = (pr == 1) ? pset : NULL;
+                if (by_name && by_len && strcmp(by_name, by_len) != 0)
+                    return CKR_TEMPLATE_INCONSISTENT;
+                const char *alg = by_name ? by_name : by_len;
+                if (!alg) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                ipk = EVP_PKEY_new_raw_private_key_ex(NULL, alg, NULL,
+                                                       a.value_data, a.value_len);
+                from_raw = 1;
             } else if (a.ckk == CKK_EC_EDWARDS_CREATEOBJECT
                        || a.ckk == CKK_EC_MONTGOMERY_KT) {
                 long pi = find_attr(pTemplate, ulCount, CKA_EC_PARAMS);
@@ -2832,10 +2893,9 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                 if (!alg) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 ipk = EVP_PKEY_new_raw_private_key_ex(NULL, alg, NULL,
                                                        a.value_data, a.value_len);
+                from_raw = 1;
             }
-            if (a.ckk == CKK_EC_CREATEOBJECT
-                || a.ckk == CKK_EC_EDWARDS_CREATEOBJECT
-                || a.ckk == CKK_EC_MONTGOMERY_KT) {
+            if (from_raw) {
                 if (!ipk) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 int dlen = i2d_PrivateKey(ipk, &der);
                 EVP_PKEY_free(ipk);

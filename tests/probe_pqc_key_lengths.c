@@ -140,5 +140,48 @@ int main(void)
      * alone ambiguous, which decides whether CKA_PARAMETER_SET may be
      * optional. Said here rather than assumed at the call site. */
     printf("\nIf two sets share a length, CKA_PARAMETER_SET cannot be optional.\n");
+
+    /* ---- Private keys -------------------------------------------------
+     *
+     * Added 2026-09-18, second pass. The public-key import fixed earlier that
+     * day made test_acvp_mldsa::TestMlDsaSigGen reachable, and 199 of its
+     * vectors failed: an ML-DSA private key imported from ACVP is raw, the
+     * module stores DER, and the sign path reads it with d2i_AutoPrivateKey.
+     * The private half of the same defect.
+     *
+     * C_CreateObject already converts raw private keys for EC, Edwards and
+     * Montgomery, with a comment stating the rule; PQC was never wired to it.
+     * Wiring it needs these six numbers, and they come from here for the same
+     * reason the public ones did. */
+    printf("\nRaw PQC private-key lengths\n\n");
+    for (size_t i = 0; i < sizeof(SETS)/sizeof(SETS[0]); ++i) {
+        EVP_PKEY *k = NULL;
+        EVP_PKEY_CTX *c = EVP_PKEY_CTX_new_from_name(NULL, SETS[i], NULL);
+        if (!c) continue;
+        if (EVP_PKEY_keygen_init(c) > 0 && EVP_PKEY_keygen(c, &k) > 0) {
+            size_t n = 0;
+            if (EVP_PKEY_get_raw_private_key(k, NULL, &n) > 0) {
+                unsigned char *rp = malloc(n);
+                int round = 0;
+                if (rp && EVP_PKEY_get_raw_private_key(k, rp, &n) > 0) {
+                    EVP_PKEY *back = EVP_PKEY_new_raw_private_key_ex(
+                                         NULL, SETS[i], NULL, rp, n);
+                    round = (back != NULL);
+                    EVP_PKEY_free(back);
+                }
+                char sym[32]; size_t j = 0;
+                for (const char *p = SETS[i]; *p && j < sizeof(sym) - 1; ++p)
+                    sym[j++] = (*p == '-') ? '_' : *p;
+                sym[j] = '\0';
+                printf("  %-12s  raw %5zu   #define FHSM_%s_PRIV_LEN %zu   raw->EVP %s\n",
+                       SETS[i], n, sym, n, round ? "ok" : "NO");
+                free(rp);
+            } else {
+                printf("  %-12s  no raw private key from this provider\n", SETS[i]);
+            }
+        }
+        EVP_PKEY_free(k);
+        EVP_PKEY_CTX_free(c);
+    }
     return 0;
 }
