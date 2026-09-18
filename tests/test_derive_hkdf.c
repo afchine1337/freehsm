@@ -50,6 +50,7 @@ typedef struct {
 #define CKR_TEMPLATE_INCOMPLETE       0xD0UL
 #define CKR_MECHANISM_PARAM_INVALID   0x71UL
 #define CKR_ATTRIBUTE_VALUE_INVALID   0x13UL
+#define CKR_TEMPLATE_INCONSISTENT     0xD1UL
 #define CKF_RW                        6UL
 #define CKA_CLASS                     0UL
 #define CKA_VALUE                     0x11UL
@@ -430,6 +431,34 @@ int main(void)
         p.prfHashMechanism = CKM_SHA512;
         rv = C_DeriveKey(s, &m, hikm, big_t, 5, &out);
         ok(rv == CKR_OK, "the ceiling follows the hash: 16320 under SHA-512");
+    }
+    /* (10) CKA_VALUE in a derive template.
+     *
+     * The derived value comes from the KDF. A template that states one is
+     * asking to choose the bytes of a key that is supposed to be derived, and
+     * the module answered CKR_OK while ignoring it -- which tells the caller
+     * it complied.
+     *
+     * pkcs11-check found this on the KEM side, in
+     * test_decapsulate_with_invalid_attributes_in_template, once the v3.2
+     * interface made C_DecapsulateKey reachable at all. It was never probed
+     * here, and it was the same rule and the same helper: derive_store_secret
+     * is where every §6.20 combiner and both HKDF mechanisms land. */
+    {
+        CK_BYTE injected[] = "injected";
+        CK_ULONG vl32 = 32;
+        CK_ATTRIBUTE inject_t[] = {
+            { CKA_CLASS,       &(CK_ULONG){CKO_SECRET_KEY},     sizeof(CK_ULONG) },
+            { CKA_KEY_TYPE,    &(CK_ULONG){CKK_GENERIC_SECRET}, sizeof(CK_ULONG) },
+            { CKA_VALUE_LEN,   &vl32, sizeof(CK_ULONG) },
+            { CKA_VALUE,       injected, sizeof injected - 1 },
+        };
+        CK_HKDF_PARAMS p = { 1, 1, CKM_SHA256, CKF_HKDF_SALT_DATA,
+                             salt, sizeof salt, 0, info, sizeof info };
+        CK_MECHANISM m = { CKM_HKDF_DERIVE, &p, sizeof p };
+        rv = C_DeriveKey(s, &m, hikm, inject_t, 4, &out);
+        ok(rv == CKR_TEMPLATE_INCONSISTENT,
+           "CKA_VALUE in a derive template is refused, not ignored");
     }
 
     if (C_Finalize) C_Finalize(NULL);

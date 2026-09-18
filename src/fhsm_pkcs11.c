@@ -1971,6 +1971,34 @@ static long find_attr(CK_ATTRIBUTE *t, CK_ULONG n, CK_ATTRIBUTE_TYPE type) {
 #ifndef FHSM_MAX_TEMPLATE_ATTRS
 #define FHSM_MAX_TEMPLATE_ATTRS 1024u
 #endif
+/* Refuse an attribute the mechanism itself contributes.
+ *
+ * PKCS#11 gives the mechanism, not the template, the CKA_VALUE of a key it
+ * derives, generates or decapsulates. A template that states one is asking to
+ * choose the secret bytes of a key that is supposed to come out of a KDF or a
+ * KEM, and a module that takes the template, ignores it, and answers CKR_OK
+ * has told the caller it complied.
+ *
+ * pkcs11-check puts it plainly, in
+ * test_kem.py::test_decapsulate_with_invalid_attributes_in_template:
+ *
+ *   accepting CKA_VALUE in the decapsulation template lets the caller dictate
+ *   the derived key's secret bytes instead of deriving them -- a break for
+ *   any provider
+ *
+ * CKR_TEMPLATE_INCONSISTENT: the template is not wrong in isolation, it is
+ * inconsistent with the mechanism it was handed to.
+ *
+ * Not for C_CreateObject or C_UnwrapKey, where CKA_VALUE is the point of the
+ * call. Only where the mechanism produces the value. */
+static CK_RV fhsm_reject_mech_supplied(CK_ATTRIBUTE *t, CK_ULONG n) {
+    if (n == 0 || t == NULL) return FHSM_RV_OK;
+    for (CK_ULONG i = 0; i < n; ++i) {
+        if (t[i].type == CKA_VALUE) return CKR_TEMPLATE_INCONSISTENT;
+    }
+    return FHSM_RV_OK;
+}
+
 static CK_RV fhsm_check_template(CK_ATTRIBUTE *t, CK_ULONG n) {
     if (n == 0) return FHSM_RV_OK;
     if (t == NULL) return FHSM_RV_ARGUMENTS_BAD;
@@ -3587,6 +3615,14 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
      * would have produced a secret key for a mechanism defined to produce
      * data -- announced as implemented, and wrong in a way no CKR_ would
      * reveal. */
+    /* The derived value comes from the KDF, not from the template. Checked
+     * here rather than in each caller: every §6.20 combiner and both HKDF
+     * mechanisms land in this function, which is the whole reason it was
+     * extracted. Found on the KEM side by pkcs11-check
+     * (test_decapsulate_with_invalid_attributes_in_template) and fixed on
+     * both, because the two entry points are the same rule and only one of
+     * them was probed. */
+    { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     uint32_t obj_class = default_class;
     { long ci = find_attr(pTemplate, ulCount, CKA_CLASS);
       if (ci >= 0 && pTemplate[ci].pValue
@@ -4136,6 +4172,8 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* The shared secret comes from the KEM, not from the caller. */
+    { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     if (pMechanism->mechanism != CKM_ML_KEM_OP)
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -4229,11 +4267,12 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                        CK_OBJECT_HANDLE *phNewKey) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phNewKey || !pCiphertext) return FHSM_RV_ARGUMENTS_BAD;
-    /* See C_EncapsulateKey: same three guards, same reason. This is the one
-     * the crashes actually landed on. */
+    /* See C_EncapsulateKey: same guards, same reasons. This is the one the
+     * crashes landed on, and the one the CKA_VALUE injection was aimed at. */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     if (pMechanism->mechanism != CKM_ML_KEM_OP)
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);

@@ -57,6 +57,8 @@ struct FN_LIST { CK_VERSION version; void *pfn[104]; };
 #define CKA_LABEL                      0x03UL
 #define CKA_VALUE                      0x11UL
 #define CKA_EXTRACTABLE                0x162UL
+#define CKA_KEY_TYPE                   0x100UL
+#define CKR_TEMPLATE_INCONSISTENT      0xD1UL
 
 #define CKM_ML_KEM_KEY_PAIR_GEN        0x0FUL
 #define CKM_ML_KEM                     0x17UL
@@ -303,6 +305,28 @@ int main(void)
         /* A NULL template with a live count is the other half of the guard. */
         ok(f_encap(s, &kem, hPub, NULL, 4, ct2, &ct2_len, &hx) != CKR_OK,
            "and a NULL template with a non-zero count");
+
+        /* (6) CKA_VALUE in the template.
+         *
+         *     The shared secret comes out of the KEM. A template that states
+         *     one is asking to choose the secret bytes of a key that is
+         *     supposed to be derived, and answering CKR_OK to it -- which the
+         *     module did -- tells the caller it complied. It did not: the
+         *     value was ignored. Silence about what one ignores is the shape
+         *     removed from CKM_AES_GMAC on 2026-09-16. */
+        CK_BYTE injected[] = "injected";
+        CK_ULONG cko_secret = 4UL /* CKO_SECRET_KEY */, ckk_aes = 0x1FUL;
+        CK_ATTRIBUTE inject_t[] = {
+            { 0UL /* CKA_CLASS */, &cko_secret, sizeof(CK_ULONG) },
+            { CKA_KEY_TYPE,        &ckk_aes,    sizeof(CK_ULONG) },
+            { CKA_VALUE,           injected,    sizeof injected - 1 },
+        };
+        CK_RV rinj = f_decap(s, &kem, hPriv, inject_t, 3, ct, ct_len, &hx);
+        ok(rinj == CKR_TEMPLATE_INCONSISTENT,
+           "C_DecapsulateKey refuses CKA_VALUE injected into the template");
+        ok(f_encap(s, &kem, hPub, inject_t, 3, ct2, &ct2_len, &hx)
+             == CKR_TEMPLATE_INCONSISTENT,
+           "and C_EncapsulateKey too, which nothing had probed");
     }
 
     if (f_fin) f_fin(NULL);
