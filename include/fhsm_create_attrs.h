@@ -37,9 +37,25 @@ extern "C" {
  * and what attributes are present in the template. */
 typedef enum {
     FHSM_CREATE_PATH_INVALID = 0,
-    /* CKO_SECRET_KEY (any CKK_) ; CKO_PRIVATE_KEY (any CKK_) ; or
-     * CKO_PUBLIC_KEY + CKK_ML_DSA. CKA_VALUE is stored verbatim. */
+    /* CKO_SECRET_KEY (any CKK_) ; CKO_PRIVATE_KEY (any CKK_).
+     * CKA_VALUE is stored verbatim.
+     *
+     * CKO_PUBLIC_KEY + CKK_ML_DSA used to come here too, which meant an
+     * ML-DSA public key was stored as whatever the caller sent. PKCS#11 v3.2
+     * defines CKA_VALUE of a PQC public key as the raw key, this module
+     * stores SubjectPublicKeyInfo, and nothing converted -- so the import
+     * returned CKR_OK and produced a key that failed at first use. It has
+     * its own path now. */
     FHSM_CREATE_PATH_VERBATIM,
+    /* CKO_PUBLIC_KEY + CKK_ML_KEM or CKK_ML_DSA.
+     *
+     * CKA_VALUE is the raw encapsulation/public key (PKCS#11 v3.2), and
+     * `pqc_alg` carries the parameter set resolved from its length. A DER
+     * SubjectPublicKeyInfo is accepted too, with pqc_alg left NULL: a caller
+     * holding DER should not be refused because the spec prefers raw. The
+     * builder tries the raw form when pqc_alg is set and d2i_PUBKEY
+     * otherwise. */
+    FHSM_CREATE_PATH_PQC_PUB,
     /* CKO_PUBLIC_KEY + CKK_EC. CKA_EC_PARAMS = curve OID DER,
      * CKA_EC_POINT = OCTET STRING wrapped SEC1 uncompressed point. */
     FHSM_CREATE_PATH_EC_PUB,
@@ -75,6 +91,13 @@ typedef struct fhsm_create_attrs_s {
     /* === Verbatim path === */
     const uint8_t      *value_data;     /* CKA_VALUE */
     size_t              value_len;
+
+    /* === PQC public key path ===
+     * OpenSSL parameter-set name ("ML-KEM-768", "ML-DSA-65", ...) resolved
+     * from the length of CKA_VALUE, or NULL when the value did not match any
+     * raw length and should be tried as DER. The raw bytes themselves are in
+     * value_data / value_len, shared with the verbatim path. */
+    const char         *pqc_alg;
 
     /* === EC / Ed public key path === */
     /* Group name : "P-256", "P-384", "P-521". For Ed25519/Ed448 paths

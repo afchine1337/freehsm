@@ -2706,6 +2706,27 @@ static CK_RV fhsm_check_trusted_attr(CK_SESSION_HANDLE hSession,
     return 0x00000010UL;   /* CKR_ATTRIBUTE_READ_ONLY */
 }
 
+/* Forward declarations for the PQC public-key import path inside
+ * C_CreateObject. The canonical definitions live with the PQC key-generation
+ * code some two thousand lines further down; C_CreateObject comes first in
+ * this file. Same arrangement as the forward block above C_EncapsulateKey,
+ * and for the same reason: the order of functions here is historical rather
+ * than structural. */
+#ifndef CKK_ML_KEM
+#define CKK_ML_KEM                 0x00000049UL
+#endif
+#ifndef CKK_ML_DSA
+#define CKK_ML_DSA                 0x0000004AUL
+#endif
+#ifndef CKM_ML_KEM_KEY_PAIR_GEN
+#define CKM_ML_KEM_KEY_PAIR_GEN    0x0000000FUL
+#endif
+#ifndef CKM_ML_DSA_KEY_PAIR_GEN
+#define CKM_ML_DSA_KEY_PAIR_GEN    0x0000001CUL
+#endif
+static int fhsm_pset_read(CK_ATTRIBUTE *tmpl, CK_ULONG n, CK_ULONG mech,
+                           char *out, size_t out_sz);
+
 CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                       CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                       CK_OBJECT_HANDLE *phObject) {
@@ -2860,11 +2881,50 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         return FHSM_RV_OK;
     }
 
-    /* --- EVP_PKEY paths : EC / Ed25519 / Ed448 / RSA public key. */
+    /* --- EVP_PKEY paths : PQC / EC / Ed25519 / Ed448 / RSA public key. */
     EVP_PKEY *pkey = NULL;
     EVP_PKEY_CTX *pctx = NULL;
 
-    if (a.path == FHSM_CREATE_PATH_EC_PUB) {
+    if (a.path == FHSM_CREATE_PATH_PQC_PUB) {
+        /* Two accepted forms, and the parser has already told us which.
+         *
+         * pqc_alg set: CKA_VALUE is the raw key, which is what PKCS#11 v3.2
+         * defines the attribute to be and what every vector corpus sends. The
+         * conversion to SubjectPublicKeyInfo happens here, at the boundary,
+         * so that the one representation stored stays the one every reader in
+         * this module already expects.
+         *
+         * pqc_alg NULL: the length matched no parameter set, so the value may
+         * be DER. A caller holding an SPKI should not be refused because the
+         * spec prefers raw -- and ML-DSA public import accepted exactly that
+         * form until today, so refusing it now would break a caller to fix a
+         * caller. */
+        if (a.pqc_alg) {
+            pkey = EVP_PKEY_new_raw_public_key_ex(NULL, a.pqc_alg, NULL,
+                                                   a.value_data, a.value_len);
+        } else {
+            const unsigned char *p = a.value_data;
+            pkey = d2i_PUBKEY(NULL, &p, (long)a.value_len);
+        }
+        if (!pkey) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+
+        /* CKA_PARAMETER_SET, when the caller states it, must agree with the
+         * key actually supplied. Stating one and being given another is the
+         * template contradicting itself, and accepting the pair while using
+         * only one of them is how a caller ends up sure it holds an
+         * ML-KEM-1024 key that is an ML-KEM-512 key. */
+        if (a.pqc_alg) {
+            char pset[64] = "";
+            CK_ULONG fam = (a.ckk == CKK_ML_KEM) ? CKM_ML_KEM_KEY_PAIR_GEN
+                                                  : CKM_ML_DSA_KEY_PAIR_GEN;
+            int pr = fhsm_pset_read(pTemplate, ulCount, fam, pset, sizeof pset);
+            if (pr < 0 || (pr == 1 && strcmp(pset, a.pqc_alg) != 0)) {
+                EVP_PKEY_free(pkey);
+                return CKR_TEMPLATE_INCONSISTENT;
+            }
+        }
+
+    } else if (a.path == FHSM_CREATE_PATH_EC_PUB) {
         OSSL_PARAM params[3] = {
             OSSL_PARAM_construct_utf8_string("group", (char *)a.ec_group, 0),
             OSSL_PARAM_construct_octet_string("pub",
@@ -5326,6 +5386,11 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
         CK_ULONG  tmp_class = cko_class, tmp_type = ckk_type, tmp_len = value_len;
         const char    *label_p = NULL; size_t label_len = 0;
         const uint8_t *id_p    = NULL; size_t id_len    = 0;
+        /* Scratch for the PQC public-key readback below. Per iteration, like
+         * the rest of these, so it is still alive at the copy after the
+         * switch. 2592 is ML-DSA-87, the largest of the six raw public keys,
+         * measured with tests/probe_pqc_pub_lengths. */
+        uint8_t pqc_raw[2592];
         switch (pTemplate[i].type) {
             case CKA_CLASS:     src = &tmp_class; src_len = sizeof(CK_ULONG); break;
             case CKA_KEY_TYPE:
@@ -5351,6 +5416,39 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     && (of & FHSM_OBJF_SENSITIVE)) {
                     pTemplate[i].ulValueLen = (CK_ULONG)-1;
                     continue;
+                }
+                /* PKCS#11 v3.2 defines CKA_VALUE of an ML-KEM or ML-DSA
+                 * public key as the *raw* key. This module stores
+                 * SubjectPublicKeyInfo, because that is what every reader in
+                 * it expects, so the conversion happens here -- the mirror of
+                 * the one C_CreateObject performs on import, and the second
+                 * half of keeping one internal representation while both
+                 * boundaries stay spec-correct.
+                 *
+                 * Keyed on the key type, deliberately and narrowly.
+                 * CKK_COMPOSITE_MLDSA65_ED25519 is a PQC public key by any
+                 * ordinary reading of the words and must NOT come through
+                 * here: its CKA_VALUE is the composite blob, and
+                 * tools/fhsm_csr.c reads exactly that to build a CSR. A rule
+                 * written as "PQC public keys read back raw" would have taken
+                 * the composite with it and produced requests over bytes that
+                 * are not the key.
+                 *
+                 * A stored value that will not parse is reported absent
+                 * rather than returned as-is: handing back an SPKI where the
+                 * caller expects a raw key is the silence this module keeps
+                 * removing. */
+                if (cko_class == CKO_PUBLIC_KEY
+                    && (ckk_type == CKK_ML_KEM || ckk_type == CKK_ML_DSA)) {
+                    const unsigned char *pp = value;
+                    EVP_PKEY *pk = d2i_PUBKEY(NULL, &pp, (long)value_len);
+                    size_t rl = sizeof pqc_raw;
+                    int raw_ok = (pk != NULL)
+                                 && EVP_PKEY_get_raw_public_key(pk, pqc_raw, &rl) == 1;
+                    if (pk) EVP_PKEY_free(pk);
+                    if (!raw_ok) { pTemplate[i].ulValueLen = (CK_ULONG)-1; continue; }
+                    src = pqc_raw; src_len = rl;
+                    break;
                 }
                 src = value;      src_len = value_len;
                 break;

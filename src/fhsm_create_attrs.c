@@ -39,6 +39,7 @@
 #define FHSM_CKK_RSA                0x00000000UL
 #define FHSM_CKK_EC                 0x00000003UL
 #define FHSM_CKK_EC_EDWARDS         0x00000040UL
+#define FHSM_CKK_ML_KEM             0x00000049UL
 #define FHSM_CKK_ML_DSA             0x0000004AUL
 
 /* ---------------------------------------------------------------------------
@@ -114,6 +115,57 @@ static fhsm_parse_rv_t parse_verbatim(
     attrs->value_data = (const uint8_t *)t[iv].pValue;
     attrs->value_len  = (size_t)t[iv].ulValueLen;
     attrs->path = FHSM_CREATE_PATH_VERBATIM;
+    return FHSM_PARSE_OK;
+}
+
+/* Raw public-key lengths, one per parameter set.
+ *
+ * Measured with tests/probe_pqc_pub_lengths against the provider this module
+ * loads, on 2026-09-18, rather than recalled from FIPS 203 §8 / FIPS 204 §4.
+ * The six are distinct, which is what allows CKA_PARAMETER_SET to be optional
+ * here: the length identifies the set on its own. If a future set collides
+ * with one of these, that stops being true and this table stops being enough.
+ *
+ * Pure C, like the rest of this file. The conversion to an EVP_PKEY happens
+ * in the builder; this side only names the algorithm. */
+static const struct { size_t len; const char *alg; } FHSM_PQC_PUB_LENS[] = {
+    {  800, "ML-KEM-512"  },
+    { 1184, "ML-KEM-768"  },
+    { 1568, "ML-KEM-1024" },
+    { 1312, "ML-DSA-44"   },
+    { 1952, "ML-DSA-65"   },
+    { 2592, "ML-DSA-87"   },
+};
+
+/* The parameter set whose raw public key is `len` bytes, restricted to the
+ * family the key type names -- so a 1312-byte value declared CKK_ML_KEM is not
+ * silently accepted as ML-DSA-44. Returns NULL if nothing matches, which the
+ * caller reads as "not raw, try DER". */
+static const char *fhsm_pqc_alg_for(size_t len, unsigned long ckk) {
+    const char *want = (ckk == FHSM_CKK_ML_KEM) ? "ML-KEM" : "ML-DSA";
+    for (size_t i = 0; i < sizeof(FHSM_PQC_PUB_LENS)/sizeof(FHSM_PQC_PUB_LENS[0]); ++i) {
+        if (FHSM_PQC_PUB_LENS[i].len != len) continue;
+        const char *a = FHSM_PQC_PUB_LENS[i].alg;
+        if (strncmp(a, want, 6) == 0) return a;
+    }
+    return NULL;
+}
+
+static fhsm_parse_rv_t parse_pqc_pub(
+    const fhsm_attr_t *t, unsigned long n,
+    fhsm_create_attrs_t *attrs) {
+    long iv = fhsm_find_attr(t, n, FHSM_CKA_VALUE);
+    if (iv < 0) return FHSM_PARSE_TEMPLATE_INCOMPLETE;
+    if (t[iv].pValue == NULL || t[iv].ulValueLen == 0)
+        return FHSM_PARSE_ATTRIBUTE_VALUE_INVALID;
+
+    attrs->value_data = (const uint8_t *)t[iv].pValue;
+    attrs->value_len  = (size_t)t[iv].ulValueLen;
+    attrs->pqc_alg    = fhsm_pqc_alg_for(attrs->value_len, attrs->ckk);
+    attrs->path       = FHSM_CREATE_PATH_PQC_PUB;
+    /* pqc_alg NULL is not an error here: the value may be a DER
+     * SubjectPublicKeyInfo, which only the builder can tell. A length that is
+     * neither a raw key nor parsable DER is refused there. */
     return FHSM_PARSE_OK;
 }
 
@@ -293,10 +345,17 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
         return FHSM_PARSE_TEMPLATE_INCONSISTENT;
 
     if (attrs->cko == FHSM_CKO_SECRET_KEY
-        || attrs->cko == FHSM_CKO_PRIVATE_KEY
-        || (attrs->cko == FHSM_CKO_PUBLIC_KEY
-            && attrs->ckk == FHSM_CKK_ML_DSA))
+        || attrs->cko == FHSM_CKO_PRIVATE_KEY)
         return parse_verbatim(pTemplate, ulCount, attrs);
+
+    /* ML-DSA public used to fall into parse_verbatim just above, and ML-KEM
+     * public matched nothing at all and left as CKR_TEMPLATE_INCONSISTENT.
+     * Two ways of getting a PQC public key wrong: one accepted and stored
+     * something it could not read back, the other refused honestly. Both now
+     * go through the same parser. */
+    if (attrs->cko == FHSM_CKO_PUBLIC_KEY
+        && (attrs->ckk == FHSM_CKK_ML_KEM || attrs->ckk == FHSM_CKK_ML_DSA))
+        return parse_pqc_pub(pTemplate, ulCount, attrs);
 
     if (attrs->cko == FHSM_CKO_PUBLIC_KEY && attrs->ckk == FHSM_CKK_EC)
         return parse_ec_pub(pTemplate, ulCount, attrs);
