@@ -1380,6 +1380,166 @@ That is the profile working as designed and not a defect; it is recorded here
 so that the number is explained rather than left looking like a hole, and so
 that a decision to change it would be a decision rather than a drift.
 
+## `CKM_ML_KEM` was advertised through a door the module never opened (2026-09-18)
+
+The full run of 2026-09-16 carried one line that looked like the least
+interesting on the page:
+
+```
+- advertised, no canonical accept/reject observed (1): CKM_ML_KEM
+```
+
+"Limbo", in `report/capability.py`'s set algebra: advertised, never accepted,
+never rejected, never crashed. The report also carried a data-quality caveat,
+so the first reading was that the harness had simply not reached it — a gap in
+the measurement rather than in the module. That reading was wrong, and the
+`functions 67/92` on line 6 of the same report was the other half of the
+sentence.
+
+### What was true
+
+`CKM_ML_KEM` is advertised by `C_GetMechanismList`. `C_EncapsulateKey` and
+`C_DecapsulateKey` are implemented, exported, and covered end to end by
+`tests/mlkem_e2e.c`, which passes.
+
+And no application could call them. The only interface the module published
+was v3.0, whose function list ends at slot 91. Encapsulation is a v3.2
+addition at slots 92 and 93 — in the OASIS `pkcs11f.h` it sits behind
+`#ifndef CK_PKCS11_3_0_ONLY`. A caller that loaded the module the normal way
+saw the mechanism in the list and had no function to invoke it with.
+
+`tests/mlkem_e2e.c` says so in its own first lines, and had said so since it
+was written:
+
+> Exercises the v3.0-extended C_EncapsulateKey / C_DecapsulateKey symbols
+> **which are NOT in the legacy CK_FUNCTION_LIST**. We dlopen the module and
+> call them directly.
+
+It was recorded as a property of the test. It was a gap in the module.
+
+### The part that would have been worse than the gap
+
+Wiring the existing functions into slots 92 and 93 was nearly a one-line
+change, and would have shipped memory corruption. The module's signature was
+
+```c
+C_EncapsulateKey(hSession, pMechanism, hPublicKey, pTemplate, ulCount,
+                 phNewKey, pCiphertext, pulCiphertextLen)
+```
+
+against the OASIS v3.2 header's
+
+```c
+C_EncapsulateKey(hSession, pMechanism, hPublicKey, pTemplate, ulAttributeCount,
+                 pCiphertext, pulCiphertextLen, phKey)
+```
+
+The last three arguments are permuted. A conforming caller's `pCiphertext`
+would have arrived where the module expects `phKey` — a `CK_BYTE *` read as a
+`CK_OBJECT_HANDLE *`, and written to. Not a wrong return code: a write into
+the caller's buffer.
+
+The signature had been written without the header in front of it; the comment
+above it called these "PKCS#11 v3.0 extended functions", and there are no such
+functions in v3.0. Nothing ever disagreed, because the only caller was
+`mlkem_e2e.c`, written from the same assumption. Two pieces agreeing with each
+other and never meeting a third.
+
+No caller can be broken by the correction: the functions were in no function
+list, so the only way to reach them was `dlsym` plus knowledge of our order.
+
+### What changed
+
+* Both signatures now follow the OASIS v3.2 order, and `mlkem_e2e.c` with
+  them.
+* A `fhsm_function_list_3_2` (104 slots, version `{3,2}`): 0–91 verbatim from
+  the v3.0 table, 92 and 93 wired, 94–103 refusing through the same
+  `fhsm_not_supported` as everything else the module does not implement. Two
+  of twelve v3.2 functions. This is not a claim to implement v3.2.
+* `C_GetInterfaceList` reports both interfaces, newest first.
+  `C_GetInterface` matches on the requested version and refuses one it does
+  not publish. **The default for a NULL version stays v3.0** — the comment
+  above `fhsm_init_v3_0_table` records a version mismatch that once made
+  `pkcs11-tool` dereference past the end of an array, and a caller passing
+  NULL has said nothing about what it can read. `pkcs11-check` asks for
+  `{3,2}` explicitly (`raw/api.py`), which is what made the change worth
+  making. The policy is one line to reverse.
+* Slots 68 and 69 of the v3.0 table were wired only inside `C_GetInterface`,
+  so a caller arriving through `C_GetInterfaceList` found `fhsm_not_supported`
+  in the two slots that make a v3.0 module a v3.0 module. Now filled where the
+  rest of the table is.
+
+### `tests/test_interface_v32.c`
+
+Every other test in the suite reaches the module with `dlsym`. That is right
+for checking arithmetic and useless for checking reachability, and the
+difference is the whole of this finding. The new test calls `dlsym` exactly
+twice — for `C_GetInterfaceList` and `C_GetInterface`, which is how an
+application bootstraps — and everything after goes through the function-list
+pointers the module hands back. A function it cannot reach is a function no
+caller can reach.
+
+It also pins the argument order by calling through the table with the spec's
+order, which is the disagreement nothing could produce while the only caller
+shared the module's assumption.
+
+### What the door cost on the way through
+
+The first run after publishing the v3.2 interface returned **crash 3**,
+against crash 0 every day this month. All three were the same probe:
+
+```
+security/test_arithmetic_overflow.py -
+C_DecapsulateKey(ML-KEM output template_count=0xffffffffffffffff):
+module crashed with signal 11
+```
+
+`fhsm_check_template` exists because of that test — its comment names it — and
+had never been wired into `C_EncapsulateKey` or `C_DecapsulateKey`. It could
+not have been found: the test cannot reach a function that is in no function
+list. **Opening the interface did not create the hole. It made it measurable,
+which is the argument for opening it.**
+
+Asking the question at the level of the class rather than the instance found
+three more entry points that take a caller template with no bound on the
+count: `C_DeriveKey`, `C_UnwrapKey`, `C_CopyObject`. `C_DeriveKey` doubly —
+the two length checks it *does* call open with `if (n == 0 || t == NULL)
+return OK` and then iterate `n`, so they walked the absurd count themselves
+before the body was reached. Five entry points missing it, against seven that
+had it. `C_GetAttributeValue` was suspected and cleared: it carries the same
+bound inline with a written reason for not using the shared helper.
+
+### A wrong turn, recorded
+
+The first fix attempted for those crashes was a per-version static
+`CK_INTERFACE`, on the theory that one shared static was being overwritten
+between calls. The run after it was **byte-identical** — 121 passed, 211
+skipped, crash 3 — which is what a wrong theory looks like, and the same
+signal that settled the secp521r1 question on 2026-09-12.
+
+The static bug is real and the fix stayed: a caller is entitled to hold the
+interface the spec hands it, and `test_interface_v32.c` now checks that a held
+`{3,2}` survives a later request for `{3,0}`. But it was written as an
+explanation for a crash it did not explain, before the report naming the crash
+had been read. Twice in one afternoon a conclusion preceded the evidence; both
+times the evidence was one grep away.
+
+### What it made visible
+
+Three ML-KEM behaviours no measurement could reach before, none of them
+regressions:
+
+* **HIGH** — `C_DecapsulateKey` accepts `CKA_VALUE` injected into the template
+  and returns `CKR_OK`. The value is ignored; it comes from the shared secret.
+  Accepting in silence what one ignores is the shape removed from
+  `CKM_AES_GMAC` two days earlier.
+* **MEDIUM ×2** — `C_EncapsulateKey` hard-codes `CKK_GENERIC_SECRET` and reads
+  neither `CKA_KEY_TYPE` nor `CKA_VALUE_LEN` from the template, so a caller
+  asking for an AES-128 key reads back a generic secret. The same shape
+  `derive_store_secret` carried until `CKM_HKDF_DATA` was wired onto it.
+* **100 vectors** — ML-KEM public-key import through `C_CreateObject` returns
+  `CKR_TEMPLATE_INCONSISTENT`.
+
 ## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
 
 The module does not detect an IV reused with the same GCM key across

@@ -208,19 +208,36 @@ FHSM_EXPORT CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession,
                                unsigned char *pWrappedKey, CK_ULONG ulWrappedKeyLen,
                                CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                                CK_OBJECT_HANDLE *phKey);
-/* PKCS#11 v3.0 extended functions : C_Encapsulate / C_Decapsulate for KEMs
- * (ML-KEM via this module). Exposed via C_GetInterface, not via the
- * legacy CK_FUNCTION_LIST. */
+/* PKCS#11 v3.2 : C_EncapsulateKey / C_DecapsulateKey for KEMs (ML-KEM via
+ * this module), function-list slots 92 and 93.
+ *
+ * The argument order is the OASIS v3.2 pkcs11f.h order, and was not always.
+ * Until 2026-09-18 these carried phNewKey BEFORE the ciphertext pair, and a
+ * comment calling them "v3.0 extended functions" -- encapsulation does not
+ * exist in v3.0; in pkcs11f.h it sits behind #ifndef CK_PKCS11_3_0_ONLY.
+ * The signature had been written without the header in front of it.
+ *
+ * Nothing disagreed, because the only caller was tests/mlkem_e2e.c, which
+ * reaches the symbols through dlsym and had been written from the same
+ * assumption. Two pieces agreeing with each other and never meeting a third.
+ *
+ * It mattered because of what came next: putting the old order into slot 92
+ * would have handed a conforming caller a function that reads its
+ * pCiphertext as phKey and writes an object handle into it. Not a wrong
+ * answer -- a write into the caller's buffer.
+ *
+ * No caller can be broken by the correction. These were in no function list,
+ * so the only way to reach them was dlsym plus knowledge of our order. */
 FHSM_EXPORT CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession,
                                     CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hPublicKey,
                                     CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
-                                    CK_OBJECT_HANDLE *phNewKey,
-                                    unsigned char *pCiphertext, CK_ULONG *pulCiphertextLen);
+                                    unsigned char *pCiphertext, CK_ULONG *pulCiphertextLen,
+                                    CK_OBJECT_HANDLE *phNewKey);
 FHSM_EXPORT CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession,
                                     CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hPrivateKey,
                                     CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
-                                    CK_OBJECT_HANDLE *phNewKey,
-                                    unsigned char *pCiphertext, CK_ULONG ulCiphertextLen);
+                                    unsigned char *pCiphertext, CK_ULONG ulCiphertextLen,
+                                    CK_OBJECT_HANDLE *phNewKey);
 /* PKCS#11 v3.0 §5.18 : C_GetInterface / C_GetInterfaceList expose the
  * v3.0 function table (CK_FUNCTION_LIST_3_0, 91 slots, version {3,0}).
  * The legacy CK_FUNCTION_LIST (v2.40, 67 slots, version {2,40}) is
@@ -3086,6 +3103,14 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                    CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
+    /* Bounds first, then contents.
+     *
+     * The two length checks below iterate the template: fhsm_check_bool_attr_
+     * lengths opens with `if (n == 0 || t == NULL) return OK` and then walks
+     * n entries. Given an absurd n they walk it themselves, so the guard that
+     * bounds n has to run before them and not after. It did not run here at
+     * all -- see C_EncapsulateKey for how this class was found. */
+    { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* An RO session may not derive into a token object either (§5.3). */
@@ -3855,6 +3880,8 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                   CK_OBJECT_HANDLE *phKey) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !pWrappedKey || !phKey) return FHSM_RV_ARGUMENTS_BAD;
+    /* Bounds before contents; see C_DeriveKey. */
+    { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* A read-only session may not create a token object, whatever the route
@@ -4087,11 +4114,28 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                        CK_OBJECT_HANDLE hPublicKey,
                        CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
-                       CK_OBJECT_HANDLE *phNewKey,
-                       unsigned char *pCiphertext, CK_ULONG *pulCiphertextLen) {
+                       unsigned char *pCiphertext, CK_ULONG *pulCiphertextLen,
+                       CK_OBJECT_HANDLE *phNewKey) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phNewKey || !pulCiphertextLen)
         return FHSM_RV_ARGUMENTS_BAD;
+    /* The template guards, which every other entry point taking a template
+     * has carried since the input-validation tranche. These two never did.
+     *
+     * Not an oversight that survived review -- one that could not be found.
+     * fhsm_check_template exists because of pkcs11-check's
+     * security/test_arithmetic_overflow, and its own comment names that test;
+     * the test could never reach C_EncapsulateKey or C_DecapsulateKey,
+     * because neither was in any published function list. The first run after
+     * the v3.2 interface opened returned crash 3, all three
+     * C_DecapsulateKey with ulCount = 0xFFFFFFFFFFFFFFFF, walking the
+     * template until the address space ran out.
+     *
+     * Publishing the interface did not create the hole. It made it
+     * measurable, which is the argument for publishing it. */
+    { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     if (pMechanism->mechanism != CKM_ML_KEM_OP)
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -4181,10 +4225,15 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                        CK_OBJECT_HANDLE hPrivateKey,
                        CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
-                       CK_OBJECT_HANDLE *phNewKey,
-                       unsigned char *pCiphertext, CK_ULONG ulCiphertextLen) {
+                       unsigned char *pCiphertext, CK_ULONG ulCiphertextLen,
+                       CK_OBJECT_HANDLE *phNewKey) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phNewKey || !pCiphertext) return FHSM_RV_ARGUMENTS_BAD;
+    /* See C_EncapsulateKey: same three guards, same reason. This is the one
+     * the crashes actually landed on. */
+    { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     if (pMechanism->mechanism != CKM_ML_KEM_OP)
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -5639,8 +5688,12 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                    CK_OBJECT_HANDLE *phNewObject) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!phNewObject) return FHSM_RV_ARGUMENTS_BAD;
-    /* Empty template is legal : it means "a verbatim copy". */
-    if (ulCount > 0 && !pTemplate) return FHSM_RV_ARGUMENTS_BAD;
+    /* Empty template is legal : it means "a verbatim copy". The pointer was
+     * checked here and the count was not, so an absurd ulCount with a valid
+     * pointer walked out of bounds in fhsm_check_ro_token, one line below,
+     * before anything looked at the object. Same guard as the other creation
+     * paths. */
+    { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* Copying *into* a token object from an RO session is the same
      * violation as creating one (§5.3). */
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
@@ -9680,42 +9733,169 @@ static void fhsm_init_v3_0_table(void) {
     for (size_t i = 0; i < 68; i++) {
         fhsm_function_list_3_0.pfn[i] = fhsm_function_list.pfn[i];
     }
-    /* v3.0 §5.18 says slot 67 is C_GetInterfaceList and slot 68 is
-     * C_GetInterface. We populate those next. */
+    /* Slots 68 and 69 are C_GetInterfaceList and C_GetInterface themselves.
+     *
+     * They used to be wired inside C_GetInterface, with a comment saying they
+     * "couldn't be populated in fhsm_init_v3_0_table because they are these
+     * very functions". That is not the obstacle -- both are declared with the
+     * other exports near the top of this file, so their addresses are
+     * available here. The consequence was that a caller who reached this table
+     * through C_GetInterfaceList, and never called C_GetInterface, found
+     * fhsm_not_supported in the two slots that make a v3.0 module a v3.0
+     * module. Wired here, where the rest of the table is filled, so both doors
+     * lead to the same table. */
+    fhsm_function_list_3_0.pfn[68] = (void*)(uintptr_t)C_GetInterfaceList;
+    fhsm_function_list_3_0.pfn[69] = (void*)(uintptr_t)C_GetInterface;
 }
+
+/* ---------------------------------------------------------------------------
+ * CK_INTERFACE v3.2 --- the door ML-KEM was waiting behind.
+ *
+ * C_EncapsulateKey and C_DecapsulateKey are implemented (see the ML-KEM
+ * section above) and exported as symbols, and CKM_ML_KEM is advertised by
+ * C_GetMechanismList. None of that made the mechanism usable: the only
+ * interface this module published was v3.0, whose function list stops at slot
+ * 91, and the encapsulation functions are v3.2 additions at slots 92 and 93.
+ * An application loading the module the normal way could see the mechanism in
+ * the list and had no function to invoke it with.
+ *
+ * pkcs11-check reported it as "advertised, no canonical accept/reject
+ * observed" -- never invoked, because there was nothing to invoke. Our own
+ * tests/mlkem_e2e.c passes, and says so in its first line: "end-to-end
+ * ML-KEM-768 test via dlsym". It exercised the implementation through a door
+ * no PKCS#11 application uses.
+ *
+ * The ordering below is from the OASIS v3.2 pkcs11f.h, which states that the
+ * order of functions in it is significant and must not be altered:
+ *
+ *   0..67    v2.40
+ *   68..91   v3.0   (C_GetInterfaceList, C_GetInterface, C_LoginUser,
+ *                    C_SessionCancel, the Message family)
+ *   92..103  v3.2   (C_EncapsulateKey, C_DecapsulateKey,
+ *                    C_VerifySignature{,Init,Update,Final},
+ *                    C_GetSessionValidationFlags, C_AsyncComplete,
+ *                    C_AsyncGetID, C_AsyncJoin, C_WrapKeyAuthenticated,
+ *                    C_UnwrapKeyAuthenticated)
+ *
+ * Two of those twelve are wired. The other ten answer CKR_FUNCTION_NOT_
+ * SUPPORTED through fhsm_not_supported, which is what they are: a slot that
+ * exists and refuses, rather than a slot that does not exist. This is not a
+ * claim to implement v3.2.
+ * ------------------------------------------------------------------------- */
+struct CK_FUNCTION_LIST_3_2 {
+    CK_VERSION version;     /* {3, 2} */
+    void *pfn[104];         /* 92 through v3.0 + 12 v3.2 */
+};
+
+static struct CK_FUNCTION_LIST_3_2 fhsm_function_list_3_2 = { { 3, 2 }, { 0 } };
+
+static void fhsm_init_v3_2_table(void) {
+    if (fhsm_function_list_3_2.pfn[0]) return;
+    fhsm_init_v3_0_table();
+    for (size_t i = 0;
+         i < sizeof(fhsm_function_list_3_2.pfn)/sizeof(fhsm_function_list_3_2.pfn[0]);
+         i++) {
+        fhsm_function_list_3_2.pfn[i] = (void*)(uintptr_t)fhsm_not_supported;
+    }
+    /* 0..91 are the v3.0 table verbatim, fhsm_not_supported entries included:
+     * a function this module does not implement must refuse identically
+     * whichever interface the caller asked for. */
+    for (size_t i = 0; i < 92; i++) {
+        fhsm_function_list_3_2.pfn[i] = fhsm_function_list_3_0.pfn[i];
+    }
+    fhsm_function_list_3_2.pfn[92] = (void*)(uintptr_t)C_EncapsulateKey;
+    fhsm_function_list_3_2.pfn[93] = (void*)(uintptr_t)C_DecapsulateKey;
+}
+
+/* Both interfaces carry the name "PKCS 11" and are told apart by their
+ * version, which is how §5.18 defines the pairing. Newest first, so a caller
+ * that reads the list and takes the first acceptable entry gets the richer
+ * one. */
+static char fhsm_iface_name[] = "PKCS 11";
 
 CK_RV C_GetInterfaceList(CK_INTERFACE *pInterfacesList, CK_ULONG *pulCount) {
     if (!pulCount) return FHSM_RV_ARGUMENTS_BAD;
-    if (pInterfacesList == NULL) { *pulCount = 1; return FHSM_RV_OK; }
-    if (*pulCount < 1) { *pulCount = 1; return 0x00000150UL; }
-    fhsm_init_v3_0_table();
-    static char name[] = "PKCS 11";
-    pInterfacesList[0].pInterfaceName = name;
-    pInterfacesList[0].pFunctionList  = &fhsm_function_list_3_0;
+    if (pInterfacesList == NULL) { *pulCount = 2; return FHSM_RV_OK; }
+    if (*pulCount < 2) { *pulCount = 2; return 0x00000150UL; }
+    fhsm_init_v3_2_table();
+    pInterfacesList[0].pInterfaceName = fhsm_iface_name;
+    pInterfacesList[0].pFunctionList  = &fhsm_function_list_3_2;
     pInterfacesList[0].flags          = 0;
-    *pulCount = 1;
+    pInterfacesList[1].pInterfaceName = fhsm_iface_name;
+    pInterfacesList[1].pFunctionList  = &fhsm_function_list_3_0;
+    pInterfacesList[1].flags          = 0;
+    *pulCount = 2;
     return FHSM_RV_OK;
 }
 
 CK_RV C_GetInterface(unsigned char *pInterfaceName, void *pVersion,
                      CK_INTERFACE **ppInterface, CK_FLAGS flags) {
-    (void)pVersion; (void)flags;
+    /* flags is still ignored, as it was. CKF_INTERFACE_FORK_SAFE is the bit a
+     * caller would set here, and answering it truthfully is a separate
+     * question from this change -- the module does reset state across a fork
+     * (fhsm_state_reset_after_fork), but claiming the flag is a promise about
+     * every path, not an observation about one. Left as it was rather than
+     * bundled in. */
+    (void)flags;
     if (!ppInterface) return FHSM_RV_ARGUMENTS_BAD;
     if (pInterfaceName != NULL
         && strcmp((const char*)pInterfaceName, "PKCS 11") != 0) {
         return FHSM_RV_FUNCTION_FAILED;
     }
-    fhsm_init_v3_0_table();
-    static char name[] = "PKCS 11";
-    static CK_INTERFACE iface;
-    iface.pInterfaceName = name;
-    iface.pFunctionList  = &fhsm_function_list_3_0;
-    iface.flags          = 0;
-    *ppInterface = &iface;
-    /* Wire slot 68 (C_GetInterfaceList) and slot 69 (C_GetInterface)
-     * on first call ; they couldn't be populated in fhsm_init_v3_0_table
-     * because they are these very functions. */
-    fhsm_function_list_3_0.pfn[68] = (void*)(uintptr_t)C_GetInterfaceList;
-    fhsm_function_list_3_0.pfn[69] = (void*)(uintptr_t)C_GetInterface;
+    fhsm_init_v3_2_table();
+
+    /* CK_VERSION is two CK_BYTEs, major then minor -- not two CK_ULONGs, the
+     * mistake this file records against C_GetInfo a few thousand lines up. */
+    unsigned char major = 3, minor = 0;
+    if (pVersion) {
+        const unsigned char *v = (const unsigned char *)pVersion;
+        major = v[0]; minor = v[1];
+    }
+
+    /* One static per version, not one shared between them.
+     *
+     * This was a single `static CK_INTERFACE iface` rewritten on every call.
+     * With one published interface that was harmless. With two it is a
+     * use-after-overwrite the caller cannot see: ask for {3,2}, keep the
+     * pointer, ask for {3,0}, and the first pointer now describes the v3.0
+     * table. A caller that then indexes slot 92 -- which is exactly what it
+     * asked for {3,2} in order to do -- reads past the end of a 92-slot array
+     * and calls whatever it finds.
+     *
+     * It cost three crashes on the first run after the v3.2 interface was
+     * published, against crash 0 every day before it, and pkcs11-check drives
+     * precisely that sequence: raw/api.py asks for {3,2}, then falls back to
+     * the default. The spec does not say the returned CK_INTERFACE may be
+     * invalidated by a later call, and a caller is entitled to hold it. */
+    static CK_INTERFACE iface_30, iface_32;
+    CK_INTERFACE *iface_p;
+
+    /* A NULL version asks for the module's default, and the default stays
+     * v3.0.
+     *
+     * The newest interface would be the more flattering default and this
+     * module has already paid for that kind of choice once: the comment above
+     * fhsm_init_v3_0_table records a version mismatch that made pkcs11-tool
+     * dereference past the end of an array. A caller that passes NULL has said
+     * nothing about what it can read, and v3.0 is what it has been getting.
+     * A caller that wants v3.2 can ask for it -- which is what pkcs11-check
+     * does, and what made this change worth making.
+     *
+     * This is a policy, not a limit, and reversing it is one line. */
+    if (major == 3 && minor == 2) {
+        iface_p = &iface_32;
+        iface_p->pFunctionList = &fhsm_function_list_3_2;
+    } else if (major == 3 && minor == 0) {
+        iface_p = &iface_30;
+        iface_p->pFunctionList = &fhsm_function_list_3_0;
+    } else {
+        /* Refusing a version we do not publish, rather than handing back a
+         * table whose shape the caller did not ask for and will index by its
+         * own idea of the layout. */
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    iface_p->pInterfaceName = fhsm_iface_name;
+    iface_p->flags          = 0;
+    *ppInterface = iface_p;
     return FHSM_RV_OK;
 }

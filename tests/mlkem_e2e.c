@@ -18,9 +18,18 @@
 /* ===========================================================================
  * mlkem_e2e.c --- end-to-end ML-KEM-768 test via dlsym.
  *
- *  Exercises the v3.0-extended C_EncapsulateKey / C_DecapsulateKey
- *  symbols which are NOT in the legacy CK_FUNCTION_LIST. We dlopen the
- *  module and call them directly.
+ *  Exercises C_EncapsulateKey / C_DecapsulateKey through dlsym: this file
+ *  checks the ML-KEM arithmetic, not the module's public surface.
+ *
+ *  It used to say the two functions were "NOT in the legacy
+ *  CK_FUNCTION_LIST", and treated that as a fact about the test rather than
+ *  a gap in the module. It was a gap: they were in no function list at all,
+ *  so CKM_ML_KEM was advertised by C_GetMechanismList and unreachable by any
+ *  application that loads the module the normal way. Since 2026-09-18 they
+ *  occupy slots 92 and 93 of a published v3.2 interface, and
+ *  tests/test_interface_v32.c is what checks that door -- reaching them the
+ *  way an application does, which is the check this file cannot make about
+ *  itself.
  *
  *  Scenario :
  *    1. C_Initialize
@@ -85,12 +94,16 @@ typedef CK_RV (*pf_keypair_t)(CK_SESSION_HANDLE, CK_MECHANISM*,
                                CK_ATTRIBUTE*, CK_ULONG,
                                CK_ATTRIBUTE*, CK_ULONG,
                                CK_OBJECT_HANDLE*, CK_OBJECT_HANDLE*);
+/* OASIS v3.2 pkcs11f.h order: the ciphertext pair, then the key handle.
+ * These two typedefs said otherwise until 2026-09-18, and so did the module,
+ * and so neither ever contradicted the other. See the comment on the
+ * prototypes in src/fhsm_pkcs11.c. */
 typedef CK_RV (*pf_encap_t)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE,
-                             CK_ATTRIBUTE*, CK_ULONG, CK_OBJECT_HANDLE*,
-                             unsigned char*, CK_ULONG*);
+                             CK_ATTRIBUTE*, CK_ULONG,
+                             unsigned char*, CK_ULONG*, CK_OBJECT_HANDLE*);
 typedef CK_RV (*pf_decap_t)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE,
-                             CK_ATTRIBUTE*, CK_ULONG, CK_OBJECT_HANDLE*,
-                             unsigned char*, CK_ULONG);
+                             CK_ATTRIBUTE*, CK_ULONG,
+                             unsigned char*, CK_ULONG, CK_OBJECT_HANDLE*);
 typedef CK_RV (*pf_getattr_t)(CK_SESSION_HANDLE, CK_OBJECT_HANDLE,
                                CK_ATTRIBUTE*, CK_ULONG);
 
@@ -157,7 +170,7 @@ int main(void) {
     CK_OBJECT_HANDLE hSS1 = 0;
     rv = C_EncapsulateKey(session, &kemm, hPub,
                            ss_tpl, sizeof(ss_tpl)/sizeof(ss_tpl[0]),
-                           &hSS1, ct, &ct_len);
+                           ct, &ct_len, &hSS1);
     if (rv != CKR_OK) { fprintf(stderr, "C_EncapsulateKey : 0x%lx\n", rv); return 1; }
     printf("[mlkem] encapsulated : ct_len=%lu, ss_alice handle=%lu\n",
            ct_len, hSS1);
@@ -171,7 +184,7 @@ int main(void) {
     CK_OBJECT_HANDLE hSS2 = 0;
     rv = C_DecapsulateKey(session, &kemm, hPriv,
                            ss_tpl2, sizeof(ss_tpl2)/sizeof(ss_tpl2[0]),
-                           &hSS2, ct, ct_len);
+                           ct, ct_len, &hSS2);
     if (rv != CKR_OK) { fprintf(stderr, "C_DecapsulateKey : 0x%lx\n", rv); return 1; }
     printf("[mlkem] decapsulated : ss_bob handle=%lu\n", hSS2);
 
