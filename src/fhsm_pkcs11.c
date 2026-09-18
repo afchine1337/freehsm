@@ -4250,9 +4250,56 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
         && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
         obj_flags |= FHSM_OBJF_EXTRACTABLE;
+    /* CKA_KEY_TYPE comes from the template (PKCS#11 v3.2 §5.14.8), as it does
+     * for a derived key. It was hard-coded CKK_GENERIC_SECRET here and in the
+     * other half of this pair, so a caller asking for an AES key got a generic
+     * secret and CKR_OK -- and found out at first use, through the
+     * mechanism/key-type gate, several layers from the cause. That is how
+     * CKM_PKCS5_PBKD2 was reported in September: "PBES2 decryption does not
+     * work". derive_store_secret was fixed then; this is the copy of the same
+     * lines that nothing could reach until the v3.2 interface was published.
+     *
+     * CKA_VALUE_LEN is honoured by truncation, below. */
+    uint32_t new_ckk = CKK_GENERIC_SECRET;
+    { long ki = find_attr(pTemplate, ulCount, 0x100 /* CKA_KEY_TYPE */);
+      if (ki >= 0 && pTemplate[ki].pValue
+          && pTemplate[ki].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG req = 0; memcpy(&req, pTemplate[ki].pValue, sizeof(CK_ULONG));
+          new_ckk = (uint32_t)req;
+      }
+    }
+    /* CKA_VALUE_LEN, by truncation.
+     *
+     * FIPS 203 fixes the ML-KEM shared secret at 32 bytes, so a caller asking
+     * for an AES-128 key is asking for half of it. Truncating is sound here
+     * for the reason the secret exists: FIPS 203 §6.2 produces K as uniformly
+     * random key material intended for direct use, so any 16 of its bytes are
+     * a sound AES-128 key. That is not true of KEM outputs in general --
+     * SP 800-227 wants a KDF between a KEM and the keys drawn from it -- and
+     * it is why this is written here, for this mechanism, rather than as a
+     * rule about shared secrets.
+     *
+     * Returning 32 bytes to a caller who asked for 16, in silence, was the
+     * previous behaviour and is the shape this module removed from
+     * CKM_AES_GMAC and from the KEM templates earlier the same day.
+     *
+     * A length longer than the secret is refused rather than padded: the
+     * module cannot produce key material it does not have. */
+    size_t out_len = ss_len;
+    { long vi = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+      if (vi >= 0 && pTemplate[vi].pValue
+          && pTemplate[vi].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG req = 0; memcpy(&req, pTemplate[vi].pValue, sizeof(CK_ULONG));
+          if (req == 0 || (size_t)req > ss_len) {
+              fhsm_zeroize(ss, sizeof(ss));
+              return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+          }
+          out_len = (size_t)req;
+      }
+    }
     uint32_t handle = 0;
-    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, CKK_GENERIC_SECRET, label,
-                                ss, ss_len, NULL, 0, obj_flags,
+    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, new_ckk, label,
+                                ss, out_len, NULL, 0, obj_flags,
                                 &handle);
     fhsm_zeroize(ss, sizeof(ss));
     if (rv != FHSM_RV_OK) return rv;
@@ -4371,9 +4418,56 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
         && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
         obj_flags |= FHSM_OBJF_EXTRACTABLE;
+    /* CKA_KEY_TYPE comes from the template (PKCS#11 v3.2 §5.14.8), as it does
+     * for a derived key. It was hard-coded CKK_GENERIC_SECRET here and in the
+     * other half of this pair, so a caller asking for an AES key got a generic
+     * secret and CKR_OK -- and found out at first use, through the
+     * mechanism/key-type gate, several layers from the cause. That is how
+     * CKM_PKCS5_PBKD2 was reported in September: "PBES2 decryption does not
+     * work". derive_store_secret was fixed then; this is the copy of the same
+     * lines that nothing could reach until the v3.2 interface was published.
+     *
+     * CKA_VALUE_LEN is honoured by truncation, below. */
+    uint32_t new_ckk = CKK_GENERIC_SECRET;
+    { long ki = find_attr(pTemplate, ulCount, 0x100 /* CKA_KEY_TYPE */);
+      if (ki >= 0 && pTemplate[ki].pValue
+          && pTemplate[ki].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG req = 0; memcpy(&req, pTemplate[ki].pValue, sizeof(CK_ULONG));
+          new_ckk = (uint32_t)req;
+      }
+    }
+    /* CKA_VALUE_LEN, by truncation.
+     *
+     * FIPS 203 fixes the ML-KEM shared secret at 32 bytes, so a caller asking
+     * for an AES-128 key is asking for half of it. Truncating is sound here
+     * for the reason the secret exists: FIPS 203 §6.2 produces K as uniformly
+     * random key material intended for direct use, so any 16 of its bytes are
+     * a sound AES-128 key. That is not true of KEM outputs in general --
+     * SP 800-227 wants a KDF between a KEM and the keys drawn from it -- and
+     * it is why this is written here, for this mechanism, rather than as a
+     * rule about shared secrets.
+     *
+     * Returning 32 bytes to a caller who asked for 16, in silence, was the
+     * previous behaviour and is the shape this module removed from
+     * CKM_AES_GMAC and from the KEM templates earlier the same day.
+     *
+     * A length longer than the secret is refused rather than padded: the
+     * module cannot produce key material it does not have. */
+    size_t out_len = ss_len;
+    { long vi = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+      if (vi >= 0 && pTemplate[vi].pValue
+          && pTemplate[vi].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG req = 0; memcpy(&req, pTemplate[vi].pValue, sizeof(CK_ULONG));
+          if (req == 0 || (size_t)req > ss_len) {
+              fhsm_zeroize(ss, sizeof(ss));
+              return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+          }
+          out_len = (size_t)req;
+      }
+    }
     uint32_t handle = 0;
-    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, CKK_GENERIC_SECRET, label,
-                                ss, ss_len, NULL, 0, obj_flags,
+    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, new_ckk, label,
+                                ss, out_len, NULL, 0, obj_flags,
                                 &handle);
     fhsm_zeroize(ss, sizeof(ss));
     if (rv != FHSM_RV_OK) return rv;

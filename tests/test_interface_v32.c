@@ -327,6 +327,48 @@ int main(void)
         ok(f_encap(s, &kem, hPub, inject_t, 3, ct2, &ct2_len, &hx)
              == CKR_TEMPLATE_INCONSISTENT,
            "and C_EncapsulateKey too, which nothing had probed");
+
+        /* (7) The template decides the key, here as everywhere else.
+         *
+         *     CKA_KEY_TYPE was hard-coded CKK_GENERIC_SECRET, so a caller
+         *     asking for AES got a generic secret and CKR_OK, then found out
+         *     at first use through the mechanism/key-type gate -- which is
+         *     how CKM_PKCS5_PBKD2 was reported in September, as "PBES2
+         *     decryption does not work".
+         *
+         *     CKA_VALUE_LEN is honoured by truncation: FIPS 203 fixes the
+         *     ML-KEM shared secret at 32 bytes, and §6.2 makes it uniformly
+         *     random material meant for direct use, so its first 16 bytes are
+         *     a sound AES-128 key. Returning 32 to a caller who asked for 16
+         *     was the previous behaviour. */
+        CK_ULONG want16 = 16;
+        CK_ATTRIBUTE aes_t[] = {
+            { CKA_KEY_TYPE,    &ckk_aes, sizeof(CK_ULONG) },
+            { 0x161UL /* CKA_VALUE_LEN */, &want16, sizeof(CK_ULONG) },
+            { CKA_EXTRACTABLE, &yes, 1 },
+        };
+        CK_OBJECT_HANDLE hAes = 0;
+        ct2_len = sizeof ct2;
+        CK_RV raes = f_encap(s, &kem, hPub, aes_t, 3, ct2, &ct2_len, &hAes);
+        ok(raes == CKR_OK, "C_EncapsulateKey accepts an AES-128 template");
+        if (raes == CKR_OK) {
+            CK_ULONG kt = 0;
+            CK_ATTRIBUTE qk[] = { { CKA_KEY_TYPE, &kt, sizeof kt } };
+            ok(f_getatt(s, hAes, qk, 1) == CKR_OK && kt == ckk_aes,
+               "the key reads back as CKK_AES, not a generic secret");
+            CK_BYTE kv[64];
+            CK_ATTRIBUTE qv[] = { { CKA_VALUE, kv, sizeof kv } };
+            ok(f_getatt(s, hAes, qv, 1) == CKR_OK && qv[0].ulValueLen == 16,
+               "and is 16 bytes, the length the template asked for");
+        }
+        /* Longer than the secret is refused, not padded. */
+        CK_ULONG want64 = 64;
+        CK_ATTRIBUTE big_t[] = {
+            { 0x161UL /* CKA_VALUE_LEN */, &want64, sizeof(CK_ULONG) },
+        };
+        ct2_len = sizeof ct2;
+        ok(f_encap(s, &kem, hPub, big_t, 1, ct2, &ct2_len, &hx) != CKR_OK,
+           "a CKA_VALUE_LEN longer than the shared secret is refused");
     }
 
     if (f_fin) f_fin(NULL);
