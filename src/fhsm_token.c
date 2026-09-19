@@ -119,23 +119,10 @@ _Static_assert(FHSM_SECURE_HEAP_BYTES
  * came from. */
 #define FHSM_POLICY_ENTRY_SZ     56u   /* 8 header + 48 value, on disk */
 
-/* One entry of a nested policy template (CKA_WRAP/UNWRAP/DERIVE_TEMPLATE).
- *
- * `kind` exists because the three value shapes cannot be told apart from the
- * bytes: a one-byte CK_BBOOL and a one-byte prefix of something else are the
- * same octet, and guessing from the attribute type would make the store's
- * reading of a value depend on a table that changes. It is recorded once, at
- * the boundary where the caller's CK_ATTRIBUTE is still in hand. */
-#define FHSM_POLICY_KIND_NONE   0u
-#define FHSM_POLICY_KIND_BOOL   1u
-#define FHSM_POLICY_KIND_ULONG  2u
-#define FHSM_POLICY_KIND_BYTES  3u
-typedef struct {
-    uint32_t type;                            /* the CKA_ attribute */
-    uint8_t  kind;                            /* FHSM_POLICY_KIND_* */
-    uint8_t  len;                             /* significant bytes of value */
-    uint8_t  value[FHSM_POLICY_VALUE_MAX];
-} fhsm_policy_attr_t;
+/* fhsm_policy_attr_t and the FHSM_POLICY_KIND_* values are in fhsm_token.h:
+ * the PKCS#11 layer builds these entries from the caller's CK_ATTRIBUTE array
+ * and hands them over, so the shape is part of the interface, not of this
+ * file. */
 
 typedef struct fhsm_object_s {
     uint32_t handle;        /* CK_OBJECT_HANDLE, opaque to PKCS#11 caller */
@@ -2071,6 +2058,102 @@ fhsm_rv_t fhsm_token_object_mech_allowed(fhsm_token_t *t, uint32_t handle,
     }
     pthread_mutex_unlock(&t->mu);
     return FHSM_RV_OK;
+}
+
+/* The three nested templates live in three pairs of fields rather than in one
+ * array indexed by `which`. An array would make this function shorter and
+ * would also make a wrong index silently read a different policy -- a wrap
+ * template enforced as an unwrap one, with nothing to say so. The switch is
+ * longer and cannot do that. */
+static fhsm_policy_attr_t *tmpl_slot(fhsm_object_t *o, fhsm_tmpl_which_t which,
+                                      uint8_t **out_count) {
+    switch (which) {
+        case FHSM_TMPL_WRAP:   *out_count = &o->wrap_count;   return o->wrap;
+        case FHSM_TMPL_UNWRAP: *out_count = &o->unwrap_count; return o->unwrap;
+        case FHSM_TMPL_DERIVE: *out_count = &o->derive_count; return o->derive;
+    }
+    *out_count = NULL;
+    return NULL;
+}
+
+static uint8_t tmpl_present_bit(fhsm_tmpl_which_t which) {
+    switch (which) {
+        case FHSM_TMPL_WRAP:   return FHSM_OBJF2_HAS_WRAP_TMPL;
+        case FHSM_TMPL_UNWRAP: return FHSM_OBJF2_HAS_UNWRAP_TMPL;
+        case FHSM_TMPL_DERIVE: return FHSM_OBJF2_HAS_DERIVE_TMPL;
+    }
+    return 0;
+}
+
+fhsm_rv_t fhsm_token_object_set_tmpl(fhsm_token_t *t, uint32_t handle,
+                                      fhsm_tmpl_which_t which,
+                                      const fhsm_policy_attr_t *a,
+                                      uint8_t count) {
+    if (!t || (count > 0 && !a)) return FHSM_RV_ARGUMENTS_BAD;
+    if (count > FHSM_POLICY_ATTR_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    uint8_t bit = tmpl_present_bit(which);
+    if (!bit) return FHSM_RV_ARGUMENTS_BAD;
+    for (uint8_t k = 0; k < count; ++k) {
+        if (a[k].len > FHSM_POLICY_VALUE_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        if (a[k].kind == FHSM_POLICY_KIND_NONE
+            || a[k].kind > FHSM_POLICY_KIND_BYTES)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    }
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            fhsm_object_t *o = &t->objects[i];
+            uint8_t *cnt = NULL;
+            fhsm_policy_attr_t *slot = tmpl_slot(o, which, &cnt);
+            if (!slot) { pthread_mutex_unlock(&t->mu); return FHSM_RV_ARGUMENTS_BAD; }
+            memset(slot, 0, sizeof(fhsm_policy_attr_t) * FHSM_POLICY_ATTR_MAX);
+            for (uint8_t k = 0; k < count; ++k) slot[k] = a[k];
+            *cnt = count;
+            o->flags2 |= bit;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+fhsm_rv_t fhsm_token_object_get_tmpl(fhsm_token_t *t, uint32_t handle,
+                                      fhsm_tmpl_which_t which,
+                                      fhsm_policy_attr_t *out,
+                                      uint8_t *io_count) {
+    if (!t || !io_count) return FHSM_RV_ARGUMENTS_BAD;
+    if (!tmpl_present_bit(which)) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            uint8_t *cnt = NULL;
+            fhsm_policy_attr_t *slot = tmpl_slot(&t->objects[i], which, &cnt);
+            if (!slot) { pthread_mutex_unlock(&t->mu); return FHSM_RV_ARGUMENTS_BAD; }
+            uint8_t cap = *io_count;
+            *io_count = *cnt;
+            if (!out) { pthread_mutex_unlock(&t->mu); return FHSM_RV_OK; }
+            if (cap < *cnt) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_BUFFER_TOO_SMALL;
+            }
+            for (uint8_t k = 0; k < *cnt; ++k) out[k] = slot[k];
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_OK;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
 }
 
 /* The four policy counts, read together because they are read for one reason:

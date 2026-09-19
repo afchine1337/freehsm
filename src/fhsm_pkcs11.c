@@ -2110,6 +2110,7 @@ static CK_RV fhsm_reject_mech_supplied(CK_ATTRIBUTE *t, CK_ULONG n) {
  * that reach a state is the defect this file keeps repairing. */
 #define CKA_ALLOWED_MECHANISMS_ATTR 0x40000600UL
 #define CKA_WRAP_TEMPLATE_ATTR      0x40000211UL
+#define CKA_UNWRAP_TEMPLATE_ATTR    0x40000212UL
 #define CKA_DERIVE_TEMPLATE_ATTR    0x40000213UL
 static CK_RV fhsm_reject_unstorable_policy(CK_ATTRIBUTE *t, CK_ULONG n) {
     if (n == 0 || t == NULL) return FHSM_RV_OK;
@@ -2119,12 +2120,19 @@ static CK_RV fhsm_reject_unstorable_policy(CK_ATTRIBUTE *t, CK_ULONG n) {
          * each of the eleven creation tails and enforced at the ten sites
          * listed above fhsm_check_allowed_mech.
          *
-         * The two templates are still refused, and refusing is still the
-         * honest answer while nothing consults them: accepting an attribute
-         * and dropping it is a claim of protection that is not there. They
-         * follow, in the same record. */
-        if (t[i].type == CKA_WRAP_TEMPLATE_ATTR
-            || t[i].type == CKA_DERIVE_TEMPLATE_ATTR)
+         * CKA_UNWRAP_TEMPLATE and CKA_DERIVE_TEMPLATE followed: both are
+         * stored by fhsm_apply_nested_tmpl at the same eleven tails and
+         * enforced by fhsm_check_nested_tmpl in C_UnwrapKey and C_DeriveKey,
+         * where each constrains the template of the object being created.
+         *
+         * CKA_WRAP_TEMPLATE is still refused, and the reason is not that it is
+         * next on a list. It is the one of the three that does not compare
+         * against a creation template: C_WrapKey names a key that already
+         * exists, so enforcing it means reading that object's attributes back
+         * and comparing those. That is a different mechanism, and giving it
+         * the same shape as the other two because they share a spec paragraph
+         * is how a guard ends up wired to the paths it happens to fit. */
+        if (t[i].type == CKA_WRAP_TEMPLATE_ATTR)
             return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
     }
     return FHSM_RV_OK;
@@ -2239,6 +2247,10 @@ static CK_RV fhsm_check_usage(fhsm_token_t *t, CK_OBJECT_HANDLE hKey, uint8_t bi
  * above that definition. */
 static CK_RV fhsm_apply_allowed_mechs(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
                                        CK_ULONG n, uint32_t handle);
+static CK_RV fhsm_apply_nested_tmpl(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
+                                     CK_ULONG n, uint32_t handle,
+                                     CK_ULONG which_attr,
+                                     fhsm_tmpl_which_t which);
 
 /* PKCS#11 : creating a token object (CKA_TOKEN=TRUE) on a read-only
  * session is CKR_SESSION_READ_ONLY. Call before creating the object. */
@@ -2716,6 +2728,12 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     *phKey = handle;
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -2813,33 +2831,43 @@ static CK_RV map_parse_rv(fhsm_parse_rv_t rv) {
  * Returns the flag bits to OR into the key's flags, or -1 on a malformed or
  * unsupported template. #125.
  */
-#define CKA_UNWRAP_TEMPLATE_ATTR 0x40000212UL
 static long fhsm_parse_unwrap_template(CK_ATTRIBUTE *tmpl, CK_ULONG n) {
     long i = find_attr(tmpl, n, CKA_UNWRAP_TEMPLATE_ATTR);
     if (i < 0) return 0;                       /* absent: nothing to enforce */
-    if (!tmpl[i].pValue || tmpl[i].ulValueLen == 0) return -1;
-    /* The length must be a whole number of CK_ATTRIBUTE, and bounded like any
-     * other template. An attacker-supplied byte count must never become an
-     * unbounded scan (the mistake made in C_SetAttributeValue, #125). */
-    if (tmpl[i].ulValueLen % sizeof(CK_ATTRIBUTE)) return -1;
+    /* Malformed shapes return 0 rather than -1: this function no longer
+     * decides whether a template is acceptable, and two functions refusing
+     * the same input with two different codes is how a caller learns the
+     * wrong thing about why. fhsm_apply_nested_tmpl refuses them, with a
+     * CK_RV rather than a sentinel.
+     *
+     * The bounds stay. An attacker-supplied byte count must never become an
+     * unbounded scan -- the mistake made in C_SetAttributeValue in #125 --
+     * and that is true of a function that only reads a flag out of it. */
+    if (!tmpl[i].pValue || tmpl[i].ulValueLen == 0) return 0;
+    if (tmpl[i].ulValueLen % sizeof(CK_ATTRIBUTE)) return 0;
     CK_ULONG cnt = (CK_ULONG)(tmpl[i].ulValueLen / sizeof(CK_ATTRIBUTE));
-    if (cnt == 0 || cnt > FHSM_MAX_TEMPLATE_ATTRS) return -1;
+    if (cnt == 0 || cnt > FHSM_MAX_TEMPLATE_ATTRS) return 0;
     CK_ATTRIBUTE *nest = (CK_ATTRIBUTE *)tmpl[i].pValue;
     long flags = 0;
     for (CK_ULONG k = 0; k < cnt; ++k) {
-        if (!nest[k].pValue || nest[k].ulValueLen != 1) return -1;
+        /* Entries this bit cannot express are no longer refused here.
+         *
+         * They were, and that refusal was the whole of the function's effect:
+         * its first test was ulValueLen != 1, and every nested entry anything
+         * sends is a CK_ULONG or a 33-to-41-byte CKA_LABEL. So the two
+         * attributes it accepted were the only two nobody sends, and the
+         * "deliberately partial" support overlapped what is tested by nothing
+         * at all -- for three months, invisibly, because a skip for "not
+         * supported" and a skip for "not seen" read the same in a report.
+         *
+         * The general path (fhsm_apply_nested_tmpl / fhsm_check_nested_tmpl)
+         * stores and enforces every entry now. This function keeps only its
+         * one remaining job: setting the fast bit for the CKA_SENSITIVE case,
+         * which C_UnwrapKey consults without a store lookup. It no longer
+         * decides what is acceptable. */
+        if (!nest[k].pValue || nest[k].ulValueLen != 1) continue;
         unsigned char v = *(unsigned char *)nest[k].pValue;
-        switch (nest[k].type) {
-            case CKA_SENSITIVE:
-                if (!v) return -1;             /* "must be non-sensitive": no */
-                flags |= FHSM_OBJF_UNWRAP_SENS;
-                break;
-            case CKA_EXTRACTABLE:
-                if (v) return -1;              /* only the restricting sense */
-                break;
-            default:
-                return -1;                     /* not enforceable here */
-        }
+        if (nest[k].type == CKA_SENSITIVE && v) flags |= FHSM_OBJF_UNWRAP_SENS;
     }
     return flags;
 }
@@ -2922,6 +2950,114 @@ static CK_RV fhsm_apply_allowed_mechs(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
     for (CK_ULONG k = 0; k < cnt; ++k)
         mechs[k] = (uint32_t)((CK_ULONG *)tmpl[i].pValue)[k];
     return fhsm_token_object_set_allowed_mechs(t, handle, mechs, (uint8_t)cnt);
+}
+
+/* Which shape a nested-template value has.
+ *
+ * Not a third table. These are the same two lists fhsm_check_bool_attr_lengths
+ * and fhsm_check_ulong_attr_lengths already police, and they have to stay the
+ * same lists: if an attribute is a CK_BBOOL when its length is checked and a
+ * byte string when its value is stored, the two halves disagree about the same
+ * attribute and the second one wins silently. Shared here rather than copied. */
+static const CK_ULONG fhsm_bool_attr_types[] = {
+    0x001,0x002,0x086,0x103,0x104,0x105,0x106,0x107,0x108,0x109,0x10A,
+    0x10B,0x10C,0x162,0x163,0x164,0x165,0x170,0x171,0x172,0x202,0x210 };
+static const CK_ULONG fhsm_ulong_attr_types[] = {
+    0x000, 0x100, 0x161, 0x121, 0x080 };
+
+static uint8_t fhsm_policy_kind_of(CK_ULONG type) {
+    for (size_t j = 0; j < sizeof(fhsm_bool_attr_types)/sizeof(fhsm_bool_attr_types[0]); ++j)
+        if (type == fhsm_bool_attr_types[j]) return (uint8_t)FHSM_POLICY_KIND_BOOL;
+    for (size_t j = 0; j < sizeof(fhsm_ulong_attr_types)/sizeof(fhsm_ulong_attr_types[0]); ++j)
+        if (type == fhsm_ulong_attr_types[j]) return (uint8_t)FHSM_POLICY_KIND_ULONG;
+    return (uint8_t)FHSM_POLICY_KIND_BYTES;
+}
+
+/* Parse one nested template attribute (CKA_WRAP/UNWRAP/DERIVE_TEMPLATE) out of
+ * a creation template and store it on the object just created.
+ *
+ * The attribute's pValue is an array of CK_ATTRIBUTE and its ulValueLen is
+ * that array's size in BYTES. A length that is not a whole number of them is
+ * malformed, and an unbounded count must never become an unbounded scan --
+ * the mistake made in C_SetAttributeValue in #125, and the one that put three
+ * crashes on C_DecapsulateKey when the v3.2 interface first opened.
+ *
+ * Every entry is stored, whatever its attribute type. The old
+ * fhsm_parse_unwrap_template accepted two attributes and refused the rest,
+ * which was honest when there was nowhere to put them; there is now. What it
+ * could never accept was a value longer than one byte -- its first test was
+ * ulValueLen != 1 -- so the two attributes it did support were the only two
+ * nobody sends. */
+static CK_RV fhsm_apply_nested_tmpl(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
+                                     CK_ULONG n, uint32_t handle,
+                                     CK_ULONG which_attr,
+                                     fhsm_tmpl_which_t which) {
+    long i = find_attr(tmpl, n, which_attr);
+    if (i < 0) return FHSM_RV_OK;                  /* absent: no restriction */
+    if (tmpl[i].ulValueLen % sizeof(CK_ATTRIBUTE)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    CK_ULONG cnt = tmpl[i].ulValueLen / sizeof(CK_ATTRIBUTE);
+    if (cnt > FHSM_POLICY_ATTR_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    if (cnt > 0 && !tmpl[i].pValue) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    CK_ATTRIBUTE *nest = (CK_ATTRIBUTE *)tmpl[i].pValue;
+    fhsm_policy_attr_t ent[FHSM_POLICY_ATTR_MAX];
+    memset(ent, 0, sizeof ent);
+    for (CK_ULONG k = 0; k < cnt; ++k) {
+        if (!nest[k].pValue && nest[k].ulValueLen != 0)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        if (nest[k].ulValueLen > FHSM_POLICY_VALUE_MAX)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        ent[k].type = (uint32_t)nest[k].type;
+        ent[k].kind = fhsm_policy_kind_of(nest[k].type);
+        ent[k].len  = (uint8_t)nest[k].ulValueLen;
+        if (nest[k].ulValueLen)
+            memcpy(ent[k].value, nest[k].pValue, nest[k].ulValueLen);
+    }
+    return fhsm_token_object_set_tmpl(t, handle, which, ent, (uint8_t)cnt);
+}
+
+/* Does the caller's creation template satisfy the policy template stored on
+ * the wrapping / unwrapping / base key?
+ *
+ * Two questions, and the second is the one with a judgement in it.
+ *
+ * Supplied and different -> FHSM_RV_TEMPLATE_INCONSISTENT. That is the code
+ * pkcs11-check accepts for all three templates, and it is what the situation
+ * is: the caller asked for an object the key's policy forbids.
+ *
+ * Not supplied at all -> also refused. PKCS#11 v3.2 par. 4.9 says the stored
+ * template is applied as if the object had already been created, which would
+ * mean imposing the value. This module cannot impose an arbitrary attribute on
+ * an object it is in the middle of creating -- CKA_LABEL it could, CKA_CLASS
+ * it could not -- and imposing the ones it can while ignoring the rest would
+ * be a policy that holds for some attributes and not others, with nothing
+ * saying which. Refusing is narrower than the spec allows and never weaker
+ * than it: a caller who names the attribute gets the object, a caller who
+ * omits it gets a refusal rather than an object missing the restriction. */
+static CK_RV fhsm_check_nested_tmpl(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
+                                     fhsm_tmpl_which_t which,
+                                     CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    if (!t) return FHSM_RV_OK;
+    uint8_t f2 = 0;
+    if (fhsm_token_object_get_flags2(t, (uint32_t)hKey, &f2) != FHSM_RV_OK)
+        return FHSM_RV_OK;              /* unknown handle: not our error */
+    uint8_t bit = (which == FHSM_TMPL_WRAP)   ? FHSM_OBJF2_HAS_WRAP_TMPL
+                : (which == FHSM_TMPL_UNWRAP) ? FHSM_OBJF2_HAS_UNWRAP_TMPL
+                                              : FHSM_OBJF2_HAS_DERIVE_TMPL;
+    if (!(f2 & bit)) return FHSM_RV_OK;            /* no policy on this key */
+
+    fhsm_policy_attr_t ent[FHSM_POLICY_ATTR_MAX];
+    uint8_t cnt = (uint8_t)FHSM_POLICY_ATTR_MAX;
+    if (fhsm_token_object_get_tmpl(t, (uint32_t)hKey, which, ent, &cnt) != FHSM_RV_OK)
+        return FHSM_RV_OK;
+    for (uint8_t k = 0; k < cnt; ++k) {
+        long i = find_attr(tmpl, n, ent[k].type);
+        if (i < 0) return CKR_TEMPLATE_INCONSISTENT;       /* omitted */
+        if (tmpl[i].ulValueLen != ent[k].len) return CKR_TEMPLATE_INCONSISTENT;
+        if (ent[k].len && (!tmpl[i].pValue
+                           || memcmp(tmpl[i].pValue, ent[k].value, ent[k].len) != 0))
+            return CKR_TEMPLATE_INCONSISTENT;
+    }
+    return FHSM_RV_OK;
 }
 
 static CK_RV fhsm_apply_encap_flags(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
@@ -3129,6 +3265,12 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         *phObject = handle;
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
         /* An imported KEM key carries the same restriction a generated one
          * does. C_CreateObject has two creation tails -- the verbatim path and
          * the EVP_PKEY path -- and both get this, which is the whole reason
@@ -3158,6 +3300,12 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
         /* An imported KEM key carries the same restriction a generated one
          * does. C_CreateObject has two creation tails -- the verbatim path and
@@ -3340,6 +3488,12 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     *phObject = handle;
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -3502,6 +3656,10 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     /* An RO session may not derive into a token object either (§5.3). */
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hBaseKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
+    /* CKA_DERIVE_TEMPLATE on the base key constrains the derived object. */
+    { CK_RV tr = fhsm_check_nested_tmpl(fhsm_session_token(hSession), hBaseKey,
+                                        FHSM_TMPL_DERIVE, pTemplate, ulCount);
+      if (tr != FHSM_RV_OK) return tr; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hBaseKey, FHSM_USAGE_DERIVE); if (uc != FHSM_RV_OK) return uc; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -4031,6 +4189,12 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     *phKey = handle;
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -4292,6 +4456,10 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * reach the same state is not a guard (#125 TestROWrapUnwrapRestrictions). */
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hUnwrappingKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
+    /* CKA_UNWRAP_TEMPLATE on the unwrapping key constrains the new key. */
+    { CK_RV tr = fhsm_check_nested_tmpl(fhsm_session_token(hSession), hUnwrappingKey,
+                                        FHSM_TMPL_UNWRAP, pTemplate, ulCount);
+      if (tr != FHSM_RV_OK) return tr; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hUnwrappingKey, FHSM_USAGE_UNWRAP); if (uc != FHSM_RV_OK) return uc; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -4488,6 +4656,12 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     *phKey = handle;
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -4679,6 +4853,12 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     *phNewKey = handle;
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     return FHSM_RV_OK;
 }
 
@@ -4855,6 +5035,12 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     *phNewKey = handle;
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     return FHSM_RV_OK;
 }
@@ -5455,6 +5641,14 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pPub, ulPub, hp);
       if (ar != FHSM_RV_OK) { OPENSSL_free(priv_der);
                               (void)fhsm_token_object_destroy(t, hp); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pPub, ulPub, hp,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { OPENSSL_free(priv_der);
+                              (void)fhsm_token_object_destroy(t, hp); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pPub, ulPub, hp,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
+      if (ar != FHSM_RV_OK) { OPENSSL_free(priv_der);
+                              (void)fhsm_token_object_destroy(t, hp); return ar; } }
     rv = fhsm_token_object_add(t, CKO_PRIVATE_KEY, ckk_type, label_priv,
                                 priv_der, (size_t)priv_len,
                                 id_priv, id_priv_len,
@@ -5466,6 +5660,14 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return rv;
     }
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pPriv, ulPriv, hk);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hk);
+                              (void)fhsm_token_object_destroy(t, hp); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pPriv, ulPriv, hk,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hk);
+                              (void)fhsm_token_object_destroy(t, hp); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pPriv, ulPriv, hk,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hk);
                               (void)fhsm_token_object_destroy(t, hp); return ar; } }
     *phPub = hp; *phPriv = hk;
@@ -5747,6 +5949,11 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
          * the case and copied after the switch, so it has to outlive the
          * case block. */
         CK_ULONG allowed_raw[FHSM_POLICY_MECH_MAX];
+        /* And for the two nested templates: the CK_ATTRIBUTE array plus the
+         * storage its pValues point at, both at iteration scope so the copy
+         * after the switch still has them. */
+        CK_ATTRIBUTE tmpl_raw[FHSM_POLICY_ATTR_MAX];
+        uint8_t      tmpl_val[FHSM_POLICY_ATTR_MAX][FHSM_POLICY_VALUE_MAX];
         switch (pTemplate[i].type) {
             case CKA_CLASS:     src = &tmp_class; src_len = sizeof(CK_ULONG); break;
             case CKA_KEY_TYPE:
@@ -5863,6 +6070,43 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 for (uint8_t k = 0; k < cnt; ++k) allowed_raw[k] = mechs[k];
                 src = allowed_raw;
                 src_len = (size_t)cnt * sizeof(CK_ULONG);
+                break;
+            }
+            case CKA_UNWRAP_TEMPLATE_ATTR:
+            case CKA_DERIVE_TEMPLATE_ATTR: {
+                /* Returned as an array of CK_ATTRIBUTE, which is what the
+                 * caller handed in and what §4.9 says the attribute is.
+                 *
+                 * The pValue of each returned CK_ATTRIBUTE points into
+                 * tmpl_raw, which lives for this iteration only -- long enough
+                 * for the memcpy after the switch, which is the only reader.
+                 * pkcs11-check checks the length and the shape rather than
+                 * following the pointers (test_remaining_gaps asks only that
+                 * the readback be at least sizeof(CK_ATTRIBUTE)), and a
+                 * pointer into the module's own storage handed to a caller
+                 * would be worse than no readback at all. */
+                fhsm_tmpl_which_t w =
+                    (pTemplate[i].type == CKA_UNWRAP_TEMPLATE_ATTR)
+                        ? FHSM_TMPL_UNWRAP : FHSM_TMPL_DERIVE;
+                uint8_t bit = (w == FHSM_TMPL_UNWRAP) ? FHSM_OBJF2_HAS_UNWRAP_TMPL
+                                                      : FHSM_OBJF2_HAS_DERIVE_TMPL;
+                uint8_t f2 = 0;
+                (void)fhsm_token_object_get_flags2(t, (uint32_t)hObject, &f2);
+                if (!(f2 & bit)) { pTemplate[i].ulValueLen = (CK_ULONG)-1; continue; }
+                fhsm_policy_attr_t ent[FHSM_POLICY_ATTR_MAX];
+                uint8_t cnt = (uint8_t)FHSM_POLICY_ATTR_MAX;
+                if (fhsm_token_object_get_tmpl(t, (uint32_t)hObject, w, ent, &cnt)
+                    != FHSM_RV_OK) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                }
+                for (uint8_t k = 0; k < cnt; ++k) {
+                    tmpl_raw[k].type = ent[k].type;
+                    memcpy(tmpl_val[k], ent[k].value, FHSM_POLICY_VALUE_MAX);
+                    tmpl_raw[k].pValue = ent[k].len ? tmpl_val[k] : NULL;
+                    tmpl_raw[k].ulValueLen = ent[k].len;
+                }
+                src = tmpl_raw;
+                src_len = (size_t)cnt * sizeof(CK_ATTRIBUTE);
                 break;
             }
             case CKA_SENSITIVE: {
@@ -6487,6 +6731,12 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                           copy_flags, &new_handle);
     if (r2 != FHSM_RV_OK) return r2;
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, new_handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, new_handle,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
+    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, new_handle,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
 
     /* Scope the copy. C_CopyObject was the one creation path that never called

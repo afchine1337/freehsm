@@ -332,6 +332,50 @@ fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
 #define FHSM_POLICY_ATTR_MAX     4u    /* entries per nested template */
 #define FHSM_POLICY_VALUE_MAX    48u   /* bytes of value per template entry */
 
+/* One entry of a nested policy template.
+ *
+ * `kind` is recorded rather than derived. The three value shapes cannot be
+ * told apart from the bytes -- a one-byte CK_BBOOL and the first byte of a
+ * one-character label are the same octet -- and deriving it from the attribute
+ * number would make the store's reading of a stored value depend on a table
+ * that changes over releases. The PKCS#11 layer knows which shape it was
+ * handed, because it still has the caller's CK_ATTRIBUTE; it says so once,
+ * here, and the store never has to guess. */
+#define FHSM_POLICY_KIND_NONE   0u
+#define FHSM_POLICY_KIND_BOOL   1u    /* value[0] is a CK_BBOOL */
+#define FHSM_POLICY_KIND_ULONG  2u    /* value[0..7] is a u64 little-endian */
+#define FHSM_POLICY_KIND_BYTES  3u    /* value[0..len-1] */
+typedef struct {
+    uint32_t type;                    /* the CKA_ attribute constrained */
+    uint8_t  kind;                    /* FHSM_POLICY_KIND_* */
+    uint8_t  len;                     /* significant bytes of value */
+    uint8_t  value[FHSM_POLICY_VALUE_MAX];
+} fhsm_policy_attr_t;
+
+/* Which of the three nested templates. */
+typedef enum {
+    FHSM_TMPL_WRAP   = 0,
+    FHSM_TMPL_UNWRAP = 1,
+    FHSM_TMPL_DERIVE = 2
+} fhsm_tmpl_which_t;
+
+/* Store / read one nested template. Setting marks it present, count 0
+ * included. A count above FHSM_POLICY_ATTR_MAX, or an entry whose len exceeds
+ * FHSM_POLICY_VALUE_MAX, is FHSM_RV_ATTRIBUTE_VALUE_INVALID -- never a
+ * truncation, for the same reason as the mechanism list: a policy silently cut
+ * short is a restriction the caller believes is there and is not.
+ *
+ * For get, *io_count is capacity in, stored count out; `out` NULL is a size
+ * query. Presence is FHSM_OBJF2_HAS_*_TMPL in flags2, never the count. */
+fhsm_rv_t fhsm_token_object_set_tmpl(fhsm_token_t *t, uint32_t handle,
+                                      fhsm_tmpl_which_t which,
+                                      const fhsm_policy_attr_t *a,
+                                      uint8_t count);
+fhsm_rv_t fhsm_token_object_get_tmpl(fhsm_token_t *t, uint32_t handle,
+                                      fhsm_tmpl_which_t which,
+                                      fhsm_policy_attr_t *out,
+                                      uint8_t *io_count);
+
 /* CKA_ALLOWED_MECHANISMS. Setting marks the attribute present, count 0
  * included: an empty list allows nothing and is a real answer. A count above
  * the cap is FHSM_RV_ATTRIBUTE_VALUE_INVALID, never a truncation. */
