@@ -53,7 +53,18 @@ jobs:
           # reference can change under a tree nobody touched, and a GATING step
           # whose oracle moves on its own turns green or red for reasons that
           # are not in this repository.
-          /tmp/p11spec/bin/pip install --quiet 'pkcs11-check==0.1.9'
+          #
+          # 0.1.9 -> 0.2.0 on 2026-09-19. Moving a gating step's oracle is not
+          # a version bump, it is a change of reference, so it was run against
+          # the new one before being written here:
+          #
+          #   audit_constants.py --spec <0.2.0 types_std.py>
+          #   322 conform, 32 not in the reference, 0 divergent
+          #
+          # The workstation had been on 0.2.0 since this morning while CI
+          # compared against 0.1.9 -- two references for one question, which is
+          # the arrangement that made the 0.1.8 decoy expensive on 09-07.
+          /tmp/p11spec/bin/pip install --quiet 'pkcs11-check==0.2.0'
           # Locate types_std.py without importing it: the module uses
           # `from typing import Self` (3.11+) and importing it would tie this
           # step to the runner's Python version. We only need to read the file.

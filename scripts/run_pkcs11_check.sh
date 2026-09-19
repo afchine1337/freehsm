@@ -96,7 +96,14 @@ HARNESS_VERSION="$(p11c_version || echo unknown)"
 [ -n "$HARNESS_VERSION" ] || HARNESS_VERSION="unknown"
 # What .github/workflows/{ci,pkcs11-check}.yml pin. Override when testing a
 # candidate; the point is that a mismatch is stated, not that it is forbidden.
-EXPECTED_VERSION="${FHSM_PKCS11CHECK_EXPECT:-0.1.9}"
+#
+# Moved to 0.2.0 on 2026-09-19, with the workflows, in the same commit. This
+# default is the only thing that tells an operator their harness is not the
+# one CI uses, so a stale default is worse than none: it states a mismatch
+# that is not there and stays quiet about the one that is. Between this
+# morning and that commit it did exactly that -- every run printed a warning
+# about 0.1.9 while 0.1.9 was the version nothing used any more.
+EXPECTED_VERSION="${FHSM_PKCS11CHECK_EXPECT:-0.2.0}"
 
 # Everything a later reader needs to know whether two runs are comparable.
 #

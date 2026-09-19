@@ -99,7 +99,18 @@ jobs:
           # reported, with the module unchanged (docs/PKCS11_CHECK_FINDINGS.md,
           # 2026-09-03). A comparison whose reference version drifts on its own
           # cannot attribute a change to anything.
-          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.1.9'
+          #
+          # 0.1.9 -> 0.2.0 on 2026-09-19. This is not a routine bump: 0.2.0
+          # changed what counts as a claim -- accepting an attribute in a
+          # creation template is the claim, readback or not -- so counts from
+          # it are not comparable with counts from 0.1.9. The first full run
+          # under it removed 63 findings that were never ours and restored
+          # hard failures 0.1.9 had been classifying away.
+          #
+          # Which means the baseline this workflow compares against is reset,
+          # not continued. A run under 0.2.0 read as a delta from a 0.1.9
+          # number says nothing.
+          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.0'
           ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
           ln -sf /opt/p11check/bin/pkcs11-check-report /usr/local/bin/pkcs11-check-report
           pkcs11-check version
@@ -117,7 +128,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /root/.local/share/pkcs11-check/data
-          key: p11check-data-0.1.9
+          key: p11check-data-0.2.0
 
       - name: Fetch third-party vectors
         if: env.FULL_CORPUS == '1'
