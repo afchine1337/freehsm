@@ -6871,7 +6871,29 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     op->gcm_iv_len = 0;
     op->gcm_aad_len = 0;
     op->gcm_tag_len = 16;        /* default 128-bit tag */
-    if (pMechanism->mechanism == CKM_AES_GCM && pMechanism->pParameter) {
+    /* CK_GCM_PARAMS serves CKM_AES_GCM and CKM_AES_GMAC alike.
+     *
+     * PKCS#11 v3.2 §6.13.6, on CKM_AES_GMAC, verbatim:
+     *
+     *   GMAC is a special case of GCM that authenticates only the Additional
+     *   Authenticated Data (AAD) part of the GCM mechanism parameters. [...]
+     *   The signature produced by GMAC, also referred to as a Tag, the tag's
+     *   length is determined by the CK_GCM_PARAMS field ulTagBits. The IV
+     *   length is determined by the CK_GCM_PARAMS field ulIvLen.
+     *
+     * This branch was gated on CKM_AES_GCM alone, so a caller sending the
+     * canonical parameter block for GMAC fell through to the raw-IV branch
+     * below and had the 48 bytes of the struct read as an IV -- the first
+     * eight of which are a pointer. Thirty ACVP known-answer vectors came
+     * back with the wrong tag.
+     *
+     * It surfaced only once this module published a v3.2 interface, on
+     * 2026-09-18: pkcs11-check picks the parameter form from the interface
+     * version it negotiated, and had been sending a bare IV until then.
+     * Opening one door made the next defect measurable, for the fourth time
+     * in three days. */
+    if ((pMechanism->mechanism == CKM_AES_GCM
+         || op->mechanism == CKM_AES_GMAC) && pMechanism->pParameter) {
         /* Two calling conventions are accepted :
          *  - CK_GCM_PARAMS struct : { pIv, ulIvLen, ulIvBits, pAAD,
          *    ulAADLen, ulTagBits } = 6 CK_ULONG-sized words = 48 bytes
@@ -6916,7 +6938,11 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             op->gcm_aad_len = aad_len;
             op->gcm_tag_len = tag_bits / 8;
             op->gcm_have    = 1;
-        } else if (pMechanism->ulParameterLen >= 12) {
+        } else if (pMechanism->mechanism == CKM_AES_GCM
+                   && pMechanism->ulParameterLen >= 12) {
+            /* GCM only. GMAC's raw-IV interop form is handled below and
+             * accepts any length its buffer holds; folding it in here would
+             * silently truncate a 16-byte GMAC IV to 12. */
             memcpy(op->iv, pMechanism->pParameter, 12);
             op->have_iv = 1;
             /* Also mirror into the new GCM fields so C_Decrypt can use a
@@ -6971,34 +6997,31 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             return FHSM_RV_MECHANISM_PARAM_INVALID;
         }
     }
-    /* AES-GMAC : per PKCS#11 v3.2 §6.10.6 the IV is conveyed via
-     * pParameter. We accept two calling conventions for interop :
-     *   - raw IV bytes (PKCS#11 v3.0 convention, what most clients
-     *     including pkcs11-tool send)
-     *   - CK_AES_GMAC_PARAMS = { CK_ULONG ulIvLen ; CK_BYTE_PTR pIv }
-     *     (PKCS#11 v3.2 canonical form, 16 bytes on a 64-bit ABI)
-     * The struct form is heuristically detected when ulParameterLen ==
-     * 16 AND the first 8 bytes look like a sensible IV length (1..512).
-     * We store the IV in op->gcm_iv (shared 512-byte buffer with GCM)
-     * which fits Wycheproof's LongIv exercises if we ever extend the
-     * GMAC corpus. The mechanism check uses op->mechanism (already
-     * resolved via resolve_mech above). */
-    if (op->mechanism == CKM_AES_GMAC && pMechanism->pParameter
-        && pMechanism->ulParameterLen > 0) {
+    /* AES-GMAC, raw-IV interop form.
+     *
+     * The canonical form is CK_GCM_PARAMS and is handled by the branch above,
+     * which sets gcm_have -- so this one only sees a parameter block that was
+     * not a struct. That is the bare IV most clients send, pkcs11-tool
+     * included, and it is kept for them.
+     *
+     * What used to be here besides: a heuristic reading a 16-byte parameter as
+     *
+     *     CK_AES_GMAC_PARAMS = { CK_ULONG ulIvLen ; CK_BYTE_PTR pIv }
+     *
+     * described in the comment as "PKCS#11 v3.2 canonical form". No such
+     * structure exists. It is not in the OASIS pkcs11t.h for v3.2 -- which
+     * contains exactly one GMAC line, the mechanism code point -- and not in
+     * pkcs11-check, which implements every parameter structure from v2.40 to
+     * v3.2. It was invented, like the KMAC code points removed on 2026-09-12
+     * and the permuted C_EncapsulateKey signature corrected on 2026-09-18.
+     *
+     * Removing it costs nothing a caller could legitimately rely on, and buys
+     * back a real case: a 16-byte raw IV, which the heuristic would take for a
+     * struct whenever the first eight bytes happened to look like a length. */
+    if (op->mechanism == CKM_AES_GMAC && !op->gcm_have
+        && pMechanism->pParameter && pMechanism->ulParameterLen > 0) {
         const uint8_t *iv_src = (const uint8_t *)pMechanism->pParameter;
         size_t iv_len = pMechanism->ulParameterLen;
-        if (iv_len == 16) {
-            /* Potential CK_AES_GMAC_PARAMS struct. Peek at the length
-             * word to disambiguate from a 16-byte raw IV : if it points
-             * to a plausible length and a non-null pIv, treat as struct. */
-            const CK_ULONG *p = (const CK_ULONG *)pMechanism->pParameter;
-            size_t s_len = (size_t)p[0];
-            const uint8_t *s_iv = (const uint8_t *)(uintptr_t)p[1];
-            if (s_iv && s_len > 0 && s_len <= sizeof(op->gcm_iv)) {
-                iv_src = s_iv;
-                iv_len = s_len;
-            }
-        }
         if (iv_len > sizeof(op->gcm_iv)) return FHSM_RV_ARGUMENTS_BAD;
         /* A minimum, which this branch did not have: anything from one byte
          * upwards was taken for an IV and the operation proceeded. The
@@ -8798,18 +8821,39 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
-        if (pSignature == NULL) { *pulSignatureLen = 16; return FHSM_RV_OK; }
-        if (*pulSignatureLen < 16) { *pulSignatureLen = 16; return 0x00000150UL; }
+        /* The tag length is the mechanism's, not a constant.
+         *
+         * PKCS#11 v3.2 §6.13.6: "the tag's length is determined by the
+         * CK_GCM_PARAMS field ulTagBits". This returned 16 bytes whatever the
+         * caller asked for, so a request for a 32-bit tag -- which the ACVP
+         * corpus exercises -- got 128 bits and compared unequal.
+         *
+         * SP 800-38D §5.2.1.2 defines the shorter tags as the leftmost bits
+         * of the full one, so the truncation is a prefix and not a different
+         * computation. CMAC keeps 16: CKM_AES_CMAC has no length parameter,
+         * and CKM_AES_CMAC_GENERAL, which does, is a different mechanism this
+         * module does not implement. */
+        size_t mac_len = (op->mechanism == CKM_AES_GMAC && op->gcm_tag_len)
+                         ? op->gcm_tag_len : 16;
+        if (pSignature == NULL) { *pulSignatureLen = mac_len; return FHSM_RV_OK; }
+        if (*pulSignatureLen < mac_len) {
+            *pulSignatureLen = mac_len; return 0x00000150UL;
+        }
         if (op->mechanism == CKM_AES_GMAC) {
             if (!op->gcm_have || op->gcm_iv_len == 0) {
                 op->active = 0; return FHSM_RV_ARGUMENTS_BAD;
             }
+            /* Computed whole, then truncated: aes_gmac writes 16 bytes and
+             * the caller's buffer may legitimately be shorter. */
+            uint8_t full_tag[16];
             rv = aes_gmac(kv, kvl, op->gcm_iv, op->gcm_iv_len,
-                          pData, ulDataLen, pSignature);
+                          pData, ulDataLen, full_tag);
+            if (rv == FHSM_RV_OK) memcpy(pSignature, full_tag, mac_len);
+            OPENSSL_cleanse(full_tag, sizeof full_tag);
         } else {
             rv = aes_cmac(kv, kvl, pData, ulDataLen, pSignature);
         }
-        *pulSignatureLen = 16;
+        *pulSignatureLen = mac_len;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
                                 fhsm_session_role(hSession), rv, NULL);
@@ -8989,9 +9033,15 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
         }
         op->active = 0;
         if (rv != FHSM_RV_OK) return rv;
-        if (ulSigLen != 16) return FHSM_RV_SIGNATURE_INVALID;
-        return (fhsm_ct_memcmp(mac, pSig, 16) == 0) ? FHSM_RV_OK
-                                                     : FHSM_RV_SIGNATURE_INVALID;
+        /* The mirror of the length rule in C_Sign. Comparing on a fixed 16
+         * would refuse a tag this module had just produced at the length the
+         * caller asked for -- a verify that rejects its own signature, which
+         * is the kind of asymmetry that gets found by a user and not by us. */
+        size_t mac_len = (op->mechanism == CKM_AES_GMAC && op->gcm_tag_len)
+                         ? op->gcm_tag_len : 16;
+        if (ulSigLen != mac_len) return FHSM_RV_SIGNATURE_INVALID;
+        return (fhsm_ct_memcmp(mac, pSig, mac_len) == 0) ? FHSM_RV_OK
+                                                          : FHSM_RV_SIGNATURE_INVALID;
     }
 
     /* Asymmetric path : public key DER → EVP_PKEY → EVP_DigestVerify. */
