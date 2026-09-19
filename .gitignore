@@ -171,6 +171,22 @@ Thumbs.db
 *.tok.tpm
 audit.log
 
+# One deliberate exception, and only one.
+#
+# tests/fixtures/token-v3.tok is a token written by the pre-v4 build and kept
+# so that tests/test_v3_fixture.c can prove a v4 reader still opens it. It
+# holds two AES keys whose bytes are printed in tests/make_v3_fixture.c, under
+# a PIN that is in the same file: it is evidence, not key material.
+#
+# The rule above stays as it is. A .tok in this tree is normally a real
+# operator token and must never be committed; that is why this exception names
+# one path rather than opening a directory.
+!tests/fixtures/token-v3.tok
+
+# FUSE leftovers from editing this tree over a network/desktop mount. Zero-byte
+# files a deleted-while-open inode leaves behind; never ours to commit.
+.fuse_hidden*
+
 # GPG / secrets
 *.asc.tmp
 .gnupg/

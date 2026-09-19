@@ -297,6 +297,23 @@ fhsm_rv_t fhsm_token_object_get_id(fhsm_token_t *t, uint32_t handle,
  * default. */
 #define FHSM_OBJF2_NOT_COPYABLE   0x04
 
+/* Presence of the four policy attributes carried by the v4 record.
+ *
+ * These are presence bits, not restriction bits, and they are here rather than
+ * derived from a count because a count of zero has two meanings. An absent
+ * CKA_ALLOWED_MECHANISMS permits every mechanism; one set to the empty list
+ * permits none, and pkcs11-check sends that case deliberately. Both store a
+ * count of zero, so the count cannot be asked which one it is -- the same
+ * problem CKA_START_DATE solved with an explicit length byte.
+ *
+ * The polarity still holds: a set bit means a restriction exists, a clear bit
+ * means none, and a record written before these bits existed carries zero,
+ * which is no policy. That is what those records mean. */
+#define FHSM_OBJF2_HAS_ALLOWED_MECH 0x08
+#define FHSM_OBJF2_HAS_WRAP_TMPL    0x10
+#define FHSM_OBJF2_HAS_UNWRAP_TMPL  0x20
+#define FHSM_OBJF2_HAS_DERIVE_TMPL  0x40
+
 /* Read / write the second flags byte. Separate accessors rather than a wider
  * type on the existing pair: every current caller of the first byte keeps
  * compiling unchanged, and a caller that has not been taught about the second
@@ -305,6 +322,41 @@ fhsm_rv_t fhsm_token_object_get_flags2(fhsm_token_t *t, uint32_t handle,
                                         uint8_t *out_flags2);
 fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
                                         uint8_t flags2);
+
+/* What a v4 record can hold, per object. Measured against pkcs11-check 0.2.0
+ * rather than chosen: the corpus sends one mechanism and at most two template
+ * entries, and the longest value in a template is a 41-byte CKA_LABEL. These
+ * are in the header because a caller has to know the limit before it calls --
+ * a cap discoverable only by being refused is a cap met in production. */
+#define FHSM_POLICY_MECH_MAX     8u    /* CKA_ALLOWED_MECHANISMS entries */
+#define FHSM_POLICY_ATTR_MAX     4u    /* entries per nested template */
+#define FHSM_POLICY_VALUE_MAX    48u   /* bytes of value per template entry */
+
+/* CKA_ALLOWED_MECHANISMS. Setting marks the attribute present, count 0
+ * included: an empty list allows nothing and is a real answer. A count above
+ * the cap is FHSM_RV_ATTRIBUTE_VALUE_INVALID, never a truncation. */
+fhsm_rv_t fhsm_token_object_set_allowed_mechs(fhsm_token_t *t, uint32_t handle,
+                                               const uint32_t *mechs,
+                                               uint8_t count);
+/* *io_count is capacity in, stored count out. `out` NULL is a size query.
+ * FHSM_RV_BUFFER_TOO_SMALL when the capacity is short, count still written. */
+fhsm_rv_t fhsm_token_object_get_allowed_mechs(fhsm_token_t *t, uint32_t handle,
+                                               uint32_t *out, uint8_t *io_count);
+/* FHSM_RV_OK if permitted, FHSM_RV_MECHANISM_INVALID if not. An object with no
+ * CKA_ALLOWED_MECHANISMS permits everything; an unknown handle answers OK and
+ * leaves the handle error to the caller that is about to look it up. */
+fhsm_rv_t fhsm_token_object_mech_allowed(fhsm_token_t *t, uint32_t handle,
+                                          uint32_t mech);
+
+/* The four policy counts carried by the v4 record, read together. Any out
+ * pointer may be NULL. A zero count means "allows nothing" when the matching
+ * FHSM_OBJF2_HAS_* bit is set in flags2, and "no policy" when it is not --
+ * the count alone cannot say which. */
+fhsm_rv_t fhsm_token_object_get_policy_counts(fhsm_token_t *t, uint32_t handle,
+                                               uint8_t *out_allowed,
+                                               uint8_t *out_wrap,
+                                               uint8_t *out_unwrap,
+                                               uint8_t *out_derive);
 
 /* Read the object's flags byte (FHSM_OBJF_SENSITIVE | EXTRACTABLE).
  * Returns FHSM_RV_KEY_HANDLE_INVALID if the handle is unknown. */

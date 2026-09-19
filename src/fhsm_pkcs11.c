@@ -2114,8 +2114,16 @@ static CK_RV fhsm_reject_mech_supplied(CK_ATTRIBUTE *t, CK_ULONG n) {
 static CK_RV fhsm_reject_unstorable_policy(CK_ATTRIBUTE *t, CK_ULONG n) {
     if (n == 0 || t == NULL) return FHSM_RV_OK;
     for (CK_ULONG i = 0; i < n; ++i) {
-        if (t[i].type == CKA_ALLOWED_MECHANISMS_ATTR
-            || t[i].type == CKA_WRAP_TEMPLATE_ATTR
+        /* CKA_ALLOWED_MECHANISMS left this list when the v4 record gave it
+         * somewhere to live. It is now parsed by fhsm_apply_allowed_mechs at
+         * each of the eleven creation tails and enforced at the ten sites
+         * listed above fhsm_check_allowed_mech.
+         *
+         * The two templates are still refused, and refusing is still the
+         * honest answer while nothing consults them: accepting an attribute
+         * and dropping it is a claim of protection that is not there. They
+         * follow, in the same record. */
+        if (t[i].type == CKA_WRAP_TEMPLATE_ATTR
             || t[i].type == CKA_DERIVE_TEMPLATE_ATTR)
             return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
     }
@@ -2226,6 +2234,11 @@ static unsigned char fhsm_usage_bool(fhsm_token_t *t, CK_OBJECT_HANDLE h,
 }
 
 static CK_RV fhsm_check_usage(fhsm_token_t *t, CK_OBJECT_HANDLE hKey, uint8_t bit);
+/* Defined below, beside fhsm_apply_encap_flags; declared here because the
+ * first of its eleven creation tails is C_GenerateKey, three hundred lines
+ * above that definition. */
+static CK_RV fhsm_apply_allowed_mechs(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
+                                       CK_ULONG n, uint32_t handle);
 
 /* PKCS#11 : creating a token object (CKA_TOKEN=TRUE) on a read-only
  * session is CKR_SESSION_READ_ONLY. Call before creating the object. */
@@ -2701,6 +2714,8 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_zeroize(key, sizeof(key));
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -2878,6 +2893,37 @@ static int fhsm_pset_read(CK_ATTRIBUTE *tmpl, CK_ULONG n, CK_ULONG mech,
  *
  * TRUE writes nothing. The bits are negative so that absence means permitted,
  * which keeps every record written before 2026-09-19 correct. */
+/* CKA_ALLOWED_MECHANISMS from a creation template onto the object just made.
+ *
+ * The value is an array of CK_MECHANISM_TYPE, so ulValueLen must be a whole
+ * number of them. A length that is not is CKR_ATTRIBUTE_VALUE_INVALID: the
+ * alternative is to round down, which would store a list the caller did not
+ * write and enforce it against them.
+ *
+ * Present with zero entries is a real setting, not an absence. pkcs11-check
+ * sends it (ckr/test_ckr_object.py::test_allowed_mechanisms_empty_null_pointer
+ * _enforced) and then checks that C_EncryptInit is refused afterwards -- an
+ * empty allow-list allows nothing. fhsm_check_template has already rejected
+ * the malformed pValue == NULL with a non-zero length, so a NULL here with
+ * length zero is the empty array and nothing else.
+ *
+ * More entries than the store can hold is refused rather than truncated, for
+ * the reason the store comment gives: a truncated allow-list forbids
+ * mechanisms the caller meant to permit, and the caller sees it as the
+ * mechanism failing rather than the attribute. */
+static CK_RV fhsm_apply_allowed_mechs(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
+                                       CK_ULONG n, uint32_t handle) {
+    long i = find_attr(tmpl, n, CKA_ALLOWED_MECHANISMS_ATTR);
+    if (i < 0) return FHSM_RV_OK;                  /* absent: no restriction */
+    if (tmpl[i].ulValueLen % sizeof(CK_ULONG)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    CK_ULONG cnt = tmpl[i].ulValueLen / sizeof(CK_ULONG);
+    if (cnt > FHSM_POLICY_MECH_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    uint32_t mechs[FHSM_POLICY_MECH_MAX];
+    for (CK_ULONG k = 0; k < cnt; ++k)
+        mechs[k] = (uint32_t)((CK_ULONG *)tmpl[i].pValue)[k];
+    return fhsm_token_object_set_allowed_mechs(t, handle, mechs, (uint8_t)cnt);
+}
+
 static CK_RV fhsm_apply_encap_flags(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
                                      CK_ULONG n, uint32_t handle,
                                      uint32_t cko_class) {
@@ -3081,6 +3127,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (der) { OPENSSL_cleanse(der, store_len); OPENSSL_free(der); }
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
         /* An imported KEM key carries the same restriction a generated one
          * does. C_CreateObject has two creation tails -- the verbatim path and
          * the EVP_PKEY path -- and both get this, which is the whole reason
@@ -3109,6 +3157,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
             (uint8_t)(FHSM_OBJF_EXTRACTABLE | trusted_flag), &handle);
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
         /* An imported KEM key carries the same restriction a generated one
          * does. C_CreateObject has two creation tails -- the verbatim path and
          * the EVP_PKEY path -- and both get this, which is the whole reason
@@ -3288,6 +3338,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     OPENSSL_free(spki);
     if (rv != FHSM_RV_OK) return rv;
     *phObject = handle;
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -3374,6 +3426,9 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
 /* Defined with the other *Init guards, some three thousand lines below. */
 static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
                                        CK_ULONG mech);
+/* Likewise. Its comment carries the list of every site that must call it. */
+static CK_RV fhsm_check_allowed_mech(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
+                                      CK_ULONG mech);
 
 /* CK_KEY_DERIVATION_STRING_DATA (PKCS#11 v3.2 §6.20). Used by
  * CONCATENATE_BASE_AND_DATA, CONCATENATE_DATA_AND_BASE and
@@ -3446,6 +3501,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* An RO session may not derive into a token object either (§5.3). */
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hBaseKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hBaseKey, FHSM_USAGE_DERIVE); if (uc != FHSM_RV_OK) return uc; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -3973,6 +4029,8 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                           obj_flags, &handle);
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -4054,6 +4112,7 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !pulWrappedKeyLen) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    { CK_RV ac = fhsm_check_allowed_mech(t, hWrappingKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     { CK_RV uc = fhsm_check_usage(t, hWrappingKey, FHSM_USAGE_WRAP); if (uc != FHSM_RV_OK) return uc; }
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
@@ -4232,6 +4291,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * once that was reverted -- a guard applied to a subset of the paths that
      * reach the same state is not a guard (#125 TestROWrapUnwrapRestrictions). */
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hUnwrappingKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hUnwrappingKey, FHSM_USAGE_UNWRAP); if (uc != FHSM_RV_OK) return uc; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -4426,6 +4486,8 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_zeroize(pt, sizeof(pt));
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -4493,6 +4555,7 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     if (cl != CKO_PUBLIC_KEY || kt != CKK_ML_KEM)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    { CK_RV ac = fhsm_check_allowed_mech(t, hPublicKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     /* CKA_ENCAPSULATE=FALSE (§5.14.7 : CKR_KEY_FUNCTION_NOT_PERMITTED). */
     { uint8_t f2 = 0;
       if (fhsm_token_object_get_flags2(t, (uint32_t)hPublicKey, &f2) == FHSM_RV_OK
@@ -4614,6 +4677,8 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_zeroize(ss, sizeof(ss));
     if (rv != FHSM_RV_OK) return rv;
     *phNewKey = handle;
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     return FHSM_RV_OK;
 }
 
@@ -4645,6 +4710,7 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     if (cl != CKO_PRIVATE_KEY || kt != CKK_ML_KEM)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    { CK_RV ac = fhsm_check_allowed_mech(t, hPrivateKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     /* CKA_DECAPSULATE=FALSE (§5.14.8 : CKR_KEY_FUNCTION_NOT_PERMITTED). */
     { uint8_t f2 = 0;
       if (fhsm_token_object_get_flags2(t, (uint32_t)hPrivateKey, &f2) == FHSM_RV_OK
@@ -4788,6 +4854,8 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_zeroize(ss, sizeof(ss));
     if (rv != FHSM_RV_OK) return rv;
     *phNewKey = handle;
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     return FHSM_RV_OK;
 }
 
@@ -5384,6 +5452,9 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                                           FHSM_OBJF_LOCAL, &hp);
     OPENSSL_free(pub_der);
     if (rv != FHSM_RV_OK) { OPENSSL_free(priv_der); return rv; }
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pPub, ulPub, hp);
+      if (ar != FHSM_RV_OK) { OPENSSL_free(priv_der);
+                              (void)fhsm_token_object_destroy(t, hp); return ar; } }
     rv = fhsm_token_object_add(t, CKO_PRIVATE_KEY, ckk_type, label_priv,
                                 priv_der, (size_t)priv_len,
                                 id_priv, id_priv_len,
@@ -5394,6 +5465,9 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         (void)fhsm_token_object_destroy(t, hp);
         return rv;
     }
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pPriv, ulPriv, hk);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hk);
+                              (void)fhsm_token_object_destroy(t, hp); return ar; } }
     *phPub = hp; *phPriv = hk;
     /* CKA_ENCAPSULATE (§5.14.7) on the public half, CKA_DECAPSULATE (§5.14.8)
      * on the private one.
@@ -5669,6 +5743,10 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
          * switch. 2592 is ML-DSA-87, the largest of the six raw public keys,
          * measured with tests/probe_pqc_pub_lengths. */
         uint8_t pqc_raw[2592];
+        /* Same reason, for CKA_ALLOWED_MECHANISMS: the value is assembled in
+         * the case and copied after the switch, so it has to outlive the
+         * case block. */
+        CK_ULONG allowed_raw[FHSM_POLICY_MECH_MAX];
         switch (pTemplate[i].type) {
             case CKA_CLASS:     src = &tmp_class; src_len = sizeof(CK_ULONG); break;
             case CKA_KEY_TYPE:
@@ -5756,6 +5834,35 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                        : FHSM_OBJF2_NO_DECAPSULATE;
                 bval = (f2 & bit) ? 0 : 1;
                 src = &bval; src_len = 1;
+                break;
+            }
+            case CKA_ALLOWED_MECHANISMS_ATTR: {
+                /* Absent and empty are different answers, and only flags2 can
+                 * tell them apart -- a stored count of zero is what both look
+                 * like. Absent takes the same shape the neighbours above use
+                 * for "valid attribute, not applicable to this object":
+                 * CK_UNAVAILABLE_INFORMATION without the type-invalid flag.
+                 * Following them rather than inventing a third convention for
+                 * the same situation. */
+                uint8_t f2 = 0;
+                (void)fhsm_token_object_get_flags2(t, (uint32_t)hObject, &f2);
+                if (!(f2 & FHSM_OBJF2_HAS_ALLOWED_MECH)) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                }
+                uint32_t mechs[FHSM_POLICY_MECH_MAX];
+                uint8_t  cnt = (uint8_t)FHSM_POLICY_MECH_MAX;
+                if (fhsm_token_object_get_allowed_mechs(t, (uint32_t)hObject,
+                                                         mechs, &cnt) != FHSM_RV_OK) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                }
+                /* Widening to CK_MECHANISM_TYPE, which is a CK_ULONG and so
+                 * eight bytes where the record holds four. The caller's array
+                 * is CK_MECHANISM_TYPE[], not uint32_t[]; handing back the
+                 * record's own layout would give a 64-bit caller half a list
+                 * and a garbage tail. */
+                for (uint8_t k = 0; k < cnt; ++k) allowed_raw[k] = mechs[k];
+                src = allowed_raw;
+                src_len = (size_t)cnt * sizeof(CK_ULONG);
                 break;
             }
             case CKA_SENSITIVE: {
@@ -6379,6 +6486,8 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                           copy_id, copy_id_len,
                                           copy_flags, &new_handle);
     if (r2 != FHSM_RV_OK) return r2;
+    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, new_handle);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
 
     /* Scope the copy. C_CopyObject was the one creation path that never called
      * fhsm_apply_token_scope, so every copy landed with owner_session = 0 -- a
@@ -7681,6 +7790,53 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
     return FHSM_RV_OK;
 }
 
+/* CKA_ALLOWED_MECHANISMS (PKCS#11 v3.2 §4.9). The key names the mechanisms it
+ * may be used with; anything else is CKR_MECHANISM_INVALID.
+ *
+ * ## Every site, listed before any of them was written
+ *
+ * This list is here because a rule wired to some of the paths that reach a
+ * state and not the rest is how CKA_ALWAYS_AUTHENTICATE, CKA_ENCAPSULATE and
+ * CKA_COPYABLE each arrived in this file. Counting the sites against the
+ * entry points, rather than trusting a search, is the only thing that has
+ * caught it early.
+ *
+ *   C_EncryptInit      hKey
+ *   C_DecryptInit      hKey
+ *   C_SignInit         hKey
+ *   C_VerifyInit       hKey
+ *   C_DeriveKey        hBaseKey
+ *   C_WrapKey          hWrappingKey     -- the key performing the wrap
+ *   C_UnwrapKey        hUnwrappingKey   -- likewise
+ *   C_EncapsulateKey   hPublicKey
+ *   C_DecapsulateKey   hPrivateKey
+ *   C_DigestKey        hKey             -- see the judgement call below
+ *
+ * Ten. There is no C_SignRecoverInit, C_VerifyRecoverInit or C_Message*Init in
+ * this module, so the list is closed; if one is added, it belongs here on the
+ * same commit.
+ *
+ * ## The judgement call, named rather than buried
+ *
+ * C_DigestKey is the one site where the key is the *input* rather than the
+ * thing performing the operation, and its mechanism came from C_DigestInit
+ * rather than from its own arguments. It is included: §4.9 restricts the
+ * mechanisms a key may be used with, and digesting a key's value is a use of
+ * it. Reading it the other way would be defensible, but leaving it out
+ * silently would not -- that is the half-guard shape again.
+ *
+ * ## Where it sits in each site
+ *
+ * After fhsm_require_key and fhsm_check_key_mech_type, before fhsm_check_usage.
+ * A missing key must answer as a missing key, and a key of the wrong type as
+ * the wrong type; both are more specific than "that mechanism is not allowed",
+ * and a caller told the least specific of the three learns the least. */
+static CK_RV fhsm_check_allowed_mech(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
+                                      CK_ULONG mech) {
+    if (!t) return FHSM_RV_OK;
+    return fhsm_token_object_mech_allowed(t, (uint32_t)hKey, (uint32_t)mech);
+}
+
 CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_OBJECT_HANDLE hKey) {
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -7689,6 +7845,7 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!fhsm_cipher_mech_valid(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
     { CK_RV tc = fhsm_check_key_mech_type(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (tc != FHSM_RV_OK) return tc; }
+    { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_ENCRYPT); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -8065,6 +8222,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!fhsm_cipher_mech_valid(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
     { CK_RV tc = fhsm_check_key_mech_type(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (tc != FHSM_RV_OK) return tc; }
+    { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_DECRYPT); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -8640,6 +8798,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     }
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
     { CK_RV tc = fhsm_check_key_mech_type(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (tc != FHSM_RV_OK) return tc; }
+    { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_SIGN); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -9271,6 +9430,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     }
     { CK_RV kc = fhsm_require_key(fhsm_session_token(hSession), hKey); if (kc != FHSM_RV_OK) return kc; }
     { CK_RV tc = fhsm_check_key_mech_type(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (tc != FHSM_RV_OK) return tc; }
+    { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_VERIFY); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -9617,6 +9777,10 @@ CK_RV C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey) {
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+
+    /* The digest mechanism came from C_DigestInit; the key is the input.
+     * Included deliberately -- see the list in fhsm_check_allowed_mech. */
+    { CK_RV ac = fhsm_check_allowed_mech(t, hKey, op->mechanism); if (ac != FHSM_RV_OK) return ac; }
 
     /* Sensitive-key gate : refuse before fetching the key value, so the
      * value never enters the digest pipeline for a sensitive object.

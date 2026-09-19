@@ -111,6 +111,32 @@ _Static_assert(FHSM_SECURE_HEAP_BYTES
                "Raise FHSM_SECURE_HEAP_BYTES (include/fhsm_common.h) or lower "
                "FHSM_MAX_OBJECTS.");
 
+/* FHSM_POLICY_MECH_MAX, _ATTR_MAX and _VALUE_MAX are in fhsm_token.h: a caller
+ * that builds a policy has to know what the store will accept before it calls,
+ * and a cap it can only discover by being refused is a cap it will hit in
+ * production. The on-disk entry size stays here -- that one is nobody's
+ * business above this file. The v4 record comment below says where the numbers
+ * came from. */
+#define FHSM_POLICY_ENTRY_SZ     56u   /* 8 header + 48 value, on disk */
+
+/* One entry of a nested policy template (CKA_WRAP/UNWRAP/DERIVE_TEMPLATE).
+ *
+ * `kind` exists because the three value shapes cannot be told apart from the
+ * bytes: a one-byte CK_BBOOL and a one-byte prefix of something else are the
+ * same octet, and guessing from the attribute type would make the store's
+ * reading of a value depend on a table that changes. It is recorded once, at
+ * the boundary where the caller's CK_ATTRIBUTE is still in hand. */
+#define FHSM_POLICY_KIND_NONE   0u
+#define FHSM_POLICY_KIND_BOOL   1u
+#define FHSM_POLICY_KIND_ULONG  2u
+#define FHSM_POLICY_KIND_BYTES  3u
+typedef struct {
+    uint32_t type;                            /* the CKA_ attribute */
+    uint8_t  kind;                            /* FHSM_POLICY_KIND_* */
+    uint8_t  len;                             /* significant bytes of value */
+    uint8_t  value[FHSM_POLICY_VALUE_MAX];
+} fhsm_policy_attr_t;
+
 typedef struct fhsm_object_s {
     uint32_t handle;        /* CK_OBJECT_HANDLE, opaque to PKCS#11 caller */
     uint32_t class;         /* CKO_SECRET_KEY, CKO_DATA, ... */
@@ -136,13 +162,12 @@ typedef struct fhsm_object_s {
      * (0x80) = "explicit usage stored" ; if unset (legacy objects) the
      * PKCS#11 layer falls back to class defaults. #125. */
     uint8_t  usage_flags;
-    /* CKA_START_DATE / CKA_END_DATE (CK_DATE, "YYYYMMDD") and
-     * CKA_APPLICATION. In-memory only for now: serialize_objects() does not
-     * write them, so they exist on session objects and the PKCS#11 layer
-     * refuses them on token objects rather than accept a value it would drop
-     * at the next load. The v3 record that persists them is the follow-up;
-     * see docs/TOKEN_STORE_FORMAT.md. Presence is tracked by the *_len fields
-     * -- "absent" and "set to empty" are different answers to a reader. */
+    /* CKA_START_DATE / CKA_END_DATE (CK_DATE, "YYYYMMDD") and CKA_APPLICATION,
+     * persisted by the v3 record at offsets 120..202. Presence is tracked by
+     * the *_len fields -- "absent" and "set to empty" are different answers to
+     * a reader, and a length byte is what tells them apart. That is the same
+     * problem the policy attributes below have, and they solve it the same
+     * way, in flags2 rather than in a count. */
     uint8_t  start_date[8];
     uint8_t  start_date_len;
     uint8_t  end_date[8];
@@ -154,6 +179,27 @@ typedef struct fhsm_object_s {
      * can later turn on -- freeing with the wrong allocator would corrupt one
      * of the two heaps. */
     uint8_t  value_secure;
+    /* Per-object policy, persisted by the v4 record.
+     *
+     * A count of zero cannot mean two things at once. "No CKA_ALLOWED_MECHANISMS
+     * was ever set" permits every mechanism; "CKA_ALLOWED_MECHANISMS was set to
+     * the empty list" permits none, and pkcs11-check sends exactly that case.
+     * The store already had to answer this for CKA_START_DATE and answered it
+     * with an explicit length byte; a count byte cannot, because both readings
+     * are zero.
+     *
+     * So presence lives in flags2, whose bits are negative -- set = restricted.
+     * Present means a restriction exists, absent means none, and a record
+     * written before these bits meant anything reads as unrestricted. Same
+     * polarity argument as FHSM_OBJF2_NO_ENCAPSULATE, for the same reason. */
+    uint8_t  allowed_count;
+    uint32_t allowed[FHSM_POLICY_MECH_MAX];
+    uint8_t  wrap_count;
+    fhsm_policy_attr_t wrap[FHSM_POLICY_ATTR_MAX];
+    uint8_t  unwrap_count;
+    fhsm_policy_attr_t unwrap[FHSM_POLICY_ATTR_MAX];
+    uint8_t  derive_count;
+    fhsm_policy_attr_t derive[FHSM_POLICY_ATTR_MAX];
 } fhsm_object_t;
 
 struct fhsm_token_s {
@@ -328,6 +374,75 @@ static uint32_t get_u32_le(const uint8_t *p) {
 #define FHSM_OBJ_REC_V3_FIXED  204u
 #define FHSM_OBJ_APP_LEN       64u
 
+/* v4 blob : the four per-object policy attributes, which were refused up to
+ * now because they are variable-length and the record had no field for them.
+ *
+ *   ... v3 fixed fields (204) ...
+ *   allowed_count(1) allowed[8]  (8 x u32 mechanism type)          33
+ *   wrap_count(1)    wrap[4]     (4 x 56-byte entry)              225
+ *   unwrap_count(1)  unwrap[4]                                    225
+ *   derive_count(1)  derive[4]                                    225
+ *   value[value_len]
+ *
+ * = 204 + 708 = 912 bytes of fixed record.
+ *
+ * ## The caps came from the corpus, not from taste
+ *
+ * Measured against pkcs11-check 0.2.0 before a line of this was written:
+ * CKA_ALLOWED_MECHANISMS is sent with exactly one mechanism at all seventeen
+ * literal sites (plus the empty list, which means "nothing is allowed" and is
+ * a count of zero here); the three templates are sent with one or two entries
+ * and never more. Eight and four are above what anything observed asks for.
+ *
+ * The first draft of this block capped the templates at eight (attribute,
+ * boolean) pairs, which would have grown every record by 228 bytes and still
+ * refused every nested-template test in the corpus -- because the corpus does
+ * not send booleans. It sends CKA_LABEL, a byte string of 33 to 41 octets, and
+ * CKA_KEY_TYPE, a CK_ULONG. The cap was never the risk; the value type was.
+ *
+ * Which is also what fhsm_parse_unwrap_template has been doing: it requires
+ * ulValueLen == 1 before it looks at the attribute type at all, so its
+ * "deliberately partial" support overlaps what the corpus sends by exactly
+ * nothing.
+ *
+ * ## The entry
+ *
+ *   +0  u32 type       the CKA_ attribute this entry constrains
+ *   +4  u8  kind       FHSM_POLICY_KIND_*
+ *   +5  u8  len        significant bytes of value
+ *   +6  u8  pad[2]
+ *   +8  u8  value[48]  bool in value[0]; ulong as u64 LE; bytes over len
+ *   = 56 bytes, 8-aligned.
+ *
+ * 48 is the longest label the corpus sends (41) with room, not a round number
+ * chosen first and justified after.
+ *
+ * ## A cap is part of the format
+ *
+ * A later build that wants nine mechanisms or five entries must emit v5. It
+ * must not write more of them into a v4 record: this reader refuses a count
+ * above the cap, because unlike the unknown flags2 bit -- which a reader can
+ * safely ignore -- a count it cannot store is a policy it would silently drop,
+ * and a dropped policy reads as permission.
+ *
+ * v1, v2 and v3 stay readable and load with all four counts at zero, which is
+ * what those records mean. Every write emits v4. */
+/* The caps and the entry size are declared above fhsm_object_s, which needs
+ * them to size its fields; only the on-disk constants live here. */
+#define FHSM_OBJ_BLOB_V4_MAGIC   0xF5B40004u
+#define FHSM_OBJ_REC_V4_FIXED \
+    (FHSM_OBJ_REC_V3_FIXED \
+     + 1u + FHSM_POLICY_MECH_MAX * 4u \
+     + 3u * (1u + FHSM_POLICY_ATTR_MAX * FHSM_POLICY_ENTRY_SZ))
+
+/* Pin the number the format documents. The writer places the value at
+ * FHSM_OBJ_REC_V4_FIXED and the reader reads it from there; if an edit to a cap
+ * moved one of them without the other, a key would be read as policy and a
+ * policy as key. A changed size is a new format version, not a bigger v4. */
+_Static_assert(FHSM_OBJ_REC_V4_FIXED == 912u, "v4 fixed record is 912 bytes");
+_Static_assert(FHSM_POLICY_ENTRY_SZ == 8u + FHSM_POLICY_VALUE_MAX,
+               "policy entry header is 8 bytes");
+
 /* Upper bound of the objects-blob plaintext/ciphertext (GCM keeps
  * length) : the v2 bound (12 + 64 x (4 + 120 + 16384)), which also
  * covers the smaller v1 bound (8 + 64 x 5620). Used as the loader's
@@ -335,7 +450,7 @@ static uint32_t get_u32_le(const uint8_t *p) {
  * tokens holding more than 11 objects (see docs/TOKEN_STORE_FORMAT.md,
  * "Regression note"). */
 #define FHSM_OBJ_BLOB_MAX \
-    (12u + (uint32_t)FHSM_MAX_OBJECTS * (4u + FHSM_OBJ_REC_V3_FIXED + FHSM_OBJ_VALUE_MAX))
+    (12u + (uint32_t)FHSM_MAX_OBJECTS * (4u + FHSM_OBJ_REC_V4_FIXED + FHSM_OBJ_VALUE_MAX))
 
 /* #125 large-object storage helpers. The per-object value is heap-owned;
  * these keep ownership sane across the struct-copy compaction pattern. */
@@ -386,9 +501,39 @@ static void objects_free_all(fhsm_token_t *t) {
     t->object_count = 0;
 }
 
+/* Write one policy template's count and its entries at `p`, and return the
+ * number of bytes written -- always 1 + FHSM_POLICY_ATTR_MAX * entry, so the
+ * record stays fixed whether the template is present or not.
+ *
+ * Unused entry slots are written as zero rather than left as whatever the
+ * caller's buffer held: the blob is encrypted as a whole, so a stale byte here
+ * would be a byte of some other object's value carried into this record. */
+static size_t put_policy_tmpl(uint8_t *p, uint8_t count,
+                               const fhsm_policy_attr_t *a) {
+    p[0] = count;
+    size_t off = 1;
+    for (uint32_t k = 0; k < FHSM_POLICY_ATTR_MAX; ++k) {
+        uint8_t *e = p + off;
+        memset(e, 0, FHSM_POLICY_ENTRY_SZ);
+        if (k < count) {
+            put_u32_le(e + 0, a[k].type);
+            e[4] = a[k].kind;
+            e[5] = a[k].len;
+            /* a[k].len is bounded at the boundary that filled the struct, and
+             * again on read; clamp here too rather than trust three layers to
+             * agree forever. */
+            uint8_t n = a[k].len > FHSM_POLICY_VALUE_MAX
+                            ? (uint8_t)FHSM_POLICY_VALUE_MAX : a[k].len;
+            memcpy(e + 8, a[k].value, n);
+        }
+        off += FHSM_POLICY_ENTRY_SZ;
+    }
+    return off;
+}
+
 static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
-    /* v2 writer (#110). Returns the number of bytes written. */
-    put_u32_le(out + 0, FHSM_OBJ_BLOB_V3_MAGIC);
+    /* v4 writer. Returns the number of bytes written. */
+    put_u32_le(out + 0, FHSM_OBJ_BLOB_V4_MAGIC);
     /* Persist only token objects (owner_session == 0) ; session objects
      * live in memory for the lifetime of their session and are never
      * written to disk. Count them first for the header. */
@@ -401,7 +546,7 @@ static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
     for (uint32_t i = 0; i < t->object_count; ++i) {
         const fhsm_object_t *o = &t->objects[i];
         if (o->owner_session != 0) continue;   /* session object : skip */
-        uint32_t rec_len = FHSM_OBJ_REC_V3_FIXED + o->value_len;
+        uint32_t rec_len = FHSM_OBJ_REC_V4_FIXED + o->value_len;
         put_u32_le(out + off, rec_len); off += 4;
         put_u32_le(out + off + 0,  o->handle);
         put_u32_le(out + off + 4,  o->class);
@@ -424,7 +569,21 @@ static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
          * FHSM_OBJF2_* in fhsm_token.h for why zero still reads correctly on
          * records written before it meant anything. */
         out[off + 203] = o->flags2;
-        memcpy(out + off + FHSM_OBJ_REC_V3_FIXED, o->value, o->value_len);
+        /* v4 policy block. */
+        {
+            uint8_t *p = out + off + FHSM_OBJ_REC_V3_FIXED;
+            p[0] = o->allowed_count;
+            for (uint32_t k = 0; k < FHSM_POLICY_MECH_MAX; ++k)
+                put_u32_le(p + 1 + k * 4,
+                           k < o->allowed_count ? o->allowed[k] : 0u);
+            size_t q = 1 + FHSM_POLICY_MECH_MAX * 4;
+            q += put_policy_tmpl(p + q, o->wrap_count,   o->wrap);
+            q += put_policy_tmpl(p + q, o->unwrap_count, o->unwrap);
+            q += put_policy_tmpl(p + q, o->derive_count, o->derive);
+            (void)q;   /* size is fixed by construction; see the _Static_assert
+                        * beside FHSM_OBJ_REC_V4_FIXED */
+        }
+        memcpy(out + off + FHSM_OBJ_REC_V4_FIXED, o->value, o->value_len);
         off += rec_len;
     }
     return off;
@@ -577,9 +736,116 @@ static fhsm_rv_t parse_objects_v3(fhsm_token_t *t, const uint8_t *buf, size_t le
     return FHSM_RV_OK;
 }
 
+/* Read one policy template. `p` points at the count byte, and the caller has
+ * already bounds-checked the whole record, so the only thing left to refuse is
+ * a count or a length the fixed field cannot hold.
+ *
+ * Refusing rather than clamping: a clamped count silently drops a restriction,
+ * and a dropped restriction reads as permission. That is the one direction in
+ * which being lenient is unsafe. */
+static fhsm_rv_t get_policy_tmpl(const uint8_t *p, uint8_t *out_count,
+                                  fhsm_policy_attr_t *a) {
+    uint8_t count = p[0];
+    if (count > FHSM_POLICY_ATTR_MAX) return FHSM_RV_FUNCTION_FAILED;
+    size_t off = 1;
+    for (uint32_t k = 0; k < FHSM_POLICY_ATTR_MAX; ++k) {
+        if (k < count) {
+            const uint8_t *e = p + off;
+            a[k].type = get_u32_le(e + 0);
+            a[k].kind = e[4];
+            a[k].len  = e[5];
+            if (a[k].len > FHSM_POLICY_VALUE_MAX) return FHSM_RV_FUNCTION_FAILED;
+            if (a[k].kind == FHSM_POLICY_KIND_NONE
+                || a[k].kind > FHSM_POLICY_KIND_BYTES)
+                return FHSM_RV_FUNCTION_FAILED;
+            memcpy(a[k].value, e + 8, FHSM_POLICY_VALUE_MAX);
+        } else {
+            memset(&a[k], 0, sizeof(a[k]));
+        }
+        off += FHSM_POLICY_ENTRY_SZ;
+    }
+    *out_count = count;
+    return FHSM_RV_OK;
+}
+
+/* v4 variable-record blobs. Identical to v3 up to offset 204, then the policy
+ * block. Same discipline: the record is bounds-checked before any copy, and a
+ * malformed record rejects the whole blob rather than yielding a half-read
+ * object whose missing half is a permission. */
+static fhsm_rv_t parse_objects_v4(fhsm_token_t *t, const uint8_t *buf, size_t len) {
+    uint32_t count = get_u32_le(buf + 4);
+    if (count > FHSM_MAX_OBJECTS) return FHSM_RV_FUNCTION_FAILED;
+    uint32_t next_h = get_u32_le(buf + 8);
+    size_t off = 12;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (off + 4 > len) return FHSM_RV_FUNCTION_FAILED;
+        uint32_t rec_len = get_u32_le(buf + off); off += 4;
+        if (rec_len < FHSM_OBJ_REC_V4_FIXED
+            || rec_len > FHSM_OBJ_REC_V4_FIXED + FHSM_OBJ_VALUE_MAX
+            || off + rec_len > len) return FHSM_RV_FUNCTION_FAILED;
+        fhsm_object_t *o = &t->objects[i];
+        memset(o, 0, sizeof(*o));
+        o->handle    = get_u32_le(buf + off + 0);
+        o->class     = get_u32_le(buf + off + 4);
+        o->key_type  = get_u32_le(buf + off + 8);
+        o->value_len = get_u32_le(buf + off + 12);
+        if (o->value_len != rec_len - FHSM_OBJ_REC_V4_FIXED)
+            return FHSM_RV_FUNCTION_FAILED;
+        memcpy(o->label, buf + off + 16, FHSM_OBJ_LABEL_LEN);
+        memcpy(o->id,    buf + off + 80, 32);
+        o->id_len = get_u32_le(buf + off + 112);
+        if (o->id_len > 32) return FHSM_RV_FUNCTION_FAILED;
+        o->flags       = buf[off + 116];
+        o->usage_flags = buf[off + 117];
+        memcpy(o->start_date, buf + off + 120, 8);
+        o->start_date_len = buf[off + 128];
+        if (o->start_date_len > 8) return FHSM_RV_FUNCTION_FAILED;
+        memcpy(o->end_date, buf + off + 129, 8);
+        o->end_date_len = buf[off + 137];
+        if (o->end_date_len > 8) return FHSM_RV_FUNCTION_FAILED;
+        memcpy(o->application, buf + off + 138, FHSM_OBJ_APP_LEN);
+        o->application_len = buf[off + 202];
+        if (o->application_len > FHSM_OBJ_APP_LEN) return FHSM_RV_FUNCTION_FAILED;
+        o->flags2 = buf[off + 203];
+        /* Policy block. */
+        {
+            const uint8_t *p = buf + off + FHSM_OBJ_REC_V3_FIXED;
+            o->allowed_count = p[0];
+            if (o->allowed_count > FHSM_POLICY_MECH_MAX)
+                return FHSM_RV_FUNCTION_FAILED;
+            for (uint32_t k = 0; k < FHSM_POLICY_MECH_MAX; ++k)
+                o->allowed[k] = get_u32_le(p + 1 + k * 4);
+            size_t q = 1 + FHSM_POLICY_MECH_MAX * 4;
+            fhsm_rv_t rv;
+            rv = get_policy_tmpl(p + q, &o->wrap_count,   o->wrap);
+            if (rv != FHSM_RV_OK) return rv;
+            q += 1 + FHSM_POLICY_ATTR_MAX * FHSM_POLICY_ENTRY_SZ;
+            rv = get_policy_tmpl(p + q, &o->unwrap_count, o->unwrap);
+            if (rv != FHSM_RV_OK) return rv;
+            q += 1 + FHSM_POLICY_ATTR_MAX * FHSM_POLICY_ENTRY_SZ;
+            rv = get_policy_tmpl(p + q, &o->derive_count, o->derive);
+            if (rv != FHSM_RV_OK) return rv;
+        }
+        if (o->value_len) {
+            fhsm_rv_t ar = obj_alloc_value(o, o->value_len,
+                                            (o->flags & FHSM_OBJF_SENSITIVE) != 0);
+            if (ar != FHSM_RV_OK) return ar;
+            memcpy(o->value, buf + off + FHSM_OBJ_REC_V4_FIXED, o->value_len);
+        }
+        off += rec_len;
+    }
+    t->object_count = count;
+    t->next_handle  = next_h;
+    return FHSM_RV_OK;
+}
+
 static fhsm_rv_t parse_objects(fhsm_token_t *t, const uint8_t *buf, size_t len) {
     if (len < 8) return FHSM_RV_FUNCTION_FAILED;
     uint32_t magic = get_u32_le(buf);
+    if (magic == FHSM_OBJ_BLOB_V4_MAGIC) {
+        if (len < 12) return FHSM_RV_FUNCTION_FAILED;
+        return parse_objects_v4(t, buf, len);
+    }
     if (magic == FHSM_OBJ_BLOB_V3_MAGIC) {
         if (len < 12) return FHSM_RV_FUNCTION_FAILED;
         return parse_objects_v3(t, buf, len);
@@ -703,9 +969,9 @@ static fhsm_rv_t write_atomic(const fhsm_token_t *t) {
     uint8_t  blob_nonce[12];
     uint8_t  blob_tag[16];
     if (t->dek && t->objects_loaded && t->object_count > 0) {
-        size_t pt_sz = 12;   /* v2 : magic + count + next_handle */
+        size_t pt_sz = 12;   /* magic + count + next_handle */
         for (uint32_t i = 0; i < t->object_count; ++i)
-            pt_sz += 4 + FHSM_OBJ_REC_V3_FIXED + t->objects[i].value_len;
+            pt_sz += 4 + FHSM_OBJ_REC_V4_FIXED + t->objects[i].value_len;
         uint8_t *pt = malloc(pt_sz);
         if (!pt) return FHSM_RV_HOST_MEMORY;
         serialize_objects(t, pt);
@@ -1692,6 +1958,154 @@ fhsm_rv_t fhsm_token_object_is_token(fhsm_token_t *t, uint32_t handle,
  * glance. ALC_DVS prefers small repetitive code over abstraction that
  * obscures the per-attribute write boundary.
  * ----------------------------------------------------------------------- */
+/* CKA_ALLOWED_MECHANISMS.
+ *
+ * Setting it always marks it present, including with count 0: an empty list is
+ * a real answer -- it allows nothing -- and it is the case pkcs11-check sends
+ * on purpose. There is deliberately no "unset" call. The attribute is fixed at
+ * creation in this module, and a later unset would be a restriction that can
+ * be lifted by the same caller it restricts.
+ *
+ * A count above the cap is refused rather than truncated. Truncating would
+ * store a shorter list than the caller asked for, and a shorter allow-list
+ * silently forbids mechanisms the caller meant to permit -- which looks like
+ * the module failing at the mechanism rather than at the attribute. */
+fhsm_rv_t fhsm_token_object_set_allowed_mechs(fhsm_token_t *t, uint32_t handle,
+                                               const uint32_t *mechs,
+                                               uint8_t count) {
+    if (!t || (count > 0 && !mechs)) return FHSM_RV_ARGUMENTS_BAD;
+    if (count > FHSM_POLICY_MECH_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            fhsm_object_t *o = &t->objects[i];
+            memset(o->allowed, 0, sizeof(o->allowed));
+            for (uint8_t k = 0; k < count; ++k) o->allowed[k] = mechs[k];
+            o->allowed_count = count;
+            o->flags2 |= FHSM_OBJF2_HAS_ALLOWED_MECH;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+/* Read it back. *io_count is the caller's capacity on entry, the stored count
+ * on return; FHSM_RV_BUFFER_TOO_SMALL if the capacity is short, with the
+ * needed count written, which is the shape C_GetAttributeValue wants.
+ *
+ * Presence is not in the count -- ask fhsm_token_object_get_flags2 for
+ * FHSM_OBJF2_HAS_ALLOWED_MECH. A caller that reads count 0 and concludes "no
+ * restriction" has inverted the one case this attribute exists to express. */
+fhsm_rv_t fhsm_token_object_get_allowed_mechs(fhsm_token_t *t, uint32_t handle,
+                                               uint32_t *out, uint8_t *io_count) {
+    if (!t || !io_count) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            const fhsm_object_t *o = &t->objects[i];
+            uint8_t cap = *io_count;
+            *io_count = o->allowed_count;
+            if (!out) {                      /* size query */
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_OK;
+            }
+            if (cap < o->allowed_count) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_BUFFER_TOO_SMALL;
+            }
+            for (uint8_t k = 0; k < o->allowed_count; ++k) out[k] = o->allowed[k];
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_OK;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+/* Is `mech` permitted for this object?
+ *
+ * FHSM_RV_OK when it is, FHSM_RV_MECHANISM_INVALID when it is not, and
+ * FHSM_RV_OK when the object carries no CKA_ALLOWED_MECHANISMS at all -- an
+ * absent list is not an empty one.
+ *
+ * An unknown handle answers FHSM_RV_OK rather than refusing: the caller is
+ * about to look the handle up itself and will produce the right error for it.
+ * Answering CKR_MECHANISM_INVALID here would report a bad handle as a bad
+ * mechanism, which is the sort of misattribution that costs an afternoon. */
+fhsm_rv_t fhsm_token_object_mech_allowed(fhsm_token_t *t, uint32_t handle,
+                                          uint32_t mech) {
+    if (!t) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_OK;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            const fhsm_object_t *o = &t->objects[i];
+            if (!(o->flags2 & FHSM_OBJF2_HAS_ALLOWED_MECH)) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_OK;           /* absent: everything permitted */
+            }
+            for (uint8_t k = 0; k < o->allowed_count; ++k) {
+                if (o->allowed[k] == mech) {
+                    pthread_mutex_unlock(&t->mu);
+                    return FHSM_RV_OK;
+                }
+            }
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_MECHANISM_INVALID;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_OK;
+}
+
+/* The four policy counts, read together because they are read for one reason:
+ * to ask whether this object carries any policy at all. A caller that wants
+ * one of them wants to know about the other three too -- a key restricted by a
+ * wrap template and not by an allowed-mechanisms list is still restricted.
+ *
+ * Counts, not presence. A count of zero with the matching FHSM_OBJF2_HAS_* bit
+ * set is a policy that allows nothing; without the bit it is no policy at all.
+ * The bit lives in flags2 and is read through fhsm_token_object_get_flags2. */
+fhsm_rv_t fhsm_token_object_get_policy_counts(fhsm_token_t *t, uint32_t handle,
+                                               uint8_t *out_allowed,
+                                               uint8_t *out_wrap,
+                                               uint8_t *out_unwrap,
+                                               uint8_t *out_derive) {
+    if (!t) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            if (out_allowed) *out_allowed = t->objects[i].allowed_count;
+            if (out_wrap)    *out_wrap    = t->objects[i].wrap_count;
+            if (out_unwrap)  *out_unwrap  = t->objects[i].unwrap_count;
+            if (out_derive)  *out_derive  = t->objects[i].derive_count;
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_OK;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
 fhsm_rv_t fhsm_token_object_set_label(fhsm_token_t *t, uint32_t handle,
                                        const char *label) {
     if (!t || !label) return FHSM_RV_ARGUMENTS_BAD;
