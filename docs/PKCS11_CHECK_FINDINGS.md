@@ -1618,6 +1618,103 @@ whole interface between two boots".
 
 Recorded rather than repaired on the way past. It deserves its own reading.
 
+## The forty CRITICALs were eight behaviours (2026-09-19)
+
+The first full run under pkcs11-check 0.2.0 returned `fail 51 (CRITICAL 40 ·
+HIGH 9)`, against 4 the day before under 0.1.9. Neither number means what it
+looks like on its own: the corpus changed size (92,609 vectors against
+112,038) and 0.2.0 both removed 63 invented findings and restored hard
+failures that had been mere deviations. Totals across the two versions do not
+compare. Composition does.
+
+Forty CRITICALs were **eight behaviours**, one of which accounted for thirty.
+Four were repaired the same day; what follows is what they had in common,
+because that is more useful than four accounts of four bugs.
+
+### The shared sentence
+
+Three of the four are the same finding text: *"claimed the protection then
+violated it"*, which 0.2.0 produces from `classify_policy_enforcement` when a
+module reports a protective attribute back and then breaches it. Its
+docstring is the whole lesson:
+
+> `not claimed` → xfail (honest non-support of an optional protection);
+> `claimed` and `violated` → fail (the module claimed the protection then
+> violated it — a self-contradiction, broken for any provider).
+
+And 0.2.0 widened what counts as claiming: **accepting an attribute in a
+creation template is itself the claim**, whether or not the module can report
+it back. That is the change that moved `CKA_ENCAPSULATE`, `CKA_DECAPSULATE`,
+`CKA_COPYABLE` and `CKA_ALLOWED_MECHANISMS` from honest non-support to
+contradiction — and it is the better reading. A caller who sets an attribute,
+receives `CKR_OK`, and watches the operation succeed has no way to learn it
+was dropped.
+
+The module already held that rule and had wired it to one path. `C_GenerateKey`
+has rejected `CKA_ENCAPSULATE` on a symmetric template since #125, with a
+comment calling that better than ignoring it. `C_GenerateKeyPair` ignored it.
+
+### The four, and what each needed
+
+| Finding | Count | Answer |
+|---|---|---|
+| `CKM_AES_GMAC` tag does not match the known answer | 30 | Parse `CK_GCM_PARAMS`; honour `ulTagBits` |
+| `CKA_ENCAPSULATE` / `CKA_DECAPSULATE` unenforced | 2 | Store in a new flags byte; enforce; report |
+| `CKA_COPYABLE` accepted, reported `TRUE` regardless | 2 | Same byte, one more bit |
+| `CKA_ALLOWED_MECHANISMS` accepted and dropped | 1 | Refuse: the module cannot store a list |
+
+Three of the four had nowhere to put a bit. Both per-object bytes were full,
+and the flags byte said so itself — "this is the last bit [...] the v3 record
+exists now, so that is a matter of spending a byte in it rather than a format
+change". The v3 record's `pad` at offset 203 was that byte: written zero,
+read by nobody, one occurrence in the tree. The bits placed there are
+**negative** — set means restricted — so every record written before today
+still reads as permitted, and backward compatibility is a consequence of the
+polarity rather than a migration.
+
+The fourth could not take that route. `CKA_ALLOWED_MECHANISMS` is a list, and
+a bit is not a list; refusing it is the honest answer until the store can hold
+one.
+
+### The thirty
+
+`CKM_AES_GMAC` was not that family at all. The module parsed `CK_GCM_PARAMS`
+for `CKM_AES_GCM` only, so the canonical parameter block for GMAC fell through
+to a raw-IV branch and had its 48 struct bytes — the first eight a pointer —
+read as an IV. Every tag was wrong.
+
+It became measurable only because **this module published a v3.2 interface the
+day before**: pkcs11-check picks the GMAC parameter form from the interface
+version it negotiates, and had been sending a bare IV, the one form the module
+handled. Opening one door exposed the next defect, for the fourth time in
+three days.
+
+The raw-IV branch also probed a 16-byte parameter for a
+`CK_AES_GMAC_PARAMS = { ulIvLen; pIv }` its comment called "PKCS#11 v3.2
+canonical form". No such structure exists — not in the OASIS `pkcs11t.h`,
+which carries exactly one GMAC line, and not in pkcs11-check, which implements
+every parameter structure from v2.40 to v3.2. Both checked. It is the third
+invented structure found this week, after the KMAC code points and the
+permuted `C_EncapsulateKey` signature.
+
+### Method, since it went wrong twice and was caught twice
+
+Both times a conclusion preceded the evidence, and both times the evidence was
+one command away.
+
+The GMAC diagnosis was nearly made against the **wrong source**: the report
+named the installed 0.2.0, while the working checkout was still at 0.1.9 and
+its `test_acvp_aes_gmac` called a different function with a different
+classifier. Caught by noticing that the code being read could not have
+produced the report being read.
+
+A regression was then announced in the module when two cases of the new GMAC
+test failed. They failed because the test's own size query — `C_Sign` with a
+NULL buffer — leaves the operation active by design, and the test never came
+back with a buffer. `CKR_OPERATION_ACTIVE`. The module was right; the test was
+wrong. The case added to repair it now pins that an operation survives a size
+query, which the module had correct and nothing held.
+
 ## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
 
 The module does not detect an IV reused with the same GCM key across
