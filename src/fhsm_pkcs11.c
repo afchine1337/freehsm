@@ -365,6 +365,10 @@ static void fhsm_pack_field(unsigned char *dst, const char *src, size_t n) {
  * ----------------------------------------------------------------------- */
 static pid_t g_init_pid = 0;
 static void fhsm_reset_after_fork(void);   /* defined below, next to the state it clears */
+/* The same state, released by C_Finalize in the process that owns it. Defined
+ * beside fhsm_reset_after_fork, for the same reason: it clears globals
+ * declared between here and there. */
+static void fhsm_finalize_release(void);
 
 /* Defined with the slot registry further down; needed here to place the
  * audit log beside the tokens. */
@@ -514,6 +518,10 @@ CK_RV C_Finalize(CK_VOID_PTR pReserved) {
     (void)pReserved;
     (void)fhsm_audit_event(FHSM_EV_MODULE_FINALIZE, -1, -1,
                             FHSM_ROLE_NONE, FHSM_RV_OK, NULL);
+    /* Release before the crypto layer goes down: the operation contexts being
+     * freed are OpenSSL objects, and freeing them after fhsm_crypto_finalize
+     * would be using a layer that has just been told it is finished. */
+    fhsm_finalize_release();
     fhsm_crypto_finalize();
     fhsm_audit_close();
     fhsm_state_set(FHSM_STATE_POWER_OFF);
@@ -1898,6 +1906,48 @@ static void fhsm_reset_after_fork(void) {
      * about -- sessions and objects -- and not the rest of what crossed the
      * fork. */
     fhsm_state_reset_after_fork();
+}
+
+/* The same teardown, for C_Finalize, in the process that built the state.
+ *
+ * The comment above g_init_pid says what was wrong and fixed only half of it:
+ * "C_Finalize does not free any of it -- it only closes crypto and drops the
+ * state machine to POWER_OFF -- so a child that calls C_Finalize and then
+ * C_Initialize [...] came up holding the parent's session objects AND the
+ * parent's logged-in state, without ever presenting a PIN."
+ *
+ * #125 answered that by detecting the fork. The other half stayed: in ONE
+ * process, C_Finalize followed by C_Initialize still came up logged in,
+ * because nothing had been released and the PID had not changed. §5.6.2 makes
+ * C_Finalize the end of the application's use of the library; an application
+ * that finalizes and starts again is not entitled to the previous one's
+ * authentication, and a test cannot stage a store reload while the token
+ * stays open. Found while writing tests/test_encap_flags.c, which could not
+ * make the module re-read its own file.
+ *
+ * One difference from the fork path, and it is the reason this is a separate
+ * function rather than a second caller. After a fork the operation tables are
+ * zeroized and NOT freed, because the EVP contexts they name belong to a
+ * process still using them. Here the process IS the owner, so they are freed:
+ * zeroizing would leak every context an unfinished operation held.
+ * fhsm_session_ops_reset does exactly that, per session. */
+static void fhsm_finalize_release(void) {
+    for (CK_SESSION_HANDLE h = 1; h < FHSM_MAX_SESSIONS; ++h)
+        fhsm_session_ops_reset(h);
+    fhsm_oaep_reset_all();
+    fhsm_zeroize(g_finds, sizeof(g_finds));
+    fhsm_session_reset_all();
+    for (size_t i = 0; i < FHSM_MAX_SLOTS; ++i) {
+        if (g_slots[i].token) {
+            fhsm_token_close(g_slots[i].token);
+            g_slots[i].token = NULL;
+        }
+    }
+    g_slots_initialized = 0;
+    /* So the next C_Initialize in this process is a first one and not an
+     * adoption: g_init_pid is what tells a fork from a restart, and after a
+     * release there is nothing left to adopt either way. */
+    g_init_pid = 0;
 }
 /* Declared far above, next to C_Login. Bounds-checked: the caller supplies the
  * session handle and these are fixed-size arrays. */
