@@ -708,8 +708,8 @@ tests/test_v3_fixture: tests/test_v3_fixture.c $(LIB_OBJ)
 tests/test_allowed_mechanisms: tests/test_allowed_mechanisms.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
-# The two nested templates that constrain a creation template. CKA_WRAP_TEMPLATE
-# is not here: it compares against an existing object's attributes instead.
+# The three nested policy templates. Two compare against a creation template,
+# the third against an existing object's attributes.
 tests/test_nested_templates: tests/test_nested_templates.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 

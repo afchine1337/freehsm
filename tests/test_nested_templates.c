@@ -2,20 +2,27 @@
  * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
  * SPDX-License-Identifier: Apache-2.0
  * ===========================================================================
- * test_nested_templates.c --- CKA_UNWRAP_TEMPLATE and CKA_DERIVE_TEMPLATE.
+ * test_nested_templates.c --- the three nested policy templates.
  *
- * Both say the same thing about the key that carries them: an object created
- * through this key must match this template. C_UnwrapKey and C_DeriveKey are
- * the two places that create such an object from a caller-supplied template,
- * and both are checked here.
+ * All three say the same thing about the key that carries them: an object
+ * reached through this key must match this template. They do not say it to
+ * the same kind of object, and that is what the file is arranged around.
  *
- * CKA_WRAP_TEMPLATE is deliberately absent. It is the third of the trio and
- * shares its spec paragraph, but it does not compare against a creation
- * template: C_WrapKey names a key that already exists, so enforcing it means
- * reading that object's attributes and comparing those. Giving it the same
- * shape as these two because they are neighbours in the spec is how a guard
- * ends up wired to the paths it happens to fit. It is still refused at
- * creation, and refusing is the honest answer until it is enforced.
+ * CKA_UNWRAP_TEMPLATE and CKA_DERIVE_TEMPLATE constrain an object that does
+ * not exist yet: C_UnwrapKey and C_DeriveKey are handed a creation template,
+ * and the comparison is template against template.
+ *
+ * CKA_WRAP_TEMPLATE constrains one that does. C_WrapKey names an existing
+ * key, so the comparison is template against the object's own attributes --
+ * a different mechanism, and the reason this one arrived a commit later
+ * rather than being given the shape of its two neighbours because they share
+ * a paragraph of the spec.
+ *
+ * That difference has a consequence worth stating: the module can only
+ * compare attributes it can read back off an object, so a CKA_WRAP_TEMPLATE
+ * naming anything else is refused when the key is created. A policy that
+ * cannot be checked would have to treat the unreadable attribute as matching,
+ * and a policy that fails open is worse than an attribute that is refused.
  *
  * ## What the old support actually covered
  *
@@ -53,6 +60,7 @@ typedef struct { CK_BYTE *pData; CK_ULONG ulLen; } CK_KEY_DERIVATION_STRING_DATA
 #define CKA_DERIVE                   0x10CUL
 #define CKA_VALUE_LEN                0x161UL
 #define CKA_EXTRACTABLE              0x162UL
+#define CKA_WRAP_TEMPLATE            0x40000211UL
 #define CKA_UNWRAP_TEMPLATE          0x40000212UL
 #define CKA_DERIVE_TEMPLATE          0x40000213UL
 #define CKO_SECRET_KEY               4UL
@@ -140,7 +148,7 @@ int main(void)
     SYM(C_WrapKey); SYM(C_UnwrapKey); SYM(C_DeriveKey);
     if (!C_UnwrapKey || !C_DeriveKey) { fprintf(stderr,"missing symbols\n"); return 2; }
 
-    printf("CKA_UNWRAP_TEMPLATE and CKA_DERIVE_TEMPLATE\n\n");
+    printf("The three nested policy templates\n\n");
 
     CK_BYTE label[32]; memset(label,' ',32); memcpy(label,"nesttmpl",8);
     if (C_Initialize(NULL)) { fprintf(stderr,"C_Initialize\n"); return 2; }
@@ -159,13 +167,35 @@ int main(void)
         ok(make_policy_key(s, CKA_UNWRAP_TEMPLATE, nested, sizeof nested, &kw) == CKR_OK,
            "a key carrying CKA_UNWRAP_TEMPLATE is accepted at creation");
 
-        /* The readback. pkcs11-check treats acceptance as the claim and the
-         * readback as corroboration; a module that accepts and cannot report
-         * is odd, so this checks the shape rather than trusting acceptance. */
+        /* The readback, both levels, and the thing that matters about it:
+         * the caller owns the array AND the buffer each entry points at, and
+         * the module fills them without touching either pointer.
+         *
+         * The first implementation returned pointers into its own stack,
+         * which died when the call returned. It passed a shape check and was
+         * caught by pkcs11-check's security/test_unwrap_reimport, which
+         * compares each returned pValue against the address it supplied. This
+         * case is that comparison, so the next version cannot regress past a
+         * green suite. */
         CK_ATTRIBUTE q = { CKA_UNWRAP_TEMPLATE, NULL, 0 };
         ok(C_GetAttributeValue(s, kw, &q, 1) == CKR_OK
            && q.ulValueLen == sizeof(CK_ATTRIBUTE),
-           "  and reads back as one CK_ATTRIBUTE");
+           "  and a size query reports one CK_ATTRIBUTE");
+        {
+            CK_BYTE      lbuf[64];
+            CK_ATTRIBUTE inner[1] = { { CKA_LABEL, lbuf, sizeof lbuf } };
+            CK_ATTRIBUTE outer[1] = { { CKA_UNWRAP_TEMPLATE, inner, sizeof inner } };
+            CK_RV rv = C_GetAttributeValue(s, kw, outer, 1);
+            ok(rv == CKR_OK
+               && outer[0].pValue == inner
+               && outer[0].ulValueLen == sizeof(CK_ATTRIBUTE),
+               "  the outer pointer is still the caller's array");
+            ok(inner[0].pValue == lbuf
+               && inner[0].type == CKA_LABEL
+               && inner[0].ulValueLen == strlen(ALLOWED)
+               && memcmp(lbuf, ALLOWED, strlen(ALLOWED)) == 0,
+               "  and the value landed in the caller's own buffer");
+        }
 
         /* Something to unwrap. */
         CK_OBJECT_HANDLE src = 0;
@@ -232,6 +262,60 @@ int main(void)
             ok(C_DeriveKey(s, &dm, kd, nt, nc, &out) == CKR_TEMPLATE_INCONSISTENT,
                "  a violating label is CKR_TEMPLATE_INCONSISTENT");
         }
+    }
+
+    /* ---------------- CKA_WRAP_TEMPLATE ---------------- */
+    {
+        CK_OBJECT_HANDLE kw = 0;
+        ok(make_policy_key(s, CKA_WRAP_TEMPLATE, nested, sizeof nested, &kw) == CKR_OK,
+           "a key carrying CKA_WRAP_TEMPLATE is accepted at creation");
+
+        /* Two targets that differ only by the attribute the policy names. */
+        CK_OBJECT_HANDLE good = 0, bad = 0;
+        CK_ATTRIBUTE gt[] = {
+            { CKA_CLASS, &g_klass, sizeof g_klass },
+            { CKA_KEY_TYPE, &g_aes, sizeof g_aes },
+            { CKA_VALUE, (void*)g_val, sizeof g_val },
+            { CKA_TOKEN, &g_no, 1 },
+            { CKA_SENSITIVE, &g_no, 1 },
+            { CKA_EXTRACTABLE, &g_yes, 1 },
+            { CKA_LABEL, (void*)ALLOWED, (CK_ULONG)strlen(ALLOWED) },
+        };
+        CK_ATTRIBUTE bt[] = {
+            { CKA_CLASS, &g_klass, sizeof g_klass },
+            { CKA_KEY_TYPE, &g_aes, sizeof g_aes },
+            { CKA_VALUE, (void*)g_val, sizeof g_val },
+            { CKA_TOKEN, &g_no, 1 },
+            { CKA_SENSITIVE, &g_no, 1 },
+            { CKA_EXTRACTABLE, &g_yes, 1 },
+            { CKA_LABEL, (void*)DENIED, (CK_ULONG)strlen(DENIED) },
+        };
+        if (C_CreateObject(s, gt, sizeof gt / sizeof gt[0], &good) != CKR_OK
+            || C_CreateObject(s, bt, sizeof bt / sizeof bt[0], &bad) != CKR_OK) {
+            fprintf(stderr, "wrap targets\n"); return 2;
+        }
+        CK_MECHANISM kwmech = { CKM_AES_KEY_WRAP, NULL, 0 };
+        CK_BYTE out[64]; CK_ULONG ol = sizeof out;
+        CK_RV rv = C_WrapKey(s, &kwmech, kw, good, out, &ol);
+        if (rv != CKR_OK) {
+            printf("  (CKM_AES_KEY_WRAP unavailable: 0x%lx -- wrap half skipped)\n", rv);
+        } else {
+            ok(1, "  a key matching the template wraps");
+            ol = sizeof out;
+            ok(C_WrapKey(s, &kwmech, kw, bad, out, &ol) == CKR_TEMPLATE_INCONSISTENT,
+               "  and one that does not is CKR_TEMPLATE_INCONSISTENT");
+        }
+
+        /* An attribute the module cannot read back off an object is refused
+         * when the template is created, not silently treated as matching when
+         * it is checked. CKA_MODULUS is a real attribute of a real class and
+         * is not in the readable set. */
+        CK_BYTE dummy[4] = { 0 };
+        CK_ATTRIBUTE unreadable[1] = { { 0x120UL /* CKA_MODULUS */, dummy, sizeof dummy } };
+        CK_OBJECT_HANDLE nope = 0;
+        ok(make_policy_key(s, CKA_WRAP_TEMPLATE, unreadable, sizeof unreadable, &nope)
+           != CKR_OK,
+           "  and a template naming an unreadable attribute is refused at creation");
     }
 
     /* A key with no nested template is unrestricted, which is every key
