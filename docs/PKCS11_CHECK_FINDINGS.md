@@ -1794,6 +1794,120 @@ on 2026-09-17 and the stale module on 2026-09-11. The rule that keeps earning
 its place: a claim with a number in it gets the number from a file, not from
 memory of a file.
 
+## The cap was not the risk (2026-09-19, evening)
+
+Four attributes — `CKA_ALLOWED_MECHANISMS` and the three nested templates —
+had been refused since #125 for one reason: variable-length per-object policy
+with no field in the record to hold it. `dev/fhsm-policy-field-plan.md`
+proposed a v4 record with a fixed extension, and set one condition before any
+of it was written: **read what the corpus actually sends, and fix the caps
+from that.**
+
+That condition earned its place in the first twenty minutes.
+
+### What the corpus sends
+
+Measured against pkcs11-check 0.2.0, not recalled:
+
+```
+CKA_ALLOWED_MECHANISMS   1 mechanism, at all 17 literal sites   (plus the empty list)
+CKA_WRAP_TEMPLATE        1 entry
+CKA_UNWRAP_TEMPLATE      1 entry
+CKA_DERIVE_TEMPLATE      2 entries
+```
+
+So the plan's cap of eight was generous three times over. The plan had worried
+about the wrong number.
+
+The entries are `CKA_LABEL` — byte strings of 33 to 41 octets — and
+`CKA_KEY_TYPE`, a `CK_ULONG`. There is not one boolean anywhere in them.
+
+The plan's entry layout was `(u32 attribute type + u8 value + pad(3))`, which
+stores a boolean and nothing else. Eight of those per template would have
+grown every record by 228 bytes and still refused every nested-template test
+in the corpus. **A cap chosen too low fails loudly; a value type chosen wrong
+fails by accepting the attribute and never matching anything.**
+
+### The module had already made that mistake
+
+`fhsm_parse_unwrap_template` has carried partial `CKA_UNWRAP_TEMPLATE` support
+since #125, with a comment calling it *deliberately partial*: only
+`CKA_SENSITIVE=TRUE` and `CKA_EXTRACTABLE=FALSE`, "because those are what
+defend the key".
+
+It is not partial. Its first test on each nested entry is
+
+```c
+if (!nest[k].pValue || nest[k].ulValueLen != 1) return -1;
+```
+
+and every entry the corpus sends is 8 bytes or 33–41. They are refused at the
+door, before the `switch` that chooses which attributes are honoured ever
+runs. The overlap between what that code supports and what anything tests is
+**zero**, and had been for three months.
+
+Nothing in any report could have said so. The tests skip on the refusal, and
+a skip for "the module does not support this" and a skip for "the module
+cannot see this" are the same line.
+
+### Absent is not empty
+
+An absent `CKA_ALLOWED_MECHANISMS` permits every mechanism. One set to the
+empty list permits none — and pkcs11-check sends that case deliberately, then
+checks that `C_EncryptInit` is refused afterwards.
+
+Both store a count of zero. A count byte cannot be asked which one it is.
+
+The store had already met this and already answered it: `start_date_len`
+exists because "absent" and "set to empty" are different answers and the
+payload cannot tell them apart. The same answer applies, in `flags2`, whose
+bits are negative — set means restricted — so a record written before those
+bits existed reads as no policy, which is what it means.
+
+Writing the design comment is what surfaced this. The first draft of the
+struct comment said presence "lives in the PKCS#11 layer's own bits", which
+was a way of not deciding, and the layer in question did not have any.
+
+### Three tails, not one entry point
+
+`CKA_ALLOWED_MECHANISMS` is parsed at eleven creation tails. `C_CreateObject`
+holds three of them — the verbatim path, the certificate path and the
+EVP_PKEY path — so a wiring done per entry point would have covered one of
+three and looked complete. Counting `fhsm_token_object_add` call sites rather
+than counting functions is what produced eleven.
+
+Enforcement is at ten sites, listed in a comment above `fhsm_check_allowed_mech`
+before the first was wired.
+
+### The fixture had to be a real file
+
+`tests/fixtures/token-v3.tok` was written by the pre-v4 build in a git
+worktree and committed. The alternative — synthesising a v3 blob from the v4
+code — would produce a file built from the same beliefs the reader holds: an
+offset wrong in the writer would be wrong in the synthesiser, and the test
+would agree with itself.
+
+This is `test_encap_flags_store`'s argument about a reboot, one step further
+back: the file is the whole interface between two builds, and only a file this
+build had no part in making can contradict it.
+
+### Method
+
+Two mistakes, both caught within minutes, both the same shape as the subject.
+
+`fhsm_check_allowed_mech` got a forward declaration because `C_DeriveKey`
+needed one. `fhsm_apply_allowed_mechs` did not, because the reasoning was not
+repeated for the second function — two sibling functions, one of the two cases
+handled. The compiler caught it.
+
+And the first draft of `tests/test_allowed_mechanisms.c` called
+`C_EncryptInit` twice in a row and would have read the second one's
+`CKR_OPERATION_ACTIVE` as a refused mechanism. `tests/test_gmac_params` was
+written with that exact defect **the same week**, and reported a module
+regression that did not exist. Knowing a trap is not the same as avoiding it;
+what avoided it this time was re-reading the test before running it, not
+memory.
+
 ## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
 
 The module does not detect an IV reused with the same GCM key across
