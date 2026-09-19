@@ -1959,6 +1959,25 @@ static long find_attr(CK_ATTRIBUTE *t, CK_ULONG n, CK_ATTRIBUTE_TYPE type) {
     return -1;
 }
 
+/* Translate a store lookup failure for an *object*-handle entry point.
+ *
+ * fhsm_token_object_get answers FHSM_RV_KEY_HANDLE_INVALID for a handle it
+ * does not know, which is right for C_SignInit and its relatives -- they take
+ * a key handle and PKCS#11 lists CKR_KEY_HANDLE_INVALID for them. It is wrong
+ * for C_GetAttributeValue, C_GetObjectSize, C_SetAttributeValue and
+ * C_CopyObject: those take an object handle, their error lists name
+ * CKR_OBJECT_HANDLE_INVALID, and CKR_KEY_HANDLE_INVALID does not appear in
+ * them at all. A caller checking against the documented set sees an unlisted
+ * code and cannot tell a destroyed object from a module fault.
+ *
+ * Reported by pkcs11-check as a use-after-destroy deviation: "expected
+ * CKR_OBJECT_HANDLE_INVALID, got CKR_KEY_HANDLE_INVALID". One line at each
+ * site, but one function so the four cannot drift apart. */
+static CK_RV fhsm_object_lookup_rv(fhsm_rv_t rv) {
+    return (rv == FHSM_RV_KEY_HANDLE_INVALID) ? FHSM_RV_OBJECT_HANDLE_INVALID
+                                               : (CK_RV)rv;
+}
+
 /* Robustness guard for a caller-supplied attribute template. A NULL
  * template pointer paired with a non-zero count, or an absurd count
  * (integer-overflow probe), must be rejected before ANY iteration --
@@ -1999,37 +2018,57 @@ static CK_RV fhsm_reject_mech_supplied(CK_ATTRIBUTE *t, CK_ULONG n) {
     return FHSM_RV_OK;
 }
 
-/* CKA_ALLOWED_MECHANISMS (0x40000600, an array attribute) in a creation
- * template is refused, because this module cannot honour it.
+/* Per-object policy this module cannot store, refused in a creation template
+ * rather than accepted and dropped.
  *
- * It was accepted and dropped. pkcs11-check builds the strictest possible
- * form -- a NULL pointer with zero length, "no mechanism is allowed" -- and
- * then encrypts with the key: accepted, ignored, and contradicted. The
- * attribute is a per-object list of CK_MECHANISM_TYPE and there is nowhere in
- * the object record to put one, so honouring it is a stored variable-length
- * field and a v4 record, which is a piece of work and not a line.
+ * Three attributes, one cause. Each is a variable-length policy carried per
+ * object -- a list of mechanisms, or a nested template of attributes the keys
+ * produced from this key must have -- and the object record has no field for
+ * any of them:
  *
- * Refusing is the same answer C_GenerateKey has given CKA_ENCAPSULATE on a
- * symmetric template since #125, for the same stated reason: better than
- * something to silently ignore. A caller that set the attribute and believed
- * it now learns otherwise, which is the whole point -- the belief was the
- * defect.
+ *   CKA_ALLOWED_MECHANISMS  a list of CK_MECHANISM_TYPE
+ *   CKA_WRAP_TEMPLATE       attributes required of a key wrapped by this one
+ *   CKA_DERIVE_TEMPLATE     attributes required of a key derived from it
  *
- * CKR_ATTRIBUTE_TYPE_INVALID, matching that precedent.
+ * All three were accepted and silently dropped, and pkcs11-check 0.2.0 reports
+ * each as "claimed the protection then violated it", rightly: accepting an
+ * attribute is the claim. It builds the strictest form it can -- an empty
+ * CKA_ALLOWED_MECHANISMS, a CKA_DERIVE_TEMPLATE whose label the derive then
+ * contradicts -- and watches the operation succeed.
  *
- * Creation paths only. A search template may name it (C_FindObjectsInit
- * matches on attributes it does not have to enforce), and C_SetAttributeValue
- * refuses it through its own read-only arm. The callers are C_CreateObject,
- * C_GenerateKey, C_GenerateKeyPair for both halves, C_DeriveKey, C_UnwrapKey,
- * C_CopyObject, C_EncapsulateKey and C_DecapsulateKey -- listed here because
- * a rule wired to some of the paths that reach a state is the defect this
- * file keeps repairing. */
+ * Refusing is the answer C_GenerateKey has given CKA_ENCAPSULATE on a
+ * symmetric template since #125, for the reason written there: better than
+ * something to silently ignore. CKR_ATTRIBUTE_TYPE_INVALID, matching it.
+ *
+ * CKA_UNWRAP_TEMPLATE is deliberately NOT here. It has partial support --
+ * CKA_SENSITIVE=TRUE maps to FHSM_OBJF_UNWRAP_SENS, everything else is
+ * refused by fhsm_parse_unwrap_template -- because §4.9 makes it the spec's
+ * answer to Tookan §3.3 and that one case was worth the bit. The other three
+ * have no such mapping: a bit is not a list.
+ *
+ * Giving all four a real home is one change, not three: a variable-length
+ * policy field in the record, which is a v4. Written once, when it is
+ * written. Until then this function is the honest placeholder, and it is one
+ * function rather than three refusals so that the single cause stays visible.
+ *
+ * Creation paths only. A search template may name any of them
+ * (C_FindObjectsInit matches on attributes it does not have to enforce), and
+ * C_SetAttributeValue refuses them through its own arms. The callers are
+ * C_CreateObject, C_GenerateKey, C_GenerateKeyPair for both halves,
+ * C_DeriveKey, C_UnwrapKey, C_CopyObject, C_EncapsulateKey and
+ * C_DecapsulateKey -- listed here because a rule wired to some of the paths
+ * that reach a state is the defect this file keeps repairing. */
 #define CKA_ALLOWED_MECHANISMS_ATTR 0x40000600UL
-static CK_RV fhsm_reject_allowed_mechanisms(CK_ATTRIBUTE *t, CK_ULONG n) {
+#define CKA_WRAP_TEMPLATE_ATTR      0x40000211UL
+#define CKA_DERIVE_TEMPLATE_ATTR    0x40000213UL
+static CK_RV fhsm_reject_unstorable_policy(CK_ATTRIBUTE *t, CK_ULONG n) {
     if (n == 0 || t == NULL) return FHSM_RV_OK;
-    for (CK_ULONG i = 0; i < n; ++i)
-        if (t[i].type == CKA_ALLOWED_MECHANISMS_ATTR)
+    for (CK_ULONG i = 0; i < n; ++i) {
+        if (t[i].type == CKA_ALLOWED_MECHANISMS_ATTR
+            || t[i].type == CKA_WRAP_TEMPLATE_ATTR
+            || t[i].type == CKA_DERIVE_TEMPLATE_ATTR)
             return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
+    }
     return FHSM_RV_OK;
 }
 
@@ -2486,7 +2525,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
     /* And the attribute this module cannot honour at all. Same answer, same
      * reason as the two above. */
-    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_unstorable_policy(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
 
     uint32_t key_type = 0;
     uint32_t key_len  = 0;
@@ -2845,7 +2884,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * guard above rejects it otherwise), so persist it. Computed once here:
      * C_CreateObject has three object_add paths (verbatim / certificate /
      * public-key import) and they must not drift apart. #125. */
-    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_unstorable_policy(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
 
     uint8_t trusted_flag = 0;
     {
@@ -3352,7 +3391,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * bounds n has to run before them and not after. It did not run here at
      * all -- see C_EncapsulateKey for how this class was found. */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
-    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_unstorable_policy(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* An RO session may not derive into a token object either (§5.3). */
@@ -4132,7 +4171,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !pWrappedKey || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     /* Bounds before contents; see C_DeriveKey. */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
-    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_unstorable_policy(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* A read-only session may not create a token object, whatever the route
@@ -4389,7 +4428,7 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* The shared secret comes from the KEM, not from the caller. */
     { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
-    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_unstorable_policy(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     if (pMechanism->mechanism != CKM_ML_KEM_OP)
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -4541,7 +4580,7 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
-    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_unstorable_policy(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     if (pMechanism->mechanism != CKM_ML_KEM_OP)
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -5003,8 +5042,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !phPub || !phPriv) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_template(pPub, ulPub);  if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_template(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
-    { CK_RV cr = fhsm_reject_allowed_mechanisms(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
-    { CK_RV cr = fhsm_reject_allowed_mechanisms(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_unstorable_policy(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_unstorable_policy(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
@@ -5564,7 +5603,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     uint32_t cko_class = 0, ckk_type = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hObject, &value, &value_len,
                                           &cko_class, &ckk_type);
-    if (rv != FHSM_RV_OK) return rv;
+    if (rv != FHSM_RV_OK) return fhsm_object_lookup_rv(rv);
     if (fhsm_object_access_denied(t, cko_class))
         return FHSM_RV_OBJECT_HANDLE_INVALID;
     int fhsm_buf_too_small = 0;
@@ -5901,7 +5940,7 @@ CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hObject,
                                           &value, &value_len,
                                           &cko_class, &ckk_type);
-    if (rv != FHSM_RV_OK) return rv;
+    if (rv != FHSM_RV_OK) return fhsm_object_lookup_rv(rv);
     if (fhsm_object_access_denied(t, cko_class))
         return FHSM_RV_OBJECT_HANDLE_INVALID;
 
@@ -5983,7 +6022,7 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     uint8_t flags_now = 0;
     fhsm_rv_t rv_get = fhsm_token_object_get_flags(t, (uint32_t)hObject,
                                                     &flags_now);
-    if (rv_get != FHSM_RV_OK) return rv_get;
+    if (rv_get != FHSM_RV_OK) return fhsm_object_lookup_rv(rv_get);
     /* CKA_MODIFIABLE=FALSE : the object may not be modified
      * (#125 TestModifiableAttribute enforcement). */
     if (flags_now & FHSM_OBJF_UNMODIFIABLE) return 0x0000001BUL; /* CKR_ACTION_PROHIBITED */
@@ -6151,7 +6190,7 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     /* Copying *into* a token object from an RO session is the same
      * violation as creating one (§5.3). */
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
-    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_unstorable_policy(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
 
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -6175,7 +6214,7 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hObject,
                                          &src_value, &src_value_len,
                                          &src_class, &src_key_type);
-    if (r != FHSM_RV_OK) return r;
+    if (r != FHSM_RV_OK) return fhsm_object_lookup_rv(r);
 
     /* Read original label / id / flags via the auxiliary accessors. */
     char     copy_label[64] = "";
