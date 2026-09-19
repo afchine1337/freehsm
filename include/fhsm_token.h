@@ -289,6 +289,13 @@ fhsm_rv_t fhsm_token_object_get_id(fhsm_token_t *t, uint32_t handle,
  * meaningless, not to the one where they mean something. */
 #define FHSM_OBJF2_NO_ENCAPSULATE 0x01
 #define FHSM_OBJF2_NO_DECAPSULATE 0x02
+/* CKA_COPYABLE = FALSE (§4.4 : C_CopyObject must answer CKR_ACTION_PROHIBITED).
+ * The attribute was accepted in a creation template, dropped, and reported
+ * back as a hard-coded TRUE -- the same shape as CKA_LOCAL before #125 and
+ * CKA_ALWAYS_AUTHENTICATE before 2026-09-17. Negative like its neighbours, so
+ * an object written before this bit existed is copyable, which is the
+ * default. */
+#define FHSM_OBJF2_NOT_COPYABLE   0x04
 
 /* Read / write the second flags byte. Separate accessors rather than a wider
  * type on the existing pair: every current caller of the first byte keeps

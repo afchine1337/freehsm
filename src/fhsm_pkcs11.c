@@ -2214,6 +2214,15 @@ static void fhsm_apply_token_scope(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
         if (!tmpl_bbool(tmpl, n, CKA_DESTROYABLE_ATTR, 1)) pf |= FHSM_OBJF_UNDESTROYABLE;
         (void)fhsm_token_object_set_flags(t, handle, pf);
     }
+    /* CKA_COPYABLE, the third of the same family and the one that was missing.
+     * It lives in the second flags byte because the first is full; see
+     * FHSM_OBJF2_* in fhsm_token.h. Default TRUE, so only FALSE is recorded. */
+    if (!tmpl_bbool(tmpl, n, CKA_COPYABLE_ATTR, 1)) {
+        uint8_t f2 = 0;
+        (void)fhsm_token_object_get_flags2(t, handle, &f2);
+        (void)fhsm_token_object_set_flags2(t, handle,
+                                           (uint8_t)(f2 | FHSM_OBJF2_NOT_COPYABLE));
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -5689,7 +5698,15 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
                 bval = (of & FHSM_OBJF_UNMODIFIABLE) ? 0 : 1; src = &bval; src_len = 1; break;
             }
-            case CKA_COPYABLE_ATTR:    bval = 1; src = &bval; src_len = 1; break;
+            case CKA_COPYABLE_ATTR: {
+                /* Was a hard-coded 1. A template could set CKA_COPYABLE=FALSE,
+                 * be accepted, and read back TRUE -- the module contradicting
+                 * itself about a control it never applied. */
+                uint8_t f2 = 0;
+                (void)fhsm_token_object_get_flags2(t, (uint32_t)hObject, &f2);
+                bval = (f2 & FHSM_OBJF2_NOT_COPYABLE) ? 0 : 1;
+                src = &bval; src_len = 1; break;
+            }
             case CKA_DESTROYABLE_ATTR: {
                 uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
                 bval = (of & FHSM_OBJF_UNDESTROYABLE) ? 0 : 1; src = &bval; src_len = 1; break;
@@ -6092,6 +6109,16 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
 
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* CKA_COPYABLE=FALSE on the source (§4.4 : CKR_ACTION_PROHIBITED).
+     *
+     * The attribute was accepted at creation, dropped, and reported back as a
+     * hard-coded TRUE, so the one operation it governs never consulted it.
+     * Checked here, before anything is read or allocated: a refusal that
+     * happens after the copy exists is not a refusal. */
+    { uint8_t sf2 = 0;
+      if (fhsm_token_object_get_flags2(t, (uint32_t)hObject, &sf2) == FHSM_RV_OK
+          && (sf2 & FHSM_OBJF2_NOT_COPYABLE))
+          return 0x0000001BUL;   /* CKR_ACTION_PROHIBITED */ }
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
 
@@ -6180,7 +6207,13 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             case CKA_PRIVATE:
             case CKA_MODIFIABLE_ATTR:
             case CKA_DESTROYABLE_ATTR:
-                /* Scope / persistence booleans: legal in a copy template and
+            case CKA_COPYABLE_ATTR:
+                /* CKA_COPYABLE joins its two siblings here: a copy may be
+                 * made non-copyable, which is the ordinary way to produce a
+                 * key that goes no further. Rejecting it as unknown -- which
+                 * is what the default arm did -- refused a legal template.
+                 *
+                 * Scope / persistence booleans: legal in a copy template and
                  * consumed after this loop (CKA_TOKEN sets session vs token,
                  * the flags set MODIFIABLE/DESTROYABLE). Accept them here rather
                  * than rejecting as unknown (an explicit CKA_TOKEN override was
@@ -6245,6 +6278,22 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             if (!tmpl_bbool(pTemplate, ulCount, CKA_DESTROYABLE_ATTR, 1))
                 pf |= FHSM_OBJF_UNDESTROYABLE;
             (void)fhsm_token_object_set_flags(t, new_handle, pf);
+        }
+        /* CKA_COPYABLE on the copy itself. The source was already checked --
+         * a non-copyable object never reaches here -- but the template may
+         * ask that the copy be the end of the line.
+         *
+         * These three lines are the fourth place in this file that reads
+         * CKA_MODIFIABLE / CKA_DESTROYABLE / CKA_COPYABLE out of a template.
+         * fhsm_apply_token_scope does the same thing for every other creation
+         * path; C_CopyObject has its own copy because it must compute the
+         * scope differently, and that divergence is exactly what left this
+         * function behind before. Worth folding together, in its own change. */
+        if (!tmpl_bbool(pTemplate, ulCount, CKA_COPYABLE_ATTR, 1)) {
+            uint8_t cf2 = 0;
+            (void)fhsm_token_object_get_flags2(t, new_handle, &cf2);
+            (void)fhsm_token_object_set_flags2(t, new_handle,
+                                               (uint8_t)(cf2 | FHSM_OBJF2_NOT_COPYABLE));
         }
         /* And the second flags byte. A copy of a key that may not decapsulate
          * must not be one that may -- the restriction is a property of the key

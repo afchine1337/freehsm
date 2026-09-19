@@ -34,6 +34,8 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 
 #define CKR_OK                          0UL
 #define CKR_KEY_FUNCTION_NOT_PERMITTED  0x68UL
+#define CKR_ACTION_PROHIBITED           0x1BUL
+#define CKA_COPYABLE                    0x171UL
 #define CKF_RW                          6UL
 #define CKA_CLASS                       0UL
 #define CKA_TOKEN                       1UL
@@ -206,6 +208,47 @@ int main(void)
                "a public key reports CKA_DECAPSULATE as absent");
         } else {
             ok(0, "keypair for the absent-attribute case");
+        }
+    }
+
+    /* (5) CKA_COPYABLE, the third attribute of the same family and the one
+     *     that had no bit until the byte opened.
+     *
+     *     It was accepted in a creation template, dropped, and reported back
+     *     as a hard-coded TRUE -- so the single operation it governs never
+     *     consulted it. §4.4 makes a copy of a CKA_COPYABLE=FALSE object
+     *     CKR_ACTION_PROHIBITED. */
+    {
+        CK_ATTRIBUTE pub_t[]  = { { CKA_TOKEN, &yes, 1 } };
+        CK_ATTRIBUTE priv_t[] = { { CKA_COPYABLE, &no, 1 }, { CKA_TOKEN, &yes, 1 } };
+        CK_OBJECT_HANDLE hp = 0, hk = 0;
+        ok(C_GenerateKeyPair(s, &gen, pub_t, 1, priv_t, 2, &hp, &hk) == CKR_OK,
+           "CKA_COPYABLE=False is accepted at generation");
+        v = 0xFF;
+        ok(read_bool(s, hk, CKA_COPYABLE, &v) && v == 0,
+           "and reads back FALSE instead of a hard-coded TRUE");
+        CK_OBJECT_HANDLE copy = 0;
+        CK_ATTRIBUTE cp[] = { { CKA_LABEL, (void*)"x", 1 } };
+        ok(C_CopyObject(s, hk, cp, 1, &copy) == CKR_ACTION_PROHIBITED,
+           "C_CopyObject refuses with CKR_ACTION_PROHIBITED");
+
+        /* The default still holds for its sibling, and a copy may be made the
+         * end of the line even when its source was copyable. */
+        v = 0xFF;
+        ok(read_bool(s, hp, CKA_COPYABLE, &v) && v == 1,
+           "the public half, unmarked, is still copyable");
+        CK_OBJECT_HANDLE last = 0;
+        CK_ATTRIBUTE cp2[] = { { CKA_COPYABLE, &no, 1 } };
+        if (C_CopyObject(s, hp, cp2, 1, &last) == CKR_OK) {
+            v = 0xFF;
+            ok(read_bool(s, last, CKA_COPYABLE, &v) && v == 0,
+               "a copy asked to be non-copyable is");
+            CK_OBJECT_HANDLE again = 0;
+            ok(C_CopyObject(s, last, cp, 1, &again) == CKR_ACTION_PROHIBITED,
+               "and cannot itself be copied");
+        } else {
+            ok(0, "copying with CKA_COPYABLE=False in the template");
+            ok(0, "(second copy not reached)");
         }
     }
 
