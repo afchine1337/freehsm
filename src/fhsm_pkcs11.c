@@ -2387,6 +2387,35 @@ CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession, unsigned char *pSeed,
  * and the other not. The profile decision stays with each caller, since a
  * digest that may not be produced on its own can still be legitimate inside
  * a construction -- HMAC-SHA-1 being the case already settled. */
+/* Why a hash can be non-approved in two different senses.
+ *
+ * The single `non_approved` flag this function used to return was consulted
+ * by two callers that are asking different questions. C_DigestInit asks "may
+ * this be a standalone digest"; the HKDF site asks "may this be the hash
+ * inside an HMAC". SP 800-131A rev. 2 answers those differently for SHA-1,
+ * and the module's own profile already says so: CKM_SHA_1_HMAC is approved
+ * and ticked in docs/MECHANISMS.md, cited to FIPS 198-1, and the profile note
+ * scopes the SHA-1 prohibition to *signature generation*.
+ *
+ * HKDF's PRF is HMAC (SP 800-56C rev. 2 §4). So HMAC-SHA-1 was approved when
+ * reached through C_SignInit and refused when reached through
+ * CKM_HKDF_DERIVE's prfHashMechanism -- one primitive, two paths, two
+ * answers, decided by a flag that ran parallel to the profile instead of
+ * agreeing with it. It cost the 84 valid vectors of hkdf_sha1_test.json,
+ * recorded in docs/PKCS11_CHECK_FINDINGS.md as "The SHA-1 eighty-four" and
+ * left there deliberately so that changing it would be a decision rather than
+ * a drift. This is the decision.
+ *
+ * It failed closed, so it was never a hole -- refusing more than FIPS demands
+ * costs vectors and explanations, not safety. That is also why it survived
+ * three months.
+ *
+ * MD5 does not move. HMAC-MD5 is approved nowhere, so it is non-approved in
+ * both senses and the split is what lets SHA-1 change without dragging it
+ * along -- which a single flag could not have done. */
+#define FHSM_HASH_NA_DIGEST 0x1   /* not approved as a standalone digest */
+#define FHSM_HASH_NA_HMAC   0x2   /* not approved as the hash inside an HMAC */
+
 static int digest_mech_to_hash(CK_ULONG mech, fhsm_hash_t *h, int *non_approved) {
     *non_approved = 0;
     switch (mech) {
@@ -2402,8 +2431,11 @@ static int digest_mech_to_hash(CK_ULONG mech, fhsm_hash_t *h, int *non_approved)
         case 0x000002C0UL: *h = FHSM_HASH_SHA3_384;   return 1; /* CKM_SHA3_384 */
         case 0x000002D0UL: *h = FHSM_HASH_SHA3_512;   return 1; /* CKM_SHA3_512 */
         /* Legacy digests : interop build only. #125. */
-        case 0x00000220UL: *h = FHSM_HASH_SHA1; *non_approved = 1; return 1;
-        case 0x00000210UL: *h = FHSM_HASH_MD5;  *non_approved = 1; return 1;
+        case 0x00000220UL: *h = FHSM_HASH_SHA1;
+                           *non_approved = FHSM_HASH_NA_DIGEST; return 1;
+        case 0x00000210UL: *h = FHSM_HASH_MD5;
+                           *non_approved = FHSM_HASH_NA_DIGEST | FHSM_HASH_NA_HMAC;
+                           return 1;
         default: return 0;
     }
 }
@@ -2423,7 +2455,7 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
     { int non_approved = 0;
       if (!digest_mech_to_hash(pMechanism->mechanism, &op->hash, &non_approved))
           return FHSM_RV_MECHANISM_INVALID;
-      if (non_approved && fhsm_build_fips_strict)
+      if ((non_approved & FHSM_HASH_NA_DIGEST) && fhsm_build_fips_strict)
           return FHSM_RV_MECHANISM_INVALID; }
     op->active = 1;
     op->mechanism = (uint32_t)pMechanism->mechanism;
@@ -3790,7 +3822,10 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         fhsm_hash_t hh; int hh_non_approved = 0;
         if (!digest_mech_to_hash(hp.prfHashMechanism, &hh, &hh_non_approved))
             return FHSM_RV_MECHANISM_PARAM_INVALID;
-        if (hh_non_approved && fhsm_build_fips_strict)
+        /* The PRF is HMAC, so the question is whether HMAC with this hash is
+         * approved -- not whether the bare digest is. SHA-1 passes here and
+         * is refused by C_DigestInit above; MD5 is refused by both. */
+        if ((hh_non_approved & FHSM_HASH_NA_HMAC) && fhsm_build_fips_strict)
             return FHSM_RV_MECHANISM_PARAM_INVALID;
 
         /* The input keying material is the base key. */

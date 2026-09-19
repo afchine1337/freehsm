@@ -67,6 +67,7 @@ typedef struct {
 #define CKM_HKDF_DATA    0x402BUL
 #define CKM_SHA256       0x250UL
 #define CKM_SHA384       0x260UL
+#define CKM_SHA_1        0x220UL
 #define CKM_SHA512       0x270UL
 #define CKF_HKDF_SALT_NULL 1UL
 #define CKF_HKDF_SALT_DATA 2UL
@@ -89,6 +90,8 @@ static CK_RV (*C_Login)(CK_SESSION_HANDLE,CK_ULONG,CK_BYTE*,CK_ULONG);
 static CK_RV (*C_InitPIN)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
 static CK_RV (*C_CreateObject)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
 static CK_RV (*C_DeriveKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
+/* For the other half of the SHA-1 split: the bare digest must stay refused. */
+static CK_RV (*C_DigestInit)(CK_SESSION_HANDLE,CK_MECHANISM*);
 static CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
 
 /* The reference. Same primitive, driven directly. */
@@ -142,7 +145,7 @@ int main(void)
     if (!lib) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
     #define SYM(n) *(void**)&n = dlsym(lib,#n)
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
-    SYM(C_Login); SYM(C_InitPIN); SYM(C_CreateObject); SYM(C_DeriveKey);
+    SYM(C_Login); SYM(C_InitPIN); SYM(C_CreateObject); SYM(C_DeriveKey); SYM(C_DigestInit);
     SYM(C_GetAttributeValue);
     if (!C_DeriveKey || !C_CreateObject) { fprintf(stderr,"missing symbols\n"); return 2; }
 
@@ -269,6 +272,41 @@ int main(void)
             ok(gotlen == 42 && memcmp(got, want, 42) == 0, "SHA-384 output differs and matches");
         }
     }
+    /* (5b) SHA-1 as the PRF hash, under the fips-strict profile this build
+     *      uses. Accepted since 2026-09-19, and the two halves of that change
+     *      are asserted together because the whole point was that they had
+     *      been one flag.
+     *
+     *      HKDF's PRF is HMAC (SP 800-56C rev. 2 §4), and CKM_SHA_1_HMAC is
+     *      approved in this module's own profile, cited to FIPS 198-1. The
+     *      SHA-1 prohibition in SP 800-131A rev. 2 is scoped to signature
+     *      generation. So HMAC-SHA-1 was approved through C_SignInit and
+     *      refused through prfHashMechanism -- one primitive, two paths, two
+     *      answers -- which cost the 84 valid vectors of hkdf_sha1_test.json.
+     *
+     *      A standalone SHA-1 digest is still refused, and that is the half
+     *      that makes this a split rather than a relaxation. If a later edit
+     *      merges the two flags again, one of these two cases goes red. */
+    {
+        CK_HKDF_PARAMS p = { 1, 1, CKM_SHA_1, CKF_HKDF_SALT_DATA,
+                             salt, sizeof salt, 0, info, sizeof info };
+        CK_MECHANISM m = { CKM_HKDF_DERIVE, &p, sizeof p };
+        rv = C_DeriveKey(s, &m, hikm, out42, 5, &out);
+        ok(rv == CKR_OK, "prfHashMechanism = CKM_SHA_1 accepted (HMAC, not a digest)");
+        if (rv == CKR_OK) {
+            gotlen = sizeof got;
+            read_value(s, out, got, &gotlen);
+            hkdf_ref(EVP_KDF_HKDF_MODE_EXTRACT_AND_EXPAND, "SHA1",
+                     ikm, sizeof ikm, salt, sizeof salt, info, sizeof info, want, 42);
+            ok(gotlen == 42 && memcmp(got, want, 42) == 0,
+               "and its output matches the reference");
+        }
+        /* The other half: the bare digest stays refused. */
+        CK_MECHANISM dm = { CKM_SHA_1, NULL, 0 };
+        ok(C_DigestInit(s, &dm) != CKR_OK,
+           "while a standalone SHA-1 digest is still refused");
+    }
+
     /* (6) CKM_HKDF_DATA derives a data object, not a key. Same bytes, other
      *     class -- and no CKR_ would have shown the difference, which is why
      *     it is asserted rather than assumed. */
