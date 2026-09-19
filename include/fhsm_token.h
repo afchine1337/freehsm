@@ -271,6 +271,34 @@ fhsm_rv_t fhsm_token_object_get_id(fhsm_token_t *t, uint32_t handle,
  * spending a byte in it rather than a format change. */
 #define FHSM_OBJF_UNWRAP_SENS   0x80
 
+/* Second per-object flags byte. The note above was right that the first one
+ * was full and that the v3 record could spend a byte: it ends with a pad byte
+ * at offset 203, written zero and never read. This is that byte.
+ *
+ * The bits are NEGATIVE -- set means restricted -- so that zero means
+ * permitted. That is the spec default for a KEM key and it is also what every
+ * record written before 2026-09-19 already says, so v1, v2 and older v3
+ * records keep their meaning without a migration. Backward compatibility here
+ * is a consequence of the polarity rather than something added afterwards.
+ *
+ * CKA_ENCAPSULATE (§5.14.7) and CKA_DECAPSULATE (§5.14.8) were accepted in a
+ * C_GenerateKeyPair template, silently dropped, and then contradicted by the
+ * operation succeeding. C_GenerateKey had rejected them on a symmetric
+ * template since #125, with a comment calling that better than ignoring them
+ * -- the rule existed and was wired to the path where the attributes are
+ * meaningless, not to the one where they mean something. */
+#define FHSM_OBJF2_NO_ENCAPSULATE 0x01
+#define FHSM_OBJF2_NO_DECAPSULATE 0x02
+
+/* Read / write the second flags byte. Separate accessors rather than a wider
+ * type on the existing pair: every current caller of the first byte keeps
+ * compiling unchanged, and a caller that has not been taught about the second
+ * cannot silently drop it by passing the old width. */
+fhsm_rv_t fhsm_token_object_get_flags2(fhsm_token_t *t, uint32_t handle,
+                                        uint8_t *out_flags2);
+fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
+                                        uint8_t flags2);
+
 /* Read the object's flags byte (FHSM_OBJF_SENSITIVE | EXTRACTABLE).
  * Returns FHSM_RV_KEY_HANDLE_INVALID if the handle is unknown. */
 fhsm_rv_t fhsm_token_object_get_flags(fhsm_token_t *t, uint32_t handle,

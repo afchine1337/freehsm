@@ -121,6 +121,11 @@ typedef struct fhsm_object_s {
     uint8_t  id[32];        /* CKA_ID */
     uint32_t id_len;
     uint8_t  flags;         /* bit 0 = CKA_PRIVATE, bit 1 = CKA_EXTRACTABLE */
+    /* Second flags byte (FHSM_OBJF2_*), serialised into the v3 record's pad
+     * byte at offset 203. Negative sense: set = restricted, so zero -- which
+     * is what every record written before 2026-09-19 carries there -- means
+     * permitted, and no migration is needed. */
+    uint8_t  flags2;
     /* In-memory only (NOT serialised to the .tok file) : 0 = persistent
      * token object ; non-zero = session object owned by that session
      * handle, destroyed on C_CloseSession and never written to disk
@@ -415,7 +420,10 @@ static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
         out[off + 137] = o->end_date_len;
         memcpy(out + off + 138, o->application, FHSM_OBJ_APP_LEN);
         out[off + 202] = o->application_len;
-        out[off + 203] = 0;   /* pad */
+        /* Was pad, written zero. Now the second flags byte -- see
+         * FHSM_OBJF2_* in fhsm_token.h for why zero still reads correctly on
+         * records written before it meant anything. */
+        out[off + 203] = o->flags2;
         memcpy(out + off + FHSM_OBJ_REC_V3_FIXED, o->value, o->value_len);
         off += rec_len;
     }
@@ -545,6 +553,17 @@ static fhsm_rv_t parse_objects_v3(fhsm_token_t *t, const uint8_t *buf, size_t le
         memcpy(o->application, buf + off + 138, FHSM_OBJ_APP_LEN);
         o->application_len = buf[off + 202];
         if (o->application_len > FHSM_OBJ_APP_LEN) return FHSM_RV_FUNCTION_FAILED;
+        /* Offset 203 was a pad byte written zero until 2026-09-19 and read by
+         * nobody. It is the second flags byte now, and because its bits are
+         * negative -- set = restricted -- a record written when it was pad
+         * loads as "no restriction", which is what it meant. No version bump
+         * and no migration: the whole compatibility story is the polarity.
+         *
+         * Not validated against a mask. Refusing a record for an unknown bit
+         * would make a token written by a later build unreadable by this one,
+         * which is a worse failure than ignoring a flag we do not understand
+         * -- the reader has no way to act on it either way. */
+        o->flags2 = buf[off + 203];
         if (o->value_len) {
             fhsm_rv_t ar = obj_alloc_value(o, o->value_len,
                                             (o->flags & FHSM_OBJF_SENSITIVE) != 0);
@@ -1755,6 +1774,47 @@ fhsm_rv_t fhsm_token_object_set_flags(fhsm_token_t *t, uint32_t handle,
                 o->value_secure = 1;
             }
             o->flags = flags;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+/* The second flags byte. Deliberately plainer than its sibling above: that
+ * one has to migrate a value into the secure heap when CKA_SENSITIVE turns on,
+ * because the guarantee has to follow the attribute. Nothing in FHSM_OBJF2_*
+ * changes how the value is held -- these bits only refuse operations -- so the
+ * setter stores and persists, and no more. */
+fhsm_rv_t fhsm_token_object_get_flags2(fhsm_token_t *t, uint32_t handle,
+                                        uint8_t *out_flags2) {
+    if (!t || !out_flags2) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            *out_flags2 = t->objects[i].flags2;
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_OK;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
+                                        uint8_t flags2) {
+    if (!t) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            t->objects[i].flags2 = flags2;
             t->objects_dirty = 1;
             fhsm_rv_t rv = write_atomic(t);
             pthread_mutex_unlock(&t->mu);

@@ -1540,6 +1540,84 @@ regressions:
 * **100 vectors** — ML-KEM public-key import through `C_CreateObject` returns
   `CKR_TEMPLATE_INCONSISTENT`.
 
+## `CKA_ENCAPSULATE` / `CKA_DECAPSULATE`, and what counts as a claim (2026-09-19)
+
+```
+[1] C_DecapsulateKey CKM_ML_KEM - decapsulate with CKA_DECAPSULATE=False on
+    private key (§5.14.8 requires CKR_KEY_FUNCTION_NOT_PERMITTED):
+    claimed the protection then returned CKR_OK          [CRITICAL]
+[1] C_EncapsulateKey CKM_ML_KEM - encapsulate with CKA_ENCAPSULATE=False
+    on public key (§5.14.7): idem
+```
+
+Under harness 0.1.9 the same behaviour was an `honest_deviation` — "module
+does not claim the protection". It was checked here on 2026-09-18 and the
+check was right as far as it went: the module neither stored nor reported the
+attributes, so it was not claiming anything.
+
+0.2.0 changed what counts as a claim, and the change is correct.
+`testcases/test_kem.py`, verbatim:
+
+> Creation-time template acceptance is independent claim evidence: [...]
+> reaching this point already proves the module accepted
+> `CKA_DECAPSULATE=False` at create. The readback below corroborates the claim
+> where available, but a missing readback must not downgrade it — that would
+> let one unreadable attribute mask a proven decapsulate-permission violation.
+
+**Accepting an attribute in silence is the claim.** A caller who sets it, gets
+`CKR_OK`, and watches the operation succeed has no way to learn it was
+dropped. Which makes the earlier verdict — mine — the narrower reading of two
+defensible ones, and the harness's the better.
+
+The module already held the rule, on the wrong path. `C_GenerateKey` rejects
+both attributes on a symmetric template with a comment calling that better
+than ignoring them; `C_GenerateKeyPair` ignored them. One rule, wired to the
+path where the attributes mean nothing.
+
+### Where the bits went
+
+Both per-object bytes were full, and the flags byte said so itself:
+
+> NOTE: this is the last bit of the flags byte. A further per-object boolean
+> needs a wider field; the v3 record (#125) exists now, so that is a matter of
+> spending a byte in it rather than a format change.
+
+The v3 record ends its extension with `pad(1)` at offset 203, written
+`out[off + 203] = 0` and read by nobody — one occurrence in the whole tree,
+checked before the plan was written rather than after. That is the byte.
+
+**The bits are negative: set means restricted.** Zero therefore means
+permitted, which is both the spec default and what every record written before
+today already carries, so v1, v2 and older v3 records keep their meaning with
+no migration. The compatibility story is the polarity, not a special case.
+
+### Six call sites, listed before any was written
+
+The recurring defect of this file is a rule wired to some of the paths that
+reach a state, so the list came first: the token accessors, `C_GenerateKeyPair`,
+both creation tails of `C_CreateObject`, `C_CopyObject`, `C_GetAttributeValue`,
+and the two operations. `C_CopyObject` is on it deliberately — its own comment
+records it as "fifth of six creation paths to be missed by a guard wired only
+to the others", and a copy that could shed a restriction would be the obvious
+way around the control.
+
+### A second observation, not fixed here
+
+Writing the store round-trip test turned one up. **Login state survives
+`C_Finalize`.** After `C_Finalize` and a fresh `C_Initialize`, `C_Login` answers
+`CKR_USER_ALREADY_LOGGED_IN`: the token object and its authenticated state
+outlive the library's lifecycle, so the store is never re-parsed either.
+
+Two consequences. An application that finalizes and re-initializes inherits
+the previous authenticated state, which is not what §5.6 describes. And no
+test driving the module through PKCS#11 can stage a reload — which is why the
+round trip for these bits lives at the token layer in
+`tests/test_encap_flags_store.c`, following `test_throttle_reboot`: "a reboot
+cannot be staged inside a test, but it does not have to be: the file is the
+whole interface between two boots".
+
+Recorded rather than repaired on the way past. It deserves its own reading.
+
 ## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
 
 The module does not detect an IV reused with the same GCM key across

@@ -2727,6 +2727,37 @@ static CK_RV fhsm_check_trusted_attr(CK_SESSION_HANDLE hSession,
 static int fhsm_pset_read(CK_ATTRIBUTE *tmpl, CK_ULONG n, CK_ULONG mech,
                            char *out, size_t out_sz);
 
+/* Record CKA_ENCAPSULATE / CKA_DECAPSULATE = FALSE from a creation template.
+ *
+ * One function, called from every path that creates an object, because the
+ * alternative -- the same dozen lines in C_GenerateKeyPair, C_CreateObject and
+ * C_CopyObject -- is precisely how this module has repeatedly ended up with a
+ * rule honoured on some of the paths that reach a state. C_CopyObject has
+ * already been the one that was missed, and its own comment says so.
+ *
+ * Which attribute applies follows the class, since the spec puts CKA_ENCAPSULATE
+ * on the encapsulating (public) key and CKA_DECAPSULATE on the decapsulating
+ * (private) one. A template that names the other one is not an error here: it
+ * is simply an attribute that does not apply to the object, and refusing it
+ * would be inventing a rule the spec does not state.
+ *
+ * TRUE writes nothing. The bits are negative so that absence means permitted,
+ * which keeps every record written before 2026-09-19 correct. */
+static CK_RV fhsm_apply_encap_flags(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
+                                     CK_ULONG n, uint32_t handle,
+                                     uint32_t cko_class) {
+    CK_ULONG which = (cko_class == CKO_PUBLIC_KEY) ? CKA_ENCAPSULATE_ATTR
+                                                    : CKA_DECAPSULATE_ATTR;
+    uint8_t bit = (cko_class == CKO_PUBLIC_KEY) ? FHSM_OBJF2_NO_ENCAPSULATE
+                                                 : FHSM_OBJF2_NO_DECAPSULATE;
+    long i = find_attr(tmpl, n, which);
+    if (i < 0 || !tmpl[i].pValue || tmpl[i].ulValueLen != 1) return FHSM_RV_OK;
+    if (*(unsigned char *)tmpl[i].pValue) return FHSM_RV_OK;   /* TRUE: default */
+    uint8_t f2 = 0;
+    (void)fhsm_token_object_get_flags2(t, handle, &f2);
+    return fhsm_token_object_set_flags2(t, handle, (uint8_t)(f2 | bit));
+}
+
 /* The parameter set whose raw *private* key is `len` bytes, within the family
  * the key type names.
  *
@@ -2913,6 +2944,13 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (der) { OPENSSL_cleanse(der, store_len); OPENSSL_free(der); }
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
+        /* An imported KEM key carries the same restriction a generated one
+         * does. C_CreateObject has two creation tails -- the verbatim path and
+         * the EVP_PKEY path -- and both get this, which is the whole reason
+         * the plan listed the call sites before any of them was written. */
+        { CK_RV fr = fhsm_apply_encap_flags(t, pTemplate, ulCount, handle,
+                                            (uint32_t)a.cko);
+          if (fr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return fr; } }
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
         { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
           if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -2934,6 +2972,13 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
             (uint8_t)(FHSM_OBJF_EXTRACTABLE | trusted_flag), &handle);
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
+        /* An imported KEM key carries the same restriction a generated one
+         * does. C_CreateObject has two creation tails -- the verbatim path and
+         * the EVP_PKEY path -- and both get this, which is the whole reason
+         * the plan listed the call sites before any of them was written. */
+        { CK_RV fr = fhsm_apply_encap_flags(t, pTemplate, ulCount, handle,
+                                            (uint32_t)a.cko);
+          if (fr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return fr; } }
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
         { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
           if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -4308,6 +4353,11 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     if (cl != CKO_PUBLIC_KEY || kt != CKK_ML_KEM)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    /* CKA_ENCAPSULATE=FALSE (§5.14.7 : CKR_KEY_FUNCTION_NOT_PERMITTED). */
+    { uint8_t f2 = 0;
+      if (fhsm_token_object_get_flags2(t, (uint32_t)hPublicKey, &f2) == FHSM_RV_OK
+          && (f2 & FHSM_OBJF2_NO_ENCAPSULATE))
+          return FHSM_RV_KEY_FUNCTION_NOT_PERMITTED; }
 
     const uint8_t *p = kv;
     EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
@@ -4454,6 +4504,11 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
     if (cl != CKO_PRIVATE_KEY || kt != CKK_ML_KEM)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    /* CKA_DECAPSULATE=FALSE (§5.14.8 : CKR_KEY_FUNCTION_NOT_PERMITTED). */
+    { uint8_t f2 = 0;
+      if (fhsm_token_object_get_flags2(t, (uint32_t)hPrivateKey, &f2) == FHSM_RV_OK
+          && (f2 & FHSM_OBJF2_NO_DECAPSULATE))
+          return FHSM_RV_KEY_FUNCTION_NOT_PERMITTED; }
 
     const uint8_t *p = kv;
     EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
@@ -5197,6 +5252,26 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return rv;
     }
     *phPub = hp; *phPriv = hk;
+    /* CKA_ENCAPSULATE (§5.14.7) on the public half, CKA_DECAPSULATE (§5.14.8)
+     * on the private one.
+     *
+     * Both were accepted here and silently dropped, and the operation then
+     * succeeded on a key whose template had forbidden it -- which pkcs11-check
+     * 0.2.0 calls a self-contradiction, rightly: accepting an attribute
+     * without a word is a claim to honour it. C_GenerateKey has rejected the
+     * pair on symmetric templates since #125, calling that better than
+     * ignoring them. The rule existed, on the path where the attributes mean
+     * nothing.
+     *
+     * Only FALSE is recorded. TRUE is the default and needs no bit, which is
+     * also why a record written before the byte meant anything reads as
+     * permitted. */
+    { CK_RV fr = fhsm_apply_encap_flags(t, pPub,  ulPub,  hp, CKO_PUBLIC_KEY);
+      if (fr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
+                              (void)fhsm_token_object_destroy(t, hk); return fr; } }
+    { CK_RV fr = fhsm_apply_encap_flags(t, pPriv, ulPriv, hk, CKO_PRIVATE_KEY);
+      if (fr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
+                              (void)fhsm_token_object_destroy(t, hk); return fr; } }
     fhsm_apply_token_scope(t, hSession, pPub,  ulPub,  hp);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pPub, ulPub, hp);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
@@ -5514,6 +5589,32 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 break;
             }
             case CKA_VALUE_LEN: src = &tmp_len;   src_len = sizeof(CK_ULONG); break;
+            /* CKA_ENCAPSULATE / CKA_DECAPSULATE (§5.14.7, §5.14.8).
+             *
+             * Reported only on the class each belongs to, and only for a KEM
+             * key: answering for an RSA key or asking a public key about
+             * decapsulation would be inventing an attribute where the spec
+             * puts none. Elsewhere the attribute is absent, which is what
+             * ulValueLen = -1 says.
+             *
+             * Without this readback the module could restrict an operation
+             * and have no way to say so, which is half of the defect it is
+             * fixing: the other half was claiming without restricting. */
+            case CKA_ENCAPSULATE_ATTR:
+            case CKA_DECAPSULATE_ATTR: {
+                int is_encap = (pTemplate[i].type == CKA_ENCAPSULATE_ATTR);
+                uint32_t want_class = is_encap ? CKO_PUBLIC_KEY : CKO_PRIVATE_KEY;
+                if (ckk_type != CKK_ML_KEM || cko_class != want_class) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                }
+                uint8_t f2 = 0;
+                (void)fhsm_token_object_get_flags2(t, (uint32_t)hObject, &f2);
+                uint8_t bit = is_encap ? FHSM_OBJF2_NO_ENCAPSULATE
+                                       : FHSM_OBJF2_NO_DECAPSULATE;
+                bval = (f2 & bit) ? 0 : 1;
+                src = &bval; src_len = 1;
+                break;
+            }
             case CKA_SENSITIVE: {
                 uint8_t of = 0;
                 (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
@@ -6144,6 +6245,33 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             if (!tmpl_bbool(pTemplate, ulCount, CKA_DESTROYABLE_ATTR, 1))
                 pf |= FHSM_OBJF_UNDESTROYABLE;
             (void)fhsm_token_object_set_flags(t, new_handle, pf);
+        }
+        /* And the second flags byte. A copy of a key that may not decapsulate
+         * must not be one that may -- the restriction is a property of the key
+         * material, and copying is exactly the operation an attacker would
+         * reach for otherwise.
+         *
+         * Inherited from the source first, then the override template, in that
+         * order: the same shape as the dates below, and for the same reason.
+         * Note this path can only tighten -- the helper records FALSE and
+         * never clears a bit -- so a copy cannot be used to lift a
+         * restriction the original carried. */
+        uint8_t src_f2 = 0;
+        if (fhsm_token_object_get_flags2(t, (uint32_t)hObject, &src_f2) == FHSM_RV_OK
+            && src_f2 != 0)
+            (void)fhsm_token_object_set_flags2(t, new_handle, src_f2);
+        {
+            uint32_t copy_class = 0, copy_kt = 0;
+            const uint8_t *cv = NULL; size_t cvl = 0;
+            if (fhsm_token_object_get(t, new_handle, &cv, &cvl,
+                                       &copy_class, &copy_kt) == FHSM_RV_OK) {
+                CK_RV fr = fhsm_apply_encap_flags(t, pTemplate, ulCount,
+                                                   new_handle, copy_class);
+                if (fr != FHSM_RV_OK) {
+                    (void)fhsm_token_object_destroy(t, new_handle);
+                    return fr;
+                }
+            }
         }
     }
 
