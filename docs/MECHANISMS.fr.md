@@ -2,6 +2,10 @@
 
 > English version : [`MECHANISMS.md`](MECHANISMS.md) (auto-généré par `scripts/gen_p11_thunks.py`).
 
+<!-- doc-twins: pointer -- ce fichier n'est pas une traduction de son jumeau
+     mais un aiguillage vers lui ; scripts/check_doc_twins.py ne compare pas
+     leurs revendications. -->
+
 Ce document est **auto-généré** depuis la base de mécanismes de `scripts/gen_p11_thunks.py`. Le générateur produit uniquement la version anglaise — la table et les colonnes restent identiques quelle que soit la langue, et le vocabulaire technique (CKM, FIPS, NIST SP, RFC) est uniquement disponible en anglais dans les standards normatifs.
 
 Ce wrapper français fournit le contexte général et les conventions de lecture ; pour la table complète des 78 mécanismes, voir le fichier canonique [`MECHANISMS.md`](MECHANISMS.md).
