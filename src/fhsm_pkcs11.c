@@ -1999,6 +1999,40 @@ static CK_RV fhsm_reject_mech_supplied(CK_ATTRIBUTE *t, CK_ULONG n) {
     return FHSM_RV_OK;
 }
 
+/* CKA_ALLOWED_MECHANISMS (0x40000600, an array attribute) in a creation
+ * template is refused, because this module cannot honour it.
+ *
+ * It was accepted and dropped. pkcs11-check builds the strictest possible
+ * form -- a NULL pointer with zero length, "no mechanism is allowed" -- and
+ * then encrypts with the key: accepted, ignored, and contradicted. The
+ * attribute is a per-object list of CK_MECHANISM_TYPE and there is nowhere in
+ * the object record to put one, so honouring it is a stored variable-length
+ * field and a v4 record, which is a piece of work and not a line.
+ *
+ * Refusing is the same answer C_GenerateKey has given CKA_ENCAPSULATE on a
+ * symmetric template since #125, for the same stated reason: better than
+ * something to silently ignore. A caller that set the attribute and believed
+ * it now learns otherwise, which is the whole point -- the belief was the
+ * defect.
+ *
+ * CKR_ATTRIBUTE_TYPE_INVALID, matching that precedent.
+ *
+ * Creation paths only. A search template may name it (C_FindObjectsInit
+ * matches on attributes it does not have to enforce), and C_SetAttributeValue
+ * refuses it through its own read-only arm. The callers are C_CreateObject,
+ * C_GenerateKey, C_GenerateKeyPair for both halves, C_DeriveKey, C_UnwrapKey,
+ * C_CopyObject, C_EncapsulateKey and C_DecapsulateKey -- listed here because
+ * a rule wired to some of the paths that reach a state is the defect this
+ * file keeps repairing. */
+#define CKA_ALLOWED_MECHANISMS_ATTR 0x40000600UL
+static CK_RV fhsm_reject_allowed_mechanisms(CK_ATTRIBUTE *t, CK_ULONG n) {
+    if (n == 0 || t == NULL) return FHSM_RV_OK;
+    for (CK_ULONG i = 0; i < n; ++i)
+        if (t[i].type == CKA_ALLOWED_MECHANISMS_ATTR)
+            return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
+    return FHSM_RV_OK;
+}
+
 static CK_RV fhsm_check_template(CK_ATTRIBUTE *t, CK_ULONG n) {
     if (n == 0) return FHSM_RV_OK;
     if (t == NULL) return FHSM_RV_ARGUMENTS_BAD;
@@ -2450,6 +2484,9 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (find_attr(pTemplate, ulCount, CKA_ENCAPSULATE_ATTR) >= 0 ||
         find_attr(pTemplate, ulCount, CKA_DECAPSULATE_ATTR) >= 0)
         return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
+    /* And the attribute this module cannot honour at all. Same answer, same
+     * reason as the two above. */
+    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
 
     uint32_t key_type = 0;
     uint32_t key_len  = 0;
@@ -2808,6 +2845,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * guard above rejects it otherwise), so persist it. Computed once here:
      * C_CreateObject has three object_add paths (verbatim / certificate /
      * public-key import) and they must not drift apart. #125. */
+    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+
     uint8_t trusted_flag = 0;
     {
         long ti = find_attr(pTemplate, ulCount, CKA_TRUSTED_ATTR);
@@ -3313,6 +3352,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * bounds n has to run before them and not after. It did not run here at
      * all -- see C_EncapsulateKey for how this class was found. */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* An RO session may not derive into a token object either (§5.3). */
@@ -4092,6 +4132,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !pWrappedKey || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     /* Bounds before contents; see C_DeriveKey. */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* A read-only session may not create a token object, whatever the route
@@ -4348,6 +4389,7 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* The shared secret comes from the KEM, not from the caller. */
     { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     if (pMechanism->mechanism != CKM_ML_KEM_OP)
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -4499,6 +4541,7 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     if (pMechanism->mechanism != CKM_ML_KEM_OP)
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -4960,6 +5003,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !phPub || !phPriv) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_template(pPub, ulPub);  if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_template(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_allowed_mechanisms(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_allowed_mechanisms(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
@@ -6106,6 +6151,7 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     /* Copying *into* a token object from an RO session is the same
      * violation as creating one (§5.3). */
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_reject_allowed_mechanisms(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
 
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
