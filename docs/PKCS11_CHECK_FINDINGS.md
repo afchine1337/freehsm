@@ -1908,6 +1908,109 @@ regression that did not exist. Knowing a trap is not the same as avoiding it;
 what avoided it this time was re-reading the test before running it, not
 memory.
 
+## A comment that was wrong about the test beside it (2026-09-19, night)
+
+The other three policy attributes, and one defect found by the corpus in code
+written an hour earlier — in the same evening spent proving that a cap taken
+from assumption was wrong.
+
+### What the scoped run said
+
+`-k "template or allowed_mechanisms"`, pkcs11-check 0.2.0, signed module:
+
+```
+before the readback fix   passed 89/113 · fail 0 · crash 0 · xfail 7
+after                     passed 90/113 · fail 0 · crash 0 · xfail 6
+```
+
+One deviation gone, none new, the other six byte-identical. The six that
+stayed: two pre-existing return codes unrelated to this work
+(`C_CreateObject(bad CLASS)`, `C_GenerateKeyPair(RSA, 0)`), three readbacks on
+a key that genuinely has no template — "unavailable" is the right answer and
+the harness records it as an honest deviation anyway — and one probe that
+needs a key reporting `CKA_SENSITIVE=TRUE` which its own setup does not give
+it.
+
+And the line that is no longer in the report at all: **no skip mentions any of
+the four policy attributes.** `CKA_WRAP_TEMPLATE not supported at key
+generation` and its two siblings are gone. That was the whole point of the v4
+record, and it is the only part of it that a report can show.
+
+### The defect
+
+The readback for the three nested templates built the `CK_ATTRIBUTE` array in
+module-side storage and returned pointers into a buffer that died when
+`C_GetAttributeValue` returned. A caller following them read freed stack.
+
+The comment sitting beside that code said:
+
+> pkcs11-check checks the length and the shape rather than following the
+> pointers (test_remaining_gaps asks only that the readback be at least
+> sizeof(CK_ATTRIBUTE)) [...]
+
+It follows them. `security/test_unwrap_reimport.py` builds the two levels in
+its own storage, calls `C_GetAttributeValue`, and compares each returned
+`pValue` against `ctypes.addressof` of the buffer it supplied:
+
+```python
+if int(inner_record.pValue or 0) != ctypes.addressof(inner_value):
+    return "nested CKA_SENSITIVE pointer was not caller-owned storage"
+```
+
+The sentence was true of one test file and written as though it were true of
+the suite. The half that was checked was the half that had been looked at.
+
+An array attribute is two levels and the caller owns both. The module fills
+the caller's buffers and sets the lengths, touching neither level of pointer.
+
+### Why three of our own tests passed over it
+
+`tests/test_nested_templates.c` checked that the readback reported
+`sizeof(CK_ATTRIBUTE)` — the shape the comment had assumed was enough,
+verified against the assumption that produced it. A test written from the same
+belief as the code cannot contradict it; that is the `safePrimes` shape from
+acvp-assay's own findings, and the `key_ver`/`key_gen` shape, arriving from a
+third direction in one week.
+
+The case now compares the returned pointers against the addresses it passed
+in, so the next version cannot regress past a green suite.
+
+### Two positions, named rather than buried
+
+**An attribute the stored template names and the caller omits is refused.**
+§4.9 says the stored template is applied as if the object had already been
+created, which means imposing the value. This module cannot impose an
+arbitrary attribute on an object it is creating — `CKA_LABEL` it could,
+`CKA_CLASS` it could not — and imposing the ones it can while ignoring the
+rest is a policy that holds for some attributes with nothing saying which.
+Refusing is narrower than the spec allows and never weaker than it.
+
+**`CKA_WRAP_TEMPLATE` may only name attributes the module can read back off
+an object.** It is the one of the three that compares against an existing key
+rather than a creation template, so enforcing it means reading that object's
+attributes. The readable set is seven; a template naming anything else is
+refused when the key is created. A stored policy that cannot be checked would
+have to treat the unreadable attribute as matching, and a policy that fails
+open is worse than an attribute that is refused.
+
+### Method
+
+Four times in one evening a function was defined after its first caller, and
+the compiler caught all four. Each time the cause was the same: a forward
+declaration added for one function and not for its sibling, which is the
+defect shape this entire record is about, reproduced in the ordering of the
+file describing it.
+
+Once, a script inserting guards assumed single-line predecessors. That holds
+at nine of eleven creation tails; at `C_GenerateKeyPair` the guards are three
+lines and the new blocks landed inside the previous one's failure arm. Nine of
+eleven is the same arithmetic as three of six and five of six elsewhere in
+this document.
+
+None of those five reached a commit. What did reach one was the sentence about
+what the test checks — because a compiler cannot read a comment, and the only
+thing that could was the suite the comment was describing.
+
 ## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
 
 The module does not detect an IV reused with the same GCM key across
