@@ -240,9 +240,11 @@ Properties:
   them is not a red test, it is a key nobody can reach. Every write emits v3,
   so conversion is one-way, as v1 → v2 already was.
 * Loader bound: `FHSM_OBJ_BLOB_MAX` = 12 + 1024 x (4 + 204 + 2 097 152)
-  = **2 147 696 652 bytes**. It is a bound only -- nothing allocates it. It is derived from `FHSM_OBJ_REC_V3_FIXED`;
-  forgetting to update it is what broke loading past 11 objects in v1.4.0
-  (see the regression note above).
+  = **2 147 696 652 bytes**. It is a bound only -- nothing allocates it. It was
+  derived from `FHSM_OBJ_REC_V3_FIXED` while v3 was the written format; it is
+  derived from `FHSM_OBJ_REC_V4_FIXED` now, and the figure above is v3's.
+  Forgetting to move it with the format is what broke loading past 11 objects
+  in v1.4.0 (see the regression note above).
 * A 32-byte AES key record is 240 bytes on disk (4 + 204 + 32), against 156
   under v2 — the 84 bytes are paid whether or not any metadata is set. That
   cost was accepted; see the TLV note above.
@@ -265,6 +267,103 @@ dropping one that was.
 (`flags` = `EXTRACTABLE`): `C_GetAttributeValue(CKA_VALUE)` returns the
 DER. The module never parses X.509 — validation is the PKI layer's job.
 
+## Objects blob v4 (2026-09-19 — per-object policy)
+
+Four attributes had nowhere to live, for the reason the v3 section predicted a
+v4 would be needed: `CKA_ALLOWED_MECHANISMS`, `CKA_WRAP_TEMPLATE`,
+`CKA_UNWRAP_TEMPLATE` and `CKA_DERIVE_TEMPLATE` are per-object policy of
+variable length. Three were refused outright; the fourth had partial support
+that turned out to overlap nothing (see below). v4 is v3 with a 708-byte
+policy block inserted between the metadata and the value.
+
+```
+u32  magic = 0xF5B40004
+u32  object_count | u32 next_handle
+object_count x records:
+    ... v3 fixed fields, unchanged, 204 bytes ...
+    u8   allowed_count ; u32 allowed[8]                       (33)
+    u8   wrap_count    ; entry wrap[4]                       (225)
+    u8   unwrap_count  ; entry unwrap[4]                     (225)
+    u8   derive_count  ; entry derive[4]                     (225)
+    u8   value[value_len]
+
+entry (56 bytes, 8-aligned):
+    u32  type          the CKA_ attribute constrained
+    u8   kind          1 bool, 2 ulong, 3 bytes
+    u8   len           significant bytes of value
+    u8   pad[2]
+    u8   value[48]     bool in value[0]; ulong as u64 LE; bytes over len
+```
+
+`FHSM_OBJ_REC_V4_FIXED` = 204 + 708 = **912**, pinned by a `_Static_assert`.
+The writer places the value at that offset and the reader reads it from there;
+an edit to a cap that moved one without the other would read a key as policy.
+
+Properties:
+
+* **The caps were measured, and the measurement changed the design.**
+  pkcs11-check 0.2.0 sends `CKA_ALLOWED_MECHANISMS` with one mechanism at all
+  seventeen literal sites, and the templates with one or two entries. Eight and
+  four are above anything observed. But the entries are `CKA_LABEL` — 33 to 41
+  octets — and `CKA_KEY_TYPE`, a `CK_ULONG`; not one boolean. The first draft of
+  this record held `(attribute, boolean)` pairs, which would have grown every
+  record by 228 bytes and still refused every nested-template test in the
+  corpus. The cap was never the risk; the value type was.
+* **`kind` is recorded, not derived.** A one-byte `CK_BBOOL` and the first byte
+  of a one-character label are the same octet, and deriving the shape from the
+  attribute number would make the store's reading of a stored value depend on a
+  table that changes over releases. The PKCS#11 layer still holds the caller's
+  `CK_ATTRIBUTE` when it stores the entry, so it says which shape it was handed
+  and the store never guesses.
+* **A count of zero is not "absent".** An absent `CKA_ALLOWED_MECHANISMS`
+  permits every mechanism; one set to the empty list permits none, and the
+  corpus sends that case deliberately. Both store zero. Presence is therefore
+  four bits in `flags2` (`FHSM_OBJF2_HAS_*`, 0x08–0x40), whose polarity is
+  negative — set means restricted — so a record written before those bits
+  existed reads as no policy, which is what it means. Same problem
+  `start_date_len` answered, same answer.
+* **A cap is part of the format.** A count above its cap rejects the record.
+  Unlike an unknown `flags2` bit, which a reader can safely ignore, a count it
+  cannot store is a policy it would silently drop — and a dropped policy reads
+  as permission. A build wanting nine mechanisms or five entries must emit v5,
+  not more entries in a v4 record.
+* **Read v1 / v2 / v3, write v4.** v3 records load with all four counts at
+  zero and no `HAS_*` bit, which is what they mean. `tests/fixtures/token-v3.tok`
+  is a real file written by the pre-v4 build and kept as a fixture;
+  `tests/test_v3_fixture.c` loads it. A synthesised v3 blob would have been
+  built from the same beliefs the reader holds and would have agreed with
+  itself.
+* Loader bound: `FHSM_OBJ_BLOB_MAX` is now derived from
+  `FHSM_OBJ_REC_V4_FIXED`. Forgetting to move it is what broke loading past 11
+  objects in v1.4.0; the same is true of `write_atomic`'s `pt_sz`, which sizes
+  the plaintext buffer and would have overflowed it on the first write.
+* A 32-byte AES key record is 948 bytes on disk (4 + 912 + 32), against 240
+  under v3. The 708 bytes are paid whether or not any policy is set — the same
+  trade the v3 section took, for the same reason: a fourth hand-written
+  variable-length parser costs more than a fixed extension.
+
+### What the previous `CKA_UNWRAP_TEMPLATE` support covered
+
+`fhsm_parse_unwrap_template` accepted `CKA_SENSITIVE=TRUE` and
+`CKA_EXTRACTABLE=FALSE` and refused the rest, described in its own comment as
+deliberately partial. Its first test on each nested entry was
+`ulValueLen != 1`, and every entry anything sends is a `CK_ULONG` or a 33-to-41
+byte `CKA_LABEL`. The two attributes it supported were the only two nobody
+sends, so the overlap with what is tested was zero — since #125, invisibly,
+because a skip for "not supported" and a skip for "not seen" are the same line
+in a report.
+
+### Enforcement, which is where the record earns its place
+
+Storage is half of it. `CKA_ALLOWED_MECHANISMS` is consulted at ten sites (the
+four `C_*Init`, `C_DeriveKey`, `C_WrapKey`, `C_UnwrapKey`, `C_EncapsulateKey`,
+`C_DecapsulateKey`, `C_DigestKey`). `CKA_UNWRAP_TEMPLATE` and
+`CKA_DERIVE_TEMPLATE` are compared against the creation template in
+`C_UnwrapKey` and `C_DeriveKey`. `CKA_WRAP_TEMPLATE` is the odd one: `C_WrapKey`
+names a key that already exists, so it is compared against that object's
+attributes, which is why it can only name attributes the module can read back
+and why a template naming anything else is refused at creation.
+
 ## Versioning policy
 
 Header `Version` (offset 4) is bumped on any *header* layout change;
@@ -273,6 +372,14 @@ reject unknown versions/magics rather than guess. Future extensions are additive
 fixed layout over a CBOR/TLV `extras` blob deliberately (see above): with no
 installed base, bumping the magic again is cheaper than carrying another
 hand-written parser.
+
+v4 is that bump, and it is the evidence for the reasoning rather than a
+repetition of it. The extension cost 708 fixed bytes per record and no new
+parser shape — the same field-at-offset reads v3 already used, with four more
+bounded counts. What it did cost was a measurement: the first draft sized the
+entries for booleans because that is what the attributes looked like from the
+spec, and what the corpus sends is labels. A TLV blob would have absorbed that
+mistake silently and carried it.
 
 ## What a mutation costs (measured 2026-08-16)
 
