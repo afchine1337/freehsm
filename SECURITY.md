@@ -126,9 +126,8 @@ which signs `tests/test_integrity`, flips a byte and requires the refusal —
 the only place in the suite that runs the integrity check without
 `FHSM_INTEGRITY_ALLOW_UNSIGNED`.
 
-**Disclosure decision : no CVE.** The project is in pre-certification
-status (FIPS 140-3 Level 1 / CC EAL4+ candidate) with no known production
-deployments. The defect is disclosed transparently via :
+**Disclosure decision : no CVE.** The project holds no certificate and
+seeks none, and has no known production deployments. The defect is disclosed transparently via :
 
 - the CHANGELOG entry for v1.2.1 ;
 - this SECURITY.md section ;

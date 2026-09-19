@@ -339,7 +339,7 @@ Expected output excerpt :
 
 ```
 Cryptoki version 3.2
-Manufacturer     FreeHSM C (FIPS 140-3 candidate)
+Manufacturer     Simorgh Labs
 Library          libfreehsm.so <version>-FIPS
 Using slot 0 with a present token (0x0)
 ```

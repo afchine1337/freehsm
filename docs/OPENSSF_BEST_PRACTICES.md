@@ -16,8 +16,8 @@ both the `passing`, `silver` and `gold` tiers.
    `afchine1337`.
 2. Click **"Add a new project"**.
 3. Enter:
-   - **Project home page** : `https://github.com/afchine1337/freehsm-c`
-   - **Source repo URL**    : `https://github.com/afchine1337/freehsm-c.git`
+   - **Project home page** : `https://github.com/afchine1337/freehsm`
+   - **Source repo URL**    : `https://github.com/afchine1337/freehsm.git`
 4. Fill in the questionnaire using the answers below.
 5. Submit. You will get an integer project ID, e.g. `9876`.
 6. Replace `XXXX` by that ID in `README.md` (badge URL).
@@ -36,16 +36,16 @@ The form auto-saves. You can come back and revise answers at any time.
 
 | Criterion | Status | Evidence URL |
 |---|---|---|
-| `description_good` | Met | https://github.com/afchine1337/freehsm-c/blob/main/README.md#freehsm-c--fips-140-3--cc-eal4-candidate |
-| `interact` | Met | https://github.com/afchine1337/freehsm-c/issues |
-| `contribution` | Met | https://github.com/afchine1337/freehsm-c/blob/main/CONTRIBUTING.md |
-| `contribution_requirements` | Met | https://github.com/afchine1337/freehsm-c/blob/main/CONTRIBUTING.md#dco-and-sign-off |
-| `floss_license` | Met | https://github.com/afchine1337/freehsm-c/blob/main/LICENSE |
+| `description_good` | Met | https://github.com/afchine1337/freehsm/blob/main/README.md |
+| `interact` | Met | https://github.com/afchine1337/freehsm/issues |
+| `contribution` | Met | https://github.com/afchine1337/freehsm/blob/main/CONTRIBUTING.md |
+| `contribution_requirements` | Met | https://github.com/afchine1337/freehsm/blob/main/CONTRIBUTING.md#dco-and-sign-off |
+| `floss_license` | Met | https://github.com/afchine1337/freehsm/blob/main/LICENSE |
 | `floss_license_osi` | Met | Apache-2.0 is OSI-approved. |
 | `license_location` | Met | `LICENSE` at repo root + `LICENSES/Apache-2.0.txt` (REUSE). |
 | `discussion` | Met | GitHub Discussions + Issues. |
 | `english` | Met | All public-facing documentation is bilingual EN/FR. |
-| `documentation_basics` | Met | https://github.com/afchine1337/freehsm-c/blob/main/README.md + `docs/` |
+| `documentation_basics` | Met | https://github.com/afchine1337/freehsm/blob/main/README.md + `docs/` |
 | `documentation_interface` | Met | PKCS#11 v3.2 public symbols documented in `docs/MECHANISMS.md`. |
 | `sites_https` | Met | github.com, gitlab.com, codeberg.org all enforce TLS. |
 
@@ -59,14 +59,14 @@ The form auto-saves. You can come back and revise answers at any time.
 | `repo_distributed` | Met | Git is distributed; three independent mirrors. |
 | `version_unique` | Met | Semantic versioning (https://semver.org). |
 | `version_semver` | Met | `MAJOR.MINOR.PATCH` enforced. |
-| `release_notes` | Met | https://github.com/afchine1337/freehsm-c/blob/main/CHANGELOG.md |
+| `release_notes` | Met | https://github.com/afchine1337/freehsm/blob/main/CHANGELOG.md |
 | `release_notes_vulns` | Met | CHANGELOG flags CVE fixes explicitly. |
 
 ### Reporting
 
 | Criterion | Status | Evidence URL |
 |---|---|---|
-| `report_process` | Met | https://github.com/afchine1337/freehsm-c/blob/main/SECURITY.md |
+| `report_process` | Met | https://github.com/afchine1337/freehsm/blob/main/SECURITY.md |
 | `report_tracker` | Met | GitHub Issues + private security advisories. |
 | `report_responses` | Met | Maintainer commits to 7-day acknowledgement (cf. `SECURITY.md`). |
 | `enhancement_responses` | Met | Triage cadence documented in `CONTRIBUTING.md`. |

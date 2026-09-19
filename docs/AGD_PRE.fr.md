@@ -409,7 +409,7 @@ sudo cmp /tmp/plain.bin /tmp/recovered.bin && echo "ROUND-TRIP OK"
 
 Le module est *opérationnellement validé* quand **tous** les critères suivants sont vrais simultanément :
 
-1. `pkcs11-tool --show-info` affiche `Cryptoki version 3.2 / Manufacturer FreeHSM C (FIPS 140-3)`.
+1. `pkcs11-tool --show-info` affiche `Cryptoki version 3.2 / Manufacturer Simorgh Labs`.
 2. `pkcs11-tool --list-mechanisms` énumère au moins les 17 mécanismes FIPS-approved wired.
 3. Le test §8.1 affiche `Signature Verified Successfully` — preuve qu'un tiers indépendant accepte la signature ECDSA produite par le module.
 4. Le test §8.2 affiche `ROUND-TRIP OK` — preuve que la clé privée RSA reste interne au HSM et que le module déchiffre correctement un input externe.

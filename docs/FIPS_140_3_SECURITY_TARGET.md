@@ -52,7 +52,7 @@ Policy for a software cryptographic module contains.
 | **Operational Environment (OE)** | Debian 13 / Linux kernel ≥ 6.1 / glibc ≥ 2.40 / OpenSSL 3.5.6 FIPS provider |
 | **Approved Cryptographic Algorithms** | See §3 below |
 | **Tested Configuration** | x86_64 Debian 13.0 stable, FIPS-mode enabled in `/etc/ssl/openssl.cnf` |
-| **Security Level Sought** | **Level 1** (initial) ; Level 2 candidate after AVA_VAN.5 testing |
+| **Security Level Addressed** | **Level 1** ; Level 2 requirements noted where they differ |
 
 ---
 
@@ -216,7 +216,7 @@ Fixed in v1.2.1 (commit `63e1b35`, 2026-06-21). The comparison block now returns
 
 A `killer test` validates the fix : after re-signing the binary with the v1.2.1 build, the `tests/test_smoke` harness loads the signed binary correctly and the `tests/test_smoke.tampered` variant (1 byte flipped in `.text`) is rejected with `C_Initialize` returning `0x80000002 = FHSM_RV_INTEGRITY_FAILED`. The same procedure on a v1.2.0 binary returns OK silently, confirming the defect's behaviour on the affected window.
 
-Discovery was triggered by an investigation of a dev-environment integrity quirk on the maintainer's VM ; the visibility of the underlying defect was enabled by the v1.2.0 ALC_DVS-grade decomposition of `C_CreateObject` (see §13.5 and §13.8), which sharpened the focus on the integrity surface and made the dev-env quirk worth chasing. Pre-certification status of the project means no CVE is requested ; full disclosure is in CHANGELOG, this Security Target, and the GitHub Security Advisory in informational mode.
+Discovery was triggered by an investigation of a dev-environment integrity quirk on the maintainer's VM ; the visibility of the underlying defect was enabled by the v1.2.0 ALC_DVS-grade decomposition of `C_CreateObject` (see §13.5 and §13.8), which sharpened the focus on the integrity surface and made the dev-env quirk worth chasing. The project holds no certificate and seeks none, so no CVE is requested ; full disclosure is in CHANGELOG, this Security Target, and the GitHub Security Advisory in informational mode.
 
 #### 9.1.2 v1.2.2 fix : raw CKM_ECDSA / CKM_RSA_PKCS sign+verify
 
@@ -348,7 +348,7 @@ The module has no "non-approved" mode in shipping builds. Development builds may
 
 ## 12. Mitigation of Other Attacks (§7.12)
 
-Out of scope at Security Level 1. Will be addressed at Level 2 candidate review (AVA_VAN.5).
+Out of scope at Security Level 1 ; it is a Level 2 requirement (AVA_VAN.5).
 
 Documented future work :
 * Side-channel hardening audit and patches (see `docs/SIDE_CHANNEL.md`)
@@ -499,7 +499,7 @@ The five-step protocol :
 
 4. **Killer-test artifact** : For every defect that has the structure "a malicious input would have been accepted", a reproducible artifact is produced that demonstrates the difference between the buggy and the fixed behaviour. For v1.2.1, the artifact is `tests/test_smoke.tampered` (1 byte flipped in `.text`, runs OK against pre-v1.2.1, returns `0x80000002` against v1.2.1).
 
-5. **Scope the temporal impact via git blame** : The commit that introduced the defect is identified. The set of affected releases is enumerated. The disclosure decision (CVE vs informational advisory) is made based on the pre-certification status, the deployment landscape (none known), and the project's transparency-first hygiene.
+5. **Scope the temporal impact via git blame** : The commit that introduced the defect is identified. The set of affected releases is enumerated. The disclosure decision (CVE vs informational advisory) is made based on the absence of any certificate, the deployment landscape (none known), and the project's transparency-first hygiene.
 
 This protocol applies to any future evidence-bearing surface defect : the KAT runner (covered by the v1.1.13 → v1.1.18 cross-validation methodology, §13.6), the integrity self-test (covered by the v1.2.1 fix), the structured fuzzing harnesses (covered by the v1.2.0 ALC_DVS-grade decomposition, §13.5), the audit log (not yet a surface that has produced a defect, but eligible). The protocol is documented as a developer expectation in `SECURITY.md` and `CONTRIBUTING.md`.
 
