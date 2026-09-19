@@ -1715,6 +1715,85 @@ back with a buffer. `CKR_OPERATION_ACTIVE`. The module was right; the test was
 wrong. The case added to repair it now pins that an operation survives a size
 query, which the module had correct and nothing held.
 
+## Two findings in the harness, not in the module (2026-09-19)
+
+Both were read out of pkcs11-check 0.2.0's own source and then measured before
+being written up. Neither is a module defect, and neither cost us a fix; they
+are recorded here because the numbers are ours and would otherwise live only
+in a run directory.
+
+    pkcs11-check   0.2.0 (b7f860d)
+    openssl        3.5.7
+    module-sha256  e62ec7b43981685457b28f673d02f4abd9b516dcb8cf38648aaa5c654a6a3ebd
+    scope          -k "mldsa_siggen or mldsa_sigver or
+                        always_authenticate_with_context_login"
+    result         passed 225/341 · fail 0 · crash 0 · xfail 71
+
+### Three tests disagree about `C_Login(CKU_CONTEXT_SPECIFIC)`
+
+Three places call it with no operation in progress.
+`test_always_authenticate.py::test_context_specific_login_without_active_op_rejected`
+and `test_v30_session.py::test_context_specific_login_without_active_op` both
+require `CKR_OPERATION_NOT_INITIALIZED`, the second quoting the v2.40 §11.6
+error table. `test_access_levels.py::test_always_authenticate_with_context_login`
+expects `CKR_USER_ALREADY_LOGGED_IN` — its own comment states the order, "Do
+context-specific login, then sign", and no `C_SignInit` precedes it.
+
+Under 0.1.9 our answer produced a skip. Under 0.2.0 it produces one deviation:
+
+    [1] nonspec_reject -> SPEC_REVIEW - e.g. C_Login
+        actual_ckr CKR_OPERATION_NOT_INITIALIZED
+        "Context-specific C_Login for CKA_ALWAYS_AUTHENTICATE:
+         provider rejected with a non-spec CKR"
+
+The sibling test in the same file has the spec's order — `C_SignInit`, then
+the context login, then `C_Sign` — so the suite contains both shapes.
+
+### Hash-ML-DSA for SHA2 and SHAKE is gated and recorded as `ML_DSA`
+
+`get_mldsa_mechanism` normalises the ACVP spelling before looking up
+(`SHA2-` → `SHA-`, `SHAKE-` → `SHAKE`) and raises on a miss. `_get_mech_name`,
+in the test module, is keyed on the PKCS#11 spelling, is handed the ACVP one,
+and returns `"ML_DSA"` on a miss. So the harness performs `CKM_HASH_ML_DSA_*`
+while gating and recording `CKM_ML_DSA`.
+
+ACVP and PKCS#11 spell `SHA3-256` identically, so the SHA3 third of the family
+resolves correctly and is the control case:
+
+    skipped, naming the mechanism:  HASH_ML_DSA_SHA3_{224,256,384,512}  45
+    run and recorded as ML_DSA:     SHA2-* and SHAKE-*                  70
+        46  C_Sign,   mechanism ML_DSA,  CKR_MECHANISM_INVALID
+        20  C_Verify, lifecycle,         CKR_MECHANISM_INVALID
+         4  sigver,                      CKR_MECHANISM_INVALID
+
+Same module, same absent capability, two outcomes. No skip in the run names
+`HASH_ML_DSA_SHA224/256/384/512` or `HASH_ML_DSA_SHAKE128/256`.
+
+That the 70 are the pre-hashed vectors needs no access to the corpus: 180
+`TestMlDsaSigGen` vectors passed in the same run signing with pure
+`CKM_ML_DSA`. Had these 70 reached `C_SignInit` with that mechanism they would
+have signed too. The audit line therefore reads `C_Sign ML_DSA ... advertised
+ML-DSA operation is not operational` about a mechanism that is operational
+180 times in the same report.
+
+### Method
+
+Both numbers in the first draft were wrong, and the scoped run that corrected
+them took minutes against a corpus that takes a night.
+
+The count was written as 199 from memory of a full-corpus run; it is 70, and
+the 199 belonged to a different set entirely. The scope was written as "every
+pre-hashed vector"; it is SHA2 and SHAKE only, because the SHA3 spellings
+coincide — and that coincidence turned out to be the strongest evidence in the
+report, since it puts the working and the broken path side by side under one
+module.
+
+Neither error was in the reading of the code, which held. Both were in numbers
+recalled rather than measured, which is the same shape as the stale checkout
+on 2026-09-17 and the stale module on 2026-09-11. The rule that keeps earning
+its place: a claim with a number in it gets the number from a file, not from
+memory of a file.
+
 ## R3 — `TestGcmIvReuse::test_gcm_iv_reuse_same_key`
 
 The module does not detect an IV reused with the same GCM key across
