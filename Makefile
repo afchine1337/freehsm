@@ -119,7 +119,11 @@ DEBUG_FLAGS ?= -g3 -O2
 # Never ship a SANITIZE build -- it is for the store-format and parser work,
 # where a bounds bug does not show up as a failing test but as an unreadable
 # token months later.
-#   make SANITIZE=1 && make SANITIZE=1 tests/test_token
+#   make asan                    (the whole suite, and it cannot be got wrong)
+#   make SANITIZE=1 && make SANITIZE=1 tests/test_token   (one binary)
+# The variable must be repeated: it reaches LDFLAGS only on the invocation
+# that sets it, so dropping it from the second command links instrumented
+# objects without the runtime. See the `asan` target below.
 # TSAN=1 builds with ThreadSanitizer. Separate from SANITIZE=1 because ASan and
 # TSan cannot coexist in one binary.
 #
@@ -770,6 +774,45 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 # against RSA_size(key). pkcs11-check test_oaep_decrypt_correctness.
 tests/test_oaep_decrypt_size: tests/test_oaep_decrypt_size.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
+
+# ---------------------------------------------------------------------------
+# asan --- build and run the whole suite under AddressSanitizer + UBSan.
+#
+# SAN_FLAGS reaches CFLAGS and LDFLAGS only on the invocation that sets
+# SANITIZE=1, so the two-step usage has to repeat the variable. Dropping it
+# from the second command links instrumented objects without the runtime and
+# fails with undefined __asan_* / __ubsan_* references. That is not a subtle
+# trap, but it is an invisible one: the flag definition is forty lines away
+# from the line documenting how to pass it, and reading the first without the
+# second is the obvious thing to do.
+#
+# The cost of the trap was not the failed link. It was that `make SANITIZE=1`
+# existed for months and the suite had never been taken through it end to
+# end. The first complete run found four defects, one of them in the module:
+# a KAT identifier that pointed into a dead stack frame and was read by the
+# code that reports a failed self-test.
+#
+# The leading clean is not politeness. .obj/ holds whichever build ran last,
+# and a mixture of instrumented and plain objects is precisely what fails.
+#
+# The tree is left instrumented on purpose, so that a build which is not
+# shippable cannot be mistaken for one that is. Never ship it.
+.PHONY: asan
+asan:
+	$(MAKE) clean
+	$(MAKE) SANITIZE=1
+	$(MAKE) SANITIZE=1 tests
+	@echo
+	@echo "[asan] suite complete under AddressSanitizer + UBSan."
+	@echo "[asan] This tree is instrumented and must not be shipped or signed."
+	@echo "[asan] Restore with:  make clean && make && make integrity"
+
+# No `tsan` twin yet, deliberately. TSAN=1 carries the same two-invocation
+# trap and deserves the same treatment, but the full suite has never been
+# run under ThreadSanitizer here and a target that claims to run it green
+# would be asserting something nobody has measured. The Makefile comment
+# above points TSAN=1 at tests/test_concurrency, which is what it is known
+# to do.
 
 .PHONY: tests
 # Every test gets its own tokens directory. It used to be only the ones that

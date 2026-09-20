@@ -5,6 +5,7 @@
 #
 #   - lint       : SPDX header presence on every .c/.h
 #   - build      : Debian 13 image with OpenSSL 3.5 FIPS provider
+#   - sanitizers : the whole suite under AddressSanitizer + UBSan
 #   - test-smoke : the built-in static smoke test
 #   - test-cov   : full PKCS#11 coverage matrix (27 PASS / 5 SKIP target)
 #   - repro      : two-build reproducibility check
@@ -235,6 +236,49 @@ jobs:
             libfreehsm.so
             build.log
             integrity.log
+          retention-days: 14
+
+  # AddressSanitizer + UBSan over the whole test suite.
+  #
+  # `make SANITIZE=1` had been in the Makefile for months and the suite had
+  # never been taken through it end to end, because the flags reach LDFLAGS
+  # only on the invocation that sets the variable and the documented two-step
+  # usage is easy to half-remember. The first complete run found four defects,
+  # one of them in the module: a KAT vector identifier pointing into a dead
+  # stack frame, read by the code that reports a failed self-test.
+  #
+  # Nothing about that was hard to find. It only needed someone to run the
+  # tool, which is the argument for the job rather than for the discipline.
+  #
+  # Gating. It is green on the workstation as of this commit; the first CI run
+  # is the first measurement on the runner's OpenSSL, which is not the same
+  # build. If it reports a leak inside libcrypto rather than in our code, the
+  # answer is a named suppression file saying which allocation and why -- not
+  # continue-on-error, which would put this job back where SANITIZE=1 already
+  # was: present, and never read.
+  sanitizers:
+    runs-on: ubuntu-latest
+    needs: lint
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build and run the suite under ASan + UBSan
+        run: |
+          set -o pipefail
+          make asan 2>&1 | tee asan.log
+
+      # The log, not just the exit status: a sanitizer report that a later
+      # step overwrites is a finding nobody reads.
+      - name: Upload the sanitizer log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asan-log
+          path: asan.log
           retention-days: 14
 
   test-coverage-matrix:

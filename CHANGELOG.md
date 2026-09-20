@@ -65,9 +65,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   that cannot sign is refused at import rather than at the first `C_Sign`.
 
 ### Changed
-* `make SANITIZE=1` now runs the whole suite clean. The build was available
-  before and had never been taken all the way through; the four defects it
-  surfaced are fixed in this entry and in the test suite.
+* **`make asan`**, and a CI job that runs it. `make SANITIZE=1` had been in
+  the Makefile for months: the flags reach `LDFLAGS` only on the invocation
+  that sets the variable, so the usage is two commands and the second is easy
+  to write without it. The suite had never been taken through end to end. The
+  first complete run found four defects, one of them in the module.
+
+  The target does the clean and both invocations, and says on exit that the
+  tree it leaves behind is instrumented and must not be signed. No `tsan`
+  twin yet — `TSAN=1` carries the same trap, but the suite has never been run
+  under ThreadSanitizer here and a target claiming otherwise would assert
+  something nobody has measured.
 
 ## [2.1.0] --- 2026-09-09
 
