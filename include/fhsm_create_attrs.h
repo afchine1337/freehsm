@@ -65,6 +65,18 @@ typedef enum {
     FHSM_CREATE_PATH_ED448_PUB,
     /* CKO_PUBLIC_KEY + CKK_RSA. CKA_MODULUS + CKA_PUBLIC_EXPONENT. */
     FHSM_CREATE_PATH_RSA_PUB,
+    /* CKO_PRIVATE_KEY + CKK_RSA, given as components rather than as a blob.
+     *
+     * A PKCS#11 RSA private key *is* its components (§C.6.3): CKA_MODULUS,
+     * CKA_PUBLIC_EXPONENT, CKA_PRIVATE_EXPONENT, and optionally the CRT five.
+     * Every private key reached parse_verbatim, which requires CKA_VALUE, so
+     * a caller importing a key the way the spec describes was answered
+     * CKR_TEMPLATE_INCOMPLETE -- for an attribute the module never asks for.
+     *
+     * The verbatim path stays: a CKO_PRIVATE_KEY that does carry CKA_VALUE is
+     * a DER blob and is still taken as one. This path is chosen only when
+     * CKA_VALUE is absent, so nothing that worked before changes. */
+    FHSM_CREATE_PATH_RSA_PRIV,
     /* CKO_CERTIFICATE + CKA_CERTIFICATE_TYPE = CKC_X_509 (#110).
      * CKA_VALUE = complete X.509 certificate, DER. CKA_KEY_TYPE is NOT
      * required for this class (PKCS#11 v3.2 par. 4.6.3) ; cert_type
@@ -114,6 +126,19 @@ typedef struct fhsm_create_attrs_s {
     size_t              rsa_modulus_len;
     const uint8_t      *rsa_exponent;
     size_t              rsa_exponent_len;
+
+    /* === RSA private key path ===
+     * Shares rsa_modulus / rsa_exponent above with the public path: they are
+     * the same two attributes and splitting them would let the two halves
+     * disagree about CKA_MODULUS. d is required; the CRT five are optional and
+     * a NULL pointer means the caller did not supply that one. OpenSSL derives
+     * what is missing. */
+    const uint8_t      *rsa_d;      size_t rsa_d_len;
+    const uint8_t      *rsa_p;      size_t rsa_p_len;
+    const uint8_t      *rsa_q;      size_t rsa_q_len;
+    const uint8_t      *rsa_dmp1;   size_t rsa_dmp1_len;
+    const uint8_t      *rsa_dmq1;   size_t rsa_dmq1_len;
+    const uint8_t      *rsa_iqmp;   size_t rsa_iqmp_len;
 } fhsm_create_attrs_t;
 
 /* Return codes match the subset of FHSM_RV / CKR codes that C_CreateObject

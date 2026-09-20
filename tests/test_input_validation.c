@@ -11,12 +11,56 @@
  * ========================================================================= */
 #include <stdio.h>
 #include <string.h>
+#include <stddef.h>
 #include <dlfcn.h>
 
 typedef unsigned long CK_ULONG; typedef unsigned char CK_BYTE;
 typedef CK_ULONG CK_RV, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_SLOT_ID, CK_FLAGS;
 typedef struct { CK_ULONG type; void *pValue; CK_ULONG ulValueLen; } CK_ATTRIBUTE;
 typedef struct { CK_ULONG mechanism; void *p; CK_ULONG l; } CK_MECHANISM;
+
+/* CK_TOKEN_INFO, PKCS#11 v3.2 C.6.3, in full.
+ *
+ * The PIN-bounds check below used to declare a private look-alike that
+ * stopped at ulMinPinLen, because those were the only two fields it read.
+ * C_GetTokenInfo fills the whole structure, so it wrote ulTotalPublicMemory
+ * eight bytes past the end of a stack object -- reported by ASan as a
+ * stack-buffer-overflow the first time the suite was built with SANITIZE=1.
+ * The module was right; the caller had described the contract as the part
+ * of it that interested it.
+ *
+ * This file declares its own PKCS#11 types on purpose: it dlopen()s the
+ * module and must not share a header with it, so that a change to the
+ * module's idea of the ABI shows up here as a failure rather than being
+ * silently agreed to. That only works if what is declared is the whole
+ * structure. The size assertion below is what keeps the two in step; the
+ * 204 bytes are the standard's, quoted at src/fhsm_pkcs11.c:1112. */
+typedef struct {
+    CK_BYTE  label[32];
+    CK_BYTE  manufacturerID[32];
+    CK_BYTE  model[16];
+    CK_BYTE  serialNumber[16];
+    CK_FLAGS flags;
+    CK_ULONG ulMaxSessionCount;
+    CK_ULONG ulSessionCount;
+    CK_ULONG ulMaxRwSessionCount;
+    CK_ULONG ulRwSessionCount;
+    CK_ULONG ulMaxPinLen;
+    CK_ULONG ulMinPinLen;
+    CK_ULONG ulTotalPublicMemory;
+    CK_ULONG ulFreePublicMemory;
+    CK_ULONG ulTotalPrivateMemory;
+    CK_ULONG ulFreePrivateMemory;
+    CK_BYTE  hardwareVersion[2];
+    CK_BYTE  firmwareVersion[2];
+    CK_BYTE  utcTime[16];
+} CK_TOKEN_INFO;
+/* 204 is the standard's useful size, not sizeof: the CK_ULONG members give
+ * the structure an alignment of 8, so the compiler pads it to 208. What has
+ * to hold is that the last field ends where the standard says it does --
+ * assert that, not a number rounded up by the ABI. */
+_Static_assert(offsetof(CK_TOKEN_INFO, utcTime) + 16 == 204,
+               "CK_TOKEN_INFO fields end at 204 bytes (PKCS#11 v3.2 C.6.3)");
 
 #define CKR_OK 0UL
 #define CKR_ATTRIBUTE_VALUE_INVALID  0x13UL
@@ -132,12 +176,12 @@ int main(void) {
          * invisible until an application trusted ulMinPinLen. */
         CK_RV (*GTI)(CK_ULONG, void*);
         *(void**)&GTI = dlsym(H, "C_GetTokenInfo");
-        struct { CK_BYTE l[32], m[32], mo[16], sn[16]; CK_ULONG f, a,b,c,d, maxp, minp; } ti;
+        CK_TOKEN_INFO ti;
         memset(&ti, 0, sizeof ti);
         if (GTI && GTI(0, &ti) == CKR_OK) {
-            if (ti.minp != 4 || ti.maxp != 64) {
+            if (ti.ulMinPinLen != 4 || ti.ulMaxPinLen != 64) {
                 fprintf(stderr, "FAIL: advertised PIN bounds %lu..%lu, enforced 4..64\n",
-                        (unsigned long)ti.minp, (unsigned long)ti.maxp);
+                        (unsigned long)ti.ulMinPinLen, (unsigned long)ti.ulMaxPinLen);
                 fails++;
             } else {
                 printf("  %-38s -> OK\n", "advertised PIN bounds match enforced");

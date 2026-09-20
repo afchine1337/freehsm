@@ -159,8 +159,15 @@ static int ref_build(ref_t *r, int status, int reason, int with_next) {
     if (status == V_OCSP_CERTSTATUS_REVOKED) revt = ASN1_TIME_set(NULL, 1754000000);
     if (!thisu || (with_next && !nextu)) goto out;
 
+    /* add1, not add0: OCSP_basic_add1_status duplicates the CertID and the
+     * three times, and the caller keeps its own. This line used to clear cid
+     * with the comment "consumed", so the OCSP_CERTID_free below freed NULL
+     * and the real CertID leaked with its four inner ASN1_STRINGs -- 40
+     * allocations across the eight ref_build calls, which is what
+     * LeakSanitizer reported the first time the suite was built with
+     * SANITIZE=1. The naming convention was the documentation: OpenSSL says
+     * add1 when the caller retains ownership, add0 when it does not. */
     if (!OCSP_basic_add1_status(bs, cid, status, reason, revt, thisu, nextu)) goto out;
-    cid = NULL;                              /* consumed */
     if (!OCSP_basic_add1_cert(bs, r->ca)) goto out;
     if (OCSP_basic_sign(bs, r->ca, r->key, NULL, NULL, 0) != 1) goto out;
 

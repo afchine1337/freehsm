@@ -26,6 +26,12 @@
 #define FHSM_CKA_EC_POINT           0x00000181UL
 #define FHSM_CKA_MODULUS            0x00000120UL
 #define FHSM_CKA_PUBLIC_EXPONENT    0x00000122UL
+#define FHSM_CKA_PRIVATE_EXPONENT   0x00000123UL
+#define FHSM_CKA_PRIME_1            0x00000124UL
+#define FHSM_CKA_PRIME_2            0x00000125UL
+#define FHSM_CKA_EXPONENT_1         0x00000126UL
+#define FHSM_CKA_EXPONENT_2         0x00000127UL
+#define FHSM_CKA_COEFFICIENT        0x00000128UL
 
 #define FHSM_CKO_DATA               0x00000000UL
 #define FHSM_CKO_CERTIFICATE        0x00000001UL
@@ -268,6 +274,44 @@ static fhsm_parse_rv_t parse_rsa_pub(
     return FHSM_PARSE_OK;
 }
 
+/* CKO_PRIVATE_KEY + CKK_RSA given as components (§C.6.3).
+ *
+ * n, e and d are required: without any one of them there is no private key,
+ * only a description of one. The CRT five are optional -- OpenSSL derives what
+ * is missing, and a caller that has only the bare triple is entitled to import
+ * it.
+ *
+ * Nothing is validated here beyond presence. Whether the components are a
+ * consistent key is a question for the arithmetic, not for a template parser,
+ * and the answer comes from EVP_PKEY_fromdata at the boundary. Guessing here
+ * would put half a validation in one file and half in another.
+ */
+static fhsm_parse_rv_t parse_rsa_priv(
+    const fhsm_attr_t *t, unsigned long n,
+    fhsm_create_attrs_t *attrs) {
+    struct { unsigned long cka; const uint8_t **p; size_t *len; int required; } m[] = {
+        { FHSM_CKA_MODULUS,          &attrs->rsa_modulus,  &attrs->rsa_modulus_len,  1 },
+        { FHSM_CKA_PUBLIC_EXPONENT,  &attrs->rsa_exponent, &attrs->rsa_exponent_len, 1 },
+        { FHSM_CKA_PRIVATE_EXPONENT, &attrs->rsa_d,        &attrs->rsa_d_len,        1 },
+        { FHSM_CKA_PRIME_1,          &attrs->rsa_p,        &attrs->rsa_p_len,        0 },
+        { FHSM_CKA_PRIME_2,          &attrs->rsa_q,        &attrs->rsa_q_len,        0 },
+        { FHSM_CKA_EXPONENT_1,       &attrs->rsa_dmp1,     &attrs->rsa_dmp1_len,     0 },
+        { FHSM_CKA_EXPONENT_2,       &attrs->rsa_dmq1,     &attrs->rsa_dmq1_len,     0 },
+        { FHSM_CKA_COEFFICIENT,      &attrs->rsa_iqmp,     &attrs->rsa_iqmp_len,     0 },
+    };
+    for (size_t i = 0; i < sizeof m / sizeof m[0]; ++i) {
+        long ix = fhsm_find_attr(t, n, m[i].cka);
+        if (ix < 0 || t[ix].pValue == NULL || t[ix].ulValueLen == 0) {
+            if (m[i].required) return FHSM_PARSE_TEMPLATE_INCOMPLETE;
+            continue;
+        }
+        *m[i].p   = (const uint8_t *)t[ix].pValue;
+        *m[i].len = (size_t)t[ix].ulValueLen;
+    }
+    attrs->path = FHSM_CREATE_PATH_RSA_PRIV;
+    return FHSM_PARSE_OK;
+}
+
 /* ---------------------------------------------------------------------------
  * Public entry point. Reads CKA_CLASS / CKA_KEY_TYPE / CKA_LABEL / CKA_ID
  * then dispatches to the right sub-parser based on (cko, ckk).
@@ -343,6 +387,13 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
     if (attrs->cko == FHSM_CKO_PRIVATE_KEY && attrs->ckk == FHSM_CKK_EC
         && fhsm_find_attr(pTemplate, ulCount, FHSM_CKA_EC_PARAMS) < 0)
         return FHSM_PARSE_TEMPLATE_INCONSISTENT;
+
+    /* An RSA private key given as components rather than as a blob. Chosen
+     * only when CKA_VALUE is absent, so every import that worked before --
+     * including the PQC private keys, which are verbatim -- is untouched. */
+    if (attrs->cko == FHSM_CKO_PRIVATE_KEY && attrs->ckk == FHSM_CKK_RSA
+        && fhsm_find_attr(pTemplate, ulCount, FHSM_CKA_VALUE) < 0)
+        return parse_rsa_priv(pTemplate, ulCount, attrs);
 
     if (attrs->cko == FHSM_CKO_SECRET_KEY
         || attrs->cko == FHSM_CKO_PRIVATE_KEY)

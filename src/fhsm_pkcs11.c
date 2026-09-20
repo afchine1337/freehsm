@@ -3630,6 +3630,74 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         EVP_PKEY_CTX_free(pctx);
         OSSL_PARAM_free(params);
 
+    } else if (a.path == FHSM_CREATE_PATH_RSA_PRIV) {
+        /* An RSA private key given as components (§C.6.3), which is the only
+         * form the spec defines for one -- there is no CKA_VALUE for RSA.
+         *
+         * That is why this family never reached the raw-to-DER conversion in
+         * the verbatim path above: the conversion exists for private keys
+         * whose material arrives as one blob, and RSA's does not arrive at
+         * all. The comment there describes a standards-conforming import
+         * accepted and stored unusable; this was the same class one step
+         * earlier, refused with CKR_TEMPLATE_INCOMPLETE for an attribute the
+         * module never asks for. pkcs11-check reported it four times --
+         * three test_oaep_parameter_fidelity cases and test_rsa_key_import --
+         * all of which fail in their setup, before reaching what they test.
+         *
+         * n, e and d are required by the parser. The CRT five are optional
+         * and pushed only when supplied; OpenSSL derives the rest. */
+        struct { const char *name; const uint8_t *p; size_t len; } comp[] = {
+            { "n",               a.rsa_modulus,  a.rsa_modulus_len  },
+            { "e",               a.rsa_exponent, a.rsa_exponent_len },
+            { "d",               a.rsa_d,        a.rsa_d_len        },
+            { "rsa-factor1",     a.rsa_p,        a.rsa_p_len        },
+            { "rsa-factor2",     a.rsa_q,        a.rsa_q_len        },
+            { "rsa-exponent1",   a.rsa_dmp1,     a.rsa_dmp1_len     },
+            { "rsa-exponent2",   a.rsa_dmq1,     a.rsa_dmq1_len     },
+            { "rsa-coefficient1",a.rsa_iqmp,     a.rsa_iqmp_len     },
+        };
+        /* The BIGNUMs must outlive OSSL_PARAM_BLD_to_param().
+         *
+         * OSSL_PARAM_BLD_push_BN does not copy: it keeps the pointer and
+         * serialises at to_param(). The first version of this loop freed each
+         * BIGNUM as soon as it was pushed, which is the obvious shape for a
+         * loop and made to_param() read eight freed objects. It segfaulted
+         * C_CreateObject -- turning a clean CKR_TEMPLATE_INCOMPLETE into a
+         * crash, which is worse than the defect it was fixing.
+         *
+         * The RSA public branch twenty lines above has always had this right,
+         * because with two values it frees them after the call. Copying its
+         * shape into a loop moved the free inside, and the lifetime rule was
+         * in the ordering rather than in anything the loop could see. */
+        OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+        if (!bld) return FHSM_RV_HOST_MEMORY;
+        BIGNUM *bn[sizeof comp / sizeof comp[0]];
+        memset(bn, 0, sizeof bn);
+        int bad = 0;
+        for (size_t ci = 0; ci < sizeof comp / sizeof comp[0] && !bad; ++ci) {
+            if (!comp[ci].p || !comp[ci].len) continue;
+            bn[ci] = BN_bin2bn(comp[ci].p, (int)comp[ci].len, NULL);
+            if (!bn[ci] || OSSL_PARAM_BLD_push_BN(bld, comp[ci].name, bn[ci]) != 1)
+                bad = 1;
+        }
+        OSSL_PARAM *params = bad ? NULL : OSSL_PARAM_BLD_to_param(bld);
+        OSSL_PARAM_BLD_free(bld);
+        for (size_t ci = 0; ci < sizeof bn / sizeof bn[0]; ++ci) BN_free(bn[ci]);
+        if (!params) return FHSM_RV_FUNCTION_FAILED;
+        pctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL);
+        /* EVP_PKEY_KEYPAIR, so OpenSSL checks the components against each
+         * other rather than storing whatever it was handed. An object that
+         * cannot sign is a key that lies, and the moment to find that out is
+         * now rather than at the first C_Sign. */
+        if (!pctx || EVP_PKEY_fromdata_init(pctx) != 1
+            || EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, params) != 1) {
+            if (pctx) EVP_PKEY_CTX_free(pctx);
+            OSSL_PARAM_free(params);
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        }
+        EVP_PKEY_CTX_free(pctx);
+        OSSL_PARAM_free(params);
+
     } else {
         /* Should not happen : the parser only emits the paths listed
          * above when it returns OK. Defensive return to satisfy the
@@ -3637,21 +3705,35 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         return CKR_TEMPLATE_INCONSISTENT;
     }
 
-    /* Serialize as SubjectPublicKeyInfo for the verify path. */
-    uint8_t *spki = NULL;
-    int spki_len = i2d_PUBKEY(pkey, &spki);
+    /* Serialize: SubjectPublicKeyInfo for the verify path, and DER private
+     * key for the sign path. i2d_PUBKEY on a private key would silently store
+     * its public half -- an object that reads back as the right key and
+     * cannot sign. Chosen from the path rather than from the class, because
+     * the path is what the parser decided and the class is a template value.
+     *
+     * This is the same shape the verbatim branch above guards against, at the
+     * other end of the same function: what is stored must be what every later
+     * reader expects, and d2i_AutoPrivateKey is what reads this one. */
+    int is_priv = (a.path == FHSM_CREATE_PATH_RSA_PRIV);
+    uint8_t *enc = NULL;
+    int enc_len = is_priv ? i2d_PrivateKey(pkey, &enc) : i2d_PUBKEY(pkey, &enc);
     EVP_PKEY_free(pkey);
-    if (spki_len <= 0 || !spki) {
-        OPENSSL_free(spki);
+    if (enc_len <= 0 || !enc) {
+        OPENSSL_free(enc);
         return FHSM_RV_FUNCTION_FAILED;
     }
+    /* A private key carries the flags its neighbours carry: SENSITIVE by
+     * class, as the verbatim path does for every private key it stores, plus
+     * CKA_ALWAYS_AUTHENTICATE when the template asked for it. CKA_LOCAL stays
+     * FALSE: imported, not generated. */
+    uint8_t import_flags = trusted_flag;
+    if (is_priv) import_flags |= (uint8_t)(FHSM_OBJF_SENSITIVE | always_auth_flag);
 
     uint32_t handle = 0;
-    /* CKA_LOCAL stays FALSE here: imported, not generated on the token (§4.9). */
     fhsm_rv_t rv = fhsm_token_object_add(t, (uint32_t)a.cko, (uint32_t)a.ckk,
-                                          a.label, spki, (size_t)spki_len,
-                                          a.id_data, a.id_len, trusted_flag, &handle);
-    OPENSSL_free(spki);
+                                          a.label, enc, (size_t)enc_len,
+                                          a.id_data, a.id_len, import_flags, &handle);
+    OPENSSL_free(enc);
     if (rv != FHSM_RV_OK) return rv;
     *phObject = handle;
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
