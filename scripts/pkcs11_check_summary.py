@@ -14,9 +14,27 @@
 #   * the older single-object / concatenated JSON report (results.json).
 # The runner passes whichever exists; we auto-detect by content.
 # ===========================================================================
+#
+# On memory: report.jsonl was 356 MB after the full corpus run of 2026-09-19
+# (one JSON object per phase per test). This script used to read it with
+# open(...).read(), then test the whole string for a marker, then splitlines()
+# it into a list of millions of strings, to produce a tally of a few integers.
+# Measured on that file: peak RSS 767 MiB before, 39 MiB after -- 2.2x the
+# file, against a working set that does not depend on its size. The reduction
+# is per-line and bounded by the number of test ids, so nothing needs the file
+# resident. Streaming is not an optimisation here; it is the shape the
+# computation already had.
+import itertools
 import json
 import sys
 from collections import Counter
+
+# How many leading non-empty lines to inspect when deciding which format this
+# is. pytest --report-log opens with a SessionStart object carrying
+# "$report_type", so one would do; a handful costs nothing and does not
+# depend on that staying true. The old results.json is a single JSON document,
+# pretty-printed or not, and never carries the marker.
+_SNIFF_LINES = 8
 
 
 def tally_jsonl(lines):
@@ -74,19 +92,43 @@ def tally_raw(text):
     return c
 
 
+def tally_report(path):
+    """Decide the format from the first few lines, then tally without
+    holding the report in memory when it is JSONL."""
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        head = []
+        for line in fh:
+            if line.strip():
+                head.append(line)
+                if len(head) >= _SNIFF_LINES:
+                    break
+        if not head:
+            return Counter()
+        if any('"$report_type"' in ln for ln in head):
+            # The sniffed lines have been consumed from the iterator, so put
+            # them back in front of it rather than seeking: they carry
+            # TestReport objects once the run is short enough to fit inside
+            # _SNIFF_LINES, and dropping them would silently under-count.
+            return tally_jsonl(itertools.chain(head, fh))
+
+    # The older results.json is a single JSON document, which raw_decode wants
+    # as one string. It is the small format -- a few hundred kilobytes -- and
+    # nothing streams a document whose structure is only known at the end.
+    # Reopened rather than rewound: mixing iteration and seek on a text file
+    # is a rule with exceptions, and this does not need to know them.
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        return tally_raw(fh.read())
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: pkcs11_check_summary.py REPORT", file=sys.stderr)
         return 2
     try:
-        text = open(sys.argv[1], "r", encoding="utf-8", errors="replace").read()
+        counts = tally_report(sys.argv[1])
     except OSError as exc:
         print(f"  (report open failed: {exc}; see run.log)")
         return 0
-    if '"$report_type"' in text:
-        counts = tally_jsonl(text.splitlines())
-    else:
-        counts = tally_raw(text)
     if not counts:
         print("  (no per-test outcomes found in report; see run.log)")
         return 0
