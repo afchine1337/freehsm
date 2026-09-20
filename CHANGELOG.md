@@ -27,6 +27,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `test_oaep_decrypt_correctness`, which passes `len(plaintext) + 8` and does
   not retry.
 
+* **A rejected `C_SignUpdate` left the operation active.** PKCS#11 v3.2 §5.2
+  terminates the operation on any return other than `CKR_BUFFER_TOO_SMALL`.
+  The two argument guards at the top of the function did that; the seven
+  error returns below them did not, so a session could be left holding an
+  operation that only `C_SignInit` could clear. Restructured to a single
+  exit rather than seven assignments to keep in step.
+
 * **The KAT report held a pointer into a dead stack frame.**
   `fhsm_kat_result_t.vector_id` is read long after the function that produced
   it has returned: `fhsm_kat_results()` hands the array to callers, and

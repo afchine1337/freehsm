@@ -10708,24 +10708,43 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
 
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* PKCS#11 v3.2 §5.2: any return other than CKR_BUFFER_TOO_SMALL
+     * terminates the active operation. The two argument guards above did
+     * that; the seven error returns below did not, so a rejected
+     * C_SignUpdate left the session holding an operation that only
+     * C_SignInit could clear -- and C_SignInit on an active operation is
+     * itself CKR_OPERATION_ACTIVE on many callers' code paths.
+     *
+     * One exit rather than seven assignments, for the same reason the rest
+     * of this file has been moving that way: a rule wired to some of the
+     * paths that reach a state and not the rest is how all of these
+     * started. */
+    fhsm_rv_t rv = FHSM_RV_OK;
     if (!op->mac_ctx) {
         const uint8_t *kv = NULL; size_t kvl = 0;
         uint32_t cl = 0, kt = 0;
-        fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
-        if (rv != FHSM_RV_OK) return rv;
+        rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (rv != FHSM_RV_OK) goto fail;
         /* Select the digest from the mechanism (#125 : multipart HMAC was
          * hard-coded to SHA-256, so SHA-384/512/SHA-3 produced a wrong
-         * MAC that did not match the one-shot path). */
+         * MAC that did not match the one-shot path).
+         *
+         * A mechanism C_SignInit accepted but that is not an HMAC lands
+         * here: multipart signing is implemented for HMAC and for the
+         * composite mechanism only, while C_SignInit accepts every
+         * signature mechanism because C_Sign needs it to. That gap is a
+         * separate piece of work, not something to paper over here. */
         fhsm_hash_t uhash; size_t umac;
-        if (!fhsm_hmac_hash_of(op->mechanism, &uhash, &umac))
-            return FHSM_RV_MECHANISM_INVALID;
+        if (!fhsm_hmac_hash_of(op->mechanism, &uhash, &umac)) {
+            rv = FHSM_RV_MECHANISM_INVALID; goto fail;
+        }
         const char *dn = hmac_digest_name(uhash);
-        if (!dn) return FHSM_RV_MECHANISM_INVALID;
+        if (!dn) { rv = FHSM_RV_MECHANISM_INVALID; goto fail; }
         EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-        if (!mac) return FHSM_RV_MECHANISM_INVALID;
+        if (!mac) { rv = FHSM_RV_MECHANISM_INVALID; goto fail; }
         EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
         EVP_MAC_free(mac);
-        if (!ctx) return FHSM_RV_HOST_MEMORY;
+        if (!ctx) { rv = FHSM_RV_HOST_MEMORY; goto fail; }
         OSSL_PARAM params[2];
         char digest_name[16];
         snprintf(digest_name, sizeof digest_name, "%s", dn);
@@ -10733,13 +10752,19 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
         params[1] = OSSL_PARAM_construct_end();
         if (EVP_MAC_init(ctx, kv, kvl, params) != 1) {
             EVP_MAC_CTX_free(ctx);
-            return FHSM_RV_FUNCTION_FAILED;
+            rv = FHSM_RV_FUNCTION_FAILED; goto fail;
         }
         op->mac_ctx = ctx;
     }
-    if (EVP_MAC_update(op->mac_ctx, pPart, ulPartLen) != 1)
-        return FHSM_RV_FUNCTION_FAILED;
+    if (EVP_MAC_update(op->mac_ctx, pPart, ulPartLen) != 1) {
+        rv = FHSM_RV_FUNCTION_FAILED; goto fail;
+    }
     return FHSM_RV_OK;
+
+fail:
+    if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
+    op->active = 0;
+    return rv;
 }
 
 CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
