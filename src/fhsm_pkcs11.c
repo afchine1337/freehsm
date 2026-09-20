@@ -2233,6 +2233,12 @@ static CK_RV fhsm_check_usage(fhsm_token_t *t, CK_OBJECT_HANDLE hKey, uint8_t bi
  * above that definition. */
 static CK_RV fhsm_apply_allowed_mechs(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
                                        CK_ULONG n, uint32_t handle);
+/* Defined with the other template guards, three hundred lines below the first
+ * of the ten creation paths that call it. Declared here rather than beside
+ * fhsm_check_allowed_mech, because that declaration is itself below
+ * C_GenerateKey -- which is how this same error was made twice in one file. */
+static CK_RV fhsm_check_trusted_attr(CK_SESSION_HANDLE hSession,
+                                      CK_ATTRIBUTE *tmpl, CK_ULONG n);
 static CK_RV fhsm_apply_nested_tmpl(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
                                      CK_ULONG n, uint32_t handle,
                                      CK_ULONG which_attr,
@@ -2351,11 +2357,22 @@ static void fhsm_apply_token_scope(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     /* CKA_COPYABLE, the third of the same family and the one that was missing.
      * It lives in the second flags byte because the first is full; see
      * FHSM_OBJF2_* in fhsm_token.h. Default TRUE, so only FALSE is recorded. */
-    if (!tmpl_bbool(tmpl, n, CKA_COPYABLE_ATTR, 1)) {
+    /* CKA_WRAP_WITH_TRUSTED, the fourth of the family and the one that was
+     * still missing. Default FALSE, so only TRUE is recorded -- the mirror of
+     * CKA_COPYABLE above, which defaults TRUE and records only FALSE. Both
+     * store the non-default, and both leave a record written before the bit
+     * existed saying what it meant.
+     *
+     * Enforced in C_WrapKey against the wrapping key's FHSM_OBJF_TRUSTED. */
+    if (tmpl_bbool(tmpl, n, CKA_WRAP_WITH_TRUSTED_ATTR, 0)
+        || !tmpl_bbool(tmpl, n, CKA_COPYABLE_ATTR, 1)) {
         uint8_t f2 = 0;
         (void)fhsm_token_object_get_flags2(t, handle, &f2);
-        (void)fhsm_token_object_set_flags2(t, handle,
-                                           (uint8_t)(f2 | FHSM_OBJF2_NOT_COPYABLE));
+        if (!tmpl_bbool(tmpl, n, CKA_COPYABLE_ATTR, 1))
+            f2 |= FHSM_OBJF2_NOT_COPYABLE;
+        if (tmpl_bbool(tmpl, n, CKA_WRAP_WITH_TRUSTED_ATTR, 0))
+            f2 |= FHSM_OBJF2_WRAP_WITH_TRUSTED;
+        (void)fhsm_token_object_set_flags2(t, handle, f2);
     }
 }
 
@@ -2599,6 +2616,20 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* CKA_TRUSTED may only be set to TRUE by the SO (§4.6). The guard existed
+     * and was wired to C_CreateObject and C_SetAttributeValue -- the second
+     * added because, in its own comment, "without this the CKA_TRUSTED guard
+     * on C_CreateObject would be trivially bypassable". Nobody then looked at
+     * the other seven creation paths, so a USER template naming
+     * CKA_TRUSTED=TRUE was accepted here and the flag quietly not granted.
+     *
+     * It failed closed, which is why it survived: the policy held and only the
+     * answer was wrong. pkcs11-check 0.2.0 calls that an honest deviation and
+     * reports it, because CKR_OK for something that did not happen is still a
+     * false answer -- and CKA_WRAP_WITH_TRUSTED, added in this commit, is
+     * worth exactly what CKA_TRUSTED is worth. */
+    { CK_RV tc = fhsm_check_trusted_attr(hSession, pTemplate, ulCount);
+      if (tc != FHSM_RV_OK) return tc; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
@@ -3790,6 +3821,20 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * bounds n has to run before them and not after. It did not run here at
      * all -- see C_EncapsulateKey for how this class was found. */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* CKA_TRUSTED may only be set to TRUE by the SO (§4.6). The guard existed
+     * and was wired to C_CreateObject and C_SetAttributeValue -- the second
+     * added because, in its own comment, "without this the CKA_TRUSTED guard
+     * on C_CreateObject would be trivially bypassable". Nobody then looked at
+     * the other seven creation paths, so a USER template naming
+     * CKA_TRUSTED=TRUE was accepted here and the flag quietly not granted.
+     *
+     * It failed closed, which is why it survived: the policy held and only the
+     * answer was wrong. pkcs11-check 0.2.0 calls that an honest deviation and
+     * reports it, because CKR_OK for something that did not happen is still a
+     * false answer -- and CKA_WRAP_WITH_TRUSTED, added in this commit, is
+     * worth exactly what CKA_TRUSTED is worth. */
+    { CK_RV tc = fhsm_check_trusted_attr(hSession, pTemplate, ulCount);
+      if (tc != FHSM_RV_OK) return tc; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* An RO session may not derive into a token object either (§5.3). */
@@ -4426,6 +4471,23 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * wrapped -- an object that already exists, not a template. */
     { CK_RV tr = fhsm_check_wrap_tmpl(t, hWrappingKey, hKey);
       if (tr != FHSM_RV_OK) return tr; }
+    /* CKA_WRAP_WITH_TRUSTED on the key being wrapped: the wrapping key must be
+     * CKA_TRUSTED. fhsm_token.h has said so beside FHSM_OBJF_TRUSTED since
+     * #125; this is the line that makes it true.
+     *
+     * CKR_KEY_NOT_WRAPPABLE rather than CKR_ACTION_PROHIBITED: the refusal is
+     * a property of the key being exported, not of the session's rights, and
+     * pkcs11-check accepts either. Placed before the size query, because a
+     * policy enforced only on the second call tells an attacker the length of
+     * what it is protecting. */
+    { uint8_t tf2 = 0;
+      if (fhsm_token_object_get_flags2(t, (uint32_t)hKey, &tf2) == FHSM_RV_OK
+          && (tf2 & FHSM_OBJF2_WRAP_WITH_TRUSTED)) {
+          uint8_t wf = 0;
+          if (fhsm_token_object_get_flags(t, (uint32_t)hWrappingKey, &wf) != FHSM_RV_OK
+              || !(wf & FHSM_OBJF_TRUSTED))
+              return 0x00000069UL;   /* CKR_KEY_NOT_WRAPPABLE */
+      } }
     { CK_RV uc = fhsm_check_usage(t, hWrappingKey, FHSM_USAGE_WRAP); if (uc != FHSM_RV_OK) return uc; }
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
@@ -4593,6 +4655,20 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !pWrappedKey || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     /* Bounds before contents; see C_DeriveKey. */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* CKA_TRUSTED may only be set to TRUE by the SO (§4.6). The guard existed
+     * and was wired to C_CreateObject and C_SetAttributeValue -- the second
+     * added because, in its own comment, "without this the CKA_TRUSTED guard
+     * on C_CreateObject would be trivially bypassable". Nobody then looked at
+     * the other seven creation paths, so a USER template naming
+     * CKA_TRUSTED=TRUE was accepted here and the flag quietly not granted.
+     *
+     * It failed closed, which is why it survived: the policy held and only the
+     * answer was wrong. pkcs11-check 0.2.0 calls that an honest deviation and
+     * reports it, because CKR_OK for something that did not happen is still a
+     * false answer -- and CKA_WRAP_WITH_TRUSTED, added in this commit, is
+     * worth exactly what CKA_TRUSTED is worth. */
+    { CK_RV tc = fhsm_check_trusted_attr(hSession, pTemplate, ulCount);
+      if (tc != FHSM_RV_OK) return tc; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* A read-only session may not create a token object, whatever the route
@@ -4861,6 +4937,20 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * Publishing the interface did not create the hole. It made it
      * measurable, which is the argument for publishing it. */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* CKA_TRUSTED may only be set to TRUE by the SO (§4.6). The guard existed
+     * and was wired to C_CreateObject and C_SetAttributeValue -- the second
+     * added because, in its own comment, "without this the CKA_TRUSTED guard
+     * on C_CreateObject would be trivially bypassable". Nobody then looked at
+     * the other seven creation paths, so a USER template naming
+     * CKA_TRUSTED=TRUE was accepted here and the flag quietly not granted.
+     *
+     * It failed closed, which is why it survived: the policy held and only the
+     * answer was wrong. pkcs11-check 0.2.0 calls that an honest deviation and
+     * reports it, because CKR_OK for something that did not happen is still a
+     * false answer -- and CKA_WRAP_WITH_TRUSTED, added in this commit, is
+     * worth exactly what CKA_TRUSTED is worth. */
+    { CK_RV tc = fhsm_check_trusted_attr(hSession, pTemplate, ulCount);
+      if (tc != FHSM_RV_OK) return tc; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* The shared secret comes from the KEM, not from the caller. */
@@ -5001,6 +5091,18 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_zeroize(ss, sizeof(ss));
     if (rv != FHSM_RV_OK) return rv;
     *phNewKey = handle;
+    /* C_EncapsulateKey and C_DecapsulateKey never called this, so a key
+     * they created with CKA_TOKEN=FALSE became a token object, and
+     * CKA_MODIFIABLE / CKA_DESTROYABLE / CKA_COPYABLE from its template
+     * were dropped. Three attributes, two paths -- the same omission
+     * C_CopyObject had and that was fixed for C_CopyObject alone.
+     *
+     * These two were unreachable until the v3.2 interface was
+     * published, which is also why they had no template guards and why
+     * the first run after publishing put three crashes on
+     * C_DecapsulateKey. Every guard written before that date has to be
+     * checked against them, not assumed to cover them. */
+    fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
@@ -5025,6 +5127,20 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     /* See C_EncapsulateKey: same guards, same reasons. This is the one the
      * crashes landed on, and the one the CKA_VALUE injection was aimed at. */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* CKA_TRUSTED may only be set to TRUE by the SO (§4.6). The guard existed
+     * and was wired to C_CreateObject and C_SetAttributeValue -- the second
+     * added because, in its own comment, "without this the CKA_TRUSTED guard
+     * on C_CreateObject would be trivially bypassable". Nobody then looked at
+     * the other seven creation paths, so a USER template naming
+     * CKA_TRUSTED=TRUE was accepted here and the flag quietly not granted.
+     *
+     * It failed closed, which is why it survived: the policy held and only the
+     * answer was wrong. pkcs11-check 0.2.0 calls that an honest deviation and
+     * reports it, because CKR_OK for something that did not happen is still a
+     * false answer -- and CKA_WRAP_WITH_TRUSTED, added in this commit, is
+     * worth exactly what CKA_TRUSTED is worth. */
+    { CK_RV tc = fhsm_check_trusted_attr(hSession, pTemplate, ulCount);
+      if (tc != FHSM_RV_OK) return tc; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
@@ -5186,6 +5302,18 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_zeroize(ss, sizeof(ss));
     if (rv != FHSM_RV_OK) return rv;
     *phNewKey = handle;
+    /* C_EncapsulateKey and C_DecapsulateKey never called this, so a key
+     * they created with CKA_TOKEN=FALSE became a token object, and
+     * CKA_MODIFIABLE / CKA_DESTROYABLE / CKA_COPYABLE from its template
+     * were dropped. Three attributes, two paths -- the same omission
+     * C_CopyObject had and that was fixed for C_CopyObject alone.
+     *
+     * These two were unreachable until the v3.2 interface was
+     * published, which is also why they had no template guards and why
+     * the first run after publishing put three crashes on
+     * C_DecapsulateKey. Every guard written before that date has to be
+     * checked against them, not assumed to cover them. */
+    fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
@@ -5500,7 +5628,24 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phPub || !phPriv) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_template(pPub, ulPub);  if (cr != FHSM_RV_OK) return cr; }
+    /* Same rule, the other half of the pair. */
+    { CK_RV tc = fhsm_check_trusted_attr(hSession, pPub, ulPub);
+      if (tc != FHSM_RV_OK) return tc; }
     { CK_RV cr = fhsm_check_template(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
+    /* CKA_TRUSTED may only be set to TRUE by the SO (§4.6). The guard existed
+     * and was wired to C_CreateObject and C_SetAttributeValue -- the second
+     * added because, in its own comment, "without this the CKA_TRUSTED guard
+     * on C_CreateObject would be trivially bypassable". Nobody then looked at
+     * the other seven creation paths, so a USER template naming
+     * CKA_TRUSTED=TRUE was accepted here and the flag quietly not granted.
+     *
+     * It failed closed, which is why it survived: the policy held and only the
+     * answer was wrong. pkcs11-check 0.2.0 calls that an honest deviation and
+     * reports it, because CKR_OK for something that did not happen is still a
+     * false answer -- and CKA_WRAP_WITH_TRUSTED, added in this commit, is
+     * worth exactly what CKA_TRUSTED is worth. */
+    { CK_RV tc = fhsm_check_trusted_attr(hSession, pPriv, ulPriv);
+      if (tc != FHSM_RV_OK) return tc; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pPriv, ulPriv); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pPub, ulPub);   if (cr != FHSM_RV_OK) return cr; }
@@ -6396,7 +6541,17 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
                 bval = (of & FHSM_OBJF_ALWAYS_AUTH) ? 1 : 0; src = &bval; src_len = 1; break;
             }
-            case CKA_WRAP_WITH_TRUSTED_ATTR: bval = 0; src = &bval; src_len = 1; break;
+            case CKA_WRAP_WITH_TRUSTED_ATTR: {
+                /* Was a hard-coded 0. The attribute passed
+                 * fhsm_check_bool_attr_lengths, so it was accepted at
+                 * creation, dropped, and then contradicted here -- the fourth
+                 * attribute of this family to arrive that way. */
+                uint8_t f2 = 0;
+                (void)fhsm_token_object_get_flags2(t, (uint32_t)hObject, &f2);
+                bval = (f2 & FHSM_OBJF2_WRAP_WITH_TRUSTED) ? 1 : 0;
+                src = &bval; src_len = 1;
+                break;
+            }
             case CKA_TRUSTED_ATTR: {
                 uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
                 bval = (of & FHSM_OBJF_TRUSTED) ? 1 : 0; src = &bval; src_len = 1; break;
@@ -6621,6 +6776,13 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     if (flags_now & FHSM_OBJF_UNMODIFIABLE) return 0x0000001BUL; /* CKR_ACTION_PROHIBITED */
     uint8_t flags_new = flags_now;
     int flags_touched = 0;
+    /* The second flags byte, snapshotted on the same discipline: mutated in a
+     * local and written once at the end, so an attribute that fails later in
+     * the template cannot leave half of this one applied. */
+    uint8_t f2_now = 0;
+    (void)fhsm_token_object_get_flags2(t, (uint32_t)hObject, &f2_now);
+    uint8_t f2_new = f2_now;
+    int f2_touched = 0;
 
     /* Two passes: validate everything, then apply. A single loop that
      * validated and applied as it went left a partial mutation behind on
@@ -6656,6 +6818,22 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
                     return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
                 flags_new |= FHSM_OBJF_SENSITIVE;   /* intent only, not written */
                 flags_touched = 1;
+                break;
+            }
+            case CKA_WRAP_WITH_TRUSTED_ATTR: {
+                /* One-way, like CKA_SENSITIVE above and for the same reason:
+                 * an application that could clear it could export the key it
+                 * protects by first removing the protection. §4.9 makes it
+                 * settable and not clearable. */
+                if (a->ulValueLen != 1 || !a->pValue)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                uint8_t want = *(const uint8_t *)a->pValue ? 1 : 0;
+                uint8_t is_now = (f2_new & FHSM_OBJF2_WRAP_WITH_TRUSTED) ? 1 : 0;
+                if (want == is_now) break;          /* no-op */
+                if (want == 0)
+                    return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
+                f2_new |= FHSM_OBJF2_WRAP_WITH_TRUSTED;
+                f2_touched = 1;
                 break;
             }
             case CKA_EXTRACTABLE: {
@@ -6744,6 +6922,10 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
                                                    flags_new);
         if (r != FHSM_RV_OK) return r;
     }
+    if (f2_touched) {
+        fhsm_rv_t r = fhsm_token_object_set_flags2(t, (uint32_t)hObject, f2_new);
+        if (r != FHSM_RV_OK) return r;
+    }
 
     return FHSM_RV_OK;
 }
@@ -6780,6 +6962,20 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
      * before anything looked at the object. Same guard as the other creation
      * paths. */
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* CKA_TRUSTED may only be set to TRUE by the SO (§4.6). The guard existed
+     * and was wired to C_CreateObject and C_SetAttributeValue -- the second
+     * added because, in its own comment, "without this the CKA_TRUSTED guard
+     * on C_CreateObject would be trivially bypassable". Nobody then looked at
+     * the other seven creation paths, so a USER template naming
+     * CKA_TRUSTED=TRUE was accepted here and the flag quietly not granted.
+     *
+     * It failed closed, which is why it survived: the policy held and only the
+     * answer was wrong. pkcs11-check 0.2.0 calls that an honest deviation and
+     * reports it, because CKR_OK for something that did not happen is still a
+     * false answer -- and CKA_WRAP_WITH_TRUSTED, added in this commit, is
+     * worth exactly what CKA_TRUSTED is worth. */
+    { CK_RV tc = fhsm_check_trusted_attr(hSession, pTemplate, ulCount);
+      if (tc != FHSM_RV_OK) return tc; }
     /* Copying *into* a token object from an RO session is the same
      * violation as creating one (§5.3). */
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }

@@ -314,6 +314,24 @@ fhsm_rv_t fhsm_token_object_get_id(fhsm_token_t *t, uint32_t handle,
 #define FHSM_OBJF2_HAS_UNWRAP_TMPL  0x20
 #define FHSM_OBJF2_HAS_DERIVE_TMPL  0x40
 
+/* CKA_WRAP_WITH_TRUSTED = TRUE (§4.9): this key may only be wrapped by a
+ * wrapping key that is CKA_TRUSTED. FHSM_OBJF_TRUSTED, which this gates, has
+ * carried that sentence in its own comment since #125 -- beside an enforcement
+ * that was never written. The attribute was accepted in a creation template,
+ * dropped, and reported back as a hard-coded FALSE, which is the shape
+ * CKA_ALWAYS_AUTHENTICATE, CKA_ENCAPSULATE and CKA_COPYABLE each arrived in
+ * before it.
+ *
+ * Negative like its neighbours: set means restricted, so a record written
+ * before this bit existed says FALSE, which is the spec default and what those
+ * records mean.
+ *
+ * This is the last free bit of the second flags byte. The next per-object
+ * boolean needs a third byte, and the v4 record has room for one -- but that
+ * is a format change and should be taken as one rather than discovered when
+ * the bit is wanted. */
+#define FHSM_OBJF2_WRAP_WITH_TRUSTED 0x80
+
 /* Read / write the second flags byte. Separate accessors rather than a wider
  * type on the existing pair: every current caller of the first byte keeps
  * compiling unchanged, and a caller that has not been taught about the second

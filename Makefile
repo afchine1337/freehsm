@@ -713,6 +713,11 @@ tests/test_allowed_mechanisms: tests/test_allowed_mechanisms.c libfreehsm.so
 tests/test_nested_templates: tests/test_nested_templates.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# CKA_WRAP_WITH_TRUSTED: the refusal half. The positive half needs an SO
+# session to mint a CKA_TRUSTED wrapper and is left to pkcs11-check.
+tests/test_wrap_with_trusted: tests/test_wrap_with_trusted.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # C_Finalize releases the state it built, authentication included. #125 fixed
 # the fork half of this; the same-process half stayed until 2026-09-19.
 tests/test_finalize_release: tests/test_finalize_release.c $(LIB)
@@ -767,7 +772,7 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 # beside the tokens, so any test that initialises the module writes there.
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
-tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_advertised_operational tests/test_derive_concat tests/test_derive_hkdf tests/probe_ecdh_curves tests/probe_hkdf_data tests/test_pbkd2 tests/test_always_authenticate tests/test_interface_v32 tests/test_pqc_pub_import tests/test_gmac_params tests/test_encap_flags tests/test_encap_flags_store tests/test_v3_fixture tests/test_allowed_mechanisms tests/test_nested_templates tests/test_finalize_release tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tools/fhsm-token
+tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_advertised_operational tests/test_derive_concat tests/test_derive_hkdf tests/probe_ecdh_curves tests/probe_hkdf_data tests/test_pbkd2 tests/test_always_authenticate tests/test_interface_v32 tests/test_pqc_pub_import tests/test_gmac_params tests/test_encap_flags tests/test_encap_flags_store tests/test_v3_fixture tests/test_allowed_mechanisms tests/test_nested_templates tests/test_wrap_with_trusted tests/test_finalize_release tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tools/fhsm-token
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_tpm
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
@@ -835,6 +840,8 @@ tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cb
 		$(TEST_LD) ./tests/test_allowed_mechanisms
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_nested_templates
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_wrap_with_trusted
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_finalize_release
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
