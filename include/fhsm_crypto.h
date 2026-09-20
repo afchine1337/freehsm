@@ -183,10 +183,23 @@ fhsm_rv_t fhsm_pbkdf2(fhsm_hash_t alg,
  * ----------------------------------------------------------------------- */
 typedef struct fhsm_kat_result_s {
     const char *algorithm;     /* "AES-GCM-256", "HMAC-SHA-256", ... */
-    const char *vector_id;     /* CAVP vector identifier */
+    /* CAVP vector identifier.
+     *
+     * LIFETIME: both strings must outlive the record. The record is read
+     * through fhsm_kat_results() after the producing function has returned,
+     * and on failure fhsm_crypto.c prints them. A string literal satisfies
+     * this; an identifier built at run time needs storage with static
+     * duration. A local buffer does not qualify -- see the note above
+     * g_kat_vid in kat/fhsm_kat_vectors.c for the one that did not. */
+    const char *vector_id;
     int         passed;        /* 1 if matched expected output, else 0 */
     uint32_t    duration_us;   /* execution time, for performance regression */
 } fhsm_kat_result_t;
+
+/* Capacity of the module's KAT report array. In the header rather than in
+ * fhsm_crypto.c so that the KAT producers can size their own storage
+ * against it with a _Static_assert instead of a comment. */
+#define FHSM_KAT_MAX  64
 
 const fhsm_kat_result_t *fhsm_kat_results(size_t *count);
 

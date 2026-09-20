@@ -43,6 +43,28 @@ extern unsigned long C_Finalize(void *);
 #define CHECK(expr, msg) \
     do { if (!(expr)) { fprintf(stderr, "FAIL: %s (%s:%d)\n", msg, __FILE__, __LINE__); return 1; } } while (0)
 
+/* Overwrite a few kilobytes of dead stack below the current frame.
+ *
+ * fhsm_kat_result_t.vector_id must outlive the function that produced it
+ * (see the LIFETIME note in fhsm_crypto.h). One producer formatted the
+ * identifier into a local buffer, so every CAVP record pointed into
+ * fhsm_kat_run_all's frame after it had returned. AddressSanitizer catches
+ * that; an ordinary build reads the stale bytes, which are usually still
+ * intact, and the test passes.
+ *
+ * So the check below reads the identifiers, scribbles over the region they
+ * would live in if they were on the stack, and reads them again. A stable
+ * string is one that was never there. This is not a proof -- nothing
+ * portable is -- but it turns "passes because nothing has overwritten it
+ * yet" into "passes because it is not stack memory", without needing a
+ * sanitizer build.
+ *
+ * volatile so the compiler cannot decide the writes are unobservable. */
+static void scribble_dead_stack(void) {
+    volatile unsigned char pad[8192];
+    for (size_t i = 0; i < sizeof(pad); ++i) pad[i] = (unsigned char)(0xA5u ^ i);
+}
+
 int main(void) {
     unsigned long rv;
 
@@ -94,6 +116,27 @@ int main(void) {
     /* --- KAT report --- */
     size_t kat_n = 0;
     const fhsm_kat_result_t *res = fhsm_kat_results(&kat_n);
+
+    /* Identifier lifetime, checked before anything prints them. */
+    CHECK(kat_n <= FHSM_KAT_MAX, "KAT count within report capacity");
+    char snap[FHSM_KAT_MAX][64];
+    for (size_t i = 0; i < kat_n; ++i) {
+        CHECK(res[i].algorithm != NULL, "KAT algorithm not NULL");
+        CHECK(res[i].vector_id != NULL, "KAT vector_id not NULL");
+        snprintf(snap[i], sizeof(snap[i]), "%s", res[i].vector_id);
+    }
+    scribble_dead_stack();
+    for (size_t i = 0; i < kat_n; ++i) {
+        if (strcmp(snap[i], res[i].vector_id) != 0) {
+            fprintf(stderr,
+                    "FAIL: KAT vector_id %zu (%s) did not survive: now \"%s\"\n"
+                    "      vector_id must outlive the record --- see the\n"
+                    "      LIFETIME note in include/fhsm_crypto.h\n",
+                    i, snap[i], res[i].vector_id);
+            return 1;
+        }
+    }
+
     printf("[smoke] %zu KAT vectors:\n", kat_n);
     for (size_t i = 0; i < kat_n; ++i) {
         printf("        [%c] %-24s %-24s %4u us\n",

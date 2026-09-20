@@ -129,6 +129,32 @@ HEX_LITERAL(kat_hmac_expected,
     0x88,0x1d,0xc2,0x00,0xc9,0x83,0x3d,0xa7,
     0x26,0xe9,0x37,0x6c,0x2e,0x32,0xcf,0xf7)
 
+/* Storage for the vector identifiers that are built at run time rather
+ * than written as literals.
+ *
+ * fhsm_kat_result_t.vector_id is a const char *, and the record outlives
+ * this function: fhsm_kat_results() hands the array to callers long after
+ * fhsm_kat_run_all has returned, and fhsm_crypto.c prints vector_id when a
+ * vector fails. Every other KAT_RECORD site passes a string literal, which
+ * satisfies that silently. The SHA-256 CAVP loop formats "CAVP-SHA256-LenN"
+ * per vector, and formatted it into a local char[40] -- so the identifier
+ * of every CAVP record died at the closing brace, and the failure path that
+ * prints it read freed stack. AddressSanitizer reported it as
+ * stack-use-after-return the first time the module was built under it.
+ *
+ * The lifetime rule was "vector_id must outlive the record". It held at
+ * six of seven sites because six of them were literals. Here the storage
+ * is static, so the rule holds by construction for the seventh too.
+ * The pool is indexed by the same cursor as the report array, so it is
+ * sized off FHSM_KAT_MAX itself rather than off a second number that would
+ * have to be edited in step with it. */
+#define FHSM_KAT_VID_LEN   32u
+static char g_kat_vid[FHSM_KAT_MAX][FHSM_KAT_VID_LEN];
+
+/* "CAVP-SHA256-Len" plus an int in decimal, with its sign and NUL. */
+_Static_assert(sizeof "CAVP-SHA256-Len" + 11u <= FHSM_KAT_VID_LEN,
+               "vector-id slot must hold CAVP-SHA256-Len<int>");
+
 /* --------------------------------------------------------------------- */
 
 fhsm_rv_t fhsm_kat_run_all(fhsm_kat_result_t *out, size_t cap, size_t *count) {
@@ -289,6 +315,12 @@ fhsm_rv_t fhsm_kat_run_all(fhsm_kat_result_t *out, size_t cap, size_t *count) {
                 }
                 if (have_len && have_msg && have_md) {
                     if (*count >= cap) break;
+                    /* The identifier is built per vector, so it needs a
+                     * slot that outlives this frame. Running out of slots
+                     * stops the CAVP extras rather than recording a vector
+                     * whose identity cannot be printed; the smoke SHA-256
+                     * KAT above already covers the algorithm. */
+                    if (*count >= (size_t)FHSM_KAT_MAX) break;
                     clock_gettime(CLOCK_MONOTONIC, &t0);
                     uint8_t got[32]; size_t got_len = 32;
                     /* msg_len = 0 means empty message (Len = 0). */
@@ -296,8 +328,9 @@ fhsm_rv_t fhsm_kat_run_all(fhsm_kat_result_t *out, size_t cap, size_t *count) {
                                 FHSM_SLICE(msg, msg_len), got, &got_len);
                     int ok = (hrv == FHSM_RV_OK) && (got_len == 32) &&
                              (fhsm_ct_memcmp(got, md_expected, 32) == 0);
-                    char vid[40];
-                    snprintf(vid, sizeof(vid), "CAVP-SHA256-Len%d", msg_bits);
+                    char *vid = g_kat_vid[*count];
+                    snprintf(vid, FHSM_KAT_VID_LEN, "CAVP-SHA256-Len%d",
+                             msg_bits);
                     KAT_RECORD(out, *count, "SHA-256-CAVP", vid, ok,
                                 elapsed_us(&t0));
                     (*count)++;

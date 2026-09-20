@@ -60,8 +60,9 @@ static fhsm_rv_t       g_crypto_init_rv = FHSM_RV_FUNCTION_FAILED;
 /* KAT results, populated by fhsm_kat_run(). Read by fhsm_kat_results().
  * Cap sized at 64 to leave headroom for the CAVP extended set
  * (SHA-2, SHA-3, AES-CBC/CTR/CMAC, HMAC, RSA, ECDSA, KDF, PQ) as it
- * grows across the FIPS 140-3 §C.B coverage phases. */
-#define FHSM_KAT_MAX  64
+ * grows across the FIPS 140-3 §C.B coverage phases.
+ * FHSM_KAT_MAX now lives in include/fhsm_crypto.h so the KAT producers
+ * can size their identifier storage against it. */
 static fhsm_kat_result_t g_kat[FHSM_KAT_MAX];
 static size_t            g_kat_count = 0;
 
