@@ -8,6 +8,25 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **`C_Decrypt` measured the caller's buffer against the key size rather than
+  the recovered plaintext.** `EVP_PKEY_decrypt` with a NULL output buffer
+  reports `RSA_size(key)`, because the true length is only known once the
+  padding has been removed. Both RSA branches compared `*pulDataLen` against
+  that maximum, so a buffer that would have held the result was refused: a
+  2048-bit key, OAEP-SHA256 and a 29-byte plaintext told a 37-byte buffer
+  `CKR_BUFFER_TOO_SMALL` with a required size of 256.
+
+  PKCS#11 v3.2 §5.2 allows the size *query* to over-report — that path is
+  unchanged. It does not allow the call carrying a buffer to refuse one that
+  fits, and the required size reported on a genuine refusal is now the
+  plaintext length, so the retry allocates what is needed instead of the key
+  size. `CKM_RSA_PKCS` had the same defect; `CKM_RSA_X_509` recovers exactly
+  `RSA_size` bytes, so for it the two quantities coincide.
+
+  `tests/test_oaep_decrypt_size.c`. Found by pkcs11-check
+  `test_oaep_decrypt_correctness`, which passes `len(plaintext) + 8` and does
+  not retry.
+
 * **The KAT report held a pointer into a dead stack frame.**
   `fhsm_kat_result_t.vector_id` is read long after the function that produced
   it has returned: `fhsm_kat_results()` hands the array to callers, and

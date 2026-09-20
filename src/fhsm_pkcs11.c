@@ -8951,6 +8951,56 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     return op_init(op, hSession, pMechanism, hKey);
 }
 
+/* Recover an RSA plaintext and measure the caller's buffer against what
+ * actually came out, rather than against what the key could have produced.
+ *
+ * EVP_PKEY_decrypt with a NULL output buffer reports RSA_size(key) -- the
+ * maximum -- because the true length is only known once the padding has been
+ * removed. Both RSA branches of C_Decrypt compared *pulDataLen against that
+ * maximum, so a buffer that would have held the result was refused: with a
+ * 2048-bit key, OAEP-SHA256 and a 29-byte plaintext, a 37-byte buffer was
+ * told CKR_BUFFER_TOO_SMALL and a required size of 256.
+ *
+ * PKCS#11 v3.2 §5.2 lets the size *query* over-report -- that is why the
+ * pData == NULL path above is left alone. It does not let the call that
+ * carries a buffer refuse one that fits. pkcs11-check's
+ * test_oaep_decrypt_correctness passes len(plaintext) + 8 and does not retry,
+ * which is a fair reading of the specification.
+ *
+ * Returns FHSM_RV_OK (plaintext copied, *pulDataLen set to the real length),
+ * CKR_BUFFER_TOO_SMALL (*pulDataLen set to the real length, nothing copied),
+ * or FHSM_RV_ENCRYPTED_DATA_INVALID. The caller owns op->active and the audit
+ * record, because the two branches terminate and audit differently.
+ *
+ * The scratch buffer holds recovered plaintext and is zeroised on every exit,
+ * including the too-small one -- especially the too-small one, since that path
+ * returns to a caller who will call again. */
+static CK_RV rsa_decrypt_sized(EVP_PKEY_CTX *dctx, size_t max_len,
+                                unsigned char *pEnc, CK_ULONG ulEncLen,
+                                unsigned char *pData, CK_ULONG *pulDataLen) {
+    if (max_len == 0) return FHSM_RV_ENCRYPTED_DATA_INVALID;
+    unsigned char *scratch = malloc(max_len);
+    if (!scratch) return FHSM_RV_HOST_MEMORY;
+    size_t got = max_len;
+    int dr = EVP_PKEY_decrypt(dctx, scratch, &got, pEnc, ulEncLen);
+    if (dr <= 0 || got > max_len) {
+        fhsm_zeroize(scratch, max_len);
+        free(scratch);
+        return FHSM_RV_ENCRYPTED_DATA_INVALID;
+    }
+    CK_RV out;
+    if (*pulDataLen < got) {
+        out = 0x00000150UL;            /* CKR_BUFFER_TOO_SMALL */
+    } else {
+        memcpy(pData, scratch, got);
+        out = FHSM_RV_OK;
+    }
+    *pulDataLen = (CK_ULONG)got;
+    fhsm_zeroize(scratch, max_len);
+    free(scratch);
+    return out;
+}
+
 CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncLen,
                 unsigned char *pData, CK_ULONG *pulDataLen) {
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
@@ -9006,27 +9056,23 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
             return FHSM_RV_OK;
         }
-        if (*pulDataLen < out_len) {
-            /* Buffer too small : keep the operation active for retry. */
-            *pulDataLen = out_len;
-            EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
-            return 0x00000150UL;
-        }
-        size_t buf_len = *pulDataLen;
-        int dr = EVP_PKEY_decrypt(dctx, pData, &buf_len, pEnc, ulEncLen);
+        CK_RV dres = rsa_decrypt_sized(dctx, out_len, pEnc, ulEncLen,
+                                        pData, pulDataLen);
         EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
+        if (dres == 0x00000150UL) {
+            /* Buffer too small : keep the operation active for retry, and
+             * *pulDataLen now carries the real length rather than the key
+             * size, so the retry allocates what is actually needed. */
+            return dres;
+        }
         op->active = 0;
         g_oaep_dec[hSession].active = 0;
-        if (dr <= 0) {
-            (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
-                                    fhsm_session_role(hSession),
-                                    FHSM_RV_ENCRYPTED_DATA_INVALID, NULL);
-            return FHSM_RV_ENCRYPTED_DATA_INVALID;
-        }
-        *pulDataLen = buf_len;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
-        return FHSM_RV_OK;
+                                fhsm_session_role(hSession),
+                                dres == FHSM_RV_OK
+                                    ? FHSM_RV_OK
+                                    : FHSM_RV_ENCRYPTED_DATA_INVALID, NULL);
+        return dres;
     }
 
     /* --- RSA PKCS#1 v1.5 / X.509 raw decryption (non-FIPS ; interop) --- */
@@ -9050,12 +9096,17 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_ENCRYPTED_DATA_INVALID;
         }
         if (pData == NULL) { *pulDataLen = out_len; EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); return FHSM_RV_OK; }  /* size query : op stays active */
-        if (*pulDataLen < out_len) { *pulDataLen = out_len; EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); return 0x00000150UL; }  /* buffer too small : op stays active for retry */
-        size_t bl = *pulDataLen;
-        int dr = EVP_PKEY_decrypt(dctx, pData, &bl, pEnc, ulEncLen);
-        EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey); op->active = 0;
-        if (dr <= 0) return FHSM_RV_ENCRYPTED_DATA_INVALID;
-        *pulDataLen = bl;
+        /* Same sizing rule as the OAEP branch above, and the same reason:
+         * out_len is RSA_size(key), not the length of the recovered data.
+         * CKM_RSA_X_509 recovers exactly RSA_size bytes, so for that
+         * mechanism the two are equal and this changes nothing; CKM_RSA_PKCS
+         * strips padding and they are not. */
+        CK_RV dres = rsa_decrypt_sized(dctx, out_len, pEnc, ulEncLen,
+                                        pData, pulDataLen);
+        EVP_PKEY_CTX_free(dctx); EVP_PKEY_free(pkey);
+        if (dres == 0x00000150UL) return dres;  /* op stays active for retry */
+        op->active = 0;
+        if (dres != FHSM_RV_OK) return dres;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
                                 fhsm_session_role(hSession), FHSM_RV_OK, NULL);
         return FHSM_RV_OK;
