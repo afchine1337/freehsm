@@ -7,6 +7,42 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+* **The KAT report held a pointer into a dead stack frame.**
+  `fhsm_kat_result_t.vector_id` is read long after the function that produced
+  it has returned: `fhsm_kat_results()` hands the array to callers, and
+  `fhsm_crypto.c` prints the identifier when a vector fails. Six of the seven
+  recording sites pass a string literal and satisfy that without thinking
+  about it. The seventh — the SHA-256 CAVP loop — formatted
+  `CAVP-SHA256-Len<N>` into a local buffer, so every CAVP record pointed into
+  `fhsm_kat_run_all`'s frame after it had gone. The first code to read it is
+  the code that reports a failed self-test.
+
+  The identifiers now come from storage with static duration.
+  `FHSM_KAT_MAX` moved to `include/fhsm_crypto.h` so the producer can size its
+  pool against the report array rather than against a second number, and the
+  lifetime rule is written on the field it governs instead of being implied by
+  six examples. `tests/test_smoke.c` reads every identifier, overwrites the
+  dead stack below it, and reads again: a string that survives was never on
+  the stack.
+
+  Found by AddressSanitizer, which had never been run over the full test
+  suite. Reported as `stack-use-after-return`.
+
+### Added
+* **RSA private keys can be imported from their components** (PKCS#11 v3.2
+  §C.6.3). `C_CreateObject` accepted `CKA_MODULUS` and
+  `CKA_PUBLIC_EXPONENT` for a public key but had no path for
+  `CKA_PRIVATE_EXPONENT` and the CRT parameters, so importing a private key
+  returned `CKR_TEMPLATE_INCOMPLETE`. The key is rebuilt through
+  `EVP_PKEY_fromdata`, which checks the components against each other: a key
+  that cannot sign is refused at import rather than at the first `C_Sign`.
+
+### Changed
+* `make SANITIZE=1` now runs the whole suite clean. The build was available
+  before and had never been taken all the way through; the four defects it
+  surfaced are fixed in this entry and in the test suite.
+
 ## [2.1.0] --- 2026-09-09
 
 *Everything below was found in the twenty-four hours after @petrn pointed out
