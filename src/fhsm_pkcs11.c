@@ -10327,6 +10327,14 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     return op_init(op, hSession, pMechanism, hKey);
 }
 
+/* Defined just below C_Verify, from whose body it was extracted, and called
+ * by C_VerifyFinal further down. Declared here because C_Verify is the first
+ * caller and sits above it. */
+static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
+                                    fhsm_op_t *op,
+                                    unsigned char *pData, CK_ULONG ulDataLen,
+                                    unsigned char *pSig, CK_ULONG ulSigLen);
+
 CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
                CK_ULONG ulDataLen, unsigned char *pSig, CK_ULONG ulSigLen) {
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
@@ -10406,7 +10414,33 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
                                                           : FHSM_RV_SIGNATURE_INVALID;
     }
 
-    /* Asymmetric path : public key DER → EVP_PKEY → EVP_DigestVerify. */
+    /* Asymmetric: one implementation, reached from here and from
+     * C_VerifyFinal. It was inline in this function while the sign side had
+     * sign_asymmetric() -- an asymmetry with no reason behind it, and the
+     * thing that would have forced multipart verify to be a second copy of
+     * the ML-DSA raw-key fallback, the PSS parameters and the ECDSA
+     * raw-to-DER conversion. */
+    return verify_asymmetric(hSession, t, op, pData, ulDataLen, pSig, ulSigLen);
+}
+
+/* Verify with an asymmetric public key.
+ *
+ * Extracted verbatim from C_Verify, which is why it takes hSession: the body
+ * clears op->active and writes its own audit records on every terminating
+ * path, and moving those to the callers would have meant editing a hundred
+ * and eighty lines that carry the v1.2.2 raw-ECDSA fix. The extraction adds
+ * the key lookup at the top and nothing else.
+ *
+ * Unlike sign_asymmetric there is no size query and no CKR_BUFFER_TOO_SMALL,
+ * so every return here terminates the operation. */
+static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
+                                    fhsm_op_t *op,
+                                    unsigned char *pData, CK_ULONG ulDataLen,
+                                    unsigned char *pSig, CK_ULONG ulSigLen) {
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
+    (void)kt;
     if (cl != CKO_PUBLIC_KEY) {
         op->active = 0;
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
@@ -11063,12 +11097,17 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
 
 /* PKCS#11 v3.2 §C.6.13.6 / §C.6.13.7 : C_VerifyUpdate and C_VerifyFinal.
  *
- * Symmetric to C_SignUpdate / C_SignFinal which currently only supports
- * the HMAC mechanism CKM_SHA256_HMAC. We mirror that coverage on the
- * verify path : multipart HMAC verification is supported ; asymmetric
- * multipart verify (which would require deferring the actual
- * EVP_DigestVerifyFinal call until C_VerifyFinal) is not currently
- * implemented and falls through to CKR_MECHANISM_INVALID.
+ * Symmetric to C_SignUpdate / C_SignFinal, and kept symmetric on purpose:
+ * the two share the accumulation buffer, the 16 MiB ceiling and the
+ * predicate that decides which mechanisms take it, so they cannot disagree
+ * about what is supported.
+ *
+ * Covered: HMAC (streamed through EVP_MAC), the composite mechanism
+ * (accumulates PH(M)), and the asymmetric families (accumulated and checked
+ * at Final by verify_asymmetric). Not covered: CKM_AES_CMAC and
+ * CKM_AES_GMAC, which C_VerifyInit accepts for the one-shot path and which
+ * still reach CKR_MECHANISM_INVALID here. That is the remaining instance of
+ * the gap this pair of functions was closing.
  *
  * The HMAC compare uses fhsm_ct_memcmp for constant-time equality
  * to avoid timing side channels on signature validation. */
@@ -11097,27 +11136,43 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519)
         return composite_ph_update(op, pPart, (size_t)ulPartLen);
 
+    /* Asymmetric: accumulate the message, verify it at Final. The same
+     * predicate and the same buffer as the sign path, so the two cannot
+     * disagree about which mechanisms are covered. */
+    if (mech_sign_is_buffered_multipart(op->mechanism))
+        return op_append_multipart(op, pPart, (size_t)ulPartLen);
+
+    /* One exit, for the reason given at the same place in C_SignUpdate: §5.2
+     * terminates the operation on any return other than
+     * CKR_BUFFER_TOO_SMALL, and these seven returns did not. That fix was
+     * applied to C_SignUpdate and not to its mirror here -- which is the
+     * defect shape this file keeps producing, committed while fixing an
+     * instance of it. */
+    fhsm_rv_t rv = FHSM_RV_OK;
     if (!op->mac_ctx) {
         const uint8_t *kv = NULL; size_t kvl = 0;
         uint32_t cl = 0, kt = 0;
-        fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
-        if (rv != FHSM_RV_OK) return rv;
+        rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (rv != FHSM_RV_OK) goto vfail;
         /* Select the digest from the mechanism, as C_SignUpdate does. This
          * path kept the SHA-256 that #125 removed from its sign neighbour,
          * so multipart verify refused every other HMAC while multipart sign
          * produced them: the fix had been applied to one of two callers.
-         * Asymmetric multipart remains unimplemented and is refused by
-         * fhsm_hmac_hash_of() returning 0, not by naming one mechanism. */
+         * What reaches here now is a MAC mechanism or nothing: the
+         * asymmetric families were taken above, and CKM_AES_CMAC /
+         * CKM_AES_GMAC are still unimplemented for multipart and are
+         * refused by fhsm_hmac_hash_of() returning 0, not by being named. */
         fhsm_hash_t uhash; size_t umac;
-        if (!fhsm_hmac_hash_of(op->mechanism, &uhash, &umac))
-            return FHSM_RV_MECHANISM_INVALID;
+        if (!fhsm_hmac_hash_of(op->mechanism, &uhash, &umac)) {
+            rv = FHSM_RV_MECHANISM_INVALID; goto vfail;
+        }
         const char *dn = hmac_digest_name(uhash);
-        if (!dn) return FHSM_RV_MECHANISM_INVALID;
+        if (!dn) { rv = FHSM_RV_MECHANISM_INVALID; goto vfail; }
         EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-        if (!mac) return FHSM_RV_MECHANISM_INVALID;
+        if (!mac) { rv = FHSM_RV_MECHANISM_INVALID; goto vfail; }
         EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
         EVP_MAC_free(mac);
-        if (!ctx) return FHSM_RV_HOST_MEMORY;
+        if (!ctx) { rv = FHSM_RV_HOST_MEMORY; goto vfail; }
         OSSL_PARAM params[2];
         char digest_name[16];
         snprintf(digest_name, sizeof digest_name, "%s", dn);
@@ -11125,13 +11180,19 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
         params[1] = OSSL_PARAM_construct_end();
         if (EVP_MAC_init(ctx, kv, kvl, params) != 1) {
             EVP_MAC_CTX_free(ctx);
-            return FHSM_RV_FUNCTION_FAILED;
+            rv = FHSM_RV_FUNCTION_FAILED; goto vfail;
         }
         op->mac_ctx = ctx;
     }
-    if (EVP_MAC_update(op->mac_ctx, pPart, ulPartLen) != 1)
-        return FHSM_RV_FUNCTION_FAILED;
+    if (EVP_MAC_update(op->mac_ctx, pPart, ulPartLen) != 1) {
+        rv = FHSM_RV_FUNCTION_FAILED; goto vfail;
+    }
     return FHSM_RV_OK;
+
+vfail:
+    if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
+    op->active = 0;
+    return rv;
 }
 
 CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
@@ -11159,6 +11220,30 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
                                 fhsm_session_role(hSession), crv, "alg", "composite-multipart", NULL);
         return crv;
     }
+    /* Asymmetric: the parts were accumulated by C_VerifyUpdate and checked
+     * here by the same verify_asymmetric() C_Verify uses. The mirror of the
+     * sign path, minus its sizing problem -- verification has no size query
+     * and no CKR_BUFFER_TOO_SMALL, so every return terminates and the buffer
+     * is always released.
+     *
+     * A caller that issued no C_VerifyUpdate verifies over the empty
+     * message, which is what C_Verify does with ulDataLen 0. */
+    if (mech_sign_is_buffered_multipart(op->mechanism)) {
+        fhsm_token_t *t = fhsm_session_token(hSession);
+        if (!t) { op_free_multipart(op); op->active = 0;
+                  return FHSM_RV_SESSION_HANDLE_INVALID; }
+        static uint8_t empty[1] = { 0 };
+        fhsm_rv_t vrv = verify_asymmetric(hSession, t, op,
+                                           op->mp_buf ? op->mp_buf : empty,
+                                           (CK_ULONG)op->mp_len,
+                                           pSig, ulSigLen);
+        op_free_multipart(op);
+        op->active = 0;     /* verify_asymmetric clears it too; both callers
+                             * of that helper state it, so neither depends on
+                             * the other having done so. */
+        return vrv;
+    }
+
     /* The MAC length comes from the mechanism's hash, as it does in
      * C_SignFinal. This path carried mac[32] and FHSM_HASH_SHA256 in the
      * empty-input branch, so a SHA-384 or SHA-512 multipart verify could not

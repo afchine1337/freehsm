@@ -45,6 +45,7 @@ typedef struct { CK_ULONG mechanism; void *p; CK_ULONG l; } CK_MECHANISM;
 
 #define CKR_OK                    0x00000000UL
 #define CKR_BUFFER_TOO_SMALL      0x00000150UL
+#define CKR_OPERATION_NOT_INITIALIZED 0x00000091UL
 /* 0x21. 0x20 is CKR_DATA_INVALID, which is what this said first --- so the
  * ceiling check failed against a module that was answering correctly. */
 #define CKR_DATA_LEN_RANGE        0x00000021UL
@@ -81,6 +82,8 @@ static CK_RV (*C_SignUpdate)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG);
 static CK_RV (*C_SignFinal)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG*);
 static CK_RV (*C_VerifyInit)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE);
 static CK_RV (*C_Verify)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG, CK_BYTE*, CK_ULONG);
+static CK_RV (*C_VerifyUpdate)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG);
+static CK_RV (*C_VerifyFinal)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG);
 
 static CK_BYTE *pad32(CK_BYTE buf[32], const char *s) {
     size_t n = strlen(s); if (n > 32) n = 32;
@@ -158,6 +161,38 @@ static void family(const char *label, CK_SESSION_HANDLE s,
     ok(C_Verify(s, WHOLE, WHOLE_LEN, sig2, retry_len) == CKR_OK,
        "and signs the same message, not an empty one");
 
+    /* --- the verify mirror ------------------------------------------- */
+
+    /* Multipart verify accepts a one-shot signature over the same bytes.
+     * The two halves are checked against each other rather than each
+     * against itself: a pair that only ever agrees with its own kind would
+     * pass while producing something no other implementation reads. */
+    ok(C_VerifyInit(s, &m, pub) == CKR_OK, "C_VerifyInit (multipart)");
+    for (int i = 0; i < 3; ++i)
+        ok(C_VerifyUpdate(s, (CK_BYTE *)PART[i], (CK_ULONG)strlen(PART[i])) == CKR_OK,
+           "C_VerifyUpdate");
+    ok(C_VerifyFinal(s, sig, sig_len) == CKR_OK,
+       "multipart verify accepts the signature");
+
+    /* And refuses a wrong one. The signature is valid, the message is not
+     * the one it covers: the parts fed here differ from the parts signed. */
+    ok(C_VerifyInit(s, &m, pub) == CKR_OK, "C_VerifyInit (wrong message)");
+    ok(C_VerifyUpdate(s, (CK_BYTE *)"not the ", 8) == CKR_OK, "C_VerifyUpdate (wrong)");
+    ok(C_VerifyUpdate(s, (CK_BYTE *)"same bytes", 10) == CKR_OK, "C_VerifyUpdate (wrong)");
+    ok(C_VerifyFinal(s, sig, sig_len) != CKR_OK,
+       "multipart verify refuses a signature over other bytes");
+
+    /* A rejected signature must terminate the operation, not leave the
+     * session holding one. pkcs11-check
+     * test_c_verify_final_terminates_after_rejected_signature.
+     *
+     * Asserted as OPERATION_NOT_INITIALIZED and not merely as "not OK":
+     * an operation left active answers SIGNATURE_INVALID a second time,
+     * which is also "not OK", so the weaker check passes either way and
+     * tests nothing. */
+    ok(C_VerifyFinal(s, sig, sig_len) == CKR_OPERATION_NOT_INITIALIZED,
+       "and the rejection terminated the operation");
+
     free(sig); free(sig2);
 }
 
@@ -168,7 +203,7 @@ int main(void) {
                  if (!n) { fprintf(stderr, "missing %s\n", #n); return 2; }
     S(C_Initialize) S(C_InitToken) S(C_OpenSession) S(C_Login) S(C_InitPIN)
     S(C_GenerateKeyPair) S(C_SignInit) S(C_SignUpdate) S(C_SignFinal)
-    S(C_VerifyInit) S(C_Verify)
+    S(C_VerifyInit) S(C_Verify) S(C_VerifyUpdate) S(C_VerifyFinal)
 
     printf("test_sign_multipart\n");
 

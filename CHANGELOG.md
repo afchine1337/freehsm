@@ -27,6 +27,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `test_oaep_decrypt_correctness`, which passes `len(plaintext) + 8` and does
   not retry.
 
+* **A rejected `C_VerifyUpdate` left the operation active**, the same way its
+  sign counterpart did. That fix was applied to `C_SignUpdate` and not to its
+  mirror three days earlier — a guard wired to some of the paths reaching a
+  state and not the rest, committed while fixing an instance of exactly that.
+
 * **A rejected `C_SignUpdate` left the operation active.** PKCS#11 v3.2 §5.2
   terminates the operation on any return other than `CKR_BUFFER_TOO_SMALL`.
   The two argument guards at the top of the function did that; the seven
@@ -61,7 +66,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `C_Sign` needs it to; Update and Final implemented HMAC and the composite
   mechanism only. `CKM_SHA256_RSA_PKCS` was therefore accepted at Init and
   refused at Final with `CKR_MECHANISM_INVALID` — advertised, not
-  operational. Verification is still one-shot only and is the next piece.
+  operational.
+
+  `C_VerifyUpdate` / `C_VerifyFinal` gained the mirror, sharing the buffer,
+  the ceiling and the predicate with the sign side so the two cannot disagree
+  about what is covered. The asymmetric verify body was inline in `C_Verify`
+  while the sign side already had `sign_asymmetric()`; it is now
+  `verify_asymmetric()`, called from both, which is what kept the ML-DSA
+  raw-key fallback and the ECDSA `r||s`-to-DER conversion at one copy each.
+  `CKM_AES_CMAC` and `CKM_AES_GMAC` remain one-shot only on both sides, and
+  the comment at the refusal says so.
 
   The parts are accumulated and signed at Final by the same
   `sign_asymmetric()` the one-shot path uses, so the PSS parameters, the
@@ -96,6 +110,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   that cannot sign is refused at import rather than at the first `C_Sign`.
 
 ### Changed
+* **`run_pkcs11_check.sh` refuses an instrumented module.** `make asan`
+  leaves the tree instrumented by design, and `pkcs11-tool` is an ordinary
+  binary that `dlopen()`s it — ASan's runtime has to load before libc, so the
+  combination fails with `ASan runtime does not come first` followed by a
+  bare `C_InitToken failed`, naming neither the cause nor the fix. That cost
+  a run three times in one week, always the same way. The Makefile's
+  build-mode stamp catches this for `make`; nothing caught it for a consumer
+  of the `.so`, so the script now asks and says what to do. It refuses rather
+  than preloading the runtime itself: an instrumented build is a different
+  module from the one the recorded numbers were taken against.
+
 * **Objects record which sanitizer built them, and a change of mode discards
   them.** `SANITIZE=1` and `TSAN=1` change `CFLAGS` without touching any
   file's timestamp, so make relinks up-to-date objects under different flags
