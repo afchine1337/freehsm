@@ -71,13 +71,26 @@ extern "C" {
  * version --- which is why the baseline is taken after this bump, never
  * before.
  * ----------------------------------------------------------------------- */
-/* MINOR, not PATCH: CKM_AES_KEY_WRAP and CKM_AES_KEY_WRAP_KWP now report
- * CKF_ENCRYPT|CKF_DECRYPT through C_GetMechanismInfo, which they did not
- * before (#14). A capability an application can observe was added, so
- * semantic versioning puts this at 2.1.0 rather than 2.0.4 --- even though
- * the release is mostly defect repair. */
+/* MINOR, not PATCH, for the second time and for the same reason.
+ *
+ * 2.1.0 was argued here as MINOR because CKM_AES_KEY_WRAP and
+ * CKM_AES_KEY_WRAP_KWP began reporting CKF_ENCRYPT|CKF_DECRYPT through
+ * C_GetMechanismInfo (#14): a capability an application can observe was
+ * added, even though the release was mostly defect repair.
+ *
+ * 2.2.0 is the same shape. C_SignFinal and C_VerifyFinal answered
+ * CKR_MECHANISM_INVALID for every asymmetric mechanism and now complete the
+ * operation; C_CreateObject answered CKR_TEMPLATE_INCOMPLETE for an RSA
+ * private key given as components and now imports it. Both are observable.
+ *
+ * It carries a security fix as well, which is an argument for PATCH --- a
+ * patch release is taken without deliberation and a minor one is not. The
+ * rule above wins anyway: a version number that under-states what changed
+ * costs more than one that makes a reader pause. The release notes say the
+ * security fix is self-contained and the rest is additive, which is the
+ * honest way to have both. */
 #define FHSM_VERSION_MAJOR   2
-#define FHSM_VERSION_MINOR   1
+#define FHSM_VERSION_MINOR   2
 #define FHSM_VERSION_PATCH   0
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
@@ -85,7 +98,7 @@ extern "C" {
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
-#define FHSM_VERSION_STRING  "2.1.0"
+#define FHSM_VERSION_STRING  "2.2.0"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including

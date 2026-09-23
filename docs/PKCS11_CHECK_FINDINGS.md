@@ -2144,3 +2144,54 @@ turned 10 of 13 unit tests red on first use: they had been passing a short
 string literal as `C_InitToken`'s 32-byte `pLabel` field. The module was right
 and the tests were wrong, and a suite green for months went red the moment
 something was watching.
+
+## Full corpus on a signed module (2026-09-23)
+
+**55,202 passed · 2 failed · 0 crashed · xfail 14,299**, against 54,339 / 11 / 0
+/ 15,263 on 2026-09-19.
+
+The two counts do not compare directly and the reason is worth stating before
+the numbers are quoted anywhere. Every previous full run went through
+`FHSM_INTEGRITY_ALLOW_UNSIGNED`, so the OpenSSL FIPS provider was never
+loaded. This one ran against a module signed with `make integrity`, in the
+evaluated configuration. Mechanisms the `fips-strict` profile refuses become
+skips rather than failures, so the denominator moved.
+
+### The two that remain
+
+Both are `test_registry_sign_missing_required_param[EDDSA]` and its verify
+twin — the upstream disagreement in mingulov#23, not defects here.
+
+The nine that closed since 2026-09-19 are in the CHANGELOG under
+`[Unreleased]`: RSA private-key import from components, the OAEP decrypt
+sizing, `CKA_WRAP_WITH_TRUSTED`, multipart asymmetric signing and
+verification, and the two AES-CBC-PAD buffer defects.
+
+### Two of those nine were standing one in front of the other
+
+`C_DecryptUpdate` refused undersized buffers against `ulEncLen` + one block —
+`C_EncryptUpdate`'s bound, which decryption cannot reach. The harness's probe
+was refused at its *setup* step and never reached what it was testing:
+`C_DecryptFinal`, which had no output-size check at all and wrote up to 15
+bytes past the caller's buffer. Fixing the first exposed the second within the
+hour.
+
+Recorded because the first defect was not merely adjacent to the second — it
+was hiding it, and the module had passed four full corpus runs in that state.
+A guard that is wrong in the refusing direction is not the harmless kind.
+
+### 110 Wycheproof RSA-OAEP vectors skipped, correctly, for the wrong reason
+
+The harness reports:
+
+    Skipped: wycheproof RSA-OAEP decrypt KAT: Module does not implement C_CreateObject
+
+All 110 are `rsa_three_primes_oaep_*`. The module does implement
+`C_CreateObject`, including RSA private-key import from components as of this
+release; what it cannot do is accept a multi-prime RSA key, because PKCS#11
+has no attributes for the additional primes. The skip is right and its stated
+cause is not.
+
+No action here. Noted so the message does not send the next reader — or the
+next session — looking for a `C_CreateObject` gap that does not exist. Worth
+reporting upstream.

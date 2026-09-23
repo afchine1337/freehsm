@@ -11423,6 +11423,78 @@ CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
     return FHSM_RV_OK;
 }
 
+/* How many bytes will this C_DecryptUpdate actually produce?
+ *
+ * Asked by running the update on a *copy* of the cipher context, so the real
+ * one is left exactly where it was. That matters because the answer is used
+ * to decide whether to return CKR_BUFFER_TOO_SMALL, and §5.2 leaves the
+ * operation alive after that return: the caller retries with the same
+ * ciphertext, and a module that had already consumed it would decrypt those
+ * bytes twice.
+ *
+ * The scratch buffer holds recovered plaintext and is cleansed.
+ *
+ * This is the only way to get the number without reconstructing OpenSSL's
+ * internal buffering rules -- how much a padded decrypt holds back, how much
+ * a previous partial block left behind -- in a second place, from
+ * documentation, for a value the library already computes. */
+static fhsm_rv_t decrypt_update_exact_len(fhsm_op_t *op,
+                                           const unsigned char *in, size_t inl,
+                                           size_t bound, size_t *out) {
+    if (bound == 0) bound = 1;
+    EVP_CIPHER_CTX *probe = EVP_CIPHER_CTX_new();
+    if (!probe) return FHSM_RV_HOST_MEMORY;
+    if (EVP_CIPHER_CTX_copy(probe, (EVP_CIPHER_CTX *)op->cipher_ctx) != 1) {
+        EVP_CIPHER_CTX_free(probe);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    unsigned char *scratch = OPENSSL_malloc(bound);
+    if (!scratch) { EVP_CIPHER_CTX_free(probe); return FHSM_RV_HOST_MEMORY; }
+    int n = 0;
+    int ok = EVP_DecryptUpdate(probe, scratch, &n, in, (int)inl);
+    OPENSSL_cleanse(scratch, bound);
+    OPENSSL_free(scratch);
+    EVP_CIPHER_CTX_free(probe);
+    if (ok != 1 || n < 0) return FHSM_RV_FUNCTION_FAILED;
+    *out = (size_t)n;
+    return FHSM_RV_OK;
+}
+
+/* The same question for C_DecryptFinal, answered the same way.
+ *
+ * Returns FHSM_RV_OK with *out set, or FHSM_RV_ENCRYPTED_DATA_INVALID when
+ * the padding does not check out -- in which case the caller must return
+ * that without touching the caller's buffer, because there is nothing to
+ * write and the buffer may be a single byte.
+ *
+ * On the padding oracle: the copy runs the padding check, so a caller with
+ * an undersized buffer now learns CKR_BUFFER_TOO_SMALL for valid padding and
+ * CKR_ENCRYPTED_DATA_INVALID for invalid. That is the same distinction a
+ * caller already gets by passing a large buffer (CKR_OK against
+ * CKR_ENCRYPTED_DATA_INVALID), so no information is added -- see
+ * tests/test_cbc_pad_oracle.c for the property that does matter here. */
+static fhsm_rv_t decrypt_final_exact_len(fhsm_op_t *op, size_t bound,
+                                          size_t *out) {
+    if (bound == 0) bound = 1;
+    EVP_CIPHER_CTX *probe = EVP_CIPHER_CTX_new();
+    if (!probe) return FHSM_RV_HOST_MEMORY;
+    if (EVP_CIPHER_CTX_copy(probe, (EVP_CIPHER_CTX *)op->cipher_ctx) != 1) {
+        EVP_CIPHER_CTX_free(probe);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    unsigned char *scratch = OPENSSL_malloc(bound);
+    if (!scratch) { EVP_CIPHER_CTX_free(probe); return FHSM_RV_HOST_MEMORY; }
+    int n = 0;
+    int ok = EVP_DecryptFinal_ex(probe, scratch, &n);
+    OPENSSL_cleanse(scratch, bound);
+    OPENSSL_free(scratch);
+    EVP_CIPHER_CTX_free(probe);
+    if (ok != 1) return FHSM_RV_ENCRYPTED_DATA_INVALID;
+    if (n < 0) return FHSM_RV_FUNCTION_FAILED;
+    *out = (size_t)n;
+    return FHSM_RV_OK;
+}
+
 CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
                       CK_ULONG ulEncLen, unsigned char *pPart, CK_ULONG *pulPartLen) {
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
@@ -11437,14 +11509,52 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
     if (ulEncLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     fhsm_rv_t rv = ensure_cipher_ctx(op, t, 0);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
-    /* Symmetric guard to C_EncryptUpdate : stream (GCM/CTR) emits exactly
-     * ulEncLen ; block ciphers may emit up to ulEncLen + one block. Refuse an
-     * undersized buffer before EVP writes rather than overrun pPart
-     * (#125 TestUpdateOutputGuard / TestDecryptBufferTooSmallGuards, #57). */
+    /* Refuse an undersized buffer before EVP writes, rather than overrun
+     * pPart (#125 TestUpdateOutputGuard / TestDecryptBufferTooSmallGuards,
+     * #57). The guard is right; the number it used was not.
+     *
+     * ulEncLen + one block is C_EncryptUpdate's bound, and there it is real:
+     * a block cipher fed 64 bytes with 12 already buffered emits 64 + 16.
+     * Decryption cannot do that. Each ciphertext block yields one plaintext
+     * block and padding only removes bytes, so the output never exceeds what
+     * came in. The encrypt bound had been copied to the decrypt side -- a
+     * rule written for one direction and applied to the other.
+     *
+     * The cost was not an overrun but a refusal: pkcs11-check's probe
+     * decrypts 64 bytes of AES-CBC-PAD into a 1-byte buffer and is told to
+     * retry with 80, which is larger than the ciphertext. Its retry check
+     * requires the reported size to be usable (1 < n <= 64), so it never
+     * retried, and the module looked as though it could not recover.
+     *
+     * Same shape as the OAEP decrypt and the multipart signature earlier
+     * this week: measuring the caller's buffer against an upper bound
+     * instead of against what is actually produced. The answer there was to
+     * produce into scratch and measure. That answer does not work here --
+     * EVP_DecryptUpdate consumes the input, and §5.2 keeps the operation
+     * alive after CKR_BUFFER_TOO_SMALL precisely so the caller can retry
+     * with the same ciphertext. So the question is asked on a copy of the
+     * context instead, and the real one is left untouched.
+     *
+     * The size query keeps answering the bound: §5.2 lets it over-report,
+     * and a caller who asks before providing data should get a number that
+     * is still valid once it does.
+     *
+     * The probe only runs when the caller's buffer is under the bound --
+     * when it is at or above, no refusal is possible and there is nothing
+     * to decide. */
     { int dk = op_cipher_kind(op->mechanism);
-      size_t need = (dk == 2 || dk == 3) ? ulEncLen + 16 : ulEncLen;
-      if (pPart == NULL) { *pulPartLen = need; return FHSM_RV_OK; }
-      if (*pulPartLen < need) { *pulPartLen = need; return 0x00000150UL; }
+      size_t bound = (dk == 2 || dk == 3) ? ulEncLen + 16 : ulEncLen;
+      if (pPart == NULL) { *pulPartLen = bound; return FHSM_RV_OK; }
+      if (*pulPartLen < bound) {
+          size_t exact = 0;
+          fhsm_rv_t erv = decrypt_update_exact_len(op, pEnc, ulEncLen,
+                                                    bound, &exact);
+          if (erv != FHSM_RV_OK) { op->active = 0; return erv; }
+          if (*pulPartLen < exact) {
+              *pulPartLen = exact;
+              return 0x00000150UL;   /* operation stays alive for the retry */
+          }
+      }
     }
     int out_len = 0;
     if (EVP_DecryptUpdate(op->cipher_ctx, pPart, &out_len, pEnc, (int)ulEncLen) != 1) {
@@ -11461,16 +11571,60 @@ CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
     { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
-    if (pLast == NULL) { *pulLastLen = 0; return FHSM_RV_OK; }
     /* No multipart context : C_DecryptInit was called but no
      * C_DecryptUpdate ever created the cipher context (e.g. the key
      * handle was invalid, or Final was called directly). Guard against
      * EVP_DecryptFinal_ex(NULL) which segfaults. Mirrors C_EncryptFinal.
-     * #125 (pkcs11-check crash : test_mech_flags decrypt_flag_callable). */
+     * #125 (pkcs11-check crash : test_mech_flags decrypt_flag_callable).
+     *
+     * Before the size query, which needs the context to answer. */
     if (op->cipher_ctx == NULL) {
         op->active = 0;
         return FHSM_RV_OPERATION_NOT_INITIALIZED;
     }
+
+    /* How much can Final still emit?
+     *
+     * Padded CBC holds one block back and returns it minus 1..16 padding
+     * bytes, so 0 to 15. Every other mode here emits nothing at all. The
+     * size query answered a flat 0, which is correct for those modes and an
+     * under-report for CKM_AES_CBC_PAD -- and an under-report is the one
+     * direction §5.2 does not allow, because the caller sizes from it.
+     *
+     * Worse, there was no size check at all on the write. A caller that
+     * declared one byte got up to fifteen written into it. pkcs11-check's
+     * probe does exactly that, and had never reached this call: the
+     * oversized bound in C_DecryptUpdate -- fixed just above -- refused its
+     * setup first, so the overflow sat behind a defect that happened to
+     * shadow it. */
+    int dk = op_cipher_kind(op->mechanism);
+    size_t bound = (dk == 3) ? 16u : 0u;
+    if (pLast == NULL) { *pulLastLen = bound; return FHSM_RV_OK; }
+
+    if (*pulLastLen < bound) {
+        /* Under the bound, so a refusal is possible and the exact figure
+         * has to come from somewhere. Asked on a copy, for the same reason
+         * as C_DecryptUpdate: §5.2 keeps the operation alive after
+         * CKR_BUFFER_TOO_SMALL, and the retry needs the held-back block
+         * still held. */
+        size_t exact = 0;
+        fhsm_rv_t erv = decrypt_final_exact_len(op, bound, &exact);
+        if (erv == FHSM_RV_ENCRYPTED_DATA_INVALID) {
+            /* Nothing to write, and pLast may be a single byte. Answered
+             * from the copy rather than by calling the real Final with an
+             * undersized buffer and trusting it not to write on failure. */
+            EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
+            *pulLastLen = 0;
+            op->active = 0;
+            return FHSM_RV_ENCRYPTED_DATA_INVALID;
+        }
+        if (erv != FHSM_RV_OK) { op->active = 0; return erv; }
+        if (*pulLastLen < exact) {
+            *pulLastLen = exact;
+            return 0x00000150UL;   /* operation and context stay alive */
+        }
+    }
+
     int out_len = 0;
     int ok = EVP_DecryptFinal_ex(op->cipher_ctx, pLast, &out_len);
     EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;

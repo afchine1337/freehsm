@@ -303,25 +303,107 @@ identified the same evening; fixed, tested and pushed within the hour.
 
 ---
 
+## Self-disclosed out-of-bounds write — `C_DecryptFinal`, AES-CBC-PAD (2026-09-23)
+
+**Advisory:** GHSA pending · High · CWE-787 · no CVE requested
+
+**`C_DecryptFinal` wrote past the caller's output buffer.** Affects every
+published release: the call is present in `0c0f5df`, the v1.1.0 initial
+open-source release. Fixed on `main`, shipping in v2.2.0.
+
+**Cause.** The function had no output-size check of any kind. It called
+`EVP_DecryptFinal_ex` straight into `pLastPart` and reported the length
+afterwards:
+
+```c
+int out_len = 0;
+int ok = EVP_DecryptFinal_ex(op->cipher_ctx, pLast, &out_len);
+*pulLastLen = (CK_ULONG)out_len;
+```
+
+For `CKM_AES_CBC_PAD` the held-back block yields 0 to 15 bytes once padding is
+removed. Every one of them was written, whatever the caller had declared.
+
+**The size query made it reachable rather than mitigating it.** PKCS#11 §5.2
+has the caller ask for the length with a NULL buffer, allocate, and call
+again. This function answered a flat `0` to that question. So an application
+following the pattern the specification prescribes allocated nothing, called
+again, and had up to fifteen bytes written into it. **The correct usage was
+the reachable one** — an application that guessed a generous buffer instead
+was safe.
+
+**Effect, and how it differs from GHSA-833h-crp9-f378.** That one overflowed a
+buffer inside the module, on the stack, where `_FORTIFY_SOURCE` and the stack
+protector turned it into an abort. This one writes into the *caller's* buffer:
+the module knows neither its size nor where it lives, and it is commonly heap.
+No compile-time protection in our build sees it, and the failure is silent.
+
+**Reachability.** Any application decrypting `CKM_AES_CBC_PAD` in multiple
+parts. The ciphertext is, by the nature of decryption, data from elsewhere —
+it decides the padding, and the padding decides how many bytes are written. An
+attacker without the key cannot steer that precisely; a legitimate peer's
+message does it as a matter of course.
+
+**Fixed.** The size query answers the real bound. An undersized buffer is
+refused with `CKR_BUFFER_TOO_SMALL` and a length the caller can retry with,
+the operation and its held-back block staying alive for the retry, as §5.2
+requires. When the padding does not check out, the answer comes from a copy of
+the cipher context rather than from calling the real `Final` with an
+undersized buffer and trusting it not to write on failure.
+`tests/test_cbc_pad_update_size.c` covers both guard cases.
+
+**A second defect, in front of this one.** `C_DecryptUpdate` refused undersized
+buffers against `ulEncLen` + one block — `C_EncryptUpdate`'s bound, which
+decryption cannot reach, since each ciphertext block yields one plaintext block
+and padding only removes bytes. Nothing was overrun there; the cost was that
+`pkcs11-check`'s probe was refused at its *setup* step and never reached
+`C_DecryptFinal`. The module had passed four full-corpus runs with the
+overflow behind it. Fixing the refusal exposed the write within the hour.
+
+**Detection.** Nothing is logged, and in the common case nothing crashes —
+fifteen bytes into an adjacent allocation. If you run an affected version and
+your application uses multipart CBC-PAD decryption, the two-call sizing path is
+where to look: a buffer sized from `C_DecryptFinal`'s size query was sized from
+`0`.
+
+**Found by** `pkcs11-check`'s `aes_cbc_pad_decrypt_final_buffer_too_small`
+probe, which became reachable only after the `C_DecryptUpdate` bound was
+corrected on 2026-09-23.
+
+**Timeline.** Present since v1.1.0 (2026-06-11), the first public release, and
+in every release since — three months and four full-corpus runs, behind a
+defect that refused the probe before it could arrive. Surfaced 2026-09-23
+within an hour of that refusal being corrected; fixed, tested under ASan and
+measured against the full corpus (55,202 passed · 2 failed · 0 crashed) before
+disclosure.
+
+---
+
 ## Supported versions
 
 | Version | Supported |
 |---|---|
-| `2.1.x` | ✅ — active development. First version carrying the `C_UnwrapKey` bound described above |
-| `2.0.x` | ⚠️ — **affected by the `C_UnwrapKey` stack overflow**; upgrade to v2.1.0. v2.0.3 is otherwise current |
-| `1.5.x` – `1.6.x` | ⚠️ — affected by the same defect; no backports planned, upgrade |
+| `2.2.x` | ✅ — active development. First version carrying the `C_DecryptFinal` output bound described above |
+| `2.1.x` | ⚠️ — **affected by the `C_DecryptFinal` out-of-bounds write**; upgrade to v2.2.0. Carries the `C_UnwrapKey` bound |
+| `2.0.x` | ⚠️ — affected by **both** the `C_DecryptFinal` write and the `C_UnwrapKey` stack overflow; upgrade to v2.2.0 |
+| `1.5.x` – `1.6.x` | ⚠️ — affected by both; no backports planned, upgrade |
 | `1.4.0` | ❌ — **published unsigned** (see above); unusable as shipped, do not work around it |
-| `1.1.x` – `1.3.x` | ❌ — end of life. All `1.1.x` are additionally affected by the integrity self-test defect |
+| `1.1.x` – `1.3.x` | ❌ — end of life. Affected by the `C_DecryptFinal` write, and all `1.1.x` additionally by the integrity self-test defect |
 | `< 1.0` | ❌ — end of life (Python proof of concept) |
+
+The `C_DecryptFinal` write reaches every row from `1.1.x` upward: the call is
+present in `0c0f5df`, the initial open-source release. There is no version of
+this module published before v2.2.0 that does not have it.
 
 The `-FIPS` suffix was dropped from version strings in v2.0.0: it asserted in
 the version number a certification this project does not hold and will not seek.
 Older tags carry it; it means nothing beyond the name they were released under.
 
-This table was last accurate at v1.2.1 and is corrected here as part of writing
-the entry above — a supported-versions table that stops four minor versions
-short is the one place a reader checks to find out whether an advisory concerns
-them.
+This table was last accurate at v1.2.1, corrected when the `C_UnwrapKey` entry
+was written, and corrected again here for v2.2.0 — a supported-versions table
+that lags is the one place a reader checks to find out whether an advisory
+concerns them, so it is updated in the same commit as the advisory rather than
+in a tidying pass afterwards.
 
 ---
 

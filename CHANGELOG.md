@@ -7,7 +7,69 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.0] --- 2026-09-23
+
+*Minor rather than patch, and it carries a security fix. `C_SignFinal`,
+`C_VerifyFinal` and `C_CreateObject` each answer a request they used to
+refuse, which an application can observe — the same argument that made 2.1.0
+a minor release. The security fix below touches `C_DecryptFinal` and
+`C_DecryptUpdate` only and does not depend on any of it.*
+
+### Security
+* **`C_DecryptFinal` wrote past the caller's buffer** — CWE-787. Affects
+  every release that has shipped multipart decryption.
+
+  The function had no output-size check at all: it called
+  `EVP_DecryptFinal_ex` straight into `pLastPart` and reported the length
+  afterwards. For `CKM_AES_CBC_PAD` that is up to 15 bytes, decided by the
+  padding of ciphertext which by the nature of decryption comes from
+  elsewhere.
+
+  The size query made it worse rather than mitigating it. `pLastPart == NULL`
+  answered a flat `0`, so an application following the two-call pattern the
+  specification prescribes allocated nothing and then had up to fifteen bytes
+  written into it. The correct usage was the reachable one.
+
+  Found because the oversized bound in `C_DecryptUpdate` (below) had been
+  refusing pkcs11-check's setup before its probe ever reached this call: one
+  defect shadowing another. Fixing the first exposed the second within the
+  hour.
+
+  The size query now answers the real bound, and an undersized buffer is
+  refused with `CKR_BUFFER_TOO_SMALL` and a length the caller can retry with,
+  the operation and its held-back block staying alive for that retry. When
+  the padding does not check out the answer comes from a copy of the context
+  rather than from calling the real `Final` with an undersized buffer and
+  trusting it not to write on failure. `tests/test_cbc_pad_update_size.c`.
+
 ### Fixed
+* **`C_DecryptUpdate` reported a length the caller could not retry with.**
+  The undersized-buffer guard was right; the number it used was not.
+  `ulEncLen` + one block is `C_EncryptUpdate`'s bound, and there it is real —
+  a block cipher fed 64 bytes with 12 already buffered emits 64 + 16.
+  Decryption cannot reach it: each ciphertext block yields one plaintext
+  block and padding only removes bytes. The encrypt bound had been copied to
+  the decrypt side, so decrypting 64 bytes of AES-CBC-PAD into a small buffer
+  answered "retry with 80" — more than the ciphertext itself.
+
+  Nothing was ever overrun. The cost was a refusal a caller could not act on,
+  and pkcs11-check, whose check requires the reported size to be usable,
+  never retried.
+
+  The length now comes from EVP, asked on a *copy* of the cipher context. The
+  answer decides whether to return `CKR_BUFFER_TOO_SMALL`, after which §5.2
+  keeps the operation alive so the caller retries with the same ciphertext —
+  a module that had consumed it while measuring would decrypt those bytes
+  twice. The copy is only made when the caller's buffer is under the bound;
+  above it no refusal is possible and there is nothing to decide. The size
+  query still answers the bound, because §5.2 lets it over-report and a
+  caller who asks before providing data should get a number still valid
+  afterwards.
+
+  `tests/test_cbc_pad_update_size.c`. Third instance this release of the same
+  shape: measuring the caller's buffer against an upper bound instead of
+  against what is produced.
+
 * **`C_Decrypt` measured the caller's buffer against the key size rather than
   the recovered plaintext.** `EVP_PKEY_decrypt` with a NULL output buffer
   reports `RSA_size(key)`, because the true length is only known once the
