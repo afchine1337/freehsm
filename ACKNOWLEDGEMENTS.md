@@ -38,6 +38,19 @@ September findings visible: severity classification, mechanisms advertised but
 not operational, honest deviations separated from spec violations. Our summary
 script counted tests; his report says what they mean.
 
+In v2.2.0 the harness found a second out-of-bounds write.
+`aes_cbc_pad_decrypt_final_buffer_too_small` reached a `C_DecryptFinal` that had
+no output-size check at all — [GHSA-c634-gqj6-4p2f](https://github.com/afchine1337/freehsm/security/advisories/GHSA-c634-gqj6-4p2f),
+present in every release since v1.1.0. It had never fired, across four
+full-corpus runs, because a different defect of ours refused the probe's setup
+step before it could arrive.
+
+The same run's `test_sign_final_buffer_too_small_then_correct` turned out not to
+be a buffer question at all: it could not reach one, because multipart signing
+was unimplemented for every asymmetric mechanism while `C_SignInit` accepted
+them. A test that fails for a reason other than the one it was written for is
+worth more than a test that passes.
+
 ## Simon Josefsson (`jas4711`)
 
 Preparing Debian packages, and reporting what that exposed:
@@ -104,6 +117,25 @@ Followed `AGD_PRE.md` as written, on a clean machine, repeatedly:
   operational": the harness drives it through `C_Encrypt`, which we refused.
   PKCS#11 v3.2 §6.16.3 gives the mechanism that half too. Implementing it made
   **7,219 NIST ACVP vectors** runnable that never had been.
+* **#15** — the CCM AAD ceiling. A fixed 4096-byte array in the operation state
+  refused every ACVP vector with a longer AAD, at a number inherited from a
+  stack frame rather than chosen. It is allocated at the announced length now,
+  with a stated 1 MiB limit documented as a deviation instead of discovered.
+
+  He also split his own report in two and resolved the second group himself:
+  the nonce-length group was a mismatch between the ACVP vectors and PKCS#11
+  v3.2 §6.13, and he took it upstream rather than filing it here. That is more
+  work than filing it, and it is what kept us from "fixing" conformance to the
+  specification.
+* **#16** — CNSA 2.0. The integrity digest and the entropy conditioner both
+  moved to SHA-384. The observation that mattered was underneath: reading the
+  RNG path to answer him turned up `SHA256(pool, off, cond)` — the one-shot
+  legacy API, which computes in libcrypto and never reaches a provider. In a
+  FIPS build the entropy conditioning was not being done by the validated
+  implementation, and no self-test could have said so, because self-tests
+  exercise advertised mechanisms and this is internal plumbing.
+
+  His stated reason was half of it. Checking the reason is what found the rest.
 
 ## `fencepost-error`
 
