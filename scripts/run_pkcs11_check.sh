@@ -40,6 +40,46 @@ command -v pkcs11-check >/dev/null || { echo "FATAL: pkcs11-check missing (pip i
 [ -f "$MODULE" ] || { echo "FATAL: module $MODULE missing (run make first)" >&2; exit 2; }
 
 MODULE="$(readlink -f "$MODULE")"
+
+# Is this module instrumented?
+#
+# `make asan` deliberately leaves an instrumented tree, and pkcs11-tool is an
+# ordinary binary that dlopen()s the module. ASan's runtime has to be loaded
+# before libc for its interceptors to take, so the combination fails with
+#
+#   ASan runtime does not come first in initial library list
+#   FATAL: C_InitToken failed
+#
+# which names neither the cause nor the fix unless the reader already knows
+# both. That cost a run three times in one week, always the same way: an
+# `asan` target followed by a harness invocation with no rebuild in between.
+#
+# The Makefile's build-mode stamp catches this for `make`, but nothing
+# catches it for a consumer of the .so. So the question is asked here.
+# Answered with a refusal rather than an automatic LD_PRELOAD: the harness
+# measures the module a caller would load, and an instrumented build is a
+# different one -- slower, differently laid out, and not what any of the
+# recorded numbers were taken against. Running the corpus under ASan is a
+# worthwhile thing to do; it is just not this script's job to do it by
+# accident.
+if command -v nm >/dev/null && nm -D "$MODULE" 2>/dev/null | grep -q '__asan_init'; then
+    cat >&2 <<EOF
+FATAL: $MODULE is instrumented (AddressSanitizer).
+
+  pkcs11-tool is not, and ASan's runtime must load before libc, so the
+  harness would fail with "ASan runtime does not come first" and a bare
+  C_InitToken failure.
+
+  Rebuild first:   make && make integrity
+  Then re-run this script.
+
+  To run the corpus under ASan on purpose, preload the runtime yourself:
+    LD_PRELOAD=\$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0 $0 ...
+  Those numbers are not comparable with the ordinary ones.
+EOF
+    exit 2
+fi
+
 mkdir -p "$REPORTS"
 TOKENS_DIR="$(mktemp -d /tmp/fhsm-p11check.XXXXXX)"
 trap 'rm -rf "$TOKENS_DIR"' EXIT
