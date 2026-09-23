@@ -1850,7 +1850,52 @@ typedef struct fhsm_op_s {
      *           no signature. */
     int         ctx_auth_required;
     int         ctx_auth_done;
+    /* Multipart accumulation for the asymmetric signature mechanisms.
+     *
+     * C_SignInit accepts every signature mechanism -- C_Sign needs it to --
+     * while C_SignUpdate and C_SignFinal implemented HMAC and the composite
+     * mechanism only. CKM_SHA256_RSA_PKCS was therefore accepted at Init and
+     * refused at Final with CKR_MECHANISM_INVALID: advertised, not
+     * operational.
+     *
+     * The parts are accumulated here and signed at Final by the same
+     * sign_asymmetric() the one-shot path uses. Streaming through
+     * EVP_DigestSignUpdate would avoid the copy, but only for three of the
+     * seven families: tests/probe_digestsign_stream.c measures Ed25519,
+     * Ed448, ML-DSA and SLH-DSA as one-shot on this OpenSSL, by construction
+     * for the first two. Taking the streaming route would also mean
+     * extracting the PSS parameters, the post-quantum context and the ECDSA
+     * DER-to-r||s conversion into a second place -- on the path that
+     * Denis Mingulov's raw-ECDSA finding already broke once. Buffering keeps
+     * one copy of every rule and costs memory; the trade is recorded here so
+     * the next reader knows it was a choice.
+     *
+     * Ownership, exactly as for gcm_aad above: the operation slots are
+     * static and indexed by session handle, never destroyed, only reused. So
+     * there are two places that must release this -- op_init(), before the
+     * slot is used again, and fhsm_session_ops_reset(). Not "every exit
+     * path". */
+    uint8_t    *mp_buf;
+    size_t      mp_len;
+    size_t      mp_cap;
 } fhsm_op_t;
+
+/* Cumulative ceiling on a buffered multipart signature, in bytes.
+ *
+ * Multipart exists so a caller need not hold the message in memory; a module
+ * that buffers it has traded that away and should say by how much rather
+ * than growing until the allocator refuses. 16 MiB covers what PKCS#11
+ * callers sign in practice -- certificates, documents, log segments -- and a
+ * larger input is refused with CKR_DATA_LEN_RANGE instead of quietly
+ * inflating the process.
+ *
+ * The worst case is this times the number of sessions signing at once. It is
+ * a ceiling, not a reservation: nothing is allocated until a C_SignUpdate
+ * arrives, and the buffer grows from 4 KiB.
+ *
+ * This number should rise, or stop mattering, when the three streaming
+ * families get their own path. */
+#define FHSM_MULTIPART_MAX  (16u * 1024u * 1024u)
 /* All five together, and above the post-fork reset rather than around it.
  * Two were declared here and three below the reset, so the reset could only
  * see two -- and zeroized exactly those. A declaration order decided which
@@ -7919,6 +7964,57 @@ static void op_free_aad(fhsm_op_t *op) {
     op->gcm_aad_len = 0;
 }
 
+/* Release a buffered multipart message. Zeroised before the free: the
+ * accumulated bytes are the caller's message, they sat in a static slot that
+ * will be handed to the next operation, and a message that reaches the HSM
+ * is not obviously less sensitive than the signature over it. */
+static void op_free_multipart(fhsm_op_t *op) {
+    if (!op) return;
+    if (op->mp_buf) {
+        OPENSSL_cleanse(op->mp_buf, op->mp_cap);
+        OPENSSL_free(op->mp_buf);
+        op->mp_buf = NULL;
+    }
+    op->mp_len = 0;
+    op->mp_cap = 0;
+}
+
+/* Append one C_SignUpdate part.
+ *
+ * The ceiling is checked against the running total, not against this part:
+ * a caller can reach any size in small pieces, and a per-call limit would be
+ * a guard on one of the two ways to get there. The addition is written so it
+ * cannot wrap -- mp_len > MAX - len rather than mp_len + len > MAX.
+ *
+ * Errors terminate the operation and drop the buffer, per §5.2. */
+static fhsm_rv_t op_append_multipart(fhsm_op_t *op, const uint8_t *part,
+                                      size_t len) {
+    if (len == 0) return FHSM_RV_OK;
+    if (len > FHSM_MULTIPART_MAX || op->mp_len > FHSM_MULTIPART_MAX - len) {
+        op_free_multipart(op);
+        op->active = 0;
+        return FHSM_RV_DATA_LEN_RANGE;
+    }
+    if (op->mp_len + len > op->mp_cap) {
+        size_t cap = op->mp_cap ? op->mp_cap : 4096u;
+        while (cap < op->mp_len + len) cap *= 2u;
+        if (cap > FHSM_MULTIPART_MAX) cap = FHSM_MULTIPART_MAX;
+        /* OPENSSL_realloc, to match the cleanse-and-free above and the
+         * allocator gcm_aad already uses in this structure. */
+        uint8_t *nb = OPENSSL_realloc(op->mp_buf, cap);
+        if (!nb) {
+            op_free_multipart(op);
+            op->active = 0;
+            return FHSM_RV_HOST_MEMORY;
+        }
+        op->mp_buf = nb;
+        op->mp_cap = cap;
+    }
+    memcpy(op->mp_buf + op->mp_len, part, len);
+    op->mp_len += len;
+    return FHSM_RV_OK;
+}
+
 static void fhsm_session_ops_reset(CK_SESSION_HANDLE h) {
     if (h == 0 || h >= FHSM_MAX_SESSIONS) return;
     fhsm_op_t *tabs[] = { &g_op_enc[h], &g_op_dec[h], &g_op_sig[h],
@@ -7930,6 +8026,7 @@ static void fhsm_session_ops_reset(CK_SESSION_HANDLE h) {
         EVP_MAC_CTX_free((EVP_MAC_CTX *)op->mac_ctx);
         /* Before the memset, which would otherwise lose the pointer. */
         op_free_aad(op);
+        op_free_multipart(op);
         memset(op, 0, sizeof(*op));
     }
     memset(&g_oaep_enc[h], 0, sizeof(g_oaep_enc[h]));
@@ -7989,8 +8086,11 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
     /* The slot is being reused. Whatever AAD the previous operation left is
      * released here -- the one place that has to do it, because the slots
-     * are static and no exit path destroys them. */
+     * are static and no exit path destroys them. The multipart buffer has
+     * exactly the same ownership, so it is released in exactly the same
+     * place rather than in a second one that would have to be remembered. */
     op_free_aad(op);
+    op_free_multipart(op);
     op->key_handle = (uint32_t)hKey;
     /* CKA_ALWAYS_AUTHENTICATE, read once here rather than at each entry point
      * (§5.6). Every C_*Init reaches op_init, so the flag is carried by every
@@ -9814,6 +9914,26 @@ static size_t fhsm_exact_sig_len(fhsm_token_t *t, fhsm_op_t *op) {
     return out;
 }
 
+/* Upper bound on a signature for a mechanism family, used to size the
+ * scratch buffer that sign_asymmetric writes into.
+ *
+ * The scratch is not an optimisation and not caution: for the CKM_ECDSA
+ * family sign_asymmetric produces a DER ECDSA-Sig-Value first and converts
+ * it to the raw r||s that PKCS#11 mandates, in place. DER is the longer of
+ * the two -- about 72 bytes for P-256 against 64 -- so a caller buffer sized
+ * to the exact signature length is too small for the intermediate. Signing
+ * into it would write past the end.
+ *
+ * One function so the one-shot and multipart entry points cannot disagree
+ * about the number. They had no reason to disagree; they simply had two
+ * copies of it, which is the arrangement that only ever holds until someone
+ * edits one. */
+static size_t sig_family_bound(uint32_t mech) {
+    if (mech == CKM_SLH_DSA_OP) return 65536u;
+    if (mech == CKM_ML_DSA_OP)  return 8192u;
+    return 512u;
+}
+
 static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
                                   const uint8_t *data, size_t data_len,
                                   uint8_t *sig, size_t *sig_len) {
@@ -10118,9 +10238,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         /* Key unreadable or an unrecognised family : fall back to the family
          * bound. Over-reporting is a contract wart; under-reporting would
          * overflow the caller's buffer. */
-        if (op->mechanism == CKM_SLH_DSA_OP)        *pulSignatureLen = 65536;
-        else if (op->mechanism == CKM_ML_DSA_OP)    *pulSignatureLen = 8192;
-        else                                          *pulSignatureLen = 512;
+        *pulSignatureLen = sig_family_bound(op->mechanism);
         return FHSM_RV_OK;
     }
     /* Sign into a scratch buffer sized to the mechanism upper bound so we
@@ -10130,8 +10248,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
      * (pkcs11-check TestBufferTooSmall::test_sign_buffer_too_small, #125).
      * Signing straight into an undersized caller buffer instead made
      * OpenSSL fail with CKR_FUNCTION_FAILED (0x6). */
-    size_t scratch_cap = (op->mechanism == CKM_SLH_DSA_OP) ? 65536u
-                       : (op->mechanism == CKM_ML_DSA_OP)  ? 8192u : 512u;
+    size_t scratch_cap = sig_family_bound(op->mechanism);
     uint8_t  stackbuf[512];
     uint8_t *scratch = (scratch_cap <= sizeof(stackbuf))
                          ? stackbuf : (uint8_t *)malloc(scratch_cap);
@@ -10680,6 +10797,26 @@ static fhsm_rv_t composite_ph_final(fhsm_op_t *op, uint8_t *ph, size_t *ph_len) 
     return FHSM_RV_OK;
 }
 
+/* Does this signature mechanism take the buffered multipart path?
+ *
+ * Derived from the same predicates the one-shot C_Sign dispatches on, rather
+ * than restated as a list. A list here would be a second enumeration of the
+ * mechanism families, and the two would drift the first time one was
+ * extended -- which is how CKM_AES_CMAC and CKM_AES_GMAC came to be accepted
+ * at C_SignInit and refused at C_SignFinal in the first place.
+ *
+ * CMAC and GMAC are excluded and still refused: they are MACs with their own
+ * EVP_MAC streaming shape, not signatures, and sign_asymmetric() would not
+ * know what to do with them. That gap is real and is named in the comment at
+ * their exclusion rather than silently swept into this path. */
+static int mech_sign_is_buffered_multipart(uint32_t m) {
+    fhsm_hash_t h; size_t n;
+    if (m == CKM_COMPOSITE_MLDSA65_ED25519) return 0;  /* streams its own PH */
+    if (m == CKM_AES_CMAC || m == CKM_AES_GMAC) return 0;  /* still unimplemented */
+    if (fhsm_hmac_hash_of(m, &h, &n)) return 0;            /* streams via EVP_MAC */
+    return 1;
+}
+
 CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                    CK_ULONG ulPartLen) {
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
@@ -10705,6 +10842,12 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
      * because nothing about the key is needed to hash the message. */
     if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519)
         return composite_ph_update(op, pPart, (size_t)ulPartLen);
+
+    /* Asymmetric mechanisms: accumulate the message, sign it at Final.
+     * Here for the same reason as the composite branch above -- nothing
+     * about the key is needed to hold on to the caller's bytes. */
+    if (mech_sign_is_buffered_multipart(op->mechanism))
+        return op_append_multipart(op, pPart, (size_t)ulPartLen);
 
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -10805,6 +10948,80 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
                                 fhsm_session_role(hSession), crv, "alg", "composite-multipart", NULL);
         return crv;
+    }
+
+    /* Asymmetric: the parts were accumulated by C_SignUpdate and the
+     * signature is produced here by the same sign_asymmetric() the one-shot
+     * C_Sign uses -- so PSS parameters, the post-quantum context string, the
+     * raw-versus-hashed split and the ECDSA DER-to-r||s conversion all have
+     * exactly one implementation, reached from both entry points.
+     *
+     * The signature is produced into a scratch buffer and copied out, which
+     * is not caution: for the CKM_ECDSA family sign_asymmetric writes a DER
+     * ECDSA-Sig-Value and converts it in place, and DER is longer than the
+     * raw r||s the caller sized for. See sig_family_bound.
+     *
+     * So the length reported on refusal is the one actually produced, not an
+     * estimate. pkcs11-check test_sign_final_buffer_too_small_then_correct
+     * asserts that a 16-byte buffer for an RSA-2048 key is refused with
+     * pulSize set to 256 and that the retry then succeeds -- which requires
+     * the accumulated message to survive the refusal. The buffer is
+     * therefore released on success and on failure, and kept on
+     * CKR_BUFFER_TOO_SMALL.
+     *
+     * A caller that issued no C_SignUpdate at all signs the empty message,
+     * which is legal and is what the one-shot path does with ulDataLen 0. */
+    if (mech_sign_is_buffered_multipart(op->mechanism)) {
+        fhsm_token_t *t = fhsm_session_token(hSession);
+        if (!t) { op->active = 0; return FHSM_RV_SESSION_HANDLE_INVALID; }
+
+        /* Size query: nothing is signed, so the length comes from the key.
+         * The operation stays active -- the caller is about to call again. */
+        if (pSig == NULL) {
+            size_t need = fhsm_exact_sig_len(t, op);
+            *pulSigLen = need ? need : sig_family_bound(op->mechanism);
+            return FHSM_RV_OK;
+        }
+
+        size_t scratch_cap = sig_family_bound(op->mechanism);
+        uint8_t  stackbuf[512];
+        uint8_t *scratch = (scratch_cap <= sizeof stackbuf)
+                             ? stackbuf : (uint8_t *)malloc(scratch_cap);
+        if (!scratch) {
+            op_free_multipart(op); op->active = 0;
+            return FHSM_RV_HOST_MEMORY;
+        }
+        size_t slen = scratch_cap;
+        static const uint8_t empty[1] = { 0 };
+        fhsm_rv_t srv = sign_asymmetric(t, op,
+                                         op->mp_buf ? op->mp_buf : empty,
+                                         op->mp_len, scratch, &slen);
+        if (srv != FHSM_RV_OK) {
+            if (scratch != stackbuf) free(scratch);
+            op_free_multipart(op); op->active = 0;
+            (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
+                                    fhsm_session_role(hSession), srv,
+                                    "mode", "multipart", NULL);
+            return srv;
+        }
+        if (*pulSigLen < slen) {
+            /* The one return §5.2 does not treat as terminating. The
+             * operation stays active AND the accumulated message is kept,
+             * because the retry has to sign the same bytes -- the caller
+             * will not send them again. */
+            *pulSigLen = slen;
+            if (scratch != stackbuf) free(scratch);
+            return 0x00000150UL;
+        }
+        memcpy(pSig, scratch, slen);
+        if (scratch != stackbuf) free(scratch);
+        *pulSigLen = slen;
+        op_free_multipart(op);
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
+                                fhsm_session_role(hSession), srv,
+                                "mode", "multipart", NULL);
+        return srv;
     }
 
     /* Signature length is the MAC length of the mechanism's hash, not a

@@ -229,6 +229,39 @@ endif
 OBJDIR ?= .obj
 LIB_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(LIB_SRC))
 
+# ---------------------------------------------------------------------------
+# Objects remember which sanitizer built them, and a change of mode cleans.
+#
+# SANITIZE=1 and TSAN=1 change CFLAGS but not any file's timestamp, so make
+# sees objects that are up to date and relinks them under different flags.
+# Both directions fail, and neither failure names its cause:
+#
+#   plain objects + SANITIZE=1 link  -> undefined __asan_init
+#   ASan objects  + plain link       -> undefined __asan_init
+#
+# The second is the one that bites, because `make asan` deliberately leaves an
+# instrumented tree and the next ordinary `make` inherits it. That happened
+# twice in four days -- once from forgetting to repeat the variable, once from
+# forgetting the clean afterwards -- and both times the linker error pointed
+# at a KAT source file, which has nothing to do with it.
+#
+# The `asan` target's leading clean and its closing message were the earlier
+# answers, and both are instructions someone has to follow. This is the guard:
+# the mode is recorded beside the objects, and a mismatch cleans them.
+#
+# Evaluated while the makefile is read, because it has to happen before any
+# recipe runs.
+BUILD_MODE := $(if $(filter 1,$(SANITIZE)),asan,$(if $(filter 1,$(TSAN)),tsan,plain))
+BUILD_MODE_STAMP := $(OBJDIR)/.build-mode
+BUILD_MODE_PREV := $(shell cat $(BUILD_MODE_STAMP) 2>/dev/null)
+ifneq ($(BUILD_MODE_PREV),)
+ifneq ($(BUILD_MODE_PREV),$(BUILD_MODE))
+$(info [build] sanitizer mode changed: $(BUILD_MODE_PREV) -> $(BUILD_MODE), discarding $(OBJDIR))
+$(shell rm -rf $(OBJDIR))
+endif
+endif
+$(shell mkdir -p $(OBJDIR) && printf '%s' '$(BUILD_MODE)' > $(BUILD_MODE_STAMP))
+
 # src/fhsm_revocation.c is deliberately NOT in LIB_SRC. It is shared between
 # fhsm-ca and fhsm-service -- one implementation of "is this serial revoked",
 # because two would drift and a drifted responder answers `good` for a revoked
@@ -656,6 +689,14 @@ tests/test_derive_hkdf: tests/test_derive_hkdf.c $(LIB)
 tests/probe_ecdh_curves: tests/probe_ecdh_curves.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Which signature algorithms accept EVP_DigestSignUpdate on this OpenSSL.
+# Decides, per mechanism family, whether multipart signing can stream or has
+# to buffer the message. Links against OpenSSL directly, not the module: the
+# question is about the provider's capability. Not in `make tests` -- it
+# measures the environment rather than asserting anything about us.
+tests/probe_digestsign_stream: tests/probe_digestsign_stream.c
+	$(CC) $(CFLAGS) -o $@ $< $(OPENSSL_LDFLAGS) -lcrypto
+
 # What the module answers to the harness's HKDF call shapes. Reports return
 # codes rather than asserting: written to find out which of two candidate rules
 # was refusing CKM_HKDF_DATA, and kept because the next HKDF discrepancy will
@@ -775,6 +816,14 @@ tests/test_legacy_rsa: tests/test_legacy_rsa.c $(LIB)
 tests/test_oaep_decrypt_size: tests/test_oaep_decrypt_size.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# C_SignUpdate / C_SignFinal for the asymmetric mechanisms, which used to be
+# accepted at C_SignInit and refused at Final. Includes the exact-size buffer
+# case for ECDSA, where DER is converted to raw r||s in place, and the
+# buffered-multipart ceiling. pkcs11-check
+# test_sign_final_buffer_too_small_then_correct.
+tests/test_sign_multipart: tests/test_sign_multipart.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # ---------------------------------------------------------------------------
 # asan --- build and run the whole suite under AddressSanitizer + UBSan.
 #
@@ -792,8 +841,11 @@ tests/test_oaep_decrypt_size: tests/test_oaep_decrypt_size.c $(LIB)
 # a KAT identifier that pointed into a dead stack frame and was read by the
 # code that reports a failed self-test.
 #
-# The leading clean is not politeness. .obj/ holds whichever build ran last,
-# and a mixture of instrumented and plain objects is precisely what fails.
+# The leading clean also drops the built binaries, which the build-mode stamp
+# near OBJDIR does not: the stamp discards objects when the mode changes, so
+# an ordinary `make` after this target now works on its own. The clean stays
+# because a target whose job is "measure from scratch" should start from
+# scratch, not from whatever a previous run left.
 #
 # The tree is left instrumented on purpose, so that a build which is not
 # shippable cannot be mistaken for one that is. Never ship it.
@@ -805,7 +857,7 @@ asan:
 	@echo
 	@echo "[asan] suite complete under AddressSanitizer + UBSan."
 	@echo "[asan] This tree is instrumented and must not be shipped or signed."
-	@echo "[asan] Restore with:  make clean && make && make integrity"
+	@echo "[asan] The next plain 'make' rebuilds it; then 'make integrity'."
 
 # No `tsan` twin yet, deliberately. TSAN=1 carries the same two-invocation
 # trap and deserves the same treatment, but the full suite has never been
@@ -820,7 +872,7 @@ asan:
 # beside the tokens, so any test that initialises the module writes there.
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
-tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_advertised_operational tests/test_derive_concat tests/test_derive_hkdf tests/probe_ecdh_curves tests/probe_hkdf_data tests/test_pbkd2 tests/test_always_authenticate tests/test_interface_v32 tests/test_pqc_pub_import tests/test_gmac_params tests/test_encap_flags tests/test_encap_flags_store tests/test_v3_fixture tests/test_allowed_mechanisms tests/test_nested_templates tests/test_wrap_with_trusted tests/test_finalize_release tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tests/test_oaep_decrypt_size tools/fhsm-token
+tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_advertised_operational tests/test_derive_concat tests/test_derive_hkdf tests/probe_ecdh_curves tests/probe_hkdf_data tests/test_pbkd2 tests/test_always_authenticate tests/test_interface_v32 tests/test_pqc_pub_import tests/test_gmac_params tests/test_encap_flags tests/test_encap_flags_store tests/test_v3_fixture tests/test_allowed_mechanisms tests/test_nested_templates tests/test_wrap_with_trusted tests/test_finalize_release tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tests/test_oaep_decrypt_size tests/test_sign_multipart tools/fhsm-token
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_tpm
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
@@ -910,6 +962,8 @@ tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cb
 		$(TEST_LD) ./tests/test_legacy_rsa
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_oaep_decrypt_size
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_sign_multipart
 
 # External behavioral harness (#125) : Denis Mingulov's pkcs11-check
 # (>100k vendor-neutral checks) against the built module. Findings are

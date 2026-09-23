@@ -56,6 +56,37 @@ project adheres to [Semantic Versioning](https://semver.org/).
   suite. Reported as `stack-use-after-return`.
 
 ### Added
+* **Multipart signing for the asymmetric mechanisms** (`C_SignUpdate` /
+  `C_SignFinal`). `C_SignInit` accepts every signature mechanism, because
+  `C_Sign` needs it to; Update and Final implemented HMAC and the composite
+  mechanism only. `CKM_SHA256_RSA_PKCS` was therefore accepted at Init and
+  refused at Final with `CKR_MECHANISM_INVALID` — advertised, not
+  operational. Verification is still one-shot only and is the next piece.
+
+  The parts are accumulated and signed at Final by the same
+  `sign_asymmetric()` the one-shot path uses, so the PSS parameters, the
+  post-quantum context string, the raw-versus-hashed split and the ECDSA
+  DER-to-`r||s` conversion keep one implementation each.
+
+  Streaming through `EVP_DigestSignUpdate` would avoid holding the message,
+  but `tests/probe_digestsign_stream.c` measures Ed25519, Ed448, ML-DSA and
+  SLH-DSA as one-shot on OpenSSL 3.5 — by construction for the first two — so
+  it would have covered three families of seven while putting a second copy
+  of those rules on the path Denis Mingulov's raw-ECDSA finding already broke
+  once. Buffering was chosen instead, with an explicit 16 MiB ceiling:
+  multipart exists so a caller need not hold the message, and a module that
+  buffers it should say by how much rather than growing until the allocator
+  refuses. Past the ceiling, `CKR_DATA_LEN_RANGE`.
+
+  `tests/test_sign_multipart.c` covers RSA-2048 and ECDSA P-256: the
+  signature verifies over the concatenation, a flipped byte breaks it, the
+  size query does not consume the operation, a too-small buffer reports the
+  real length and the retry still signs the same message. It also calls
+  `C_SignFinal` with a buffer of exactly the reported length — for ECDSA the
+  module builds a DER `ECDSA-Sig-Value` and converts it in place, and DER is
+  longer than the raw form, so that is the only buffer size that catches a
+  module signing into it directly.
+
 * **RSA private keys can be imported from their components** (PKCS#11 v3.2
   §C.6.3). `C_CreateObject` accepted `CKA_MODULUS` and
   `CKA_PUBLIC_EXPONENT` for a public key but had no path for
@@ -65,6 +96,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
   that cannot sign is refused at import rather than at the first `C_Sign`.
 
 ### Changed
+* **Objects record which sanitizer built them, and a change of mode discards
+  them.** `SANITIZE=1` and `TSAN=1` change `CFLAGS` without touching any
+  file's timestamp, so make relinks up-to-date objects under different flags
+  and the linker reports undefined `__asan_init` against whichever source
+  file it happened to reach first. Both directions fail, and the error names
+  neither the cause nor the fix. It cost two builds in four days — once from
+  not repeating the variable on the second invocation, once from an ordinary
+  `make` inheriting the instrumented tree `make asan` deliberately leaves.
+
+  The `asan` target's leading clean and its closing message were the earlier
+  answers to that, and both are instructions someone has to read. The mode is
+  now recorded beside the objects and a mismatch cleans them, which is the
+  same move as every other guard in this release.
+
 * **`make asan`**, and a CI job that runs it. `make SANITIZE=1` had been in
   the Makefile for months: the flags reach `LDFLAGS` only on the invocation
   that sets the variable, so the usage is two commands and the second is easy
