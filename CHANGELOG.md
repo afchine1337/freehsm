@@ -16,8 +16,9 @@ a minor release. The security fix below touches `C_DecryptFinal` and
 `C_DecryptUpdate` only and does not depend on any of it.*
 
 ### Security
-* **`C_DecryptFinal` wrote past the caller's buffer** — CWE-787. Affects
-  every release that has shipped multipart decryption.
+* **`C_DecryptFinal` wrote past the caller's buffer** —
+  [GHSA-c634-gqj6-4p2f](https://github.com/afchine1337/freehsm/security/advisories/GHSA-c634-gqj6-4p2f),
+  High, CWE-787. Affects every published release from v1.1.0 through v2.1.0.
 
   The function had no output-size check at all: it called
   `EVP_DecryptFinal_ex` straight into `pLastPart` and reported the length

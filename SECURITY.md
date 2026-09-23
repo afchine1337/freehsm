@@ -305,7 +305,8 @@ identified the same evening; fixed, tested and pushed within the hour.
 
 ## Self-disclosed out-of-bounds write — `C_DecryptFinal`, AES-CBC-PAD (2026-09-23)
 
-**Advisory:** GHSA pending · High · CWE-787 · no CVE requested
+**Advisory:** [GHSA-c634-gqj6-4p2f](https://github.com/afchine1337/freehsm/security/advisories/GHSA-c634-gqj6-4p2f)
+· High · CWE-787 · no CVE requested
 
 **`C_DecryptFinal` wrote past the caller's output buffer.** Affects every
 published release: the call is present in `0c0f5df`, the v1.1.0 initial

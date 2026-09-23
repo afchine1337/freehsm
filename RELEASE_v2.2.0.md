@@ -24,7 +24,8 @@ touches two functions and is independent of everything else here.
 
 ## An out-of-bounds write in `C_DecryptFinal`
 
-High · CWE-787 · affects every release from v1.1.0 through v2.1.0.
+[GHSA-c634-gqj6-4p2f](https://github.com/afchine1337/freehsm/security/advisories/GHSA-c634-gqj6-4p2f)
+· High · CWE-787 · affects every release from v1.1.0 through v2.1.0.
 
 The function called `EVP_DecryptFinal_ex` straight into the caller's buffer and
 reported the length afterwards:
