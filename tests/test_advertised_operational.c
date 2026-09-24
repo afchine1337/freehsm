@@ -121,8 +121,11 @@ static const struct { CK_ULONG ckm; const char *name; const char *why; } KNOWN_G
     /* KMAC and the two hybrids: handlers exist, the entry points do not know
      * the mechanism. No external harness has ever reported these three --
      * pkcs11-check tests what it has vectors for, and it has none here. */
-    { 0x80004200UL, "CKM_HYBRID_X25519_ML_KEM_768",  "C_EncapsulateKey" },
-    { 0x80004201UL, "CKM_HYBRID_ED25519_ML_DSA_65",  "C_SignInit / C_VerifyInit" },
+    /* The two hybrids stood here. They are no longer advertised, so a
+     * KNOWN_GAPS entry for either is now the stale-entry failure this file
+     * checks for at the end. Removed with the advertisement, in the same
+     * commit -- the reason is in scripts/gen_p11_thunks.py, beside the rows
+     * that were deleted. */
     { 0, NULL, NULL }
 };
 

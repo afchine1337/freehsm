@@ -505,13 +505,46 @@ MECHANISMS: tuple[Mech, ...] = (
     #
     # If PKCS#11 assigns KMAC a code point, it comes back with that value.
 
-    # === Hybrid KEM (post-quantum + classical) ========================
-    Mech("CKM_HYBRID_X25519_ML_KEM_768", 0x80004200, "Hybrid-KEM",
-         "encap", "dispatch_hybrid_x25519_ml_kem_768",
-         fips="approved",
-         refs=("SP 800-227", "draft-ietf-pquip-pqt-hybrid",
-                "draft-ietf-tls-hybrid-design"),
-         notes="ss = SHA3-256(ss_x25519 || ss_ml_kem_768 || ct_pqkem || ct_x25519)"),
+    # === The two hybrids: de-advertised, 2026-09-24 ===================
+    #
+    # CKM_HYBRID_X25519_ML_KEM_768 (0x80004200) and
+    # CKM_HYBRID_ED25519_ML_DSA_65 (0x80004201) were advertised by
+    # C_GetMechanismList, had a handler in src/dispatch/, and were called by
+    # no entry point. Issue #17 tracked that as a gap to close by writing the
+    # operation paths. Reading them closely says the gap was the smaller
+    # problem.
+    #
+    # Both were declared fips="approved". Neither construction is specified
+    # by anyone but us.
+    #
+    # The signature hybrid has both components sign the bare message and
+    # concatenates the results, so the Ed25519 half lifts out of the
+    # concatenation as a valid standalone signature over the same message.
+    # That is the non-separability failure draft-ietf-lamps-pq-composite-sigs
+    # §2.2 and §9.2.3 exist to prevent, and it is why
+    # CKM_COMPOSITE_MLDSA65_ED25519 was written to replace it -- implemented,
+    # and checked against the draft's own Appendix D vectors rather than
+    # against ourselves. Implementing 0x80004201 would have meant shipping,
+    # deliberately, the weaker construction this project had already
+    # replaced.
+    #
+    # The KEM hybrid's combiner, ss = SHA3-256(ss_x25519 || ss_ml_kem_768 ||
+    # ct_pqkem || ct_x25519), is also ours. Its references were SP 800-227 --
+    # a draft -- and the TLS and PQUIP hybrid drafts, none of which prescribe
+    # that form. X25519MLKEM768 as TLS actually deploys it is a different
+    # construction. Citing the right documents for a shape they do not
+    # specify reads like a verification that did not happen, which is the
+    # sentence this file already wrote about KMAC's SP 800-185 reference.
+    #
+    # So the honest reading is not "advertised but not operational". It is
+    # two unfounded approval claims, one of them for a design we had
+    # superseded. Two mechanisms named and refused is worse for a caller than
+    # two not named; two named, refused and called approved is worse again.
+    #
+    # Removed from the advertised set. The reference implementations stay in
+    # src/dispatch/fhsm_dispatch_hybrid.c, where nothing calls them and their
+    # header says what they are. If a caller ever asks for a PQ/T hybrid, it
+    # comes back specified by somebody else, with somebody else's vectors.
 
     # === Composite ML-DSA (draft-ietf-lamps-pq-composite-sigs) =========
     #
@@ -544,22 +577,8 @@ MECHANISMS: tuple[Mech, ...] = (
                "Interop-only -- see the comment in gen_p11_thunks.py for why "
                "it is not announced as approved."),
 
-    # === Hybrid signature (concatenated) ==============================
-    Mech("CKM_HYBRID_ED25519_ML_DSA_65", 0x80004201, "Hybrid-Sig",
-         "sign", "dispatch_hybrid_ed25519_ml_dsa_65",
-         fips="approved",
-         refs=("RFC 9794 (PQ/T hybrid terminology)",),
-         notes="A PQ/T hybrid of local design: Ed25519 and ML-DSA-65 each sign "
-               "the message and the two signatures are concatenated; verify "
-               "requires both. It is NOT Composite ML-DSA "
-               "(draft-ietf-lamps-pq-composite-sigs): there is no signature "
-               "combiner, so no Prefix/Label/ctx binding and no "
-               "non-separability -- the Ed25519 half is a valid standalone "
-               "signature over the same message. Not usable in X.509 or CMS, "
-               "which need a registered composite OID. See "
-               "docs/COMPOSITE_SIGS_GAP.md; conforming Composite ML-DSA is "
-               "task zero of #112.",
-         ),
+    # (CKM_HYBRID_ED25519_ML_DSA_65 stood here; see the de-advertisement note
+    #  above CKM_COMPOSITE_MLDSA65_ED25519.)
 
     # === Legacy / non-approved (rejected in fips-strict) ==============
     Mech("CKM_MD5",                0x00000210, "MD5",  "digest",  "dispatch_md5",

@@ -7,6 +7,42 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+* **The two PQ/T hybrid mechanisms are no longer advertised** (#17).
+  `CKM_HYBRID_X25519_ML_KEM_768` (0x80004200) and
+  `CKM_HYBRID_ED25519_ML_DSA_65` (0x80004201) leave
+  `C_GetMechanismList`; `C_GetMechanismInfo` on either now answers
+  `CKR_MECHANISM_INVALID`. Neither was ever reachable: both had a handler in
+  `src/dispatch/` that no entry point called.
+
+  #17 tracked that as a gap to close by writing the operation paths. Reading
+  them closely said the gap was the smaller problem — both were declared
+  `fips="approved"`, and neither construction is specified by anyone but us.
+
+  The signature hybrid has both components sign the bare message and
+  concatenates the results, so the Ed25519 half lifts out as a valid
+  standalone signature over the same message. That is the non-separability
+  failure `draft-ietf-lamps-pq-composite-sigs` §2.2 and §9.2.3 exist to
+  prevent, and it is why `CKM_COMPOSITE_MLDSA65_ED25519` was written to
+  replace it — implemented, and checked against the draft's own Appendix D
+  vectors. Implementing 0x80004201 would have meant shipping the weaker
+  construction this project had already superseded.
+
+  The KEM hybrid's combiner is ours too. Its references were a draft
+  SP 800-227 and the TLS and PQUIP hybrid drafts, none of which prescribe
+  that shape; `X25519MLKEM768` as TLS deploys it is a different
+  construction.
+
+  Two mechanisms named and refused is worse for a caller than two not named;
+  two named, refused and called approved is worse again. The reference
+  implementations stay in `src/dispatch/fhsm_dispatch_hybrid.c`, called by
+  nothing. If a caller asks for a PQ/T hybrid, it comes back specified by
+  somebody else, with somebody else's vectors.
+
+  `tests/test_advertised_operational.c` now reports **70 mechanisms, 0 known
+  gaps** — every advertised mechanism is operational, which had not been
+  true before.
+
 ## [2.2.0] --- 2026-09-23
 
 *Minor rather than patch, and it carries a security fix. `C_SignFinal`,
