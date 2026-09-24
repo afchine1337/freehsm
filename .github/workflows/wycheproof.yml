@@ -16,6 +16,10 @@ on:
     - cron: '0 2 * * *'  # nightly 02:00 UTC
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+  issues: write        # the failure notice below opens one
+
 jobs:
   wycheproof:
     runs-on: ubuntu-latest
@@ -68,6 +72,52 @@ jobs:
           name: wycheproof-report-${{ github.run_number }}
           path: tests/wycheproof/results/full.json
           retention-days: 30
+
+      # A red nightly that nobody sees is a harness talking to itself.
+      #
+      # Runs #140 to #145 failed on six consecutive nights, reporting three
+      # valid ML-KEM decapsulation vectors as rejected. Nothing said so. The
+      # README carries badges for CI and Mirror and for no other workflow,
+      # so a failure here appears on no page anyone opens; scheduled-run
+      # notifications go to one mailbox and are easy to file away.
+      #
+      # This opens an issue on the first failing night and comments on it on
+      # the following ones, so the signal arrives where the other reports
+      # arrive and does not multiply. It closes nothing -- a green night
+      # leaves the issue open, because the person who reads it is the person
+      # who should decide it is finished.
+      - name: Say so, in an issue
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -o pipefail
+          TITLE="Wycheproof nightly is failing"
+
+          # The violating adapters, from the report rather than from the log:
+          # the log is 26 lines of counters and the JSON is the thing that
+          # says which vector, in which file, with which comment.
+          BODY=$(mktemp)
+          {
+            echo "The nightly Wycheproof run is red. This issue was opened by"
+            echo "the workflow itself; see \`.github/workflows/wycheproof.yml\`."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            python3 tests/wycheproof/violations_md.py \
+                    tests/wycheproof/results/full.json
+          } > "$BODY"
+
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" \
+                       --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+            gh issue comment "$EXISTING" --body-file "$BODY"
+            echo "commented on #$EXISTING"
+          else
+            gh issue create --title "$TITLE" --body-file "$BODY" \
+              && echo "issue opened"
+          fi
 
   wycheproof-smoke:
     runs-on: ubuntu-latest

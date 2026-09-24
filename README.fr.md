@@ -4,6 +4,9 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/afchine1337/freehsm)](https://api.reuse.software/info/github.com/afchine1337/freehsm)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13190/badge)](https://www.bestpractices.dev/projects/13190)
 [![CI](https://github.com/afchine1337/freehsm/actions/workflows/ci.yml/badge.svg)](https://github.com/afchine1337/freehsm/actions/workflows/ci.yml)
+[![Wycheproof](https://github.com/afchine1337/freehsm/actions/workflows/wycheproof.yml/badge.svg)](https://github.com/afchine1337/freehsm/actions/workflows/wycheproof.yml)
+[![Fuzz](https://github.com/afchine1337/freehsm/actions/workflows/fuzz.yml/badge.svg)](https://github.com/afchine1337/freehsm/actions/workflows/fuzz.yml)
+[![Reproducible build](https://github.com/afchine1337/freehsm/actions/workflows/dist-verify.yml/badge.svg)](https://github.com/afchine1337/freehsm/actions/workflows/dist-verify.yml)
 [![Mirror](https://github.com/afchine1337/freehsm/actions/workflows/mirror.yml/badge.svg)](https://github.com/afchine1337/freehsm/actions/workflows/mirror.yml)
 
 
