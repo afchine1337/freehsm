@@ -547,11 +547,24 @@ class P11Session:
                     ciphertext: bytes,
                     template: list | None = None) -> tuple[int, int]:
         """C_DecapsulateKey(hSession, mech, hPrivKey, tmpl, ulCount,
-                            &phNewKey, pCt, ulCtLen).
+                            pCt, ulCtLen, &phNewKey).
 
         Returns (CKR_*, new_key_handle). New key handle is 0 on failure.
         The shared secret is stored as a CKO_SECRET_KEY (CKK_GENERIC_SECRET)
         with the SS as CKA_VALUE ; read it back via get_attribute_value().
+
+        The output handle goes LAST, which is the OASIS pkcs11f.h order. This
+        file had it before the ciphertext pair, which is where the module put
+        it until 2026-09-18. The module was corrected then, with a comment
+        saying "nothing disagreed, because the only caller was
+        tests/mlkem_e2e.c". There were two callers.
+
+        ctypes does not type-check, so the mistake was silent: pCiphertext
+        received &phNewKey -- a zeroed CK_ULONG -- and ulCiphertextLen
+        received the ciphertext pointer truncated to 32 bits. The module saw
+        a 900-million-byte ciphertext of zeros, EVP_PKEY_decapsulate refused
+        the argument without setting an error, and Wycheproof reported three
+        valid ML-KEM decapsulation vectors as rejected for six days.
         """
         attrs = template or []
         n = len(attrs)
@@ -563,8 +576,8 @@ class P11Session:
         rv = self.mod.lib.C_DecapsulateKey(
             CK_ULONG(self.h), byref(mech), CK_ULONG(priv_key),
             tmpl, CK_ULONG(n),
-            byref(new_key),
             ct, CK_ULONG(len(ciphertext) if ciphertext else 0),
+            byref(new_key),
         )
         return rv, new_key.value
 

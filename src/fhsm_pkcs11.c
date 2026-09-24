@@ -217,17 +217,32 @@ FHSM_EXPORT CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession,
  * exist in v3.0; in pkcs11f.h it sits behind #ifndef CK_PKCS11_3_0_ONLY.
  * The signature had been written without the header in front of it.
  *
- * Nothing disagreed, because the only caller was tests/mlkem_e2e.c, which
- * reaches the symbols through dlsym and had been written from the same
- * assumption. Two pieces agreeing with each other and never meeting a third.
- *
  * It mattered because of what came next: putting the old order into slot 92
  * would have handed a conforming caller a function that reads its
  * pCiphertext as phKey and writes an object handle into it. Not a wrong
  * answer -- a write into the caller's buffer.
  *
- * No caller can be broken by the correction. These were in no function list,
- * so the only way to reach them was dlsym plus knowledge of our order. */
+ * What this comment said next, and had wrong:
+ *
+ *   "Nothing disagreed, because the only caller was tests/mlkem_e2e.c [...]
+ *    No caller can be broken by the correction."
+ *
+ * There were five callers. mlkem_e2e.c, test_encap_flags.c and
+ * test_pqc_pub_import.c were corrected with the signature;
+ * test_advertised_operational.c and tests/wycheproof/adapters/_p11.py were
+ * not. Both reach the symbols through dlsym or ctypes and declare their own
+ * prototype, so neither could fail to compile -- the property that made the
+ * claim feel safe is the property that made it unverifiable.
+ *
+ * The Wycheproof adapter then passed &phNewKey as pCiphertext and the
+ * ciphertext pointer, truncated to 32 bits, as its length. The module saw a
+ * 900-million-byte ciphertext of zeros and refused it; three valid ML-KEM
+ * decapsulation vectors were reported as rejected, nightly, for six days,
+ * and the first four explanations tried were all about ML-KEM.
+ *
+ * A grep for the function name would have listed all five that afternoon.
+ * The lesson is the one docs/PKCS11_CHECK_FINDINGS.md already draws about
+ * insertion sites: count the callers, do not recall them. */
 FHSM_EXPORT CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession,
                                     CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hPublicKey,
                                     CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
@@ -5292,8 +5307,22 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
           && (f2 & FHSM_OBJF2_NO_DECAPSULATE))
           return FHSM_RV_KEY_FUNCTION_NOT_PERMITTED; }
 
+    /* FHSM_DEBUG_MLKEM covered one branch -- the raw-import fallback -- and
+     * five returns in this function answer CKR_FUNCTION_FAILED. A diagnostic
+     * that lights one of five paths sends the reader to the one it lights,
+     * which is the shape of defect this file keeps producing, appearing here
+     * in the tool meant to find it. It covers the function now. */
+#define MLKEM_DBG(...) \
+    do { if (getenv("FHSM_DEBUG_MLKEM")) { \
+            fprintf(stderr, "[fhsm_pkcs11] ML-KEM decaps: " __VA_ARGS__); \
+            fputc('\n', stderr); } } while (0)
+
+    MLKEM_DBG("stored value %zu bytes, first byte 0x%02x",
+              kvl, kvl ? kv[0] : 0);
+
     const uint8_t *p = kv;
     EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+    MLKEM_DBG("d2i_AutoPrivateKey %s", pkey ? "OK" : "failed");
     if (!pkey) {
         /* Raw ML-KEM private key import fallback. The Wycheproof
          * mlkem_{512,768,1024}_semi_expanded_decaps_test.json files
@@ -5334,25 +5363,46 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                 EVP_PKEY_CTX_free(kctx);
             }
         }
-        if (!pkey) return FHSM_RV_FUNCTION_FAILED;
+        if (!pkey) {
+            MLKEM_DBG("no key after the raw fallback -- FUNCTION_FAILED");
+            return FHSM_RV_FUNCTION_FAILED;
+        }
     }
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
     if (!ctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
     if (EVP_PKEY_decapsulate_init(ctx, NULL) <= 0) {
+        MLKEM_DBG("decapsulate_init failed -- FUNCTION_FAILED");
         EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
         return FHSM_RV_FUNCTION_FAILED;
     }
     size_t ss_len = 0;
     if (EVP_PKEY_decapsulate(ctx, NULL, &ss_len, pCiphertext, ulCiphertextLen) <= 0
         || ss_len > 64) {
+        MLKEM_DBG("size query failed or too large: ss_len=%zu ct=%lu"
+                  " -- FUNCTION_FAILED", ss_len, (unsigned long)ulCiphertextLen);
         EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
         return FHSM_RV_FUNCTION_FAILED;
     }
     uint8_t ss[64];
+    ERR_clear_error();
     if (EVP_PKEY_decapsulate(ctx, ss, &ss_len, pCiphertext, ulCiphertextLen) <= 0) {
+        { char ebuf[256] = {0};
+          ERR_error_string_n(ERR_peek_last_error(), ebuf, sizeof ebuf);
+          MLKEM_DBG("decapsulate failed: ss_len=%zu ct=%lu ct[0..3]=%02x%02x%02x%02x"
+                    " err=0x%lx \"%s\" -- FUNCTION_FAILED",
+                    ss_len, (unsigned long)ulCiphertextLen,
+                    ulCiphertextLen > 3 ? pCiphertext[0] : 0,
+                    ulCiphertextLen > 3 ? pCiphertext[1] : 0,
+                    ulCiphertextLen > 3 ? pCiphertext[2] : 0,
+                    ulCiphertextLen > 3 ? pCiphertext[3] : 0,
+                    ERR_peek_last_error(), ebuf); }
         EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
         return FHSM_RV_FUNCTION_FAILED;
     }
+    MLKEM_DBG("decapsulated %zu bytes", ss_len);
+    /* A #define inside a function body still has file scope. Undefined here
+     * so it does not reach the rest of the translation unit. */
+#undef MLKEM_DBG
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(pkey);
 

@@ -154,7 +154,22 @@ int main(void)
     CK_RV (*C_DecryptInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
     CK_RV (*C_DigestInit)(CK_SESSION_HANDLE,CK_MECHANISM*);
     CK_RV (*C_DeriveKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
-    CK_RV (*C_EncapsulateKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*,CK_BYTE*,CK_ULONG*);
+    /* OASIS pkcs11f.h order: the ciphertext pair, then the output handle.
+     * This declaration had the handle first, which is where the module put
+     * it until 2026-09-18. The module was corrected then and this file was
+     * not -- dlsym hands back a void*, so nothing could disagree.
+     *
+     * It changed no verdict, and that is worth writing down rather than
+     * leaving for someone to re-derive. This file flags a mechanism only on
+     * CKR_MECHANISM_INVALID, and the module answers that from the mechanism
+     * alone, before it reads the ciphertext arguments -- so the transposed
+     * pair was never reached on the path that decides anything. The known
+     * gap on the hybrids is a real gap.
+     *
+     * Fixed anyway. A call that passes its arguments in the wrong order and
+     * survives on the order in which the callee checks things is one module
+     * change away from reporting whatever it likes. */
+    CK_RV (*C_EncapsulateKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_BYTE*,CK_ULONG*,CK_OBJECT_HANDLE*);
     CK_RV (*C_GenerateKeyPair)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_ATTRIBUTE*,CK_ULONG,
                                CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*,CK_OBJECT_HANDLE*);
     #define SYM(n) *(void**)&n = dlsym(h,#n)
@@ -239,7 +254,7 @@ int main(void)
         if (info.flags & CKF_DERIVE)  { probe[5].rv = C_DeriveKey(s,&m,key,ktmpl,3,&out); probe[5].tried = 1; }
         if ((info.flags & CKF_ENCAPSULATE) && C_EncapsulateKey) {
             CK_BYTE ct[64]; CK_ULONG ctlen = sizeof ct;
-            probe[6].rv = C_EncapsulateKey(s,&m,key,ktmpl,3,&out,ct,&ctlen);
+            probe[6].rv = C_EncapsulateKey(s,&m,key,ktmpl,3,ct,&ctlen,&out);
             probe[6].tried = 1;
         }
         if (info.flags & CKF_GENERATE) {
