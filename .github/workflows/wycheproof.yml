@@ -103,9 +103,19 @@ jobs:
   # carry a tool it has no other use for. This runs where gh already is, and
   # takes the report through the artefact the job above uploads, which is the
   # only thing it needs from it.
+  # workflow_dispatch as well as schedule, so the notice can be exercised on
+  # purpose instead of first running on the night it is needed. That is not a
+  # hypothetical: the first version of this ran exactly once, on the first red
+  # night it was written for, and failed on `gh: not found`. A channel nobody
+  # can test is a channel nobody has tested.
+  #
+  # A manual run that fails will therefore open an issue too. That is the
+  # intended behaviour, not a side effect -- a red run is a red run, and the
+  # workflow has no business deciding that some of them do not count.
   notify:
     needs: wycheproof
-    if: failure() && github.event_name == 'schedule'
+    if: failure() && (github.event_name == 'schedule'
+                      || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
