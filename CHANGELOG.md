@@ -7,6 +7,34 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+* **The optional key-wrap IV was accepted and dropped** (#14). PKCS#11 v3.2
+  §6.16.2 gives `CKM_AES_KEY_WRAP` and `CKM_AES_KEY_WRAP_KWP` an optional
+  `pParameter`: absent means the SP 800-38F default initial value, present
+  means the alternative one — 8 bytes for KW (RFC 3394's ICV), 4 for KWP (the
+  AIV prefix of RFC 5649 §3).
+
+  It was read nowhere. A caller who supplied one was given the default and
+  `CKR_OK`, on all four entry points: `C_WrapKey`, `C_UnwrapKey`, and the
+  `C_Encrypt` / `C_Decrypt` pair added in 2.1.0. Accepting a parameter and
+  dropping it claims a behaviour that is not there — the same shape as
+  `CKA_TRUSTED` accepted and not granted.
+
+  One validator, four call sites. `C_WrapKey` and `C_UnwrapKey` read the
+  mechanism at the call; `C_EncryptInit` / `C_DecryptInit` copy it into the
+  operation, because the parameter block belongs to the caller and the
+  specification guarantees it only for the duration of the `*Init`. A
+  parameter of the wrong length is refused with
+  `CKR_MECHANISM_PARAM_INVALID` rather than silently defaulted: the
+  alternative wraps a blob under an ICV nobody can reproduce.
+
+  That EVP honours a non-default IV for both ciphers, and that its lengths
+  are the specification's 8 and 4, was measured before the change was written
+  rather than assumed. `tests/test_kw_iv.c` checks both mechanisms in both
+  directions — including that a blob wrapped under one IV does **not** unwrap
+  under another or under the default, since an ICV that can be ignored is not
+  an integrity check.
+
 ### Changed
 * **A refused audit key now says which refusal it was** (#11).
   `fhsm_audit_key_provision` has six failure exits and one return type, and

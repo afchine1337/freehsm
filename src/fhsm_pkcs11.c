@@ -4601,6 +4601,45 @@ static fhsm_rv_t fhsm_rsa_v15_unwrap(const uint8_t *priv_der, size_t priv_len,
 #define CKM_AES_KEY_WRAP_KWP      0x0000210BUL
 #endif
 
+/* The optional IV of PKCS#11 v3.2 §6.16.2, for both key-wrap mechanisms.
+ *
+ * pParameter is either absent -- the default initial value of SP 800-38F --
+ * or the alternative one: 8 bytes for CKM_AES_KEY_WRAP (RFC 3394 §2.2.3.1's
+ * ICV) and 4 for CKM_AES_KEY_WRAP_KWP (the AIV prefix of RFC 5649 §3).
+ *
+ * It was read nowhere. A caller who supplied one was given the default and
+ * CKR_OK, on all four entry points -- the wrap pair, and the encrypt pair
+ * that #14 added. Accepting a parameter and dropping it claims a behaviour
+ * that is not there, which is the fault this file keeps removing: the same
+ * shape as CKA_TRUSTED accepted and not granted, and as the four policy
+ * attributes accepted and not stored.
+ *
+ * The two lengths are what EVP reports for the fetched ciphers --
+ * EVP_CIPHER_get_iv_length gives 8 for AES-*-WRAP and 4 for AES-*-WRAP-PAD --
+ * and passing a non-default value through EVP_EncryptInit_ex2 changes the
+ * output, measured before this was written rather than assumed. Hard-coded
+ * here rather than read from the cipher because op_init validates the
+ * parameter before any cipher is fetched, and one rule in one place beats the
+ * same rule derived two ways.
+ *
+ * A wrong length is refused. It cannot be honoured, and the alternative is to
+ * use the default while the caller believes otherwise -- which is how a blob
+ * gets wrapped under an ICV nobody can reproduce.
+ *
+ * Returns fhsm_rv_t rather than CK_RV: op_init returns the narrow type, and
+ * a CK_RV coming back into it is a narrowing conversion that -Wconversion
+ * refuses. The other way round widens, which is silent and correct at the
+ * three entry points that do return CK_RV. */
+static fhsm_rv_t kw_iv_from_mech(CK_MECHANISM *m, const unsigned char **out) {
+    *out = NULL;
+    if (!m->pParameter && m->ulParameterLen == 0) return FHSM_RV_OK;
+    size_t want = (m->mechanism == CKM_AES_KEY_WRAP) ? 8u : 4u;
+    if (!m->pParameter || m->ulParameterLen != want)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    *out = (const unsigned char *)m->pParameter;
+    return FHSM_RV_OK;
+}
+
 CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                 CK_OBJECT_HANDLE hWrappingKey, CK_OBJECT_HANDLE hKey,
                 unsigned char *pWrappedKey, CK_ULONG *pulWrappedKeyLen) {
@@ -4658,6 +4697,8 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (pMechanism->mechanism == CKM_AES_KEY_WRAP
         || pMechanism->mechanism == CKM_AES_KEY_WRAP_KWP) {
         if (wkt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        const unsigned char *kwiv = NULL;
+        { CK_RV ir = kw_iv_from_mech(pMechanism, &kwiv); if (ir != FHSM_RV_OK) return ir; }
         /* The wrapping key must be a valid AES key size (128/192/256 bits) ;
          * anything else is CKR_WRAPPING_KEY_SIZE_RANGE (#125 TestWrapKeyErrors),
          * not a silent fall-through to the 256-bit cipher name. */
@@ -4677,7 +4718,7 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
         /* AES-WRAP needs explicit flag for wrapping. */
         EVP_CIPHER_CTX_set_flags(ctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
-        if (EVP_EncryptInit_ex2(ctx, c, wkv, NULL, NULL) != 1) {
+        if (EVP_EncryptInit_ex2(ctx, c, wkv, kwiv, NULL) != 1) {
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
             return FHSM_RV_FUNCTION_FAILED;
         }
@@ -4860,6 +4901,8 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (pMechanism->mechanism == CKM_AES_KEY_WRAP
         || pMechanism->mechanism == CKM_AES_KEY_WRAP_KWP) {
         if (ukt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        const unsigned char *kwiv = NULL;
+        { CK_RV ir = kw_iv_from_mech(pMechanism, &kwiv); if (ir != FHSM_RV_OK) return ir; }
 
         /* Unwrapping-key size. C_WrapKey validates this at the matching point
          * above, with a comment saying a bad size must not "silently fall
@@ -4907,7 +4950,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
         if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
         EVP_CIPHER_CTX_set_flags(ctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
-        if (EVP_DecryptInit_ex2(ctx, c, ukv, NULL, NULL) != 1) {
+        if (EVP_DecryptInit_ex2(ctx, c, ukv, kwiv, NULL) != 1) {
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
             return FHSM_RV_FUNCTION_FAILED;
         }
@@ -8290,6 +8333,28 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             return FHSM_RV_MECHANISM_PARAM_INVALID;
         }
     }
+    /* The key-wrap IV of §6.16.2, captured here for the C_Encrypt / C_Decrypt
+     * half of the pair.
+     *
+     * C_WrapKey and C_UnwrapKey receive the mechanism at the call and read it
+     * there. These two do not: the parameter block belongs to the caller and
+     * PKCS#11 guarantees it only for the duration of the *Init, so it is
+     * copied now or it is gone. op->iv is where every other mechanism's IV
+     * already lives, and 8 or 4 bytes fit in it.
+     *
+     * kw_iv_from_mech is the single validator; storing is the only thing that
+     * differs between the four entry points. */
+    if (pMechanism->mechanism == CKM_AES_KEY_WRAP
+        || pMechanism->mechanism == CKM_AES_KEY_WRAP_KWP) {
+        const unsigned char *kwiv = NULL;
+        fhsm_rv_t ir = kw_iv_from_mech(pMechanism, &kwiv);
+        if (ir != FHSM_RV_OK) return ir;
+        if (kwiv) {
+            memcpy(op->iv, kwiv,
+                   pMechanism->mechanism == CKM_AES_KEY_WRAP ? 8u : 4u);
+            op->have_iv = 1;
+        }
+    }
     /* AES-GMAC, raw-IV interop form.
      *
      * The canonical form is CK_GCM_PARAMS and is handled by the branch above,
@@ -8881,7 +8946,10 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
          * direction only. If a probe ever exercises this one, the same local
          * buffer belongs here too. */
         int kwoutl = 0, kwfinl = 0;
-        if (EVP_EncryptInit_ex2(kwctx, kwc, kv, NULL, NULL) != 1
+        /* op->iv carries the §6.16.2 IV when C_EncryptInit was given one;
+         * NULL is the SP 800-38F default, which is what the absence means. */
+        if (EVP_EncryptInit_ex2(kwctx, kwc, kv,
+                                op->have_iv ? op->iv : NULL, NULL) != 1
             || EVP_EncryptUpdate(kwctx, pEnc, &kwoutl, pData, (int)ulDataLen) != 1
             || EVP_EncryptFinal_ex(kwctx, pEnc + kwoutl, &kwfinl) != 1) {
             EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
@@ -9335,7 +9403,11 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         if (!kwctx) { EVP_CIPHER_free(kwc); op->active = 0; return FHSM_RV_HOST_MEMORY; }
         EVP_CIPHER_CTX_set_flags(kwctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
         int kwoutl = 0, kwfinl = 0;
-        if (EVP_DecryptInit_ex2(kwctx, kwc, kv, NULL, NULL) != 1) {
+        /* The §6.16.2 IV, as on the encrypt side. An unwrap under a
+         * non-default ICV must be given the same one, or it fails the
+         * integrity check -- which is the point of the ICV. */
+        if (EVP_DecryptInit_ex2(kwctx, kwc, kv,
+                                op->have_iv ? op->iv : NULL, NULL) != 1) {
             EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
             op->active = 0; return FHSM_RV_FUNCTION_FAILED;
         }
