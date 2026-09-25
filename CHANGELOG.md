@@ -7,6 +7,34 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+* **A refused audit key now says which refusal it was** (#11).
+  `fhsm_audit_key_provision` has six failure exits and one return type, and
+  `C_Initialize` printed that return as a bare `rv`. @petrn met it on a
+  directory owned by another user:
+
+      FATAL : cannot provision the audit key in /tmp/freehsm-wycheproof (rv=0x6)
+
+  True, actionable by nobody, and indistinguishable from a TPM blob that will
+  not unseal or a DRBG that would not produce 32 bytes — three situations,
+  three different things to do, one number.
+
+  Each exit now says what it was: the path and `strerror` for a directory that
+  cannot be written or a file that cannot be read, the mode and `chmod 600`
+  for a key others can read, the rv and what it means for a seal or an unseal
+  that failed.
+
+  **Absence stays silent.** First use has no key file, and a fresh install that
+  printed a failure it then recovered from would teach its operator that this
+  channel is noise — which costs more than the messages are worth.
+  `tests/test_audit_key_diag.c` checks that case as carefully as the two
+  failures.
+
+  This closes the "Also" of #11. The issue stays open for its third defect:
+  `dev` / `legacy` / `fips-strict` remain three unrelated axes with colliding
+  names, and renaming them belongs with the pending `fips-strict` →
+  `approved-only` pass rather than being done piecemeal.
+
 ### Removed
 * **The two PQ/T hybrid mechanisms are no longer advertised** (#17).
   `CKM_HYBRID_X25519_ML_KEM_768` (0x80004200) and

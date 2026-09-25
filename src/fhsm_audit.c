@@ -173,23 +173,75 @@ void fhsm_audit_set_actor(const char *subject) {
  * See fhsm_audit.h for why it is its own key and not the token DEK, and for
  * what the two storage paths do and do not protect. */
 
+/* Why a provisioning step failed, said where it happened.
+ *
+ * fhsm_audit_key_provision has six failure exits and one return type, and
+ * C_Initialize prints that return as a bare rv. @petrn met it on a directory
+ * another user owned (#11):
+ *
+ *     FATAL : cannot provision the audit key in /tmp/freehsm-wycheproof (rv=0x6)
+ *
+ * -- true, actionable by nobody, and indistinguishable from a TPM blob that
+ * will not unseal or a DRBG that would not produce 32 bytes. Three situations,
+ * three different things to do, one number.
+ *
+ * Absence is not a failure and stays silent: first use has no key file, and a
+ * fresh install that printed an error it then recovered from would teach its
+ * operator to ignore the channel. */
+static void audit_key_why(const char *what, const char *path, int with_errno) {
+    if (with_errno)
+        fprintf(stderr, "[freehsm-c] audit key : %s %s : %s\n",
+                what, path, strerror(errno));
+    else
+        fprintf(stderr, "[freehsm-c] audit key : %s %s\n", what, path);
+}
+
 static fhsm_rv_t key_read_file(const char *p, uint8_t key[32]) {
     struct stat st;
     int fd = open(p, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return FHSM_RV_FUNCTION_FAILED;
-
-    /* Refuse a key anyone else can read. Continuing would produce a log that
-     * looks authenticated and is not, which is worse than no log: the first
-     * invites trust, the second does not. */
-    if (fstat(fd, &st) != 0 || (st.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
+    if (fd < 0) {
+        /* ENOENT is the first-use path and the caller's cue to generate.
+         * EACCES is the operator's problem and was invisible. */
+        if (errno != ENOENT) audit_key_why("cannot open", p, 1);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    if (fstat(fd, &st) != 0) {
+        audit_key_why("cannot stat", p, 1);
         close(fd);
         return FHSM_RV_FUNCTION_FAILED;
     }
-    if (st.st_size != 32) { close(fd); return FHSM_RV_FUNCTION_FAILED; }
+    /* Refuse a key anyone else can read. Continuing would produce a log that
+     * looks authenticated and is not, which is worse than no log: the first
+     * invites trust, the second does not.
+     *
+     * Said out loud, because it is a deliberate refusal of a file that exists
+     * -- the one case where the operator is most likely to believe the module
+     * simply cannot find their key. */
+    if ((st.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
+        fprintf(stderr,
+                "[freehsm-c] audit key : %s is mode %04o -- readable by group\n"
+                "  or others, and refused on purpose. A log authenticated by a\n"
+                "  key others can read is not authenticated. chmod 600 it, or\n"
+                "  remove it to have a new one generated.\n",
+                p, (unsigned)(st.st_mode & 07777u));
+        close(fd);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    if (st.st_size != 32) {
+        fprintf(stderr,
+                "[freehsm-c] audit key : %s is %lld bytes, expected 32.\n",
+                p, (long long)st.st_size);
+        close(fd);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
 
     ssize_t n = read(fd, key, 32);
     close(fd);
-    return (n == 32) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+    if (n != 32) {
+        audit_key_why("short read on", p, 1);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    return FHSM_RV_OK;
 }
 
 static fhsm_rv_t key_write_file(const char *p, const uint8_t key[32]) {
@@ -198,9 +250,16 @@ static fhsm_rv_t key_write_file(const char *p, const uint8_t key[32]) {
      * already chained entries with, and every one of those entries becomes
      * unverifiable. The loser re-reads instead. */
     int fd = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    if (fd < 0) return FHSM_RV_FUNCTION_FAILED;
+    if (fd < 0) {
+        /* EEXIST is that race, and the caller re-reads. Anything else is the
+         * reason provisioning cannot happen at all -- which is what a
+         * read-only or foreign-owned directory looks like from here. */
+        if (errno != EEXIST) audit_key_why("cannot create", p, 1);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
     ssize_t n = write(fd, key, 32);
     int ok = (n == 32) && (fsync(fd) == 0);
+    if (!ok) audit_key_why("cannot write", p, 1);
     close(fd);
     if (!ok) { unlink(p); return FHSM_RV_FUNCTION_FAILED; }
     return FHSM_RV_OK;
@@ -237,6 +296,13 @@ fhsm_rv_t fhsm_audit_key_provision(const char *dir, uint8_t key[32],
                  * would silently start a second chain in the same file and
                  * make the existing entries unverifiable -- which is the
                  * failure this whole task exists to prevent. Refuse. */
+                fprintf(stderr,
+                        "[freehsm-c] audit key : %s exists and will not unseal"
+                        " (rv=0x%x).\n"
+                        "  The boot measurements changed, or this is not the TPM\n"
+                        "  that sealed it. A fresh key here would start a second\n"
+                        "  chain in the same log, so this refuses instead.\n",
+                        blob_p, (unsigned)rv);
                 return rv;
             }
         }
@@ -247,7 +313,14 @@ fhsm_rv_t fhsm_audit_key_provision(const char *dir, uint8_t key[32],
      *    authenticates the record of everything the module does, so it should
      *    come from the generator the module is accountable for. */
     fhsm_rv_t rv = fhsm_drbg_bytes(key, 32);
-    if (rv != FHSM_RV_OK) return rv;
+    if (rv != FHSM_RV_OK) {
+        fprintf(stderr,
+                "[freehsm-c] audit key : the DRBG would not produce 32 bytes"
+                " (rv=0x%x).\n"
+                "  Nothing about the key store is wrong; the generator is.\n",
+                (unsigned)rv);
+        return rv;
+    }
 
     if (want_tpm) {
         uint8_t blob[2048]; size_t bl = 0;
@@ -255,8 +328,11 @@ fhsm_rv_t fhsm_audit_key_provision(const char *dir, uint8_t key[32],
         if (rv == FHSM_RV_OK) {
             int fd = open(blob_p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
             int good = 0;
-            if (fd >= 0) {
+            if (fd < 0) {
+                audit_key_why("cannot create", blob_p, 1);
+            } else {
                 good = (write(fd, blob, bl) == (ssize_t)bl) && (fsync(fd) == 0);
+                if (!good) audit_key_why("cannot write", blob_p, 1);
                 close(fd);
                 if (!good) unlink(blob_p);
             }
@@ -268,6 +344,13 @@ fhsm_rv_t fhsm_audit_key_provision(const char *dir, uint8_t key[32],
         /* Sealing was asked for and could not be done. Writing the key in the
          * clear instead would quietly downgrade a control the operator turned
          * on. Refuse and let them see it. */
+        fprintf(stderr,
+                "[freehsm-c] audit key : sealing to the TPM failed (rv=0x%x),"
+                " and sealing was required.\n"
+                "  Writing the key in the clear instead would turn off a control\n"
+                "  that was deliberately turned on, so this refuses. Unset the\n"
+                "  TPM requirement if a plaintext key is what you want.\n",
+                (unsigned)rv);
         fhsm_zeroize(key, 32);
         return rv;
     }
