@@ -106,6 +106,34 @@ static EVP_PKEY *load_pem_pub(fhsm_slice_t s) {
     return pk;
 }
 
+/* Prototypes, here rather than in a header.
+ *
+ * include/fhsm_pkcs11_mechanisms.h is generated from the Mech table in
+ * scripts/gen_p11_thunks.py and declares one prototype per advertised
+ * mechanism's handler. These two mechanisms were de-advertised on
+ * 2026-09-24 -- see the note in that file -- so the generated header stopped
+ * declaring them, while the definitions below stayed, non-static, and
+ * -Wmissing-prototypes -Werror refused the file.
+ *
+ * Declared here so the reference implementations keep compiling. They are
+ * reachable by nothing: no entry point calls them and no table names them.
+ * That is the state the de-advertisement intended, and it should not cost
+ * the file its ability to build.
+ *
+ * It built locally and failed in CI, which is worth recording: the local
+ * .obj still held an object from before the generated header changed, so
+ * the file was never recompiled. A clean build is the only one that says
+ * anything after touching the generator.
+ * ------------------------------------------------------------------------- */
+fhsm_rv_t dispatch_hybrid_x25519_ml_kem_768(unsigned long session, unsigned long key,
+                                              const void *params, size_t plen,
+                                              fhsm_slice_t in,
+                                              uint8_t *out, size_t *outlen);
+fhsm_rv_t dispatch_hybrid_ed25519_ml_dsa_65(unsigned long session, unsigned long key,
+                                              const void *params, size_t plen,
+                                              fhsm_slice_t in,
+                                              uint8_t *out, size_t *outlen);
+
 /* ---------------------------------------------------------------------------
  *  1. CKM_HYBRID_X25519_ML_KEM_768
  * ------------------------------------------------------------------------- */

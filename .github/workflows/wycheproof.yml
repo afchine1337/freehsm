@@ -86,8 +86,44 @@ jobs:
       # arrive and does not multiply. It closes nothing -- a green night
       # leaves the issue open, because the person who reads it is the person
       # who should decide it is finished.
-      - name: Say so, in an issue
-        if: failure() && github.event_name == 'schedule'
+  # The failure notice is its own job, on the runner, deliberately.
+  #
+  # The first version of it was a step inside the job above, which runs in
+  # freehsm-c-build:debian13-openssl-3.5. `gh` is on GitHub's hosted runners,
+  # not in an arbitrary container, so it failed with
+  #
+  #     gh: not found
+  #     Error: Process completed with exit code 127
+  #
+  # on the first red night it was meant to report -- the notice about a
+  # failure became a second failure. Written without checking what existed
+  # where the step would run.
+  #
+  # Installing gh into the build image would make the crypto build container
+  # carry a tool it has no other use for. This runs where gh already is, and
+  # takes the report through the artefact the job above uploads, which is the
+  # only thing it needs from it.
+  notify:
+    needs: wycheproof
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # `continue-on-error` because the suite can fail before writing a
+      # report -- a build failure, a container that would not start. The
+      # notice is still wanted then, and violations_md.py says so when the
+      # file is absent.
+      - name: Fetch the report, if there is one
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: wycheproof-report-${{ github.run_number }}
+          path: tests/wycheproof/results
+
+      - name: Open or update the issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
