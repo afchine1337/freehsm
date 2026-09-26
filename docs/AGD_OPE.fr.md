@@ -24,7 +24,7 @@
 | Rôle          | Identifiant | Services autorisés                                                            |
 |---------------|-------------|-------------------------------------------------------------------------------|
 | Security Officer (CO) | `CKU_SO`    | `C_InitToken`, `C_InitPIN`, `C_SetPIN` (propre), revue d'audit          |
-| User                  | `CKU_USER`  | `C_GenerateKey`, `C_GenerateKeyPair`, `C_Encrypt/Decrypt`, `C_Sign/Verify`, `C_Digest`, `C_DeriveKey`, `C_Wrap/Unwrap`, `C_SetPIN` (propre) |
+| User                  | `CKU_USER`  | `C_GenerateKey`, `C_GenerateKeyPair`, `C_Encrypt`/`Decrypt`, `C_Sign`/`Verify`, `C_Digest`, `C_DeriveKey`, `C_Wrap`/`Unwrap`, `C_SetPIN` (propre) |
 
 Services anonymes (pré-login) :
 
@@ -33,9 +33,12 @@ Services anonymes (pré-login) :
 | `C_Initialize`   | Bring-up du module (1×/processus)    |
 | `C_GetInfo`      | Identité du module                  |
 | `C_GetSlotList`  | Énumérer les slots                  |
+| `C_GetSlotInfo`  | État du slot                        |
 | `C_GetTokenInfo` | État du token (compteurs PIN inclus)|
 | `C_OpenSession`  | Ouvrir session pour login           |
+| `C_CloseSession` | Fermer une session                  |
 | `C_GetMechanismList` | Lister les CKM_* dispatchables  |
+| `C_GetMechanismInfo` | Flags et plage de clés par mécanisme |
 
 ## 2. Workflow opérateur commun
 
@@ -65,14 +68,15 @@ Après `C_Finalize`, le processus ne doit appeler aucun autre `C_*` avant un nou
 | Cas d'usage                              | Mécanisme recommandé                       |
 |------------------------------------------|--------------------------------------------|
 | Chiffrement symétrique au repos          | `CKM_AES_GCM` (IV 96 bits, tag 128 bits) — **pas** `CKM_AES_CBC_PAD`, cf. §3.1 |
+| Chiffrement symétrique en transit        | `CKM_AES_GCM` ou `CKM_AES_CCM`             |
 | Authentification symétrique              | `CKM_SHA256_HMAC` ou `CKM_AES_CMAC`        |
 | MAC streaming (gros messages)            | `CKM_KMAC128` / `CKM_KMAC256`              |
 | Signature asymétrique (classique)        | `CKM_SHA384_RSA_PKCS_PSS` ou `CKM_ECDSA_SHA384` |
 | Signature asymétrique (PQ)               | `CKM_ML_DSA` (jeu paramètre ML-DSA-65)     |
-| Signature asymétrique (hybride)          | `CKM_HYBRID_ED25519_ML_DSA_65`             |
-| Encapsulation de clé (classique)         | `CKM_ECDH1_DERIVE` ou `CKM_X25519_DERIVE`  |
+| Signature asymétrique (hybride)          | **Retiré.** `CKM_HYBRID_ED25519_ML_DSA_65` a été désannoncé le 2026-09-24 (#17) : les deux composants signaient le message nu et les résultats étaient concaténés, de sorte que la moitié Ed25519 s'extrait comme signature autonome valide — le défaut de non-séparabilité que draft-ietf-lamps-pq-composite-sigs §2.2 existe pour empêcher. `CKM_COMPOSITE_MLDSA65_ED25519` le remplace, dans le profil `all-mechanisms` uniquement. |
+| Encapsulation de clé (classique)         | `CKM_ECDH1_DERIVE` sur P-256/384 ou `CKM_X25519_DERIVE` |
 | Encapsulation de clé (PQ)                | `CKM_ML_KEM` (jeu paramètre ML-KEM-768)    |
-| Encapsulation de clé (hybride)           | `CKM_HYBRID_X25519_ML_KEM_768`             |
+| Encapsulation de clé (hybride)           | **Retiré.** `CKM_HYBRID_X25519_ML_KEM_768` a été désannoncé le 2026-09-24 (#17) ; aucun organisme de normalisation ne spécifie cette construction. Utilisez `CKM_ML_KEM` et un échange classique séparément si vous avez besoin des deux. |
 | Dérivation KEK par mot de passe          | `CKM_PKCS5_PBKD2` avec ≥ 200 000 itér.     |
 | Dérivation de clé protocole              | `CKM_HKDF_DERIVE` (SHA-256+)               |
 
@@ -132,6 +136,92 @@ Entre tentatives, `C_Login` peut retourner `FHSM_RV_PIN_THROTTLED (0x80000004)`.
 3. Réessayer exactement une fois.
 
 Marteler à travers le throttle ne change pas le résultat ; le cooldown survit au redémarrage du processus.
+
+### 4.2b Où vit le log d'audit
+
+**Ne placez pas le log d'audit sur `tmpfs`, et vérifiez au lieu de supposer.**
+
+La garantie du log est qu'une ligne est durable avant que l'opération qu'elle
+enregistre ne retourne — voir `docs/AUDIT_DURABILITY.md`. Sur un système de
+fichiers volatile, `fdatasync` retourne immédiatement sans barrière, donc la
+garantie est silencieusement absente : rien n'échoue, rien n'est journalisé à
+ce sujet, et le log paraît parfaitement normal jusqu'à ce qu'une coupure de
+courant en emporte la fin.
+
+C'est facile à faire par accident. `/tmp` est en `tmpfs` par défaut sur Debian
+actuel, et `FHSM_AUDIT_LOG` peut pointer le log ailleurs que dans le répertoire
+des tokens. Le symptôme est un log d'une rapidité invraisemblable :
+
+```
+make tests/bench_fsync_floor
+./tests/bench_fsync_floor /var/lib/freehsm       # là où le log vivra
+```
+
+C'est le contrôle le plus court et il n'implique pas le module : un append, un
+`fdatasync`, répétés. Il nomme le système de fichiers mesuré, imprime la
+distribution, et **sort non nul si la barrière a retourné trop vite pour avoir
+atteint un stockage stable.** Utilisez son code de sortie dans un script de
+provisionnement ; un message qu'un opérateur doit lire est un message qu'un
+opérateur peut manquer.
+
+```
+  filesystem   ext4 on /dev/sdc (/sessions)
+  min             2.058 ms
+  p50             2.553 ms
+  ...
+```
+
+contre, sur `tmpfs` :
+
+```
+  NOT A DURABILITY MEASUREMENT.
+  A barrier that returns in 0.000 ms did not reach stable storage -- this is
+  tmpfs, where fdatasync is a no-op.
+```
+
+Une barrière durable coûte des millisecondes sur le stockage mesuré jusqu'ici.
+Des microsecondes signifient qu'aucune barrière n'a eu lieu. `tests/bench_audit_rate`
+mesure la même chose à travers le module si vous voulez aussi le coût propre du
+log, mais l'outil de plancher est celui à lancer en premier : il n'échoue que
+pour une seule raison.
+
+La même prudence vaut pour un hyperviseur qui acquitte les barrières sans les
+honorer ; le cache d'E/S hôte de VirtualBox fait exactement cela, et **aucun
+outil ici ne peut voir au travers.** Un hyperviseur qui ment produit un chiffre
+en millisecondes plausible et aucun avertissement d'aucune sorte. Si la garantie
+compte, le stockage doit être digne de confiance à un niveau inférieur à ce
+module.
+
+### 4.2c Le log est un ensemble de fichiers, pas un fichier
+
+Chaque ouverture du module crée son propre log, `audit.log.NNNNNN`, parce qu'une
+chaîne de hachage a exactement un auteur : deux processus partageant un fichier
+reprenaient chacun la chaîne depuis sa queue et se croyaient chacun le successeur
+de la même ligne, ce qui la détruisait. Deux outils ordinaires lancés en même
+temps y suffisaient.
+
+Pour vous, cela signifie :
+
+```
+freehsm-audit verify /var/lib/freehsm/audit  <audit_key_hex>
+```
+
+Un répertoire vérifie chaque log numéroté qu'il contient, **et signale les trous
+dans la numérotation**. Un trou signifie qu'un fichier a été retiré : chaque
+chaîne restante se vérifie encore isolément, donc la numérotation est la seule
+chose qui montre la suppression. Des numéros manquants à la *fin* ne laissent pas
+de trou — c'est la même troncature de fin de log décrite en §4.3, pas une
+faiblesse nouvelle.
+
+Deux conséquences à anticiper :
+
+* **Un redémarrage laisse un nouveau fichier.** Un démon redémarré trois fois
+  laisse trois logs. Archivez l'ensemble, pas le fichier.
+* **Entre deux fichiers, seul l'horodatage ordonne les événements.** À
+  l'intérieur d'un fichier, `seq` fait foi ; entre fichiers vous fusionnez sur
+  `ts`, qui est une horloge murale et peut être déplacée par quiconque peut
+  régler l'horloge. Tenez-en compte en reconstruisant un incident à travers un
+  redémarrage.
 
 ### 4.3 Revue du log d'audit
 
@@ -208,7 +298,7 @@ Vérifier un journal exige cette clé. La lire avec `xxd -p -c 32
 sa clé ne pourra pas être vérifié plus tard** — archiver les deux séparément,
 et jamais sur le même support.
 
-### 4.4 Sauvegarde de token
+### 4.5 Sauvegarde de token
 
 Les fichiers token sont chiffrés au repos sous PIN(s). Backups sûres seulement si :
 
@@ -216,7 +306,7 @@ Les fichiers token sont chiffrés au repos sous PIN(s). Backups sûres seulement
 - Stocker sur média chiffré (LUKS, tar GCM-chiffré, envelope KMS).
 - Ne jamais copier le log d'audit sans le token correspondant.
 
-### 4.5 Discipline de logout
+### 4.6 Discipline de logout
 
 ```c
 p11->C_Logout(s);
@@ -255,6 +345,16 @@ CK_MECHANISM mech = { CKM_AES_GCM, &gcm, sizeof(gcm) };
 
 p11->C_EncryptInit(s, &mech, key);
 p11->C_Encrypt(s, plaintext, plen, ciphertext, &clen);
+```
+
+`clen` en entrée est la capacité du buffer de sortie ; en sortie, c'est la longueur réelle du chiffré (longueur du clair + 16 pour le tag). Pour un traitement multipartes, utilisez `C_EncryptUpdate`/`C_EncryptFinal`.
+
+### 5.3 `C_Sign` (ECDSA-P-384 + SHA-384)
+
+```c
+CK_MECHANISM mech = { CKM_ECDSA_SHA384, NULL, 0 };
+p11->C_SignInit(s, &mech, priv_key);
+p11->C_Sign(s, msg, msg_len, sig, &sig_len);
 ```
 
 ## 6. Réponse aux erreurs
@@ -401,11 +501,11 @@ compte.**
 
 ### DRBG durci
 
-`fhsm_rng_bytes` route via `fhsm_drbg_bytes` : seed multi-source (getrandom + RDRAND + /dev/urandom + jitter TSC), conditionneur SHA-384, health tests SP 800-90B (RCT + APT + CRNGT), reseed auto tous les 1 MiB ou 1 h. Alarme → ERROR latché. Voir [`RNG.md`](RNG.md).
+`fhsm_rng_bytes` route via `fhsm_drbg_bytes` : seed multi-source (getrandom + RDRAND + /dev/urandom + jitter TSC), conditionneur SHA-384, health tests SP 800-90B (RCT + APT + CRNGT), reseed auto tous les 1 MiB ou 1 h. Toute alarme de health test latche le module en `FHSM_STATE_ERROR` et impose un redémarrage du service. Voir [`RNG.md`](RNG.md).
 
 ### Pair-wise consistency check
 
-Chaque `C_GenerateKeyPair` est suivi d'un sign-verify (ou encap-decap) automatique. Échec → ERROR latché. ~5 ms RSA-2048, sub-ms EC, ~50 ms SLH-DSA-128s.
+Chaque `C_GenerateKeyPair` (RSA, EC, ML-KEM, ML-DSA, SLH-DSA) est suivi d'un sign-verify (ou encap-decap) automatique avec la clé fraîchement générée. Échec → ERROR latché. ~5 ms RSA-2048, sub-ms EC, ~50 ms SLH-DSA-128s.
 
 ## 8. Actions interdites
 

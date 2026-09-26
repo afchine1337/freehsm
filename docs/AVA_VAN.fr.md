@@ -31,6 +31,8 @@ Total < 25 = pratique, < 35 = modéré, < 45 = haut, ≥ 45 = au-dessus du haut.
 
 ## 3. Catalogue des vulnérabilités considérées
 
+<!-- doc-twins:pointer-begin -->
+
 Le document anglais (`AVA_VAN.md` §3) détaille 9 vulnérabilités candidates avec scoring CEM complet pour chaque. Synthèse en français :
 
 | # | Vulnérabilité | Score | Défense principale | Risque résiduel |
@@ -43,9 +45,11 @@ Le document anglais (`AVA_VAN.md` §3) détaille 9 vulnérabilités candidates a
 | 3.6 | Injection dans le log d'audit | 4 (pratique) | Refus de bytes hors safe-ASCII + chaîne HMAC | Négligeable |
 | 3.7 | Brute-force PIN | 12 (pratique) | PBKDF2 200k iter + throttle exponentiel + lockout | Acceptable PIN ≥ 8c |
 | 3.8 | Compromission de l'état DRBG | 17 (modéré) | Provider FIPS secure heap + dumpable=0 + reseed | Négligeable |
-| 3.9 | Downgrade hybride | 9 (pratique) | Combiner hashe `ct_pq` → tampering échoue MAC en aval | Cryptographique négligeable |
+| 3.9 | Downgrade hybride | 9 (pratique) | Combiner hashe `ct_pq` → tampering échoue MAC en aval | Négligeable ; mécanisme désannoncé depuis #17, non atteignable par l'API |
 
 Toutes les vulnérabilités sont notées **< 45 (au-dessus du haut)** et sont soit atténuées, soit hors-champ per FIPS 140-3 §7.7.
+
+<!-- doc-twins:pointer-end -->
 
 ## 4. Synthèse pen-test
 

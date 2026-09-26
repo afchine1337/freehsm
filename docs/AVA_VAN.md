@@ -31,6 +31,12 @@ For each candidate vulnerability we sum the points per CEM Table B.3. An attack 
 
 ## 3. Catalog of considered vulnerabilities
 
+<!-- doc-twins:pointer-begin -->
+<!-- The nine full CEM scorings live here in English only; AVA_VAN.fr.md §3
+     carries a summary table and points at this one. Two scorings of the same
+     vulnerability in two languages could disagree about a rating, which is a
+     worse outcome than one of them being English. -->
+
 For each entry : description, attack potential rating, status, defense, and the source-file references.
 
 ### 3.1 Side-channel : timing of PIN verification
@@ -122,13 +128,20 @@ For each entry : description, attack potential rating, status, defense, and the 
 | Defense | The combiner hashes the **PQ ciphertext** alongside both shared secrets : `ss = SHA3-256(ss_x25519 ‖ ss_pq ‖ ct_x25519 ‖ ct_pq ‖ label)`. Tampering with `ct_pq` changes `ss_pq` to something different from peer's, so the resulting shared secret differs and the downstream MAC fails. |
 | Residual risk | Cryptographically negligible. |
 | Source | `src/dispatch/fhsm_dispatch_hybrid.c::dispatch_hybrid_x25519_ml_kem_768` |
+| Reachability | **Not reachable through the API since #17.** The two PQ/T hybrids were
+  de-advertised: the handler is still compiled and the analysis above still
+  describes it correctly, but `C_GetMechanismList` does not offer the mechanism
+  and `C_*Init` refuses it. Kept in this catalogue because the code is present
+  and an entry deleted is an analysis nobody can find again if it returns. |
+
+<!-- doc-twins:pointer-end -->
 
 ## 4. Penetration testing summary
 
 The lab performs an independent pen-test pass during AVA_VAN.5 evaluation. The areas listed below are flagged for focused attention :
 
 1. **Fuzzing** : the PKCS#11 argument parser (`fhsm_pkcs11.c`), the TLV params parser (`src/dispatch/fhsm_dispatch_common.c::fhsm_tlv_find`), and the .rsp parser (`kat/fhsm_kat_rsp.c`). AFL++ corpora are seeded with the published CAVP vectors.
-2. **Negative integration** : C_Login with adversarial PINs (binary, very long, unicode), C_Encrypt with mechanism mismatch, C_DestroyObject on a foreign session.
+2. **Negative integration** : `C_Login` with adversarial PINs (binary, very long, unicode), `C_Encrypt` with mechanism mismatch, `C_DestroyObject` on a foreign session.
 3. **TOCTOU** : audit log file open/write race against an adversary who replaces the file between checks.
 4. **Linker hardening** : `pwntools.checksec` on the shipped `.so` ; expect `RELRO=Full`, `NX=Yes`, `PIE=Yes`, `Stack canary=Yes`, `Stripped=No-debug`.
 

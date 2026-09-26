@@ -78,10 +78,10 @@ Pick mechanisms from the **approved set** listed in `docs/MECHANISMS.md` and `do
 | Streaming MAC (large messages)        | `CKM_KMAC128` / `CKM_KMAC256`          |
 | Asymmetric signature (classical)      | `CKM_SHA384_RSA_PKCS_PSS` or `CKM_ECDSA_SHA384` |
 | Asymmetric signature (PQ)             | `CKM_ML_DSA` (parameter set ML-DSA-65) |
-| Asymmetric signature (hybrid)         | `CKM_HYBRID_ED25519_ML_DSA_65`         |
+| Asymmetric signature (hybrid)         | **Withdrawn.** `CKM_HYBRID_ED25519_ML_DSA_65` was de-advertised on 2026-09-24 (#17): the two components signed the bare message and the results were concatenated, so the Ed25519 half lifts out as a valid standalone signature — the non-separability failure draft-ietf-lamps-pq-composite-sigs §2.2 exists to prevent. `CKM_COMPOSITE_MLDSA65_ED25519` replaces it and is available in the `all-mechanisms` profile only. |
 | Key encapsulation (classical)         | `CKM_ECDH1_DERIVE` over P-256/384 or `CKM_X25519_DERIVE` |
 | Key encapsulation (PQ)                | `CKM_ML_KEM` (parameter set ML-KEM-768) |
-| Key encapsulation (hybrid)            | `CKM_HYBRID_X25519_ML_KEM_768`         |
+| Key encapsulation (hybrid)            | **Withdrawn.** `CKM_HYBRID_X25519_ML_KEM_768` was de-advertised on 2026-09-24 (#17); no standards body specifies this construction. Use `CKM_ML_KEM` and a classical exchange separately if you need both. |
 | Password-based KEK derivation         | `CKM_PKCS5_PBKD2` with ≥ 200 000 iter  |
 | Key derivation in a protocol          | `CKM_HKDF_DERIVE` (SHA-256+)           |
 
@@ -309,7 +309,7 @@ To verify a log you need that key. Read it with `xxd -p -c 32
 without its key cannot be verified later** — archive the two separately, and
 never on the same medium.
 
-### 4.4 Token backup
+### 4.5 Token backup
 
 Token files are encrypted at rest under the operator PIN(s). Backups are therefore as safe as the PIN strength, **but only if the backup retains the same access controls** :
 
@@ -317,7 +317,7 @@ Token files are encrypted at rest under the operator PIN(s). Backups are therefo
 - Store backups on encrypted media (LUKS, GCM-encrypted tar, KMS-sealed envelope).
 - Never copy the audit log without the corresponding token file --- the integrity chain depends on the token's DEK-derived HMAC key.
 
-### 4.5 Logout discipline
+### 4.6 Logout discipline
 
 After every operation sequence :
 
