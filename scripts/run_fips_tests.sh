@@ -7,7 +7,7 @@
 #
 #  WHY THIS DID NOT EXIST
 #
-#  src/fhsm_crypto.c skips the provider entirely in dev mode:
+#  src/fhsm_crypto.c skips the provider entirely under the integrity bypass:
 #
 #      int dev_mode = (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED") != NULL);
 #      if (!dev_mode) {
@@ -22,7 +22,7 @@
 #  FIPS-relevant computation is delegated to that provider. That is true of the
 #  code and, until this script, unobserved in operation.
 #
-#  What `make tests` proves about fips-strict is that the module REFUSES
+#  What `make tests` proves about nist-approved-only is that the module REFUSES
 #  non-approved mechanisms. That is a test of the refusal, not of the
 #  delegation.
 #
@@ -345,5 +345,5 @@ echo "A failure here is informative rather than bad news. The suite has never"
 echo "run in this environment, so a mechanism the module offers that the FIPS"
 echo "provider does not serve shows up now, at a desk, instead of in a"
 echo "deployment. Record what fails before changing anything: the list is the"
-echo "first measurement of what fips-strict actually is."
+echo "first measurement of what nist-approved-only actually is."
 exit 1

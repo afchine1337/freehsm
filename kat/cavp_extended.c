@@ -1463,7 +1463,7 @@ static int run_rsa_oaep_roundtrip(EVP_PKEY *pkey) {
      * size, even when the actual plaintext (after OAEP unpadding) is
      * much shorter. The FIPS provider in CI does not enforce this
      * check, which is why the previous pt[64] buffer worked in CI but
-     * produced 'bad length' errors in dev mode. Sized to modulus to
+     * produced 'bad length' errors under the integrity bypass. Sized to modulus to
      * be safe across providers. */
     uint8_t ct[512];
     uint8_t pt[256];

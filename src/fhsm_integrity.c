@@ -232,7 +232,8 @@ static fhsm_rv_t do_verify(void) {
          * with the integrity-aware build (libfreehsm.so plus any
          * statically-linked test harness that includes
          * fhsm_integrity.o). If we cannot locate it, the operator is
-         * running the wrong artifact. In dev mode (env var set) we
+         * running the wrong artifact. Under the integrity bypass (env
+         * var set) we
          * downgrade to a permissive return ; in production we MUST
          * return FHSM_RV_INTEGRITY_FAILED so the caller's state
          * machine latches ERROR. The previous version fell through
@@ -285,12 +286,13 @@ static fhsm_rv_t do_verify(void) {
      *   (a) Unsigned build : the .fhsm_digest section is the all-zero
      *       placeholder placed by the compiler. In production this is
      *       INTEGRITY_FAILED (the operator must run a signed binary).
-     *       In dev mode (FHSM_INTEGRITY_ALLOW_UNSIGNED set) the build
+     *       Under the integrity bypass (FHSM_INTEGRITY_ALLOW_UNSIGNED set)
+     *       the build
      *       is allowed to run unsigned.
      *   (b) Signed build with mismatched digest : the embedded digest
      *       is non-zero but does not match g_last_digest (computed
      *       above). In production this is INTEGRITY_FAILED (the
-     *       binary has been tampered with after signing). In dev mode
+     *       binary has been tampered with after signing). Under the bypass
      *       the mismatch is tolerated for ergonomics (e.g. an
      *       unsigned test harness reusing a stale .fhsm_digest from
      *       a previous build).

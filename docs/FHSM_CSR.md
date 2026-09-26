@@ -183,7 +183,7 @@ The interoperability half of this lifts when the RFC publishes and
 implementations follow, and nothing in the output format is expected to change.
 
 **Not FIPS-approved, and that part does not lift.** The mechanism is available
-in the interop profile only, permanently, and for a reason that publication
+in the all-mechanisms profile only, permanently, and for a reason that publication
 will not alter. §10.2 of the draft is explicit about its own standing:
 
 > This guidance is not authoritative and has not been endorsed by US NIST.
@@ -192,7 +192,7 @@ What follows it is a *design goal* — that a composite "be able to be considere
 FIPS-approved even when one of the component algorithms is not" — addressed to
 implementers seeking certification. FreeHSM seeks none and will not; the
 reasoning is in `README.md` under *Certification*, and the same notice heads
-`docs/AGD_PRE.md` and `docs/AGD_OPE.md`. A mechanism enters `fips-strict`
+`docs/AGD_PRE.md` and `docs/AGD_OPE.md`. A mechanism enters `nist-approved-only`
 because it is approved, not because a specification argues that it ought to be,
 so `CKM_COMPOSITE_MLDSA65_ED25519` stays outside that profile whatever the RFC
 Editor does.
@@ -240,7 +240,7 @@ which is how the gap was eventually found.
 consecutive failures the role locks; see `AGD_OPE.md` §4.1.
 
 **`C_GenerateKeyPair failed (0x70)`** — `CKR_MECHANISM_INVALID`. The module was
-built in the fips-strict profile, where the composite mechanism is deliberately
+built in the nist-approved-only profile, where the composite mechanism is deliberately
 refused, or the module does not implement it at all.
 
 **`no public key labelled "x"`** — run `keygen` first, or check the label. The

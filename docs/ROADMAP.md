@@ -842,7 +842,7 @@ passes that had never loaded the module. Silence is where this project's
 defects have lived.
 
 **Cheap first measurement, before any decision.** Run the harness under
-`PROFILE=interop`, which advertises SHA-1, MD5, 3DES and RSA-PKCS v1.5, and diff
+`PROFILE=all-mechanisms`, which advertises SHA-1, MD5, 3DES and RSA-PKCS v1.5, and diff
 the skip sets per node-id against the `fips-strict` run. Whatever moves is
 category 1; whatever stays skipped in both is 2, 3 or 4 and is the set worth
 reading. That partitions two thousand tests with one run and no code.

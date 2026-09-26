@@ -57,7 +57,7 @@ jobs:
           FHSM_INTEGRITY_ALLOW_UNSIGNED: '1'
           FHSM_KAT_ALLOW_FAIL: '1'
           # Override the global /usr/local/ssl/openssl.cnf which forces
-          # FIPS-only mode --- in dev mode we want the default provider
+          # FIPS-only mode --- under the integrity bypass we want the default provider
           # to serve EVP fetches with no FIPS property bias.
           OPENSSL_CONF: /dev/null
         run: |

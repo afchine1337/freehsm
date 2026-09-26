@@ -5,10 +5,10 @@
  * test_legacy_rsa.c --- Non-FIPS RSA legacy padding gating (#125).
  *
  *  RSA PKCS#1 v1.5 (0x01) and raw / X.509 (0x03) encryption are
- *  executable only in the interop build, rejected under fips-strict.
+ *  executable only in the all-mechanisms build, rejected under nist-approved-only.
  *  Profile-adaptive: generates an RSA-2048 keypair, then either
  *  round-trips both padding modes (interop) or asserts rejection
- *  (fips-strict, detected via C_GetMechanismList).
+ *  (nist-approved-only, detected via C_GetMechanismList).
  * ========================================================================= */
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +61,7 @@ int main(void){
   CK_SESSION_HANDLE s;OS(0,4|2,0,0,&s);LI(s,0,so,8);IP(s,us,8);LI(s,1,us,8);
   CK_ULONG mn=0;GML(0,0,&mn);CK_ULONG*ml=calloc(mn,sizeof(CK_ULONG));GML(0,ml,&mn);
   int strict=1;for(CK_ULONG i=0;i<mn;i++)if(ml[i]==0x1){strict=0;break;}free(ml);
-  printf("test_legacy_rsa : profile = %s\n",strict?"fips-strict":"interop");
+  printf("test_legacy_rsa : profile = %s\n",strict?"nist-approved-only":"interop");
   CK_MECHANISM kg={0x0000,0,0};/*CKM_RSA_PKCS_KEY_PAIR_GEN*/
   CK_OBJECT_HANDLE pub=0,prv=0;CK_RV rv=GKP(s,&kg,0,0,0,0,&pub,&prv);
   if(rv){fprintf(stderr,"RSA keypair 0x%lx\n",rv);return 2;}

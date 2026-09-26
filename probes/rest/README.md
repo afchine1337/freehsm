@@ -19,8 +19,8 @@ export FHSM_TOKENS_DIR=$(mktemp -d) FHSM_SO_PIN=... FHSM_PIN=...
 probes/rest/01_latency ./libfreehsm.so k
 ```
 
-The composite mechanism is `interop`-only, so build the module with
-`PROFILE=interop`.
+The composite mechanism is `all-mechanisms`-only, so build the module with
+`PROFILE=all-mechanisms`.
 
 Run each probe against a freshly provisioned token. `02_login_cost` ends by
 offering a wrong PIN twice — on purpose, that is the measurement — and leaves
@@ -59,7 +59,7 @@ guess that happens to be right for our module and wrong through p11-kit.
 ## The numbers, 2026-08-18
 
 Intel Core Ultra 7 155H, **2 cores** allocated, OpenSSL 3.5.6, `sha_ni`
-present, `PROFILE=interop`, composite `MLDSA65-Ed25519-SHA512`.
+present, `PROFILE=all-mechanisms`, composite `MLDSA65-Ed25519-SHA512`.
 
 | | measured |
 |---|---|

@@ -192,7 +192,7 @@ void fhsm_rev_db_free(fhsm_rev_db_t *d);
  * over the whole response.
  *
  * It also stays out of the module. This is OpenSSL's SHA-1, in code the module
- * does not link; the fips-strict profile is not asked to provide it, and does
+ * does not link; the nist-approved-only profile is not asked to provide it, and does
  * not. That is why this file is not in LIB_SRC.
  * ------------------------------------------------------------------------- */
 typedef struct {

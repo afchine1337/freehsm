@@ -272,7 +272,7 @@ int main(void)
             ok(gotlen == 42 && memcmp(got, want, 42) == 0, "SHA-384 output differs and matches");
         }
     }
-    /* (5b) SHA-1 as the PRF hash, under the fips-strict profile this build
+    /* (5b) SHA-1 as the PRF hash, under the nist-approved-only profile this build
      *      uses. Accepted since 2026-09-19, and the two halves of that change
      *      are asserted together because the whole point was that they had
      *      been one flag.

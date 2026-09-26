@@ -480,7 +480,7 @@ See [`docs/AGD_OPE.md`](docs/AGD_OPE.md) §4 for the full operational hardening 
 
 The following are NOT considered vulnerabilities :
 
-- Issues affecting only `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` dev mode.
+- Issues affecting only the integrity bypass (`FHSM_INTEGRITY_ALLOW_UNSIGNED=1`).
 - Issues that require root access on the host (out-of-boundary attacker per FIPS 140-3 §7.7).
 - Issues in third-party dependencies (OpenSSL FIPS provider, tpm2-tools, etc.) — please report those upstream.
 - Issues in mechanisms exposed only when `FHSM_MODE=legacy` (the operator has explicitly opted out of FIPS-strict).

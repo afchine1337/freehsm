@@ -284,7 +284,7 @@ chose, and OpenSSL's own client still chooses SHA-1 by default.
 signature generation, not for identification, and a CertID identifies. It
 proves nothing about the certificate and nothing relies on it: the response's
 integrity comes from the composite signature over the whole of it. It is also
-OpenSSL's SHA-1, in the tool — the module's `fips-strict` profile is never
+OpenSSL's SHA-1, in the tool — the module's `nist-approved-only` profile is never
 asked for it and does not provide it.
 
 ### The nonce
@@ -495,7 +495,7 @@ which is how the gap was eventually found.
 consecutive failures the role locks; see `AGD_OPE.md` §4.1.
 
 **`C_GenerateKeyPair failed (0x70)`** — `CKR_MECHANISM_INVALID`. The module was
-built in the fips-strict profile, where the composite mechanism is deliberately
+built in the nist-approved-only profile, where the composite mechanism is deliberately
 refused, or the module does not implement it at all.
 
 **`no public key labelled "x"`** — run `keygen` first, or check the label. The

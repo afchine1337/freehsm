@@ -98,7 +98,7 @@ sudo apt install -y libssl-dev cmake ninja-build
 #  ./Configure enable-fips && make install_fips.)
 
 make generate                  # regenerate the mechanism dispatch (CKM_* + table + doc)
-make generate PROFILE=interop  # same but with legacy CKM_* dispatchable (audit-only)
+make generate PROFILE=all-mechanisms  # same but with legacy CKM_* dispatchable (audit-only)
 make                           # generate then build libfreehsm.so
 make tests                     # run test_smoke (POST + KAT + AES-GCM RT + tamper)
 make integrity                 # patch SHA-256 into fhsm_module_integrity_digest[]
@@ -109,7 +109,7 @@ make dist                      # reproducible source tar.xz for the evaluator
 
 ## Mechanism dispatch (78 `CKM_*`)
 
-The module supports **66 FIPS-approved** mechanisms and **12 legacy** ones (rejected by default in `fips-strict` profile, audited in `interop`). The dispatch table is not hand-written : it is generated from a **single source of truth** (`scripts/gen_p11_thunks.py`), which lets an evaluator diff this one file against §4 of the Security Policy to verify exhaustiveness.
+The module supports **66 FIPS-approved** mechanisms and **12 legacy** ones (rejected by default in `nist-approved-only` profile, audited in `all-mechanisms`). The dispatch table is not hand-written : it is generated from a **single source of truth** (`scripts/gen_p11_thunks.py`), which lets an evaluator diff this one file against §4 of the Security Policy to verify exhaustiveness.
 
 | Family            | Approved | Mechanisms |
 |-------------------|----------|------------|

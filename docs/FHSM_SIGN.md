@@ -217,7 +217,7 @@ against OpenSSL's own output byte for byte on Ed25519 — see
 `tests/test_composite_cms`.
 
 **Not available in the FIPS-strict profile.** The composite mechanism ships in
-the interop profile only; in fips-strict every entry point refuses it. See
+the all-mechanisms profile only; in nist-approved-only every entry point refuses it. See
 `docs/COMPOSITE_SIGS_GAP.md` for why.
 
 **No third-party verifier exists yet.** No off-the-shelf tool can check a

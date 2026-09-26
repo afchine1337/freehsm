@@ -46,13 +46,43 @@ int main(void) {
     ck("absent file: heap = compiled default", (long)fhsm_conf_secure_heap_bytes(), (long)DEF);
 
     /* Both keys are read. This is the assertion #128 exists for. */
-    write_conf("mode = fips\nsecure_heap_kb = 2048\n");
+    write_conf("mode = strict\nsecure_heap_kb = 2048\n");
     ck("secure_heap_kb = 2048 is read", (long)fhsm_conf_secure_heap_bytes(), 2048L * 1024);
-    ck("mode = fips is read", fhsm_mode_is_fips(), 1);
+    ck("mode = strict is read", fhsm_mode_is_fips(), 1);
 
-    write_conf("mode = legacy\nsecure_heap_kb = 512\n");
+    write_conf("mode = permissive\nsecure_heap_kb = 512\n");
     ck("secure_heap_kb = 512 is read", (long)fhsm_conf_secure_heap_bytes(), 512L * 1024);
-    ck("mode = legacy is read", fhsm_mode_is_fips(), 0);
+    ck("mode = permissive is read", fhsm_mode_is_fips(), 0);
+
+    /* The former spellings, kept as a compatibility surface (#11). Each one
+     * prints a note to stderr naming its replacement; what is asserted here
+     * is that it still DECIDES the same way. An alias that warns correctly
+     * and then returns the wrong mode would be worse than no alias: the
+     * operator reads a note saying "taken as strict" and gets permissive.
+     *
+     * `default` is in the table as permissive. It is the odd one -- the other
+     * four name a policy, `default` names a position in a list -- and it is
+     * asserted here so that nobody removes it as meaningless. */
+    write_conf("mode = fips\n");
+    ck("alias: mode = fips still means strict", fhsm_mode_is_fips(), 1);
+    write_conf("mode = legacy\n");
+    ck("alias: mode = legacy still means permissive", fhsm_mode_is_fips(), 0);
+    write_conf("mode = default\n");
+    ck("alias: mode = default still means permissive", fhsm_mode_is_fips(), 0);
+
+    /* The build profile's vocabulary reaching the runtime axis. Accepted,
+     * warned about by name, and -- the point of the assertion -- mapped the
+     * way a reader would expect rather than silently falling to the default. */
+    write_conf("mode = fips-strict\n");
+    ck("alias: mode = fips-strict maps to strict", fhsm_mode_is_fips(), 1);
+    write_conf("mode = interop\n");
+    ck("alias: mode = interop maps to permissive", fhsm_mode_is_fips(), 0);
+
+    /* An unknown word is not a mode. It must not be taken as strict by
+     * accident of table order, and must not be taken as strict by a prefix
+     * match on "strict-ish" either: the fallback is the documented default. */
+    write_conf("mode = stricter\n");
+    ck("unknown word -> default (permissive)", fhsm_mode_is_fips(), 0);
 
     /* Exact key matching: the old prefix compare accepted this as `mode`. */
     write_conf("modem = fips\nsecure_heap_kbx = 4096\n");

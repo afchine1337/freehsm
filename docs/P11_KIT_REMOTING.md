@@ -102,7 +102,7 @@ sees it.
 ## Setting it up
 
 The commands below were run against p11-kit 0.24.0 and FreeHSM built
-`PROFILE=interop`.
+`PROFILE=all-mechanisms`.
 
 ### On the machine holding the token
 

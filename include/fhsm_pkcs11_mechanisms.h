@@ -13,10 +13,21 @@ extern "C" {
 #endif
 
 /* ---- Build profile flag ----
- * 1 = fips-strict (non-approved mechanisms rejected in the
- *     operation path) ; 0 = interop / general-purpose (non-
- *     approved mechanisms are executable). Consumed by the
- *     hand-written C_*Init operation gates in fhsm_pkcs11.c. */
+ * 1 = nist-approved-only : the thirteen mechanisms NIST has not
+ *     approved get a reject handler in place of their operation.
+ * 0 = all-mechanisms : they are executable, subject to the runtime
+ *     mode (FHSM_MODE=strict|permissive), which is a separate
+ *     question -- the profile decides what is compiled in, the mode
+ *     decides whether the unapproved ones may run.
+ *
+ * The macro keeps its FIPS_STRICT name while the profile no longer
+ * has it. Renaming it would touch every operation gate in
+ * fhsm_pkcs11.c and the tests that assert on them, for a symbol no
+ * caller outside this module sees; the mapping is stated here
+ * instead. #11.
+ *
+ * Consumed by the hand-written C_*Init operation gates in
+ * fhsm_pkcs11.c. */
 #define FHSM_BUILD_FIPS_STRICT 1
 
 /* ---- CKM_* mechanism identifiers (PKCS#11 v3.2 §6.3) ---- */
@@ -124,14 +135,8 @@ extern "C" {
 #define CKM_CONCATENATE_DATA_AND_BASE        0x00000363u
 #define CKM_XOR_BASE_AND_DATA                0x00000364u
 
-/* --- Hybrid-KEM --- */
-#define CKM_HYBRID_X25519_ML_KEM_768         0x80004200u
-
 /* --- Composite-Sig --- */
 #define CKM_COMPOSITE_MLDSA65_ED25519        0x80004202u
-
-/* --- Hybrid-Sig --- */
-#define CKM_HYBRID_ED25519_ML_DSA_65         0x80004201u
 
 /* --- MD5 --- */
 #define CKM_MD5                              0x00000210u
@@ -252,9 +257,7 @@ extern fhsm_rv_t dispatch_concat_base_and_key(unsigned long, unsigned long, cons
 extern fhsm_rv_t dispatch_concat_base_and_data(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_concat_data_and_base(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_xor_base_and_data(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
-extern fhsm_rv_t dispatch_hybrid_x25519_ml_kem_768(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_composite_mldsa65_ed25519(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
-extern fhsm_rv_t dispatch_hybrid_ed25519_ml_dsa_65(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_md5(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha1(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_des3_keygen(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);

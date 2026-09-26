@@ -683,7 +683,8 @@ CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
     fhsm_pack_field(info->manufacturerID,    "Simorgh Labs",                      32);
     info->flags = 0;
 
-    /* In dev mode the library SAYS SO, in the field every consumer reads.
+    /* Under the integrity bypass the library SAYS SO, in the field every
+       consumer reads.
      *
      * The module already prints a warning on stderr when the integrity bypass
      * is set. That is not enough, and this project has spent a week proving
@@ -1370,10 +1371,10 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
  *  so the advertised set cannot drift from the set of dispatch_* handlers.
  *  A mechanism is advertised iff it resolves to a real handler in the
  *  active build profile :
- *    - general-purpose (interop) build : every mechanism with a real
+ *    - all-mechanisms build : every mechanism with a real
  *      handler is advertised, including non-FIPS ones (the module is a
  *      general-purpose PKCS#11 provider) ;
- *    - FIPS (fips-strict) build : non-approved mechanisms are compiled
+ *    - FIPS (nist-approved-only) build : non-approved mechanisms are compiled
  *      to dispatch_reject_fips and are therefore NOT advertised.
  *
  *  This replaced the previous hand-written g_mech_list + capability
@@ -2456,7 +2457,7 @@ CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession, unsigned char *pSeed,
 
 /* Map a PKCS#11 digest mechanism to the module's hash identifier. Returns 1
  * when the mechanism is known, 0 otherwise, and sets *non_approved for the
- * ones the fips-strict profile withdraws.
+ * ones the nist-approved-only profile withdraws.
  *
  * This was the body of C_DigestInit's switch. It is a function because
  * CK_HKDF_PARAMS.prfHashMechanism carries the same values and needs the same
@@ -2507,7 +2508,7 @@ static int digest_mech_to_hash(CK_ULONG mech, fhsm_hash_t *h, int *non_approved)
         case 0x000002B0UL: *h = FHSM_HASH_SHA3_256;   return 1; /* CKM_SHA3_256 */
         case 0x000002C0UL: *h = FHSM_HASH_SHA3_384;   return 1; /* CKM_SHA3_384 */
         case 0x000002D0UL: *h = FHSM_HASH_SHA3_512;   return 1; /* CKM_SHA3_512 */
-        /* Legacy digests : interop build only. #125. */
+        /* Legacy digests : all-mechanisms build only. #125. */
         case 0x00000220UL: *h = FHSM_HASH_SHA1;
                            *non_approved = FHSM_HASH_NA_DIGEST; return 1;
         case 0x00000210UL: *h = FHSM_HASH_MD5;
@@ -2712,7 +2713,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 
     uint32_t key_type = 0;
     uint32_t key_len  = 0;
-    /* CKM_DES3_KEY_GEN (0x131) is non-FIPS : interop only, fixed 24-byte
+    /* CKM_DES3_KEY_GEN (0x131) is non-FIPS : all-mechanisms only, fixed 24-byte
      * key, no CKA_VALUE_LEN. Previously keyed off 0x130, which is
      * CKM_DES2_KEY_GEN -- so a caller asking for DES2 got a 24-byte DES3 key
      * and a caller asking for real DES3 got CKR_MECHANISM_INVALID (#125). */
@@ -4569,7 +4570,7 @@ static fhsm_rv_t fhsm_rsa_oaep_unwrap(const uint8_t *priv_der, size_t priv_len,
                                        CK_MECHANISM *pMechanism,
                                        const uint8_t *in, size_t in_len,
                                        uint8_t *out, size_t *out_len);
-/* PKCS#1 v1.5 / raw RSA key transport (interop profile only). Defined next to
+/* PKCS#1 v1.5 / raw RSA key transport (all-mechanisms profile only). Defined next to
  * the OAEP pair further down; declared here because C_WrapKey / C_UnwrapKey
  * sit above them. `raw` selects CKM_RSA_X_509 over CKM_RSA_PKCS. */
 static fhsm_rv_t fhsm_rsa_v15_wrap(const uint8_t *pub_der, size_t pub_len,
@@ -4801,7 +4802,7 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     }
 
     /* --- CKM_RSA_PKCS (v1.5) and CKM_RSA_X_509 (raw) key transport ---
-     * Non-FIPS: interop profile only. See the block comment on
+     * Non-FIPS: all-mechanisms profile only. See the block comment on
      * fhsm_rsa_v15_wrap for why these do not share the OAEP helpers. */
     if (pMechanism->mechanism == CKM_RSA_PKCS
         || pMechanism->mechanism == CKM_RSA_X_509) {
@@ -4976,7 +4977,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (orv != FHSM_RV_OK) return orv;
     } else if (pMechanism->mechanism == CKM_RSA_PKCS
                || pMechanism->mechanism == CKM_RSA_X_509) {
-        /* PKCS#1 v1.5 / raw RSA key transport. Non-FIPS: interop only.
+        /* PKCS#1 v1.5 / raw RSA key transport. Non-FIPS: all-mechanisms only.
          * The result is NOT inspected -- see fhsm_rsa_v15_unwrap. */
         if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
         if (ucl != CKO_PRIVATE_KEY || ukt != CKK_RSA)
@@ -5747,7 +5748,7 @@ done:
  *
  * Curves resolved that way are not FIPS-approved -- SP 800-186 lists the
  * approved set, and brainpool is not in it -- so they are available in the
- * interop build and refused under fips-strict, exactly as SHA-1 and MD5 are
+ * all-mechanisms build and refused under nist-approved-only, exactly as SHA-1 and MD5 are
  * in C_DigestInit. The caller decides nothing; the profile does.
  *
  * Returned names are static storage owned by OpenSSL (OBJ_nid2sn) or by the
@@ -7859,7 +7860,7 @@ static fhsm_rv_t fhsm_rsa_oaep_unwrap(const uint8_t *priv_der, size_t priv_len,
  * unwrap template, a later operation that fails on a nonsense key -- can still
  * tell an attacker that this particular ciphertext unpadded cleanly. Any
  * implementation of v1.5 key transport has that property; it is why the
- * mechanism is deprecated and why it is confined to the interop profile here.
+ * mechanism is deprecated and why it is confined to the all-mechanisms profile here.
  * Callers who need key transport with an integrity guarantee want
  * CKM_RSA_PKCS_OAEP or CKM_AES_KEY_WRAP.
  *
@@ -8606,15 +8607,15 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
 }
 
 /* Non-FIPS symmetric/asymmetric ENCRYPTION mechanisms are executable
- * only in the interop build. Rejected at C_EncryptInit / C_DecryptInit
- * time under fips-strict. NOT applied to signing (op_init is shared
+ * only in the all-mechanisms build. Rejected at C_EncryptInit / C_DecryptInit
+ * time under nist-approved-only. NOT applied to signing (op_init is shared
  * with C_SignInit, where e.g. CKM_RSA_PKCS is an approved signature
  * mechanism). #125. */
 static int fhsm_nonfips_enc_rejected(CK_ULONG mech) {
     if (!fhsm_build_fips_strict) return 0;
     switch (mech) {
         /* AES-ECB is FIPS-approved (NIST SP 800-38A) and now allowed in
-         * fips-strict ; only genuinely non-approved encryption mechanisms
+         * nist-approved-only ; only genuinely non-approved encryption mechanisms
          * are rejected here. */
         case 0x00000133UL: /* CKM_DES3_CBC */
         case CKM_RSA_PKCS:
@@ -8964,7 +8965,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
     }
 
     /* --- AES-ECB / AES-CBC / AES-CBC-PAD / AES-CTR path ---
-     * AES-ECB is non-FIPS : executable only in the interop build. */
+     * AES-ECB is non-FIPS : executable only in the all-mechanisms build. */
     if (op->mechanism == CKM_AES_ECB || op->mechanism == CKM_AES_CBC
         || op->mechanism == CKM_AES_CBC_PAD || op->mechanism == CKM_AES_CTR) {
         int is_ecb = (op->mechanism == CKM_AES_ECB);
@@ -9018,7 +9019,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         return FHSM_RV_OK;
     }
 
-    /* --- 3DES-CBC (non-FIPS ; interop / general-purpose only) --- */
+    /* --- 3DES-CBC (non-FIPS ; all-mechanisms only) --- */
     if (op->mechanism == 0x00000133UL /* CKM_DES3_CBC */) {
         if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         if (kt != CKK_DES3) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
@@ -9440,7 +9441,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
     }
 
     /* --- AES-ECB / AES-CBC / AES-CBC-PAD / AES-CTR path ---
-     * AES-ECB is non-FIPS : executable only in the interop build. */
+     * AES-ECB is non-FIPS : executable only in the all-mechanisms build. */
     if (op->mechanism == CKM_AES_ECB || op->mechanism == CKM_AES_CBC
         || op->mechanism == CKM_AES_CBC_PAD || op->mechanism == CKM_AES_CTR) {
         int is_ecb = (op->mechanism == CKM_AES_ECB);
@@ -9491,7 +9492,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         return FHSM_RV_OK;
     }
 
-    /* --- 3DES-CBC (non-FIPS ; interop / general-purpose only) --- */
+    /* --- 3DES-CBC (non-FIPS ; all-mechanisms only) --- */
     if (op->mechanism == 0x00000133UL /* CKM_DES3_CBC */) {
         if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         if (kt != CKK_DES3) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
@@ -9783,9 +9784,9 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
             break;
-        case CKM_SHA1_RSA_PKCS: /* non-FIPS : interop only */
-        case CKM_RSA_X_509:     /* raw RSA, no padding : interop only */
-        case CKM_COMPOSITE_MLDSA65_ED25519: /* Composite ML-DSA (#112) : interop only */
+        case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
+        case CKM_RSA_X_509:     /* raw RSA, no padding : all-mechanisms only */
+        case CKM_COMPOSITE_MLDSA65_ED25519: /* Composite ML-DSA (#112) : all-mechanisms only */
             if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
             break;
         default:
@@ -10433,9 +10434,9 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
             break;
-        case CKM_SHA1_RSA_PKCS: /* non-FIPS : interop only */
-        case CKM_RSA_X_509:     /* raw RSA, no padding : interop only */
-        case CKM_COMPOSITE_MLDSA65_ED25519: /* Composite ML-DSA (#112) : interop only */
+        case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
+        case CKM_RSA_X_509:     /* raw RSA, no padding : all-mechanisms only */
+        case CKM_COMPOSITE_MLDSA65_ED25519: /* Composite ML-DSA (#112) : all-mechanisms only */
             if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
             break;
         default: return FHSM_RV_MECHANISM_INVALID;

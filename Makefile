@@ -266,8 +266,8 @@ $(shell mkdir -p $(OBJDIR) && printf '%s' '$(BUILD_MODE)' > $(BUILD_MODE_STAMP))
 # fhsm-ca and fhsm-service -- one implementation of "is this serial revoked",
 # because two would drift and a drifted responder answers `good` for a revoked
 # certificate. But it is not part of the PKCS#11 module: it pulls in OpenSSL's
-# OCSP parser and computes SHA-1 for CertID matching, and the fips-strict
-# module has no business carrying either. Named here so both consumers get the
+# OCSP parser and computes SHA-1 for CertID matching, and the
+# nist-approved-only module has no business carrying either. Named here so both consumers get the
 # same object and neither the module nor a future tool acquires it by accident.
 REVOCATION_OBJ = $(OBJDIR)/src/fhsm_revocation.o
 
@@ -330,18 +330,52 @@ tools/fhsm-token: tools/fhsm_token.c tools/p11_util.h $(OBJDIR)/src/fhsm_composi
 # ---------------------------------------------------------------------------
 # Code generation --- runs scripts/gen_p11_thunks.py to regenerate
 # include/fhsm_pkcs11_mechanisms.h, src/gen/fhsm_dispatch.c, docs/MECHANISMS.md.
-# The profile defaults to fips-strict; override with PROFILE=interop.
+# The profile defaults to nist-approved-only; override with
+# PROFILE=all-mechanisms.
 # ---------------------------------------------------------------------------
-PROFILE ?= fips-strict
+PROFILE ?= nist-approved-only
+
+# One canonical spelling, resolved before anything compares against it.
+#
+# fips-strict and interop are the former names (#11) and still work. They are
+# normalised here rather than at each use, because every use is a string
+# comparison -- the stamp, check-profile below -- and a comparison that does
+# not know about an alias takes an aliased build for the other profile. That
+# is the failure check-profile exists to catch, so it must not be the one
+# introducing it.
+#
+# fips-strict named a standard this module does not claim; nist-approved-only
+# says whose list the mechanisms are on. interop described a purpose rather
+# than a content, and was not the opposite of anything.
+ifeq ($(PROFILE),fips-strict)
+PROFILE_CANON := nist-approved-only
+PROFILE_ALIAS := fips-strict
+else ifeq ($(PROFILE),interop)
+PROFILE_CANON := all-mechanisms
+PROFILE_ALIAS := interop
+else ifeq ($(PROFILE),nist-approved-only)
+PROFILE_CANON := nist-approved-only
+else ifeq ($(PROFILE),all-mechanisms)
+PROFILE_CANON := all-mechanisms
+else
+$(error PROFILE=$(PROFILE) is not a profile. Use nist-approved-only or \
+all-mechanisms (fips-strict and interop are the former names and still work))
+endif
+
+ifneq ($(PROFILE_ALIAS),)
+$(info [freehsm] PROFILE=$(PROFILE_ALIAS) is the former name for \
+$(PROFILE_CANON); it still works.)
+endif
 
 # Witness file recording the profile the generated sources were produced with.
 #
-# Without this, `make PROFILE=interop` silently did nothing: the generated
-# artifacts depended only on gen_p11_thunks.py, so an existing set built for
-# another profile satisfied the rule and the build linked the wrong dispatch
-# table. The failure is silent in the dangerous direction too -- a tree last
-# generated for interop, rebuilt without PROFILE, ships the non-FIPS mechanisms
-# enabled while every visible sign says fips-strict. Getting the profile right
+# Without this, `make PROFILE=all-mechanisms` silently did nothing: the
+# generated artifacts depended only on gen_p11_thunks.py, so an existing set
+# built for another profile satisfied the rule and the build linked the wrong
+# dispatch table. The failure is silent in the dangerous direction too -- a
+# tree last generated for all-mechanisms, rebuilt without PROFILE, ships the
+# non-approved mechanisms enabled while every visible sign says
+# nist-approved-only. Getting the profile right
 # should not depend on remembering to run `make generate` first.
 #
 # .profile.stamp is rewritten only when the profile actually changes, so it does
@@ -351,9 +385,9 @@ PROFILE_STAMP := src/gen/.profile.stamp
 .PHONY: profile-stamp
 profile-stamp:
 	@mkdir -p $(dir $(PROFILE_STAMP))
-	@if [ "$$(cat $(PROFILE_STAMP) 2>/dev/null)" != "$(PROFILE)" ]; then \
-	    printf '%s' '$(PROFILE)' > $(PROFILE_STAMP); \
-	    echo "[freehsm] profile -> $(PROFILE) (regenerating)"; \
+	@if [ "$$(cat $(PROFILE_STAMP) 2>/dev/null)" != "$(PROFILE_CANON)" ]; then \
+	    printf '%s' '$(PROFILE_CANON)' > $(PROFILE_STAMP); \
+	    echo "[freehsm] profile -> $(PROFILE_CANON) (regenerating)"; \
 	fi
 
 $(PROFILE_STAMP): profile-stamp
@@ -366,12 +400,13 @@ $(PROFILE_STAMP): profile-stamp
 # it -- a git checkout, a branch switch, a merge, a stash pop. When that
 # happens the stamp still says one profile while src/gen says the other, make
 # sees nothing out of date, and the build links a dispatch table nobody asked
-# for. Found the hard way: restoring src/gen from HEAD left a fips-strict
-# dispatch behind an interop stamp, and the only symptom was CKR_MECHANISM_
-# INVALID from a mechanism that was supposed to be enabled.
+# for. Found the hard way: restoring src/gen from HEAD left a
+# nist-approved-only dispatch behind an all-mechanisms stamp, and the only
+# symptom was CKR_MECHANISM_INVALID from a mechanism supposed to be enabled.
 #
-# The dangerous direction is the other one. A tree generated for interop and
-# rebuilt as fips-strict ships the non-approved mechanisms live while every
+# The dangerous direction is the other one. A tree generated for
+# all-mechanisms and rebuilt as nist-approved-only ships the non-approved
+# mechanisms live while every
 # visible sign says otherwise, and nothing downstream would catch it --
 # docs/ROADMAP.md already names this as the check that cannot be recovered
 # after a release.
@@ -381,12 +416,12 @@ $(PROFILE_STAMP): profile-stamp
 # cannot be right by accident.
 .PHONY: check-profile
 check-profile:
-	@want=$$( [ "$(PROFILE)" = "interop" ] && echo 0 || echo 1 ); 	got=$$(sed -n 's/^const int fhsm_build_fips_strict = \([01]\);.*/\1/p' \
-	        src/gen/fhsm_dispatch.c 2>/dev/null); 	if [ -z "$$got" ]; then 	    echo "[freehsm] cannot read fhsm_build_fips_strict from src/gen/fhsm_dispatch.c" >&2; 	    exit 1; 	fi; 	if [ "$$got" != "$$want" ]; then 	    echo "[freehsm] PROFILE=$(PROFILE) but the generated dispatch says" >&2; 	    echo "          fhsm_build_fips_strict = $$got (expected $$want)." >&2; 	    echo "          The generated sources and the profile stamp disagree --" >&2; 	    echo "          usually a checkout or merge replaced src/gen underneath." >&2; 	    echo "          Run:  rm -f $(PROFILE_STAMP) && make PROFILE=$(PROFILE) generate" >&2; 	    exit 1; 	fi
+	@want=$$( [ "$(PROFILE_CANON)" = "all-mechanisms" ] && echo 0 || echo 1 ); 	got=$$(sed -n 's/^const int fhsm_build_fips_strict = \([01]\);.*/\1/p' \
+	        src/gen/fhsm_dispatch.c 2>/dev/null); 	if [ -z "$$got" ]; then 	    echo "[freehsm] cannot read fhsm_build_fips_strict from src/gen/fhsm_dispatch.c" >&2; 	    exit 1; 	fi; 	if [ "$$got" != "$$want" ]; then 	    echo "[freehsm] PROFILE=$(PROFILE_CANON) but the generated dispatch says" >&2; 	    echo "          fhsm_build_fips_strict = $$got (expected $$want)." >&2; 	    echo "          The generated sources and the profile stamp disagree --" >&2; 	    echo "          usually a checkout or merge replaced src/gen underneath." >&2; 	    echo "          Run:  rm -f $(PROFILE_STAMP) && make PROFILE=$(PROFILE_CANON) generate" >&2; 	    exit 1; 	fi
 
 .PHONY: generate
 generate:
-	python3 scripts/gen_p11_thunks.py --profile=$(PROFILE)
+	python3 scripts/gen_p11_thunks.py --profile=$(PROFILE_CANON)
 
 # Generated artifacts depend on the script (so editing it triggers a re-gen)
 # AND on the profile witness (so switching profiles does too).
@@ -797,13 +832,13 @@ tests/test_session_objects: tests/test_session_objects.c $(LIB)
 tests/test_mech_advertise: tests/test_mech_advertise.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
-# Non-FIPS digest gating (#125 general-purpose) : SHA-1/MD5 executable
-# in interop, rejected in fips-strict. Profile-adaptive.
+# Non-approved digest gating (#125 general-purpose) : SHA-1/MD5 executable
+# in all-mechanisms, rejected in nist-approved-only. Profile-adaptive.
 tests/test_legacy_digest: tests/test_legacy_digest.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
-# Non-FIPS cipher gating (#125) : AES-ECB (+3DES) executable in interop,
-# rejected in fips-strict. Profile-adaptive round-trip.
+# Non-approved cipher gating (#125) : AES-ECB (+3DES) executable in
+# all-mechanisms, rejected in nist-approved-only. Profile-adaptive round-trip.
 tests/test_legacy_cipher: tests/test_legacy_cipher.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
@@ -889,7 +924,17 @@ asan:
 # beside the tokens, so any test that initialises the module writes there.
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
-tests: tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_advertised_operational tests/test_derive_concat tests/test_derive_hkdf tests/probe_ecdh_curves tests/probe_hkdf_data tests/test_pbkd2 tests/test_always_authenticate tests/test_interface_v32 tests/test_pqc_pub_import tests/test_gmac_params tests/test_encap_flags tests/test_encap_flags_store tests/test_v3_fixture tests/test_allowed_mechanisms tests/test_nested_templates tests/test_wrap_with_trusted tests/test_finalize_release tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tests/test_oaep_decrypt_size tests/test_sign_multipart tests/test_cbc_pad_update_size tests/test_audit_key_diag tests/test_kw_iv tools/fhsm-token
+tests: tests/test_conf tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_advertised_operational tests/test_derive_concat tests/test_derive_hkdf tests/probe_ecdh_curves tests/probe_hkdf_data tests/test_pbkd2 tests/test_always_authenticate tests/test_interface_v32 tests/test_pqc_pub_import tests/test_gmac_params tests/test_encap_flags tests/test_encap_flags_store tests/test_v3_fixture tests/test_allowed_mechanisms tests/test_nested_templates tests/test_wrap_with_trusted tests/test_finalize_release tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tests/test_oaep_decrypt_size tests/test_sign_multipart tests/test_cbc_pad_update_size tests/test_audit_key_diag tests/test_kw_iv tools/fhsm-token
+# test_conf had a build rule since #128 and appeared in no list: not in the
+# prerequisites above, not in the recipe below, not in any script, not in CI.
+# `make tests` never built it and nothing ever ran it. Found on 2026-09-26
+# while adding seven assertions to it -- the assertions would have been
+# written, committed, and never once executed.
+#
+# FHSM_MODE is cleared rather than assumed absent: the test drives the mode
+# through a conf file, and an inherited FHSM_MODE takes precedence over the
+# file by design, so it would silently decide every mode assertion.
+	env -u FHSM_MODE ./tests/test_conf
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_smoke
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_tpm
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
@@ -1029,9 +1074,9 @@ audit-switch:
 # fhsm_composite_ocsp() signs whatever certificate it is handed. Which one it
 # is handed, and whether a verifier will accept it, is decided in fhsm-ca. So
 # this drives the tools rather than linking the library, like audit_switch.sh.
-# The composite mechanism is interop-only, so this cannot run against the
-# default build: fips-strict answers CKR_MECHANISM_INVALID and there is no
-# key to sign anything with. It therefore leaves an interop tree behind,
+# The composite mechanism is all-mechanisms-only, so this cannot run against
+# the default build: nist-approved-only answers CKR_MECHANISM_INVALID and there
+# is no key to sign anything with. It leaves an all-mechanisms tree behind,
 # which is why CI rebuilds before uploading anything.
 # The service's guards need the binary and a token, so they are their own
 # target rather than part of `make tests`, which links the library and never
@@ -1080,9 +1125,9 @@ revocation-db: tools/fhsm-ca
 .PHONY: ocsp-delegated
 ocsp-delegated:
 	$(MAKE) clean
-	$(MAKE) PROFILE=interop all
+	$(MAKE) PROFILE=all-mechanisms all
 	$(TEST_LD) sh tests/ocsp_delegated.sh
-	@echo "[ocsp-delegated] the tree is now a PROFILE=interop build"
+	@echo "[ocsp-delegated] the tree is now a PROFILE=all-mechanisms build"
 
 integrity: $(LIB)
 # Exit 3 means "already signed", which is a state and not a failure.
@@ -1149,7 +1194,7 @@ install: $(LIB)
 	install -o root -g root -m 0755 $(LIB) $(LIBDIR)/$(LIB)
 	id -u $(SYSUSER) >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d $(STATEDIR) $(SYSUSER)
 	install -d -o $(SYSUSER) -g $(SYSUSER) -m 700 $(STATEDIR)/tokens $(STATEDIR)/audit $(STATEDIR)/kek
-	test -f $(ETCDIR)/freehsm.conf || printf '# freehsm.conf --- runtime configuration.\n#\n# Every key below is read by the module. Nothing else is: the rest of the\n# module is configured at compile time (FHSM_PIN_MAX_FAILED, the PBKDF2\n# iteration count, the throttle curve) or through the environment\n# (FHSM_TOKENS_DIR, FHSM_MODE). Until v1.6.0 this file listed nine keys and\n# no code read any of them -- a file that promises controls nothing enforces.\n\n# Runtime mode: fips | legacy. Overridden by the FHSM_MODE environment\n# variable. NOTE its narrow scope: this selects the KAT/dispatch behaviour\n# only. Which mechanisms the PKCS#11 API advertises and executes is fixed\n# when the module is built (make generate PROFILE=fips-strict|interop) and\n# cannot be changed here.\nmode = legacy\n\n# Size of the mlock(2)-ed secure heap holding key material, in KiB.\n# Range 64..65536, rounded UP to a power of two (the arena allocator requires\n# one). Out-of-range or unparseable values fall back to the compiled default.\n# Raise this if the module reports CKR_DEVICE_MEMORY when loading a token with\n# many private keys.\nsecure_heap_kb = 8192\n' > $(ETCDIR)/freehsm.conf
+	test -f $(ETCDIR)/freehsm.conf || printf '# freehsm.conf --- runtime configuration.\n#\n# Every key below is read by the module. Nothing else is: the rest of the\n# module is configured at compile time (FHSM_PIN_MAX_FAILED, the PBKDF2\n# iteration count, the throttle curve) or through the environment\n# (FHSM_TOKENS_DIR, FHSM_MODE). Until v1.6.0 this file listed nine keys and\n# no code read any of them -- a file that promises controls nothing enforces.\n\n# Runtime mode: strict | permissive. Overridden by the FHSM_MODE environment\n# variable. `strict` refuses the thirteen mechanisms NIST has not approved;\n# `permissive` runs them. The former spellings `fips` and `legacy` are still\n# accepted and print a note naming the replacement.\n#\n# NOTE its narrow scope. This is one of two axes, and it is the second one:\n# which mechanisms the PKCS#11 API advertises at all is fixed when the module\n# is built (make generate PROFILE=nist-approved-only|all-mechanisms) and\n# cannot be changed here. A mechanism the build left out cannot be turned on\n# by this key; this key only decides whether a compiled-in but unapproved\n# mechanism is allowed to run.\nmode = permissive\n\n# Size of the mlock(2)-ed secure heap holding key material, in KiB.\n# Range 64..65536, rounded UP to a power of two (the arena allocator requires\n# one). Out-of-range or unparseable values fall back to the compiled default.\n# Raise this if the module reports CKR_DEVICE_MEMORY when loading a token with\n# many private keys.\nsecure_heap_kb = 8192\n' > $(ETCDIR)/freehsm.conf
 	chmod 0644 $(ETCDIR)/freehsm.conf
 	-setcap 'cap_ipc_lock=+ep' $(LIBDIR)/$(LIB)
 	install -d -o root -g root -m 755 $(PREFIX)/share/kat

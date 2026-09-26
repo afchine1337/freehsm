@@ -70,7 +70,7 @@ Access control:
 ## Remaining (documented, non-defect or scoped follow-ups)
 
 * **Correct behaviour, not defects**: non-FIPS mechanisms (AES-ECB,
-  SHA-1, ...) rejected under the `fips-strict` profile the harness builds
+  SHA-1, ...) rejected under the `nist-approved-only` profile the harness builds
   against; `CKO_DATA` data objects out of scope.
 * **Follow-ups**: per-object usage-flag storage (CKA_ENCRYPT=FALSE
   enforcement); public-key material (CKA_MODULUS/EC_PARAMS) on private

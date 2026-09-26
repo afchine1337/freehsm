@@ -126,7 +126,7 @@ scripts/gen_p11_thunks.py
         └──►  docs/MECHANISMS.md      (auto-generated reference)
 ```
 
-Re-running the generator with a different `--profile=fips-strict` flag emits a build that rejects every non-approved mechanism at link time --- no runtime branching is involved, which simplifies the AVA_VAN.5 analysis.
+Re-running the generator with a different `--profile=nist-approved-only` flag emits a build that rejects every non-approved mechanism at link time --- no runtime branching is involved, which simplifies the AVA_VAN.5 analysis.
 
 ## 9. Testing & coverage
 

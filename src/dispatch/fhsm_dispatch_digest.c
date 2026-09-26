@@ -118,12 +118,12 @@ fhsm_rv_t dispatch_sha512_256(unsigned long s, unsigned long k,
 }
 
 /* ---------------------------------------------------------------------------
- * Non-FIPS legacy digests (general-purpose / interop profile only).
- * SHA-1 (disallowed as a standalone digest under fips-strict) and MD5
+ * Non-FIPS legacy digests (general-purpose / all-mechanisms profile only).
+ * SHA-1 (disallowed as a standalone digest under nist-approved-only) and MD5
  * (never FIPS-approved). Both live in the OpenSSL default provider. In
- * the fips-strict build these mechanisms are rewritten to
+ * the nist-approved-only build these mechanisms are rewritten to
  * dispatch_reject_fips by the generator ; these handlers are only
- * reachable in the interop (general-purpose) profile. #125.
+ * reachable in the all-mechanisms profile. #125.
  * ------------------------------------------------------------------------- */
 fhsm_rv_t dispatch_sha1(unsigned long s, unsigned long k,
                          const void *params, size_t plen,

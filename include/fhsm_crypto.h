@@ -121,8 +121,8 @@ typedef enum fhsm_hash_e {
     FHSM_HASH_SHA3_256 = 4,
     FHSM_HASH_SHA3_384 = 5,
     FHSM_HASH_SHA3_512 = 6,
-    /* Non-FIPS legacy digests (interop / general-purpose profile only ;
-     * rejected in the fips-strict operation path). */
+    /* Non-FIPS legacy digests (all-mechanisms profile only ;
+     * rejected in the nist-approved-only operation path). */
     FHSM_HASH_SHA1 = 7,
     FHSM_HASH_MD5  = 8,
     /* Additional FIPS-approved digests (FIPS 180-4 / 202) : advertised by

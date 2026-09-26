@@ -56,13 +56,18 @@ else
 fi
 
 # --- 2. build profile ----------------------------------------------------
-# The one check that cannot be recovered after the fact: an interop build
-# ships the non-approved mechanisms live while every visible sign says
-# fips-strict.
+# The one check that cannot be recovered after the fact: an all-mechanisms
+# build ships the non-approved mechanisms live while every visible sign says
+# nist-approved-only.
+#
+# The generated flag is still spelled fhsm_build_fips_strict: renaming a
+# symbol in generated code would break every consumer that greps for it,
+# this script included. The name is the old one; the profile it stands for
+# is nist-approved-only.
 if grep -q 'fhsm_build_fips_strict = 1' "$GEN" 2>/dev/null; then
-    ok "build profile is fips-strict"
+    ok "build profile is nist-approved-only"
 else
-    bad "profile is NOT fips-strict -- run: make generate PROFILE=fips-strict"
+    bad "profile is NOT nist-approved-only -- run: make generate PROFILE=nist-approved-only"
 fi
 
 # --- 3. version string ---------------------------------------------------

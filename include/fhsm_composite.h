@@ -649,7 +649,7 @@ fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
  *
  * Deciding *which* certificate a CertID refers to does require computing that
  * hash, and that belongs to the tool holding the revocation database, not
- * here. Keeping it out means the module's fips-strict profile is not dragged
+ * here. Keeping it out means the module's nist-approved-only profile is not dragged
  * into providing SHA-1 for an identifier.
  * ----------------------------------------------------------------------- */
 #define FHSM_OCSP_GOOD     0

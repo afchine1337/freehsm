@@ -11,11 +11,11 @@
  *  a control present on some of the paths that reach a state and absent from
  *  the rest -- and this file is where they lived. So the profile gate is
  *  checked at each entry point separately rather than once, and under
- *  fips-strict the test asserts refusal at every one of them.
+ *  nist-approved-only the test asserts refusal at every one of them.
  *
  *  Run under either profile; it detects which one it is looking at and
  *  asserts the matching behaviour. That matters: a test that only passes
- *  under interop would leave the fips-strict half unexercised, which is
+ *  under interop would leave the nist-approved-only half unexercised, which is
  *  precisely how a gate goes missing.
  * ========================================================================= */
 #include <stdio.h>
@@ -89,10 +89,10 @@ int main(void) {
      * of the run asserts the whole behaviour that follows from it. */
     int strict = (gen == CKR_MECHANISM_INVALID);
     printf("=== test_composite_p11 : Composite ML-DSA via PKCS#11 (#112) ===\n");
-    printf("    profile detected: %s\n\n", strict ? "fips-strict" : "interop");
+    printf("    profile detected: %s\n\n", strict ? "nist-approved-only" : "interop");
 
     if (strict) {
-        printf("[fips-strict] the mechanism must be refused at EVERY entry point\n");
+        printf("[nist-approved-only] the mechanism must be refused at EVERY entry point\n");
         ck("C_GenerateKeyPair refuses it", gen == CKR_MECHANISM_INVALID, "");
         /* The Init gates must refuse independently of keygen -- that is the
          * whole point of checking three sites instead of one. A stale handle

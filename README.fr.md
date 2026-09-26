@@ -99,7 +99,7 @@ sudo apt install -y libssl-dev cmake ninja-build
 #  d'OpenSSL avec ./Configure enable-fips && make install_fips.)
 
 make generate                  # regénère le mechanism dispatch (CKM_* + table + doc)
-make generate PROFILE=interop  # idem mais avec les CKM_* legacy actifs (audit-only)
+make generate PROFILE=all-mechanisms  # idem mais avec les CKM_* legacy actifs (audit-only)
 make                           # generate puis build libfreehsm.so
 make tests                     # exécute test_smoke (POST + KAT + AES-GCM RT + tamper)
 make lint                      # cppcheck strict
@@ -155,7 +155,7 @@ Un **pair-wise consistency check** (FIPS 140-3 §7.10.2.b) tourne après chaque 
 
 ## Mechanism dispatch (78 `CKM_*`)
 
-Le module supporte **66 mécanismes approuvés FIPS** et **12 legacy** (rejetés par défaut en profil `fips-strict`, audités en profil `interop`). La table de dispatch n'est pas écrite à la main : elle est générée à partir d'une **source unique de vérité** (`scripts/gen_p11_thunks.py`), ce qui garantit qu'un évaluateur peut diffuser ce seul fichier contre la §4 de la Security Policy pour vérifier l'exhaustivité.
+Le module supporte **66 mécanismes approuvés FIPS** et **12 legacy** (rejetés par défaut en profil `nist-approved-only`, audités en profil `all-mechanisms`). La table de dispatch n'est pas écrite à la main : elle est générée à partir d'une **source unique de vérité** (`scripts/gen_p11_thunks.py`), ce qui garantit qu'un évaluateur peut diffuser ce seul fichier contre la §4 de la Security Policy pour vérifier l'exhaustivité.
 
 | Famille          | Approuvés | Mécanismes                                                                  |
 |------------------|-----------|------------------------------------------------------------------------------|
@@ -177,7 +177,7 @@ Le module supporte **66 mécanismes approuvés FIPS** et **12 legacy** (rejetés
 | Generic          | 1         | `GENERIC_SECRET_KEY_GEN`                                                     |
 | **Non-approuvés (legacy)** | **12** | `AES_ECB`, `RSA_PKCS`, `RSA_X_509`, `SHA1_RSA_PKCS`, `MD5`, `SHA_1`, `DES_KEY_GEN`, `DES3_KEY_GEN`, `DES3_CBC`, `RC4`, `DH_PKCS_KEY_PAIR_GEN`, `DSA_KEY_PAIR_GEN` |
 
-Les fichiers générés sont **`include/fhsm_pkcs11_mechanisms.h`** (constantes + signature handler + table extern), **`src/gen/fhsm_dispatch.c`** (table triée par `ckm_value` + lookup binaire O(log N) + stubs faibles `__attribute__((weak))` pour permettre le link avant que chaque handler ait sa vraie implémentation), et **`docs/MECHANISMS.md`** (référence humaine groupée par famille). En profil `fips-strict`, les 12 entrées non-approuvées ont leur handler remplacé à la génération par `dispatch_reject_fips` qui retourne `FHSM_RV_FIPS_NOT_APPROVED` — aucun branchement à l'exécution, ce qui simplifie l'analyse AVA_VAN.5.
+Les fichiers générés sont **`include/fhsm_pkcs11_mechanisms.h`** (constantes + signature handler + table extern), **`src/gen/fhsm_dispatch.c`** (table triée par `ckm_value` + lookup binaire O(log N) + stubs faibles `__attribute__((weak))` pour permettre le link avant que chaque handler ait sa vraie implémentation), et **`docs/MECHANISMS.md`** (référence humaine groupée par famille). En profil `nist-approved-only`, les 12 entrées non-approuvées ont leur handler remplacé à la génération par `dispatch_reject_fips` qui retourne `FHSM_RV_FIPS_NOT_APPROVED` — aucun branchement à l'exécution, ce qui simplifie l'analyse AVA_VAN.5.
 
 ### Mécanismes hybrides PQ + classique
 

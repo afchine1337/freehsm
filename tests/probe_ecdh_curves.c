@@ -211,8 +211,8 @@ int main(void)
             { CKA_EXTRACTABLE, &t_true, 1 },
         };
         /* Ask the module whether it has the mechanism at all rather than
-         * assuming. A fips-strict build does not: the OpenSSL FIPS provider
-         * has no X25519, so the three Montgomery mechanisms are interop-only.
+         * assuming. A nist-approved-only build does not: the OpenSSL FIPS provider
+         * has no X25519, so the three Montgomery mechanisms are all-mechanisms-only.
          * Skipping on the module's own answer is also what keeps this probe
          * honest if that ever changes. */
         CK_MECHANISM_INFO mi;

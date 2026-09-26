@@ -6,7 +6,7 @@
  *
  *  AES-ECB (0x1081) is FIPS-approved (SP 800-38A) and round-trips in both
  *  profiles. 3DES-CBC (0x133) and 3DES key generation (0x130) are
- *  non-approved: executable only in interop, rejected under fips-strict.
+ *  non-approved: executable only in all-mechanisms, rejected under nist-approved-only.
  *  Profile detected via C_GetMechanismList (3DES keygen advertised iff interop).
  * ========================================================================= */
 #include <stdio.h>
@@ -80,15 +80,15 @@ int main(void) {
      * The constant here was 0x130 for a long time. That is CKM_DES2_KEY_GEN.
      * CKM_DES3_KEY_GEN is 0x131, and the module never advertises 0x130 in
      * either profile -- so the search always failed, the test always believed
-     * it was in fips-strict, and the interop branch below had never run once.
-     * Both fips-strict assertions still passed, for reasons that had nothing
+     * it was in nist-approved-only, and the interop branch below had never run once.
+     * Both nist-approved-only assertions still passed, for reasons that had nothing
      * to do with the profile: one used a mechanism that does not exist, the
      * other an AES key with a 3DES mechanism. A test that passes in both
      * profiles while exercising one is worse than a missing test, because it
      * is counted. */
     int strict = 1; for (CK_ULONG i = 0; i < mn; ++i) if (ml[i] == 0x131) { strict = 0; break; }
     free(ml);
-    printf("test_legacy_cipher : profile = %s\n", strict ? "fips-strict" : "interop");
+    printf("test_legacy_cipher : profile = %s\n", strict ? "nist-approved-only" : "interop");
 
     /* AES key for ECB (imported). */
     CK_ULONG cls = 4, kt = 0x1F; CK_BYTE ak[16]; for (int i = 0; i < 16; ++i) ak[i] = (CK_BYTE)i;

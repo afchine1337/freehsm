@@ -36,6 +36,53 @@ project adheres to [Semantic Versioning](https://semver.org/).
   an integrity check.
 
 ### Changed
+* **Three axes, three vocabularies** (#11). The module has three independent
+  switches, and they were sharing words. The build profile was `fips-strict`
+  or `interop`; the runtime mode was `fips` or `legacy` — and also accepted
+  `fips-strict` and `interop`, which are the *other* axis's names. A reader
+  could not tell from a word which question it answered, and an operator who
+  wrote `mode = fips-strict` got a runtime setting when they meant a build.
+
+  | axis | decides | was | is |
+  |---|---|---|---|
+  | build profile | which mechanisms are compiled in at all | `fips-strict` / `interop` | `nist-approved-only` / `all-mechanisms` |
+  | runtime mode | whether a compiled-in non-approved mechanism may run | `fips` / `legacy` | `strict` / `permissive` |
+  | integrity bypass | whether the signature check is skipped | "dev mode" | "integrity bypass" |
+
+  `fips-strict` asserted a standard this module does not claim — the same
+  assertion the `-FIPS` version suffix made until v2.0.0 removed it for that
+  reason. `nist-approved-only` says whose list it is, which answers the
+  objection to a bare `approved-only`: approved by whom. `interop` named a
+  purpose rather than a content, and the two were not opposites.
+
+  `legacy` was wrong for a second reason. Of the thirteen mechanisms the
+  approved profile excludes, eleven are old — MD5, SHA-1, 3DES, RC4, DSA, DH,
+  RSA v1.5 — and two are newer than anything else in the module: X25519/X448
+  key generation and the composite ML-DSA signature. A bucket holding RC4 and
+  a post-quantum composite has no name based on age.
+
+  **Every former spelling still works** and prints a note naming its
+  replacement; `fips-strict` and `interop` given to the *runtime* axis say so
+  explicitly, since that confusion is the defect rather than an abbreviation
+  of it. Normalisation happens before anything compares, so an alias cannot
+  reach a check that does not know about it.
+
+  Not rewritten: this file and the release notes, which record what the names
+  were on their dates; `docs/PKCS11_CHECK_FINDINGS.md` and the dated sections
+  of `docs/ROADMAP.md`, which are journals; the quoted wording of the notice
+  a reporter saw, in `ACKNOWLEDGEMENTS.md` and `docs/PQC_VEILLE.md`. The
+  generated `fhsm_build_fips_strict` flag keeps its name — consumers grep for
+  it, `scripts/release.sh` among them.
+
+* **`tests/test_conf` is now built and run** (#11). It had a build rule since
+  #128 and appeared in no list: not in the `tests` prerequisites, not in the
+  recipe, not in any script, not in CI. `make tests` never built it and
+  nothing ever ran it. Found while adding assertions to it — which would have
+  been written, committed, and never once executed. It now covers the five
+  former mode spellings, asserting not that each is *accepted* but that each
+  still *decides the same way*: an alias that warns correctly and then returns
+  the wrong mode is worse than no alias.
+
 * **A refused audit key now says which refusal it was** (#11).
   `fhsm_audit_key_provision` has six failure exits and one return type, and
   `C_Initialize` printed that return as a bare `rv`. @petrn met it on a

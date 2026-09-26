@@ -192,8 +192,8 @@ out:
 }
 
 /* SHA-1 stays non-approved: SP 800-131A rev. 2 forbids it for signature
- * generation. It is reachable in the interop profile only, which is what
- * legacy callers need and what fips-strict must refuse. */
+ * generation. It is reachable in the all-mechanisms profile only, which is what
+ * legacy callers need and what nist-approved-only must refuse. */
 fhsm_rv_t dispatch_sha1_rsa(unsigned long s, unsigned long k,
                              const void *p, size_t pl,
                              fhsm_slice_t in, uint8_t *o, size_t *ol)
@@ -269,7 +269,7 @@ out:
     return r;
 }
 
-/* ---- RSA encryption with legacy padding (non-FIPS ; interop only).
+/* ---- RSA encryption with legacy padding (non-FIPS ; all-mechanisms only).
  * PKCS#1 v1.5 (RSA_PKCS1_PADDING) and raw / X.509 (RSA_NO_PADDING).
  * Reference implementations ; the operation path lives in
  * C_Encrypt/C_Decrypt. #125. ---- */

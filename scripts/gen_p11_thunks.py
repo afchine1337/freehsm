@@ -29,10 +29,10 @@
 # without inspecting any generated artifact.
 #
 # Profiles :
-#   fips-strict : only FHSM_FIPS_APPROVED entries are dispatchable;
+#   nist-approved-only : only FHSM_FIPS_APPROVED entries are dispatchable;
 #                  legacy mechanisms are wired to dispatch_reject_fips()
 #                  which returns FHSM_RV_FIPS_NOT_APPROVED at runtime.
-#   interop     : every entry is dispatchable. Used only for migration
+#   all-mechanisms : every entry is dispatchable. Used only for migration
 #                  from legacy systems; the audit log records every
 #                  call to a non-approved mechanism.
 #
@@ -260,7 +260,7 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="non-approved",
          notes="SHA-1 is forbidden for signature generation per SP 800-131A rev. 2. "
                "Kept for interop with applications that still verify legacy "
-               "signatures; refused in the fips-strict profile."),
+               "signatures; refused in the nist-approved-only profile."),
     # RSASSA-PKCS1-v1_5 with SHA-2. Reachable through C_Sign since long before
     # this line existed -- mech_hash_name(), C_SignInit and C_VerifyInit all
     # knew these three -- but absent from this table, so C_GetMechanismList
@@ -347,13 +347,13 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_EDDSA",              0x00001057, "EdDSA","sign",    "dispatch_eddsa",
          fips="approved", key_type="CKK_EC_EDWARDS",
          refs=("FIPS 186-5", "RFC 8032")),
-    # The three Montgomery mechanisms are interop-only, and the reason is not
+    # The three Montgomery mechanisms are all-mechanisms-only, and the reason is not
     # a reading of a standard but a measurement: the OpenSSL FIPS provider
     # does not implement X25519 or X448 at all. EVP_PKEY_Q_keygen returns
     # "Algorithm (X25519 : 112) unsupported" from inner_evp_generic_fetch.
     # SP 800-186 does not list them among the approved curves either.
     #
-    # They were marked approved, so a fips-strict build advertised three
+    # They were marked approved, so a nist-approved-only build advertised three
     # mechanisms it could not perform -- the exact defect this table exists to
     # prevent, introduced while fixing others. tests/test_advertised_operational
     # could not catch it: it does not probe key generation, and the two derives
@@ -361,7 +361,7 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_EC_MONTGOMERY_KEY_PAIR_GEN", 0x00001056, "ECM", "keypair", "dispatch_ecm_keypair",
          fips="non-approved", key_type="CKK_EC_MONTGOMERY",
          refs=("RFC 7748",),
-         notes="Absent from the OpenSSL FIPS provider; interop profile only."),
+         notes="Absent from the OpenSSL FIPS provider; all-mechanisms profile only."),
     # === X25519 / X448 derive: removed, 2026-09-14 ====================
     #
     # CKM_X25519_DERIVE (0x1052) and CKM_X448_DERIVE (0x1054) do not exist.
@@ -580,7 +580,7 @@ MECHANISMS: tuple[Mech, ...] = (
     # (CKM_HYBRID_ED25519_ML_DSA_65 stood here; see the de-advertisement note
     #  above CKM_COMPOSITE_MLDSA65_ED25519.)
 
-    # === Legacy / non-approved (rejected in fips-strict) ==============
+    # === Legacy / non-approved (rejected in nist-approved-only) ==============
     Mech("CKM_MD5",                0x00000210, "MD5",  "digest",  "dispatch_md5",
          fips="non-approved",
          refs=("RFC 1321",),
@@ -632,7 +632,8 @@ def _validate(mechs: tuple[Mech, ...]) -> None:
 # ---------------------------------------------------------------------------
 # Output 1 --- include/fhsm_pkcs11_mechanisms.h
 # ---------------------------------------------------------------------------
-def gen_header(mechs: tuple[Mech, ...], profile: str = "fips-strict") -> str:
+def gen_header(mechs: tuple[Mech, ...],
+               profile: str = "nist-approved-only") -> str:
     lines = [
         "/* Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com> */",
         "/* SPDX-License-Identifier: Apache-2.0                       */",
@@ -649,11 +650,23 @@ def gen_header(mechs: tuple[Mech, ...], profile: str = "fips-strict") -> str:
         "#endif",
         "",
         "/* ---- Build profile flag ----",
-        " * 1 = fips-strict (non-approved mechanisms rejected in the",
-        " *     operation path) ; 0 = interop / general-purpose (non-",
-        " *     approved mechanisms are executable). Consumed by the",
-        " *     hand-written C_*Init operation gates in fhsm_pkcs11.c. */",
-        f"#define FHSM_BUILD_FIPS_STRICT {1 if profile == 'fips-strict' else 0}",
+        " * 1 = nist-approved-only : the thirteen mechanisms NIST has not",
+        " *     approved get a reject handler in place of their operation.",
+        " * 0 = all-mechanisms : they are executable, subject to the runtime",
+        " *     mode (FHSM_MODE=strict|permissive), which is a separate",
+        " *     question -- the profile decides what is compiled in, the mode",
+        " *     decides whether the unapproved ones may run.",
+        " *",
+        " * The macro keeps its FIPS_STRICT name while the profile no longer",
+        " * has it. Renaming it would touch every operation gate in",
+        " * fhsm_pkcs11.c and the tests that assert on them, for a symbol no",
+        " * caller outside this module sees; the mapping is stated here",
+        " * instead. #11.",
+        " *",
+        " * Consumed by the hand-written C_*Init operation gates in",
+        " * fhsm_pkcs11.c. */",
+        f"#define FHSM_BUILD_FIPS_STRICT "
+        f"{1 if profile == 'nist-approved-only' else 0}",
         "",
         "/* ---- CKM_* mechanism identifiers (PKCS#11 v3.2 §6.3) ---- */",
     ]
@@ -813,16 +826,16 @@ def gen_dispatch(mechs: tuple[Mech, ...], profile: str) -> str:
         ]
     lines.append(
         f"const int fhsm_build_fips_strict = "
-        f"{1 if profile == 'fips-strict' else 0};")
+        f"{1 if profile == 'nist-approved-only' else 0};")
     lines.append("")
     lines.append("const fhsm_mech_entry_t fhsm_mechanism_table[] = {")
     for m in sorted_mechs:
         approved = 1 if m.fips == "approved" else 0
         # In strict profile, non-approved mechanisms point at reject.
-        # In interop profile, they keep their real handler (audit will
+        # In all-mechanisms profile, they keep their real handler (audit will
         # flag every invocation).
         handler = m.handler
-        if profile == "fips-strict" and not approved:
+        if profile == "nist-approved-only" and not approved:
             handler = "dispatch_reject_fips"
         lines.append(
             f"    {{ 0x{m.value:08X}u, \"{m.name}\", \"{m.family}\", "
@@ -871,13 +884,20 @@ def gen_doc(mechs: tuple[Mech, ...], profile: str) -> str:
         "",
         "## Reading this table",
         "",
-        "- **FIPS** column : `✅` = approved (dispatchable in fips-strict),",
-        "  `❌` = non-approved (rejected with `FHSM_RV_FIPS_NOT_APPROVED`",
-        "  in fips-strict, dispatchable but audited in interop).",
+        "- **FIPS** column : `✅` = approved (dispatchable in",
+        "  nist-approved-only), `❌` = non-approved (rejected with",
+        "  `FHSM_RV_FIPS_NOT_APPROVED` in nist-approved-only, dispatchable",
+        "  but audited in all-mechanisms).",
         "- **Op** column : the PKCS#11 operation category.",
         "- **Handler** : the C symbol invoked after argument validation.",
-        "  In fips-strict, non-approved mechanisms have their handler",
+        "  In nist-approved-only, non-approved mechanisms have their handler",
         "  replaced by `dispatch_reject_fips` at code-gen time.",
+        "",
+        "  Two axes, not one. This table is about the BUILD profile: what is",
+        "  compiled in at all. Whether a compiled-in but non-approved",
+        "  mechanism may then run is the runtime mode (`FHSM_MODE=strict` or",
+        "  `permissive`), and no setting there can reach a mechanism this",
+        "  table shows as absent.",
         "",
         "## Documented deviations from the specification",
         "",
@@ -946,13 +966,46 @@ def gen_doc(mechs: tuple[Mech, ...], profile: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Generate the PKCS#11 mechanism dispatch table.")
-    p.add_argument("--profile", choices=("fips-strict", "interop"),
-                    default="fips-strict",
-                    help="Build profile. fips-strict rejects every "
-                         "non-approved mechanism at code-gen time.")
+    # Canonical since 2026-09-26, with the old pair still accepted (#11).
+    #
+    # `fips-strict` named a standard the module does not claim -- the same
+    # assertion the `-FIPS` version suffix made until v2.0.0 removed it for
+    # that reason. `nist-approved-only` says whose list it is, which was the
+    # objection to calling it merely `approved-only`: approved by whom.
+    #
+    # `interop` described a purpose rather than a content, and the two names
+    # were not opposites. `all-mechanisms` is what the profile actually
+    # contains.
+    #
+    # Neither is about age. Of the thirteen the profile excludes, eleven are
+    # old (MD5, SHA-1, 3DES, RC4, DSA, DH, RSA v1.5) and two are newer than
+    # anything else here: X25519/X448 key generation and the composite ML-DSA
+    # signature. A bucket holding RC4 and a post-quantum composite has no
+    # name based on age, which is why `legacy` was never right for it either.
+    p.add_argument("--profile",
+                    choices=("nist-approved-only", "all-mechanisms",
+                             "fips-strict", "interop"),
+                    default="nist-approved-only",
+                    help="Build profile. nist-approved-only compiles a reject "
+                         "handler in place of every mechanism NIST has not "
+                         "approved. fips-strict and interop are the former "
+                         "names and still work.")
     p.add_argument("--root", default=".",
                     help="Project root (where include/ src/ docs/ live).")
     args = p.parse_args(argv)
+
+    # Normalise before anything reads it, and say so once. Everything below
+    # compares against the canonical pair, so an alias cannot reach a check
+    # that does not know about it -- which is how a Makefile string test on
+    # "interop" would have silently taken an aliased build for the other one.
+    _OLD = {"fips-strict": "nist-approved-only", "interop": "all-mechanisms"}
+    if args.profile in _OLD:
+        new = _OLD[args.profile]
+        print(f"[gen_p11_thunks] NOTE: --profile={args.profile} is the former "
+              f"name for {new}; it still works. The new names say whose list "
+              f"the mechanisms are on, and what the other profile contains.",
+              file=sys.stderr)
+        args.profile = new
 
     _validate(MECHANISMS)
     root = Path(args.root).resolve()

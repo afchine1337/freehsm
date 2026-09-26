@@ -21,11 +21,11 @@ SPDX-License-Identifier: Apache-2.0
 > endorsed by US NIST" — before setting out the design goal that a composite
 > "be able to be considered FIPS-approved". That goal addresses implementers
 > seeking certification. FreeHSM seeks none (see *Certification* in
-> `README.md`), so `CKM_COMPOSITE_MLDSA65_ED25519` is interop-only as a
+> `README.md`), so `CKM_COMPOSITE_MLDSA65_ED25519` is all-mechanisms-only as a
 > settled choice and not as a state awaiting the RFC. Publication will lift
 > the interoperability limit — third-party CAs accepting these requests — and
 > will not change the profile question, because a mechanism enters
-> `fips-strict` by being approved, not by being argued for.
+> `nist-approved-only` by being approved, not by being argued for.
 >
 > One line of §10.2 bears on #168 and is worth quoting where it will be found:
 > the ML-DSA seed "MUST be the direct output of a FIPS-approved Deterministic

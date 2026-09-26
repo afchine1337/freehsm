@@ -4,12 +4,12 @@
  * ===========================================================================
  * test_legacy_digest.c --- Non-FIPS digest gating (#125 general-purpose).
  *
- *  Verifies the interop/fips-strict profile gate for the legacy digests
+ *  Verifies the interop/nist-approved-only profile gate for the legacy digests
  *  SHA-1 (0x220) and MD5 (0x210), which are executable only in the
- *  general-purpose (interop) build and rejected under fips-strict.
+ *  general-purpose (interop) build and rejected under nist-approved-only.
  *  Profile-adaptive: detects the active build via C_GetMechanismList,
  *  then asserts either correct computation (interop) or rejection
- *  (fips-strict). Works unchanged in `make tests` (fips-strict default)
+ *  (nist-approved-only). Works unchanged in `make tests` (nist-approved-only default)
  *  and in a `make PROFILE=interop tests` build.
  * ========================================================================= */
 #include <stdio.h>
@@ -37,8 +37,8 @@ static int check_digest(void *h, CK_SESSION_HANDLE s, unsigned long mech,
     CK_MECHANISM m = { mech, 0, 0 };
     CK_RV rv = DI(s, &m);
     if (!interop) {
-        if (rv == CKR_MECHANISM_INVALID) { printf("  0x%lx rejected (fips-strict) : OK\n", mech); return 0; }
-        fprintf(stderr, "  FAIL: 0x%lx not rejected under fips-strict (0x%lx)\n", mech, rv); return 1;
+        if (rv == CKR_MECHANISM_INVALID) { printf("  0x%lx rejected (nist-approved-only) : OK\n", mech); return 0; }
+        fprintf(stderr, "  FAIL: 0x%lx not rejected under nist-approved-only (0x%lx)\n", mech, rv); return 1;
     }
     if (rv) { fprintf(stderr, "  FAIL: DigestInit 0x%lx -> 0x%lx\n", mech, rv); return 1; }
     CK_BYTE out[64]; CK_ULONG olen = 64;
@@ -71,7 +71,7 @@ int main(void) {
     CK_SESSION_HANDLE s; OS(0, 4|2, NULL, NULL, &s);
 
     int interop = advertised(GML, 0x220);   /* SHA-1 advertised iff interop */
-    printf("test_legacy_digest : profile = %s\n", interop ? "interop" : "fips-strict");
+    printf("test_legacy_digest : profile = %s\n", interop ? "interop" : "nist-approved-only");
     int rc = 0;
     rc |= check_digest(h, s, 0x220, "a9993e364706816aba3e25717850c26c9cd0d89d", interop); /* SHA-1 */
     rc |= check_digest(h, s, 0x210, "900150983cd24fb0d6963f7d28e17f72", interop);         /* MD5   */

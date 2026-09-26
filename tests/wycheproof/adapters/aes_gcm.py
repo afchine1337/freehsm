@@ -217,7 +217,7 @@ class AesGcmAdapter(Adapter):
             if accepted:
                 return "match"
             # FIPS 140-3 IG C.H / NIST SP 800-38D §8.2 : in the approved mode
-            # AES-GCM IVs are fixed at 96 bits. FreeHSM (fips-strict) rejects
+            # AES-GCM IVs are fixed at 96 bits. FreeHSM (nist-approved-only) rejects
             # any other IV size at C_EncryptInit/C_DecryptInit with
             # CKR_MECHANISM_PARAM_INVALID. Wycheproof's non-96-bit "valid"
             # vectors are therefore *expected* rejections for this module, not

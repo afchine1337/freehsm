@@ -294,12 +294,12 @@ The remaining parameters are set at build time or through the environment :
 | PIN failure limit, throttle curve | compile-time (`FHSM_PIN_MAX_FAILED` and the throttle constants) |
 | PBKDF2 iteration count | compile-time, 200 000 |
 | token directory | `FHSM_TOKENS_DIR` environment variable |
-| approved-mechanism set | build profile, `make generate PROFILE=fips-strict` |
+| approved-mechanism set | build profile, `make generate PROFILE=nist-approved-only` |
 
 Note the scope of `mode` : it selects KAT/dispatch behaviour. **Which mechanisms
 the PKCS#11 API advertises and executes is fixed when the module is built** and
 cannot be changed from this file. A deployment that must refuse non-approved
-mechanisms has to be built with `PROFILE=fips-strict` — verify with
+mechanisms has to be built with `PROFILE=nist-approved-only` — verify with
 `make show-profile`, which prints the requested profile, the profile the
 generated sources were produced for, and the `fhsm_build_fips_strict` value read
 back out of the binary.
@@ -391,7 +391,7 @@ The TOE is in its secure operational state when **all** of the following hold si
 3. `fhsm_integrity_is_signed()` returns 1.
 4. The module state (introspected via vendor helper `fhsm_state_get()`) is `INITIALIZED` or `AUTHENTICATED`.
 5. `/var/lib/freehsm/audit/slot0.audit.log` contains a `module_init` event with `result=OK`.
-6. `mode = fips` is set in `/etc/freehsm/freehsm.conf`, **and** the module was built with `PROFILE=fips-strict` — the file alone does not restrict the mechanism set (`make show-profile` confirms both).
+6. `mode = fips` is set in `/etc/freehsm/freehsm.conf`, **and** the module was built with `PROFILE=nist-approved-only` — the file alone does not restrict the mechanism set (`make show-profile` confirms both).
 
 If any of these is false, the system is **not** in the certified state and must be re-installed before exposing it to users.
 

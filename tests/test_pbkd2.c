@@ -141,8 +141,8 @@ int main(void)
      *
      * That is a real limit of the module in a FIPS deployment and it is
      * stated here rather than worked around: a PKCS#12 file with an 8-byte
-     * salt, which is most of them, will not open under fips-strict with the
-     * provider loaded. The interop build is the answer for those.
+     * salt, which is most of them, will not open under nist-approved-only with the
+     * provider loaded. The all-mechanisms build is the answer for those.
      *
      * So the known-answer cases, which use RFC 6070's 4-byte salt, run only
      * where they can. Everything else uses a 16-byte salt and runs in both. */

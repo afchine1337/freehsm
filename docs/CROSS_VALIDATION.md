@@ -146,8 +146,8 @@ symptoms.
 * **Same corpus.** Both runs with `fetch-data all`, or neither.
 * **Same OpenSSL, ideally.** Both modules delegate primitives; a version
   difference is a third variable.
-* **Note each module's profile.** FreeHSM built `fips-strict` refuses
-  mechanisms that the same source built `interop` accepts. A hardware module
+* **Note each module's profile.** FreeHSM built `nist-approved-only` refuses
+  mechanisms that the same source built `all-mechanisms` accepts. A hardware module
   usually has an equivalent switch.
 * **Keep the reports.** They are the only thing that lets a later run be
   compared to this one. Not in `/tmp`: a reboot cost this project a full-corpus

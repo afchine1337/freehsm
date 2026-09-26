@@ -55,14 +55,14 @@ q() { "$@" >/dev/null 2>&1; }
 # belongs to somebody else.
 q "$TOK" init --label t
 
-# The composite mechanism is interop-only: a fips-strict build answers
+# The composite mechanism is all-mechanisms-only: a nist-approved-only build answers
 # CKR_MECHANISM_INVALID and every assertion below then fails for that one
 # reason. Say which build is needed instead of printing nineteen failures --
 # the same lesson as the missing-tool guard above.
 if ! out=$("$CSR" keygen --label ca 2>&1); then
     echo "$out" | grep -q "0x70" && {
         echo "ocsp_delegated.sh: this build has no composite mechanism." >&2
-        echo "  It is interop-only. Build with: make clean && make PROFILE=interop all" >&2
+        echo "  It needs PROFILE=all-mechanisms. Build: make clean && make PROFILE=all-mechanisms all" >&2
         exit 2; }
     echo "$out" >&2; exit 2
 fi

@@ -170,8 +170,8 @@ fhsm_rv_t dispatch_aes_cbc_pad(unsigned long session, unsigned long key,
     return evp_cipher_oneshot(c, k, iv, in, out, outlen, 1);
 }
 
-/* ---- AES-ECB (non-FIPS ; interop / general-purpose only) ----
- * No IV, no padding, block-aligned input. Rejected in fips-strict by
+/* ---- AES-ECB (non-FIPS ; all-mechanisms only) ----
+ * No IV, no padding, block-aligned input. Rejected in nist-approved-only by
  * the generator (handler rewritten to dispatch_reject_fips) and by the
  * C_Encrypt/C_Decrypt operation gate. #125. */
 fhsm_rv_t dispatch_aes_ecb(unsigned long session, unsigned long key,
@@ -190,7 +190,7 @@ fhsm_rv_t dispatch_aes_ecb(unsigned long session, unsigned long key,
     return evp_cipher_oneshot(c, k, FHSM_SLICE(NULL, 0), in, out, outlen, 0);
 }
 
-/* ---- 3DES-CBC (non-FIPS ; interop only). 24-byte key, 8-byte IV,
+/* ---- 3DES-CBC (non-FIPS ; all-mechanisms only). 24-byte key, 8-byte IV,
  * 8-byte blocks, no padding. EVP "DES-EDE3-CBC" is in the OpenSSL
  * default provider. #125. ---- */
 fhsm_rv_t dispatch_des3_cbc(unsigned long session, unsigned long key,

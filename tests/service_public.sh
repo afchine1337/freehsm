@@ -27,7 +27,7 @@ ok()  { if [ "$1" = 0 ]; then say "$2" OK; else say "$2" FAIL; fail=$((fail+1));
 # The profile the binary carries, not the profile the tree was generated for.
 #
 # This used to read `[ "$("$SVC" --profile)" != "interop" ]` and print "was
-# built fips-strict" for anything that was not the word `interop` -- including
+# built nist-approved-only" for anything that was not the word `all-mechanisms` -- including
 # the empty string you get when the binary does not run at all. Under a TSAN
 # build that cannot map its shadow memory, that is exactly what happens, and
 # the message sent the reader to rebuild a profile that was already correct.
@@ -40,7 +40,7 @@ if [ -z "$p" ]; then
 fi
 if [ "$p" != "interop" ]; then
     echo "service_public.sh: $SVC was built $p, which cannot sign with the" >&2
-    echo "  composite mechanism. Rebuild: make PROFILE=interop" >&2
+    echo "  composite mechanism. Rebuild: make PROFILE=all-mechanisms" >&2
     exit 2
 fi
 command -v python3 >/dev/null || { echo "service_public.sh: python3 needed" >&2; exit 2; }
@@ -62,12 +62,12 @@ trap 'if [ -n "$PID" ]; then kill $PID 2>/dev/null; fi; rm -rf "$D"' EXIT
     echo "  Two causes give CKR_MECHANISM_INVALID (0x70) here, and this script" >&2
     echo "  cannot tell them apart from the outside:" >&2
     echo "    - the module resolved against an OpenSSL with no ML-DSA-65;" >&2
-    echo "    - ./libfreehsm.so was built fips-strict, where the composite" >&2
+    echo "    - ./libfreehsm.so was built nist-approved-only, where the composite" >&2
     echo "      mechanism does not exist. The service's --profile above says" >&2
     echo "      nothing about it: the service carries its profile statically." >&2
     echo "  Both are handled by going through make rather than sh:" >&2
-    echo "    make PROFILE=interop service-public" >&2
-    echo "  and 'make PROFILE=interop show-profile' reports the second." >&2
+    echo "    make PROFILE=all-mechanisms service-public" >&2
+    echo "  and 'make PROFILE=all-mechanisms show-profile' reports the second." >&2
     exit 2
 }
 "$CSR" root --label ca --subject "/C=FR/O=Example/CN=Root" --out "$D/ca.der" \
@@ -333,7 +333,7 @@ ok $? "a nonce sent with the request comes back in the response"
 #
 # To see that yourself:
 #
-#   make TSAN=1 PROFILE=interop service/fhsm-service
+#   make TSAN=1 PROFILE=all-mechanisms service/fhsm-service
 #   TSAN_OPTIONS="halt_on_error=0 log_path=/tmp/tsan.out" \
 #       setarch -R sh tests/service_public.sh
 #   grep -c "WARNING: ThreadSanitizer" /tmp/tsan.out.*

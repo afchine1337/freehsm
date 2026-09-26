@@ -142,7 +142,8 @@ static void crypto_init_once(void) {
 
     /* Base provider provides only PEM/DER encoders/decoders --- no
      * primitives. Required to serialize keys to disk.
-     * In dev mode the default provider supersedes both base+fips, so
+     * Under the integrity bypass the default provider supersedes both
+     * base+fips, so
      * we skip the explicit load (which can fail in minimal containers). */
     if (!dev_mode) {
         g_base_prov = OSSL_PROVIDER_load(NULL, "base");

@@ -57,12 +57,12 @@ chmod 600 "$FHSM_TOKENS_DIR/pin"
 # so that "not authorised" and "no such key" can be told apart -- or rather,
 # proved indistinguishable, which is what docs/RATE_LIMIT.md asks for.
 # Ask the binary under test, not a sibling. fhsm-csr is built separately and
-# can be interop while the service is fips-strict; the guard that consulted it
+# can be interop while the service is nist-approved-only; the guard that consulted it
 # passed while /sign failed for exactly the reason the guard exists to catch.
 # The profile the binary carries, not the profile the tree was generated for.
 #
 # This used to read `[ "$("$SVC" --profile)" != "interop" ]` and print "was
-# built fips-strict" for anything that was not the word `interop` -- including
+# built nist-approved-only" for anything that was not the word `all-mechanisms` -- including
 # the empty string you get when the binary does not run at all. Under a TSAN
 # build that cannot map its shadow memory, that is exactly what happens, and
 # the message sent the reader to rebuild a profile that was already correct.
@@ -75,7 +75,7 @@ if [ -z "$p" ]; then
 fi
 if [ "$p" != "interop" ]; then
     echo "service_guards.sh: $SVC was built $p, which cannot sign with the" >&2
-    echo "  composite mechanism. Rebuild: make PROFILE=interop" >&2
+    echo "  composite mechanism. Rebuild: make PROFILE=all-mechanisms" >&2
     exit 2
 fi
 "$CSR" keygen --label tls-web01 >/dev/null 2>&1 || {
@@ -84,12 +84,12 @@ fi
     echo "  Two causes give CKR_MECHANISM_INVALID (0x70) here, and this script" >&2
     echo "  cannot tell them apart from the outside:" >&2
     echo "    - the module resolved against an OpenSSL with no ML-DSA-65;" >&2
-    echo "    - ./libfreehsm.so was built fips-strict, where the composite" >&2
+    echo "    - ./libfreehsm.so was built nist-approved-only, where the composite" >&2
     echo "      mechanism does not exist. The service's --profile above says" >&2
     echo "      nothing about it: the service carries its profile statically." >&2
     echo "  Both are handled by going through make rather than sh:" >&2
-    echo "    make PROFILE=interop service-guards" >&2
-    echo "  and 'make PROFILE=interop show-profile' reports the second." >&2
+    echo "    make PROFILE=all-mechanisms service-guards" >&2
+    echo "  and 'make PROFILE=all-mechanisms show-profile' reports the second." >&2
     exit 2
 }
 "$CSR" keygen --label secret-ca >/dev/null 2>&1

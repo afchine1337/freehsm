@@ -51,14 +51,26 @@
 extern "C" {
 #endif
 
-/* Returns 1 if FHSM is in FIPS strict mode, 0 if in legacy/interop mode.
- * Cached after first call. */
+/* Returns 1 in strict mode, 0 in permissive mode. Cached after first call.
+ *
+ * The name says `fips` because it predates the rename and is exported: a
+ * caller links against this symbol. The question it answers is "may the
+ * thirteen mechanisms NIST has not approved run?", and the two answers are
+ * spelled strict and permissive as of 2026-09-26.
+ *
+ * This is the SECOND of two axes. It cannot reach a mechanism the build
+ * profile left out -- see PROFILE in the Makefile for the first one. */
 int fhsm_mode_is_fips(void);
 
 /* Force a re-read of the env / config (useful for tests). */
 void fhsm_mode_reset_cache(void);
 
-/* Human-readable mode string : "fips" or "legacy". */
+/* Human-readable mode string : "strict" or "permissive".
+ *
+ * Was documented here as "fips" or "legacy" while the implementation had
+ * already moved on -- a header promising one vocabulary over a function
+ * returning another. Kept in step deliberately: nothing in the tree calls
+ * this, so nothing would have caught the divergence. */
 const char *fhsm_mode_string(void);
 
 #ifdef __cplusplus

@@ -966,7 +966,7 @@ static const verdict_t OK_VERDICT = { 200, NULL };
 
 /* Generated at build time from PROFILE. The service links the module's
  * objects statically, so it carries a profile of its own -- and a service
- * built fips-strict cannot sign with the composite mechanism whatever the
+ * built nist-approved-only cannot sign with the composite mechanism whatever the
  * separately built tools around it can do. --profile exists so that a test
  * rig can ask the binary under test rather than infer from a sibling. */
 extern const int fhsm_build_fips_strict;
@@ -2417,7 +2417,7 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         char *e = NULL;
         if (!strcmp(argv[i], "--profile")) {
-            puts(fhsm_build_fips_strict ? "fips-strict" : "interop");
+            puts(fhsm_build_fips_strict ? "nist-approved-only" : "interop");
             return 0;
         }
         else if (!strcmp(argv[i], "--socket") && i + 1 < argc) sock_path = argv[++i];

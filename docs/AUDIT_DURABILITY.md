@@ -289,7 +289,7 @@ That is the worst of both.
 Making the switch real is a separate task, and its shape is already decided:
 **optional, and explicit.** Off must be loud — announced at start-up, visible
 in the token's flags, and never the accidental result of a path. The default
-stays on for `fips-strict`; whether `interop` differs is an open question.
+stays on for `nist-approved-only`; whether `all-mechanisms` differs is an open question.
 
 ---
 

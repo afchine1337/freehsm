@@ -198,7 +198,7 @@ jobs:
         run: make ocsp-delegated
 
       # Both steps above end with a tree built some other way -- audit-switch
-      # with FHSM_AUDIT_MANDATORY=0, ocsp-delegated with PROFILE=interop. The
+      # with FHSM_AUDIT_MANDATORY=0, ocsp-delegated with PROFILE=all-mechanisms. The
       # upload below took whatever was on disk, so from the moment the audit
       # switch step was added this job has been shipping a libfreehsm.so
       # that was neither the configuration `make integrity` signed nor the one
