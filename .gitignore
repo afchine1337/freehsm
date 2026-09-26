@@ -232,6 +232,15 @@ src/gen/.profile.stamp
 # One of these went into b8ee63a for want of this line.
 .commit-msg-*.txt
 
+# Python bytecode caches. The interpreter writes these next to any module it
+# imports or compiles, so they appear beside scripts/ and the Wycheproof
+# adapters without anyone asking. One went into 24ecf2c for want of this
+# line -- the same way a commit-message draft went into b8ee63a, three
+# entries up. A generated file that is not ignored is a file that will be
+# committed eventually.
+__pycache__/
+*.pyc
+
 # Measurement probes: the sources are tracked, the binaries are not.
 probes/*/0[0-9]_*
 !probes/*/0[0-9]_*.c
