@@ -32,6 +32,27 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check SPDX headers
         run: bash scripts/add_copyright_header.sh --check
+
+      # The bilingual CC documents say the same thing. GATING as of 2026-09-26.
+      #
+      # CONTRIBUTING.md has required both twins to be updated together since
+      # the beginning. That is a review rule, and a review rule is enforced by
+      # remembering. It was not remembered: FIPS_140_3.fr.md listed KMAC128 and
+      # KMAC256 as approved for three months after the mechanisms were removed,
+      # and the English policy never had the row.
+      #
+      # Making it gate only became honest once the tree was clean. Closing the
+      # ten pairs turned up, among other things, a French AGD_PRE §5 checklist
+      # that told the operator to set `fips_strict=true` -- a key no code has
+      # ever read -- as a condition of the secure operational state.
+      #
+      # What this catches is the twins DISAGREEING. It cannot see them agreeing
+      # and both being wrong, and that class is real: the entropy conditioner
+      # was documented as SHA-256 in both languages for twelve days after the
+      # code moved to SHA-384, and the digest length as 32 bytes after it
+      # became 48. Those need a check against the code, which this is not.
+      - name: Bilingual CC documents agree
+        run: python3 scripts/check_doc_twins.py
       - name: Verify LICENSE + NOTICE present
         run: |
           test -f LICENSE

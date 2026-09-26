@@ -103,10 +103,38 @@ sudo install -d -o freehsm -g freehsm -m 700 \
 
 ### 3.2 Installation du module
 
+#### Le module ne requiert pas d'utilisateur dédié
+
+À lire avant les commandes ci-dessous, parce que les commandes seules donnent
+une impression fausse — et l'ont donnée à au moins un lecteur (issue #1).
+
+FreeHSM est un module PKCS#11 ordinaire. **Tout utilisateur capable de lire le
+`.so` et de lire/écrire un répertoire de tokens peut l'utiliser**, ce qui est
+l'usage normal d'un module PKCS#11. Le répertoire de tokens vient de
+`FHSM_TOKENS_DIR`, avec repli sur `/var/lib/freehsm/tokens` fixé à la
+compilation. Pour un usage par utilisateur ou par application, pointez-le vers
+un endroit que cet utilisateur possède :
+
+```bash
+FHSM_TOKENS_DIR="$HOME/.local/share/freehsm/tokens" \
+    pkcs11-tool --module /opt/freehsm/lib/libfreehsm.so --show-info
+```
+
+L'utilisateur `freehsm` ci-dessous relève d'un **déploiement partagé,
+multi-tenant** — typiquement `fhsm-service`, où un démon détient les tokens
+pour le compte de plusieurs appelants et où les fichiers de token ne doivent
+pas être lisibles par ces appelants. C'est une posture de déploiement pour ce
+cas-là, pas une exigence du module. La suite de cette section suppose cette
+posture, la configuration évaluée étant un déploiement en service ; adaptez si
+la vôtre ne l'est pas.
+
 ```bash
 sudo install -o root -g root -m 0755 libfreehsm.so \
     /opt/freehsm/lib/libfreehsm.so
 
+# Déploiement partagé uniquement : un utilisateur non privilégié dédié sous
+# lequel tourne le démon utilisant le HSM, propriétaire de /var/lib/freehsm et
+# porteur de CAP_IPC_LOCK.
 sudo useradd -r -s /usr/sbin/nologin -d /var/lib/freehsm freehsm
 sudo setcap 'cap_ipc_lock=+ep' /opt/freehsm/lib/libfreehsm.so
 ```
@@ -122,46 +150,173 @@ openssl list -providers
 #     status: active
 ```
 
+Si le provider n'est pas actif, suivez `docs/REPRODUCIBLE_BUILD.md` §3 pour
+reconstruire OpenSSL avec `enable-fips` et patcher `/etc/ssl/openssl.cnf` afin
+de l'activer.
+
+#### 3.3.0 Utilisez OpenSSL 3.5.7 ou plus récent — observé, non diagnostiqué
+
+**Sur OpenSSL 3.5.6, `C_GenerateKeyPair` pour RSA-2048 échoue avec
+`CKR_FUNCTION_FAILED` alors qu'EC, AES, HMAC et ECDH réussissent tous.** Le
+même module, octet pour octet, génère correctement des clés RSA sur 3.5.7.
+
+Signalé et isolé par un utilisateur externe (issue #5) sur plusieurs jours.
+L'attribution est propre — entre l'exécution en échec et celle qui passe, seule
+la version d'OpenSSL a changé — mais **la cause n'est pas établie**, et ce n'est
+pas simplement « 3.5.6 n'en est pas capable » : `openssl genpkey -algorithm RSA
+-provider fips` génère parfaitement une clé sur 3.5.6. L'échec ne survient qu'à
+travers ce module, qui charge en outre le provider `base`, pose `fips=yes`
+comme propriété par défaut et active le secure heap global d'OpenSSL. Quelque
+chose dans cette combinaison est en cause ; quelle part, on l'ignore.
+
+Un module construit contre 3.5.6 passera donc tous ses auto-tests et échouera à
+la première génération de clé RSA. Si vous êtes en 3.5.6, mettez à jour avant
+de déployer. Depuis la v2.0.2, le module imprime la pile d'erreurs propre à
+OpenSSL sur ce chemin, de sorte que quiconque le rencontre peut transmettre la
+raison plutôt que le symptôme.
+
+#### 3.3.1 Après chaque mise à jour d'OpenSSL — `fipsmodule.cnf` doit être régénéré
+
+**Refaites le §3.3 après toute mise à jour du paquet OpenSSL, avant toute autre
+chose.** Une mise à jour remplace `fips.so` mais ne touche pas à
+`fipsmodule.cnf`, qui contient le MAC du module *précédent*. Le provider échoue
+alors son propre contrôle d'intégrité et n'apparaît tout simplement pas :
+
+```bash
+openssl fipsinstall -verify \
+  -module /usr/lib/x86_64-linux-gnu/ossl-modules/fips.so \
+  -in /etc/ssl/fipsmodule.cnf
+# Module integrity mismatch
+# VERIFY FAILED
+```
+
+Trois choses justifient une section plutôt qu'une ligne.
+
+**FreeHSM ne vous le dira pas.** Un module signé charge le provider FIPS
+pendant `C_Initialize`. Quand ce chargement échoue, `C_Initialize` retourne
+`CKR_FUNCTION_FAILED` et n'imprime rien — contrairement aux échecs de clé
+d'audit et de répertoire de tokens à côté, qui se nomment chacun. Observé le
+2026-09-03 sur Debian 13, OpenSSL 3.5.6 → 3.5.7 : quarante minutes pour
+atteindre une cause que le module connaissait déjà.
+
+**`fipsinstall` ne peut pas réparer ce que votre configuration a déjà cassé.**
+Il charge `fips.so` à travers l'`openssl.cnf` ambiant, qui active le provider
+depuis le `fipsmodule.cnf` périmé ; le module entre en état d'erreur et l'outil
+censé le réparer ne peut plus l'ouvrir :
+
+```
+Failed to load FIPS module
+INSTALL FAILED
+SELF_TEST_post:invalid state
+```
+
+Lancez-le hors de la configuration. Notez que `sudo` efface l'environnement :
+l'affectation doit être à l'intérieur.
+
+```bash
+sudo env OPENSSL_CONF=/dev/null openssl fipsinstall \
+  -module /usr/lib/x86_64-linux-gnu/ossl-modules/fips.so \
+  -out /usr/lib/ssl/fipsmodule.cnf
+openssl list -providers          # fips … status: active
+```
+
+**Il doit y avoir exactement un `.include`.** Un hôte peut accumuler deux
+`fipsmodule.cnf` à des chemins différents, tous deux inclus depuis
+`openssl.cnf` — `[fips_sect]` défini deux fois, et c'est le premier lu qui
+gagne, qu'il soit le valide ou non. Vérifiez avant de régénérer, et n'en gardez
+qu'un :
+
+```bash
+grep -n '^\.include' /etc/ssl/openssl.cnf
+readlink -f /usr/lib/ssl        # si ce n'est pas /etc/ssl, les deux chemins sont deux fichiers
+```
+
 ### 3.4 Vérification de l'identité du module
 
 ```bash
 readelf -p .comment /opt/freehsm/lib/libfreehsm.so
-# Attendu : GCC 12.2.0 ; binutils 2.40 ; (match Dockerfile.build)
+# Attendu : GCC 12.2.0 ; binutils 2.40 ; (correspond aux pins de Dockerfile.build)
 
-readelf -S /opt/freehsm/lib/libfreehsm.so | grep .fhsm_digest
-# Attendu : section read-only 32-byte
+readelf -S /opt/freehsm/lib/libfreehsm.so | grep -A1 .fhsm_digest
+# Attendu : une section read-only de 48 octets --- le digest d'intégrité embarqué
 ```
 
-Si `.fhsm_digest` est tout à zéro, le module **n'a pas été signé** :
+Si `.fhsm_digest` est tout à zéro, le module **n'a pas été signé** et refusera de s'initialiser en mode livraison :
 
 ```bash
-xxd -s 0x2000 -l 32 /opt/freehsm/lib/libfreehsm.so
-# Attendu (signé) : 32 octets hex
-# Tout-zéro ⇒ refuser le déploiement.
+objcopy -O binary --only-section=.fhsm_digest \
+    /opt/freehsm/lib/libfreehsm.so /dev/stdout | xxd
+# Attendu (signé)   : 48 octets hex --- le self-digest SHA-384
+# Tout à zéro       : refuser le déploiement.
 ```
+
+Extraire par nom de section plutôt que par offset. Cette section documentait un
+`xxd -s 0x2000 -l 32` codé en dur jusqu'au 2026-09-26, faux sur deux points : le
+digest est en SHA-384 et fait 48 octets depuis `4b91308`, et l'offset se déplace
+avec le build — il vaut 0x4b2a0 dans le build courant. Un opérateur lançant
+l'ancienne commande lisait 32 octets de données sans rapport et en concluait
+« signé » ou « non signé ».
+
+Un contrôle `readelf -p .gnu.version_d ... | grep -F "1.0.0-FIPS"` figurait aussi
+ici. Le binaire n'a pas de section `.gnu.version_d` et ne porte plus de suffixe
+`-FIPS` depuis la v2.0.0 : la commande ne pouvait qu'afficher du vide.
 
 ## 4. Configuration initiale
 
 ### 4.1 Configuration du module
 
-Créer `/opt/freehsm/etc/freehsm.conf` :
+`make install` écrit `/etc/freehsm/freehsm.conf`. C'est le chemin que le module
+lit ; rien d'autre n'est consulté.
 
 ```
-[module]
-fips_strict      = true
-audit_mandatory  = true
-secure_heap_kb   = 256
+# Mode d'exécution : strict | permissive. Surchargé par FHSM_MODE.
+# fips et legacy sont les anciennes orthographes et fonctionnent encore.
+mode = strict
 
-[token]
-pin_max_failed         = 5
-pin_throttle_base_ms   = 500
-pin_throttle_max_ms    = 60000
-pbkdf2_iterations      = 200000
-
-[paths]
-tokens_dir = /var/lib/freehsm/tokens
-audit_dir  = /var/lib/freehsm/audit
+# Secure heap mlock(2)-é contenant la matière de clé, en Kio.
+# Plage 64..65536, arrondie à la puissance de deux supérieure.
+secure_heap_kb = 8192
 ```
+
+**Seules ces deux clés sont lues.** Des révisions antérieures de ce guide en
+listaient neuf — `fips_strict`, `audit_mandatory`, `pin_max_failed`,
+`pin_throttle_base_ms`, `pin_throttle_max_ms`, `pbkdf2_iterations`,
+`tokens_dir`, `audit_dir` — à un chemin que le module n'ouvrait jamais. Aucune
+n'avait le moindre effet. Un opérateur qui durcissait le module en éditant ce
+fichier ne changeait rien (#128).
+
+`audit_mandatory` est désormais réel, mais comme réglage de **build** et non
+comme clé de configuration : `-DFHSM_AUDIT_MANDATORY=0` à la compilation décide
+si cette installation peut tourner sans journal d'audit, et par défaut elle ne
+le peut pas. C'est délibéré — c'est la décision du distributeur, pas celle de
+l'opérateur, et une décision que l'opérateur pourrait éditer dans un fichier ne
+serait pas celle du distributeur. Ce que l'opérateur contrôle, c'est
+`FHSM_AUDIT=off`, et seulement là où le build l'autorise. Voir
+`docs/AUDIT_DURABILITY.md`.
+
+Les autres paramètres sont fixés à la compilation ou par l'environnement :
+
+| Paramètre | Où il est fixé |
+|---|---|
+| Limite d'échecs PIN, courbe de throttle | compilation (`FHSM_PIN_MAX_FAILED` et les constantes de throttle) |
+| Nombre d'itérations PBKDF2 | compilation, 200 000 |
+| Répertoire des tokens | variable d'environnement `FHSM_TOKENS_DIR` |
+| Ensemble des mécanismes approuvés | profil de build, `make generate PROFILE=nist-approved-only` |
+
+Notez la portée de `mode` : il sélectionne le comportement KAT/dispatch. **Les
+mécanismes que l'API PKCS#11 annonce et exécute sont fixés à la construction du
+module** et ne peuvent pas être changés depuis ce fichier. Un déploiement qui
+doit refuser les mécanismes non approuvés doit être construit avec
+`PROFILE=nist-approved-only` — vérifiez avec `make show-profile`, qui imprime le
+profil demandé, le profil pour lequel les sources générées l'ont été, et la
+valeur `fhsm_build_fips_strict` relue depuis le binaire.
+
+Ces valeurs sont les défauts avec lesquels le module est censé être validé.
+**FreeHSM n'est pas actuellement validé FIPS 140-3** ; ce guide est écrit pour
+la configuration soumise à validation, et changer ces valeurs placerait un
+déploiement hors de cette configuration une fois la validation obtenue.
+Augmenter `pbkdf2_iterations` est le seul changement conservateur entre-temps,
+et il demande une reconstruction.
 
 ### 4.2 Vérification d'intégrité au premier démarrage
 
@@ -171,7 +326,34 @@ sudo -u freehsm pkcs11-tool \
     --show-info
 ```
 
-Si `C_Initialize` retourne `0x00000005` ou `0x80000002` (`INTEGRITY_FAILED`), la POST a échoué — examiner `/var/log/syslog` et `/var/lib/freehsm/audit/boot.log`. **Ne pas** chercher à contourner.
+**Les slots rapporteront `uninitialized` et aucun token ne sera présent. C'est
+correct à ce stade, pas un défaut.** Un slot FreeHSM détient un token une fois
+qu'on en a créé un dedans ; jusque-là il n'y a rien à trouver, et
+`C_GetSlotList` avec `tokenPresent = CK_TRUE` n'en retourne aucun. Cela surprend
+qui a l'habitude de penser un token logiciel comme toujours présent — un lecteur
+l'a rapporté exactement ainsi dans l'issue #3 — parce que « soft token » suggère
+la permanence alors que le fichier n'existe pas encore. Le §4.3 le crée.
+
+Si `C_Initialize` échoue lui-même, le module dit désormais pourquoi sur stderr :
+module non signé, module altéré après signature, section `.fhsm_digest`
+manquante, provider FIPS qui refuse de charger, répertoire de tokens
+inutilisable — chacun se nomme. Si vous obtenez un code de retour nu sans
+message, le build est antérieur à la v2.0.2 et la cause est l'une de ces cinq.
+
+Extrait de sortie attendue :
+
+```
+Cryptoki version 3.2
+Manufacturer     Simorgh Labs
+Library          libfreehsm.so <version>
+Using slot 0 with a present token (0x0)
+```
+
+Si `C_Initialize` retourne `0x00000005` (`CKR_GENERAL_ERROR`) ou `0x80000002`
+(`FHSM_RV_INTEGRITY_FAILED`), le module a interrompu la POST. Examinez
+`/var/log/syslog` et `/var/lib/freehsm/audit/boot.log` avant de réessayer. **Ne
+tentez pas** de contournement : une POST en échec est imposée par FIPS et
+signifie que le binaire n'est pas digne de confiance.
 
 ### 4.3 Initialisation du token (bootstrap CO)
 
@@ -438,7 +620,7 @@ Le module est *opérationnellement validé* quand **tous** les critères suivant
 
 ### 8.4 Suite automatisée
 
-Le script `tests/full_crypto_pkcs11.sh` automatise §8.1, §8.2 et étend à AES-GCM, AES-CMAC, SHA-{256,384,512}, HMAC-SHA-256. Lancer :
+Le script `tests/full_crypto_pkcs11.sh` automatise §8.1, §8.2 et étend à AES-GCM, AES-CBC-PAD, AES-CTR, AES-CMAC, SHA-{256,384,512}, HMAC-SHA-256, ECDH1-COFACTOR-DERIVE, ML-DSA. Lancer :
 
 ```bash
 sudo install -m 755 tests/full_crypto_pkcs11.sh /tmp/fc.sh

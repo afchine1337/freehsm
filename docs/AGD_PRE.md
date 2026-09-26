@@ -242,20 +242,29 @@ readlink -f /usr/lib/ssl        # if not /etc/ssl, the two paths are two files
 readelf -p .comment /opt/freehsm/lib/libfreehsm.so
 # Expected : GCC 12.2.0 ; binutils 2.40 ; (matches Dockerfile.build pins)
 
-readelf -p .gnu.version_d /opt/freehsm/lib/libfreehsm.so | grep -F "1.0.0-FIPS"
-# Expected : the SONAME version embedded by the linker
-
-readelf -S /opt/freehsm/lib/libfreehsm.so | grep .fhsm_digest
-# Expected : a 32-byte read-only section --- this is the embedded integrity digest
+readelf -S /opt/freehsm/lib/libfreehsm.so | grep -A1 .fhsm_digest
+# Expected : a 48-byte read-only section --- the embedded integrity digest
 ```
 
 If `.fhsm_digest` is all zeros, the module was **not signed** and will refuse to initialize in shipping mode :
 
 ```bash
-xxd -s 0x2000 -l 32 /opt/freehsm/lib/libfreehsm.so
-# Expected (signed) : 32 bytes of hex data (the SHA-256 self-digest)
-# All-zero ⇒ refuse to deploy.
+objcopy -O binary --only-section=.fhsm_digest \
+    /opt/freehsm/lib/libfreehsm.so /dev/stdout | xxd
+# Expected (signed)   : 48 bytes of hex data --- the SHA-384 self-digest
+# All-zero            : refuse to deploy.
 ```
+
+Extract by section name rather than by offset. This section was documented with
+a hardcoded `xxd -s 0x2000 -l 32` until 2026-09-26, which was wrong twice over:
+the digest has been SHA-384 and 48 bytes since 4b91308, and the offset moves
+with the build --- it is 0x4b2a0 in the current one. An operator running the
+old command read 32 bytes of unrelated data and concluded signed or unsigned
+from it.
+
+A `readelf -p .gnu.version_d ... | grep -F "1.0.0-FIPS"` check stood here too.
+The binary has no `.gnu.version_d` section and carries no `-FIPS` suffix since
+v2.0.0, so the command could only ever print nothing.
 
 ## 4. Initial configuration
 
@@ -265,8 +274,9 @@ xxd -s 0x2000 -l 32 /opt/freehsm/lib/libfreehsm.so
 reads ; nothing else is consulted.
 
 ```
-# Runtime mode: fips | legacy. Overridden by FHSM_MODE.
-mode = fips
+# Runtime mode: strict | permissive. Overridden by FHSM_MODE.
+# fips and legacy are the former spellings and still work.
+mode = strict
 
 # mlock(2)-ed secure heap holding key material, in KiB.
 # Range 64..65536, rounded up to a power of two.
@@ -640,8 +650,8 @@ The module is *operationally validated* when **all** of the following criteria h
 
 1. `pkcs11-tool --show-info` displays `Cryptoki version 3.2 / Manufacturer FreeHSM C (FIPS 140-3)`.
 2. `pkcs11-tool --list-mechanisms` enumerates at least the 17 FIPS-approved wired mechanisms.
-3. Test §7.1 outputs `Signature Verified Successfully` --- proof that an independent third party accepts the ECDSA signature produced by the module.
-4. Test §7.2 outputs `ROUND-TRIP OK` --- proof that the RSA private key remains internal to the HSM and that the module correctly decrypts external input.
+3. Test §8.1 outputs `Signature Verified Successfully` --- proof that an independent third party accepts the ECDSA signature produced by the module.
+4. Test §8.2 outputs `ROUND-TRIP OK` --- proof that the RSA private key remains internal to the HSM and that the module correctly decrypts external input.
 5. `make integrity` reports a non-zero digest (= 32 hex bytes) in the `.fhsm_digest` section.
 6. `fhsm_kat_results()` after `C_Initialize` reports `passed=1` for all 15 KATs (6 smoke + 9 CAVP SHA-256).
 7. The audit log contains `module_init` / `login_ok` / `sign` records with an
@@ -662,7 +672,7 @@ The module is *operationally validated* when **all** of the following criteria h
 
 ### 8.4 Automated suite
 
-The `tests/full_crypto_pkcs11.sh` script automates §7.1, §7.2 and extends to AES-GCM, AES-CBC, AES-CTR, AES-CMAC, SHA-{256,384,512}, HMAC-SHA-256, ECDH1_DERIVE, ML-DSA. Run:
+The `tests/full_crypto_pkcs11.sh` script automates §8.1, §8.2 and extends to AES-GCM, AES-CBC-PAD, AES-CTR, AES-CMAC, SHA-{256,384,512}, HMAC-SHA-256, ECDH1-COFACTOR-DERIVE, ML-DSA. Run:
 
 ```bash
 sudo install -m 755 tests/full_crypto_pkcs11.sh /tmp/fc.sh
