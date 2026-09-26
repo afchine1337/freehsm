@@ -14,7 +14,9 @@
  * not unseal. This checks the two cases an operator can actually meet on a
  * machine without a TPM, and the one case that must stay silent.
  *
- *   1. the directory cannot be written    -> names the path and strerror
+ *   1a. the tokens directory is a file    -> names the path and strerror
+ *   1b. the directory cannot be written  -> the same, via EACCES; needs a
+ *                                          non-root uid, skipped loudly if root
  *   2. the key file is group/world readable -> says so, and says chmod 600
  *   3. no key file at all                 -> silent; this is first use
  *
@@ -71,19 +73,55 @@ int main(int argc, char **argv) {
     printf("test_audit_key_diag\n");
     char out[8192];
 
-    /* --- 1. a directory that cannot be written ------------------------ */
-    char ro[] = "/tmp/fhsm-diag-ro-XXXXXX";
-    if (!mkdtemp(ro)) { fprintf(stderr, "mkdtemp\n"); return 2; }
-    if (chmod(ro, 0500) != 0) { fprintf(stderr, "chmod\n"); return 2; }
-    run_child(ro, out, sizeof out);
+    /* --- 1. a tokens directory that cannot be written ------------------
+     *
+     * The point is that a write failure names the path and the system's
+     * reason. Permission is only one way to provoke one, and it is the way
+     * that does not work for root: mode bits do not apply to uid 0, so
+     * chmod 0500 leaves the directory writable and the failure path is never
+     * reached. This test passed on a workstation and failed in CI, whose
+     * container runs `--user root` -- a test whose premise does not hold in
+     * the environment that runs it.
+     *
+     * 1a provokes the same failure through the file type instead: a tokens
+     * directory that is a regular file gives ENOTDIR, which root does not
+     * override either. It runs everywhere, so the assertion is exercised on
+     * every machine rather than on the ones that happen not to be root.
+     *
+     * 1b keeps the permission case for the uid that can observe it, and says
+     * out loud when it is skipped. A silent skip is how a test stops
+     * covering anything without anyone noticing. */
+    char nd[] = "/tmp/fhsm-diag-notdir-XXXXXX";
+    int ndfd = mkstemp(nd);            /* a FILE where a directory is wanted */
+    if (ndfd < 0) { fprintf(stderr, "mkstemp\n"); return 2; }
+    close(ndfd);
+    run_child(nd, out, sizeof out);
     ok(strstr(out, "audit key") != NULL,
-       "an unwritable tokens directory produces an audit-key line");
-    ok(strstr(out, ro) != NULL, "and names the path");
-    ok(strstr(out, "Permission denied") != NULL,
+       "a tokens directory that is a file produces an audit-key line");
+    ok(strstr(out, nd) != NULL, "and names the path");
+    ok(strstr(out, "Not a directory") != NULL,
        "and gives the system's reason rather than a bare rv");
-    if (!strstr(out, "Permission denied"))
+    if (!strstr(out, "Not a directory"))
         printf("      got: %.300s\n", out);
-    chmod(ro, 0700); rmdir(ro);
+    unlink(nd);
+
+    if (geteuid() == 0) {
+        printf("  [SKIP] the unwritable-directory case needs a non-root uid"
+               " (running as root)\n");
+    } else {
+        char ro[] = "/tmp/fhsm-diag-ro-XXXXXX";
+        if (!mkdtemp(ro)) { fprintf(stderr, "mkdtemp\n"); return 2; }
+        if (chmod(ro, 0500) != 0) { fprintf(stderr, "chmod\n"); return 2; }
+        run_child(ro, out, sizeof out);
+        ok(strstr(out, "audit key") != NULL,
+           "an unwritable tokens directory produces an audit-key line");
+        ok(strstr(out, ro) != NULL, "and names the path");
+        ok(strstr(out, "Permission denied") != NULL,
+           "and reports EACCES specifically");
+        if (!strstr(out, "Permission denied"))
+            printf("      got: %.300s\n", out);
+        chmod(ro, 0700); rmdir(ro);
+    }
 
     /* --- 2. a key file others can read -------------------------------- */
     char loose[] = "/tmp/fhsm-diag-loose-XXXXXX";
