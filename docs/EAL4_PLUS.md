@@ -161,7 +161,7 @@ The CST-evidence work batch adds 4 transverse TSFs that complement the EAL4+ fun
 
 | TSF identifier | Family | Description | Source |
 |---|---|---|---|
-| **FCS_RBG_EXT.1** | FCS (Cryptographic Support) | Hardened DRBG with multi-source seeding (getrandom + RDRAND + /dev/urandom + TSC jitter), SHA-256 conditioner per SP 800-90C, NIST SP 800-90B health tests (RCT, APT, CRNGT), auto-reseed every 1 MiB or 1 h. | `src/fhsm_drbg.c`, `include/fhsm_drbg.h`, [`RNG.md`](RNG.md) |
+| **FCS_RBG_EXT.1** | FCS (Cryptographic Support) | Hardened DRBG with multi-source seeding (getrandom + RDRAND + /dev/urandom + TSC jitter), SHA-384 conditioner per SP 800-90C, NIST SP 800-90B health tests (RCT, APT, CRNGT), auto-reseed every 1 MiB or 1 h. | `src/fhsm_drbg.c`, `include/fhsm_drbg.h`, [`RNG.md`](RNG.md) |
 | **FCS_CKM_EXT.4** | FCS | Pair-wise consistency check post `C_GenerateKeyPair` (RSA, EC, ML-KEM, ML-DSA, SLH-DSA). Failure latches ERROR + refusal to persist. Per FIPS 140-3 §7.10.2.b. | `src/fhsm_pairwise.c`, `include/fhsm_pairwise.h` |
 | **FPT_TST_EXT.1** | FPT (Protection of TSF) | TPM 2.0 sealing of the per-token DEK (opt-in via `FHSM_TPM_SEALING=1`). DEK bound to PCRs 0-7 of the boot chain. Mismatch on unseal treated as wrong PIN (oracle resistance). | `src/fhsm_token_tpm.c`, `src/fhsm_tpm.c` |
 | **FMT_SMR_EXT.1** | FMT (Security Management) | Runtime mode switch between **permissive** (default) and **strict** via `FHSM_MODE` env or `mode =` conf directive; the former spellings `legacy` and `fips` still work. Sufficient for a single binary to satisfy both the FIPS 140-3 evaluator and operators who need interoperability with legacy systems. | `src/fhsm_mode.c`, `src/dispatch/fhsm_dispatch_legacy.c` |

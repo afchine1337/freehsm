@@ -2,7 +2,7 @@
 
 > English version: [`AVA_VAN.md`](AVA_VAN.md). In case of discrepancy, the English version prevails.
 
-**TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
+**TOE :** FreeHSM Cryptographic Module (la version que vous avez construite ; `v1.0.0-FIPS`, dans les brouillons antérieurs, était un espace réservé et n'a jamais existé comme release)
 **Classe CC :** AVA (Évaluation de vulnérabilités) — augmenté à AVA_VAN.5 (analyse méthodique avancée)
 **Potentiel d'attaque cible :** *Au-dessus du Haut* (Beyond-High)
 **Auteur :** première passe interne ; ré-analyse indépendante par labo requise avant soumission.

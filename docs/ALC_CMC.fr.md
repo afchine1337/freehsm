@@ -2,7 +2,7 @@
 
 > English version: [`ALC_CMC.md`](ALC_CMC.md). In case of discrepancy, the English version prevails.
 
-**TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
+**TOE :** FreeHSM Cryptographic Module (la version que vous avez construite ; `v1.0.0-FIPS`, dans les brouillons antérieurs, était un espace réservé et n'a jamais existé comme release)
 **Classe CC :** ALC (Support du cycle de vie) — composants ALC_CMC.4 (support production, procédures d'acceptation, automatisation), ALC_CMS.4 (couverture CM de tracking de problèmes), ALC_DEL.1 (procédures de livraison), ALC_FLR.2 (remédiation de défauts), ALC_LCD.1 (modèle de cycle de vie défini par développeur), ALC_TAT.1 (outils de développement bien définis)
 
 ---

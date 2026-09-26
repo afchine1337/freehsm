@@ -1,6 +1,7 @@
 # FreeHSM C --- Configuration Management Documentation (CC EAL4+ ALC_CMC.4)
 
-**TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
+**TOE :** FreeHSM Cryptographic Module (the version you built ; `v1.0.0-FIPS`
+in earlier drafts was a placeholder and never existed as a release)
 **CC class :** ALC (Life-cycle Support) — components ALC_CMC.4 (production support, acceptance procedures, automation), ALC_CMS.4 (problem tracking CM coverage), ALC_DEL.1 (delivery procedures), ALC_FLR.2 (flaw remediation), ALC_LCD.1 (developer-defined life-cycle model), ALC_TAT.1 (well-defined development tools)
 **Document version :** 1.0
 

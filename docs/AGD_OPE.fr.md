@@ -13,7 +13,7 @@
 > « la configuration selon laquelle ce module est construit ». Il est publié
 > comme exemple travaillé, non dans le cadre d'une soumission.
 
-**TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
+**TOE :** FreeHSM Cryptographic Module (la version que vous avez construite ; `v1.0.0-FIPS`, dans les brouillons antérieurs, était un espace réservé et n'a jamais existé comme release)
 **Audience :** opérateurs Security Officer (SO) et User d'une TOE installée
 **Pré-requis :** la TOE a été installée et amenée à l'état opérationnel sécurisé per `AGD_PRE.fr.md`
 
@@ -401,7 +401,7 @@ compte.**
 
 ### DRBG durci
 
-`fhsm_rng_bytes` route via `fhsm_drbg_bytes` : seed multi-source (getrandom + RDRAND + /dev/urandom + jitter TSC), conditionneur SHA-256, health tests SP 800-90B (RCT + APT + CRNGT), reseed auto tous les 1 MiB ou 1 h. Alarme → ERROR latché. Voir [`RNG.md`](RNG.md).
+`fhsm_rng_bytes` route via `fhsm_drbg_bytes` : seed multi-source (getrandom + RDRAND + /dev/urandom + jitter TSC), conditionneur SHA-384, health tests SP 800-90B (RCT + APT + CRNGT), reseed auto tous les 1 MiB ou 1 h. Alarme → ERROR latché. Voir [`RNG.md`](RNG.md).
 
 ### Pair-wise consistency check
 

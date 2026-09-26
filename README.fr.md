@@ -140,7 +140,7 @@ Le DRBG passe désormais par un pipeline durci (`src/fhsm_drbg.c`) :
 ```
 [getrandom] [RDRAND] [/dev/urandom] [TSC jitter]
               v
-        SHA-256 conditioner
+        SHA-384 conditioner
               v
      RAND_add → CTR_DRBG-AES-256 (FIPS)
               v

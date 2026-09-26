@@ -1,6 +1,7 @@
 # FreeHSM C --- Functional Test Documentation (CC EAL4+ ATE_FUN.1)
 
-**TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
+**TOE :** FreeHSM Cryptographic Module (the version you built ; `v1.0.0-FIPS`
+in earlier drafts was a placeholder and never existed as a release)
 **CC class :** ATE (Tests) — components ATE_FUN.1 (functional tests) + ATE_COV.2 (analysis of coverage) + ATE_DPT.1 (testing: basic design)
 **Document version :** 1.0
 **Audience :** CESTI evaluator (CC) + CST-Lab tester (FIPS 140-3)
@@ -30,6 +31,13 @@ A test is considered to have passed only if **all three** configurations exit `0
 
 The required mapping is *Security Functional Requirements → TSFI → test*. We list every SFR claimed in `docs/EAL4_PLUS.md` §4 alongside the test(s) that exercise it.
 
+<!-- doc-twins:pointer-begin -->
+<!-- This table is maintained in English only and referenced from
+     ATE_FUN.fr.md §2. Twenty-six rows kept in two languages would be
+     twenty-six chances for the twins to disagree about which test
+     covers which SFR, which is the defect check_doc_twins exists to
+     catch. One table cannot contradict itself. -->
+
 | SFR id          | TSFI exercised             | Test driver                                | Vector ref            |
 |-----------------|----------------------------|--------------------------------------------|-----------------------|
 | **FAU_GEN.1**   | `C_*` audit emit           | `tests/test_smoke.c` (`fhsm_audit_*` calls) | Log-line schema       |
@@ -50,6 +58,7 @@ The required mapping is *Security Functional Requirements → TSFI → test*. We
 | **FPT_FLS.1**   | latched ERROR              | `tests/test_smoke.c` (KAT-induced fault is verified by injecting a bad vector in a local branch) | --- |
 | **FPT_RCV.1**   | Manual restart only        | non-functional, doc-only requirement       | --- |
 | **FTA_SSL.4**   | Logout zeroize             | smoke calls C_Logout then introspects token state                 | --- |
+<!-- doc-twins:pointer-end -->
 
 The matrix above is maintained by hand. A YAML descriptor at `docs/sfr_to_test.yaml` was planned so it could be regenerated at every release; it has not been written, and until it is, "regenerated automatically" describes an intention rather than a procedure.
 

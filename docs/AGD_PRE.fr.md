@@ -13,7 +13,7 @@
 > « la configuration selon laquelle ce module est construit ». Il est publié
 > comme exemple travaillé, non dans le cadre d'une soumission.
 
-**TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
+**TOE :** FreeHSM Cryptographic Module (la version que vous avez construite ; `v1.0.0-FIPS`, dans les brouillons antérieurs, était un espace réservé et n'a jamais existé comme release)
 **Audience :** administrateur système déployant la TOE pour la première fois
 **Pré-requis :** accès root sur l'hôte cible ; familiarité avec PKCS#11
 

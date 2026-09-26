@@ -278,7 +278,7 @@ in any answer given to a user who asks whether they can use one.
 ## The composite path does not use the module's own DRBG (found 2026-08-16)
 
 `src/fhsm_drbg.c` exists because the module wanted more than `RAND_bytes`:
-multi-source seeding, a SHA-256 conditioner, SP 800-90B health tests (RCT, APT,
+multi-source seeding, a SHA-384 conditioner, SP 800-90B health tests (RCT, APT,
 CRNGT), auto-reseed every 1 MiB or hour, and — the point — a **latching
 failure**. An alarm puts the module in `FHSM_STATE_ERROR` and every subsequent
 `C_*` call returns `CKR_DEVICE_ERROR`, so key material stops being produced the

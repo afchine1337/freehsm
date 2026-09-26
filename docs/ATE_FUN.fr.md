@@ -2,8 +2,10 @@
 
 > English version: [`ATE_FUN.md`](ATE_FUN.md). In case of discrepancy, the English version prevails.
 
-**TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
+**TOE :** FreeHSM Cryptographic Module (la version que vous avez construite ; `v1.0.0-FIPS`, dans les brouillons antérieurs, était un espace réservé et n'a jamais existé comme release)
 **Classe CC :** ATE (Tests) — composants ATE_FUN.1 (tests fonctionnels) + ATE_COV.2 (analyse de couverture) + ATE_DPT.1 (testing : conception de base)
+**Version du document :** 1.0
+**Public :** évaluateur CESTI (CC) + testeur CST-Lab (FIPS 140-3)
 
 ---
 
@@ -22,7 +24,11 @@ Un test est considéré comme réussi seulement si **les trois configurations** 
 
 ## 2. Carte de couverture (ATE_COV.2)
 
+<!-- doc-twins:pointer-begin -->
 Le mapping requis est *Security Functional Requirements → TSFI → test*. Voir le tableau équivalent dans `ATE_FUN.md` §2. Chaque SFR revendiquée dans `EAL4_PLUS.fr.md` §4 est exercée par au moins un test driver de la liste.
+
+Ce tableau n'est pas traduit, et c'est délibéré : vingt-six lignes tenues dans deux langues offriraient vingt-six occasions de se contredire sur le test qui couvre telle SFR. Un tableau unique ne peut pas se contredire lui-même.
+<!-- doc-twins:pointer-end -->
 
 ### 2.1 Métrique de couverture
 

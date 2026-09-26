@@ -163,8 +163,8 @@ Le rafraîchissement pré-soumission CST ajoute 4 TSF transverses qui complèten
 
 | Identifiant TSF | Famille | Description | Source |
 |---|---|---|---|
-| **FCS_RBG_EXT.1** | FCS (Support cryptographique) | DRBG durci avec seed multi-source (getrandom + RDRAND + /dev/urandom + jitter TSC), conditionneur SHA-256 selon SP 800-90C, health tests NIST SP 800-90B (RCT, APT, CRNGT), reseed auto 1 MiB ou 1 h. | `src/fhsm_drbg.c`, [`RNG.md`](RNG.md) |
-| **FCS_CKM_EXT.4** | FCS | Pair-wise consistency check post `C_GenerateKeyPair` (RSA, EC, ML-KEM, ML-DSA, SLH-DSA). Échec → ERROR latché + refus de persister. Conforme FIPS 140-3 §7.10.2.b. | `src/fhsm_pairwise.c` |
+| **FCS_RBG_EXT.1** | FCS (Support cryptographique) | DRBG durci avec seed multi-source (getrandom + RDRAND + /dev/urandom + jitter TSC), conditionneur SHA-384 selon SP 800-90C, health tests NIST SP 800-90B (RCT, APT, CRNGT), reseed auto 1 MiB ou 1 h. | `src/fhsm_drbg.c`, `include/fhsm_drbg.h`, [`RNG.md`](RNG.md) |
+| **FCS_CKM_EXT.4** | FCS | Pair-wise consistency check post `C_GenerateKeyPair` (RSA, EC, ML-KEM, ML-DSA, SLH-DSA). Échec → ERROR latché + refus de persister. Conforme FIPS 140-3 §7.10.2.b. | `src/fhsm_pairwise.c`, `include/fhsm_pairwise.h` |
 | **FPT_TST_EXT.1** | FPT (Protection des TSF) | Sealing TPM 2.0 de la DEK par token (opt-in via `FHSM_TPM_SEALING=1`). DEK liée aux PCR 0-7 de la chaîne de boot. Mismatch à l'unseal traité comme PIN incorrect (résistance aux oracles). | `src/fhsm_token_tpm.c`, `src/fhsm_tpm.c` |
 | **FMT_SMR_EXT.1** | FMT (Gestion sécurité) | Bascule mode runtime entre **permissive** (défaut) et **strict** via env `FHSM_MODE` ou directive `mode =` ; les anciennes orthographes `legacy` et `fips` restent acceptées. Permet à un binaire unique de satisfaire l'évaluateur FIPS 140-3 ET les opérateurs qui ont besoin d'interopérer avec des systèmes anciens. | `src/fhsm_mode.c`, `src/dispatch/fhsm_dispatch_legacy.c` |
 

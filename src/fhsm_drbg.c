@@ -24,7 +24,7 @@
  *         \           \             /              /
  *          +-----------+-----+-----+--------------+
  *                            v
- *                       SHA-256 conditioner (SP 800-90C §3.1)
+ *                       SHA-384 conditioner (SP 800-90C §3.1)
  *                            v
  *                  RAND_add (entropy contribution)
  *                            v

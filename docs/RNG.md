@@ -11,7 +11,7 @@ This document describes the random-number-generation pipeline used by FreeHSM C,
      \           \             /              /
       +-----------+-----+-----+--------------+
                         v
-                   SHA-256 conditioner  (SP 800-90C §3.1)
+                   SHA-384 conditioner  (SP 800-90C §3.1)
                         v
                   RAND_add (OpenSSL FIPS)
                         v

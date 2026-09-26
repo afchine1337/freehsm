@@ -1,6 +1,7 @@
 # FreeHSM C --- Vulnerability Analysis Report (CC EAL4+ AVA_VAN.5)
 
-**TOE :** FreeHSM Cryptographic Module v1.0.0-FIPS
+**TOE :** FreeHSM Cryptographic Module (the version you built ; `v1.0.0-FIPS`
+in earlier drafts was a placeholder and never existed as a release)
 **CC class :** AVA (Vulnerability Assessment) — augmented to AVA_VAN.5 (Advanced methodical vulnerability analysis)
 **Target attack potential :** *Beyond-High* (AVA_VAN.5)
 **Document version :** 1.0

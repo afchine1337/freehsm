@@ -87,7 +87,36 @@ BARE_NAMES = (
 # is one: the generator emits English only, and the French file exists to send
 # the reader there. Comparing their claims would report the whole mechanism
 # table as missing, every time, for ever.
-RE_POINTER = re.compile(r"<!--\s*doc-twins:\s*pointer")
+# `pointer` not followed by a hyphen: the whole-file marker carries trailing
+# prose ("pointer -- ce fichier n'est pas une traduction..."), so it cannot
+# require a closing -->, and it must not swallow `pointer-begin` either.
+# Tightening it to require --> silently disabled the one file that uses it.
+RE_POINTER = re.compile(r"<!--\s*doc-twins:\s*pointer(?!-)")
+
+# The same idea with a section's reach instead of a file's.
+#
+# ATE_FUN.fr.md §2 does not translate the 26-row SFR coverage table; it says
+# "voir le tableau équivalent dans ATE_FUN.md §2" and moves on. That is the
+# better engineering: one table cannot disagree with itself, and two tables
+# of the same 26 rows in two languages is precisely the divergence this
+# script exists to catch. Translating it to satisfy the check would create
+# the defect the check is for.
+#
+# So a region can opt out by name, and the opt-out is visible in the source
+# where a reader will meet it -- not in a config file listing exceptions
+# somebody has to go and look up.
+#
+#     <!-- doc-twins:pointer-begin -->
+#     ... prose that deliberately refers to the twin instead of repeating it
+#     <!-- doc-twins:pointer-end -->
+#
+# This is deliberately not automatic. A section is skipped because somebody
+# decided it should be, and wrote that down; an inferred exemption would
+# silently grow to cover whatever drifted.
+RE_POINTER_REGION = re.compile(
+    r"<!--\s*doc-twins:\s*pointer-begin\s*-->.*?"
+    r"<!--\s*doc-twins:\s*pointer-end\s*-->",
+    re.DOTALL)
 
 # "C_Encrypt/Decrypt" and "C_GenerateKey/KeyPair" are one identifier written as
 # two, and the twins use the shorthand in different places. It is dropped
@@ -105,7 +134,12 @@ def _is_shorthand(name: str) -> bool:
 
 
 def claims(text: str) -> dict[str, set[str]]:
-    """The language-invariant claims a document makes."""
+    """The language-invariant claims a document makes.
+
+    Regions marked pointer-begin/pointer-end are removed first: their content
+    is a deliberate reference to the twin, not a claim of this document's own.
+    """
+    text = RE_POINTER_REGION.sub("", text)
     ticked = {m for m in RE_BACKTICK.findall(text)
               if _CODEY.match(m) and not _is_shorthand(m)}
     standards = {re.sub(r"\s+", " ", m).strip() for m in RE_STANDARD.findall(text)}

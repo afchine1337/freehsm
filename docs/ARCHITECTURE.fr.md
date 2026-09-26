@@ -150,7 +150,7 @@ Le rafraîchissement pré-soumission CST ajoute 4 modules transverses qui s'ins�
 ### 11.1 DRBG durci (`src/fhsm_drbg.c`)
 
 Wrapper de second tier autour d'OpenSSL CTR_DRBG-AES-256. S'intercale AVANT chaque consommateur de `fhsm_rng_bytes`. Ajoute :
-- Agrégation multi-source d'entropie : `getrandom(2)`, RDRAND, `/dev/urandom`, jitter TSC → conditionneur SHA-256 → `RAND_add`.
+- Agrégation multi-source d'entropie : `getrandom(2)`, RDRAND, `/dev/urandom`, jitter TSC → conditionneur SHA-384 → `RAND_add`.
 - Health tests NIST SP 800-90B §4.4 : RCT (cutoff 6), APT (W=512, cutoff 51), CRNGT (bloc 16 octets).
 - Reseed automatique tous les 1 MiB de sortie ou toutes les heures.
 - Alarme → `fhsm_state_latch_error` → état ERROR.

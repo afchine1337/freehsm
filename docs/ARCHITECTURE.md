@@ -160,7 +160,7 @@ The CST-evidence work batch adds 4 transverse modules. They sit at the same arch
 ### 11.1 Hardened DRBG (`src/fhsm_drbg.c`)
 
 A second-tier wrapper around OpenSSL CTR_DRBG-AES-256. Sits BEFORE every `fhsm_rng_bytes` consumer. Adds :
-- Multi-source entropy aggregation : `getrandom(2)`, RDRAND, `/dev/urandom`, TSC jitter → SHA-256 conditioner → `RAND_add`.
+- Multi-source entropy aggregation : `getrandom(2)`, RDRAND, `/dev/urandom`, TSC jitter → SHA-384 conditioner → `RAND_add`.
 - NIST SP 800-90B §4.4 health tests : RCT (cutoff 6), APT (W=512, cutoff 51), CRNGT (16-byte block).
 - Auto-reseed every 1 MiB output or every hour wall-clock.
 - Alarm → `fhsm_state_latch_error` → ERROR state.
