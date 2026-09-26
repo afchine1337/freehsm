@@ -63,15 +63,38 @@
 #define TPM_DIR        "/var/lib/freehsm/tpm"
 #define TPM_PARENT_HANDLE "0x81010001"   /* persistent primary key */
 
-/* The PCR bank the sealing policy binds to, and the one place SHA-256 is
- * still relied upon internally (#16).
+/* The PCR bank the sealing policy binds to: one of four places the module
+ * still chooses SHA-256 for itself (#16).
  *
- * The rest of the module moved off it: the integrity digest is SHA-384 as of
- * 4b91308, the entropy conditioner as of 5a7c254. The remaining `SHA2-256`
- * strings in src/ are name tables translating a hash the CALLER asked for --
- * the module offering SHA-256 through CKM_SHA256, not depending on it. This
- * constant is the exception, and it stays, for two reasons that have nothing
- * to do with preferring SHA-256.
+ * The others, so that this comment is a map and not a claim of uniqueness:
+ *
+ *   src/fhsm_token.c   PBKDF2-HMAC-SHA-256 derives the token protection key
+ *                      from the PIN. The most security-relevant of the four.
+ *   src/fhsm_audit.c   HMAC-SHA-256 chains the audit log.
+ *   tools/freehsm_audit.c  the verifier, which must match the writer.
+ *   here              the PCR bank, and `-g sha256` for the sealed object's
+ *                      name algorithm a few hundred lines down.
+ *
+ * All four are stated in docs/FIPS_140_3_SECURITY_TARGET.md (§PBKDF2, §Audit
+ * MAC Key) and none is a gap in that document. What was wrong was a claim of
+ * "no SHA-256 anywhere" made after 4b91308 and 5a7c458 moved the integrity
+ * digest and the entropy conditioner: those two moved, these four did not.
+ * The first audit of that claim searched for SHA256(), EVP_sha256() and
+ * "SHA2-256" and missed FHSM_HASH_SHA256, the project's own spelling --
+ * a state asserted from a partial read, which is the shape of defect this
+ * tree has a standing note about.
+ *
+ * The CNSA argument is also weaker here than for a signature or an integrity
+ * digest: HMAC and PBKDF2 do not fail to the attacks that motivate retiring
+ * SHA-256 from signing. That is a reason these were not urgent, not a reason
+ * the claim was true.
+ *
+ * Separately, the `SHA2-256` strings elsewhere in src/ are name tables
+ * translating a hash the CALLER asked for -- the module offering CKM_SHA256,
+ * not depending on it. Those are not in the list above and should not be.
+ *
+ * This constant stays, for two reasons that have nothing to do with
+ * preferring SHA-256.
  *
  * The bank may not exist. A SHA-384 PCR bank is optional in the TPM 2.0
  * specification and plenty of shipped parts expose only sha1 and sha256.
@@ -89,9 +112,15 @@
  * yet needs it, and an unused migration path is a migration path nobody has
  * exercised.
  *
- * Recorded here rather than left as a bare constant so that "no SHA-256
- * anywhere" is a claim that names its one exception instead of being quietly
- * untrue. */
+ * Changing the other three is the same shape of problem and worth saying
+ * once: a token is unreadable if its PBKDF2 hash changes, and an audit log
+ * cannot be verified across a change of MAC hash without a version field.
+ * None of the four is a parameter that can simply be raised.
+ *
+ * Recorded here rather than left as a bare constant, so that the next reader
+ * gets the list rather than a number, and so that the claim this replaces --
+ * that only one such place remained -- does not survive by being unwritten
+ * anywhere. */
 #define TPM_PCR_LIST   "sha256:0,1,2,3,4,5,6,7"
 
 /* ---------------------------------------------------------------------------

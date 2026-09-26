@@ -36,23 +36,46 @@ project adheres to [Semantic Versioning](https://semver.org/).
   an integrity check.
 
 ### Changed
-* **The one remaining internal SHA-256 is named** (#16). The integrity digest
+* **The internal uses of SHA-256 are enumerated** (#16). The integrity digest
   and the entropy conditioner moved to SHA-384 in 4b91308 and 5a7c254, and
-  the posture stated then was "no SHA-256 anywhere". An audit of the tree
-  found one place that is not covered by it: `TPM_PCR_LIST` in
-  `src/fhsm_tpm.c` binds the sealing policy to the SHA-256 PCR bank.
+  the posture stated then was "no SHA-256 anywhere". That was not true, and
+  the correction is the point of this entry. Four places still choose
+  SHA-256 for the module rather than for a caller:
 
-  It stays, and now says why. A SHA-384 PCR bank is optional in TPM 2.0 and
-  many shipped parts do not have one. More decisively, the policy digest
-  covers the bank, so a blob sealed under sha256 does not unseal under
-  sha384 — an operator who updated would lose the sealed audit key. A
-  probe-and-record design would handle both and is the right shape if this
-  is revisited; it is not written because nothing needs it yet.
+  | where | what |
+  |---|---|
+  | `src/fhsm_token.c` | PBKDF2-HMAC-SHA-256 derives the token protection key from the PIN |
+  | `src/fhsm_audit.c` | HMAC-SHA-256 chains the audit log |
+  | `tools/freehsm_audit.c` | the verifier, which must match the writer |
+  | `src/fhsm_tpm.c` | the PCR bank the sealing policy binds to, and the sealed object's name algorithm |
 
-  The other `SHA2-256` strings in `src/` are name tables translating a hash
-  the *caller* asked for — the module offering `CKM_SHA256`, not relying on
-  it. A claim that names its exception can be checked; one that does not is
-  only untrue more quietly.
+  None of the four is a documentation gap: the Security Target states the
+  PBKDF2 and the audit MAC correctly. The error was the claim made around
+  them, and the audit that produced it searched for `SHA256(`, `EVP_sha256()`
+  and `"SHA2-256"` while the tree spells it `FHSM_HASH_SHA256` — a state
+  asserted from a partial read.
+
+  None is a parameter that can be raised. A token is unreadable if its
+  PBKDF2 hash changes; an audit log cannot be verified across a change of
+  MAC hash without a version field; and the TPM policy digest covers the PCR
+  bank, so a blob sealed under sha256 does not unseal under sha384 — an
+  operator who updated would lose the sealed audit key. A SHA-384 PCR bank
+  is also optional in TPM 2.0 and absent from many shipped parts.
+
+  The CNSA argument is weaker here than for signing: HMAC and PBKDF2 do not
+  fail to the attacks that motivate retiring SHA-256 from signatures. That
+  is why none of this was urgent — not a reason the claim was true.
+
+  `src/fhsm_tpm.c` now carries the list, so the next reader gets an
+  enumeration rather than a number.
+
+* **Three stale facts in the Security Target** (#1). `FIPS_140_3_SECURITY_TARGET.md`
+  described the release pipeline as it was before v2.0.0: the `.fhsm_digest`
+  patch as SHA-256 (it is SHA-384 since 4b91308), the tarballs as
+  `-FIPS-src.tar.xz` (the suffix went with v2.0.0), and the mirrors as
+  `gitlab.com/afchine.mad/freehsm-c` and `codeberg.org/afchine1337/freehsm-c`
+  — the latter two not merely redirected but wrong: `mirror.yml` pushes to
+  `…/freehsm`.
 
 * **Three axes, three vocabularies** (#11). The module has three independent
   switches, and they were sharing words. The build profile was `fips-strict`

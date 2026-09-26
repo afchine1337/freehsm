@@ -48,7 +48,7 @@ Policy for a software cryptographic module contains.
 | **Version** | 1.4.0-FIPS |
 | **Module Type** | Software (`libfreehsm.so`, ELF-64 shared object) |
 | **Module Embodiment** | Multi-chip standalone (GPC host) |
-| **Module Boundary** | The single `.so` file at SHA-256 = (see `.fhsm_digest` section, patched by `make integrity`) |
+| **Module Boundary** | The single `.so` file at SHA-384 = (see `.fhsm_digest` section, patched by `make integrity`) |
 | **Operational Environment (OE)** | Debian 13 / Linux kernel ≥ 6.1 / glibc ≥ 2.40 / OpenSSL 3.5.6 FIPS provider |
 | **Approved Cryptographic Algorithms** | See §3 below |
 | **Tested Configuration** | x86_64 Debian 13.0 stable, FIPS-mode enabled in `/etc/ssl/openssl.cnf` |
@@ -64,7 +64,7 @@ FreeHSM C is a software-only PKCS#11 v3.2 cryptographic module providing key gen
 
 ### 2.2 Cryptographic Boundary
 
-The cryptographic boundary is the entire address range of the `libfreehsm.so` executable code, plus the embedded read-only `.fhsm_digest` section (32 octets of SHA-256). The boundary explicitly **excludes** :
+The cryptographic boundary is the entire address range of the `libfreehsm.so` executable code, plus the embedded read-only `.fhsm_digest` section (48 octets of SHA-384). The boundary explicitly **excludes** :
 - The host operating system kernel and user-land libraries (glibc, libdl, libpthread)
 - The OpenSSL provider modules (`fips.so`, `default.so`) which have their own boundaries and CMVP cert
 - The persistent token store on disk (treated as encrypted-at-rest data subject to §7.7 SSP transitions)
@@ -122,11 +122,11 @@ The module advertises these mechanisms in `C_GetMechanismList` for compatibility
 
 The build is reproducible per `dist-verify` :
 - Reference digest : `dist/refs/v1.1.0.sha256` (signed at release time)
-- Each build inside `Dockerfile.build` produces an ELF binary with the same SHA-256
+- Each build inside `Dockerfile.build` produces an ELF binary with the same SHA-384
 
 ### 4.2 Integrity Mechanism
 
-The module embeds its own SHA-256 in a read-only ELF section `.fhsm_digest` (32 octets), patched by `make integrity` using OpenSSL FIPS provider. At every `C_Initialize`, `fhsm_integrity_verify()` recomputes the SHA-256 of the `.text` section and compares it in constant time. On mismatch, the module enters ERROR state and refuses all service requests.
+The module embeds its own SHA-384 in a read-only ELF section `.fhsm_digest` (48 octets), patched by `make integrity` using OpenSSL FIPS provider. At every `C_Initialize`, `fhsm_integrity_verify()` recomputes the SHA-384 over the whole file with the digest area zeroed — not the `.text` section alone — and compares it in constant time. On mismatch, the module enters ERROR state and refuses all service requests.
 
 ### 4.3 Authorization
 
@@ -185,7 +185,7 @@ Documented residual side-channels are in `docs/SIDE_CHANNEL.md`.
 | **SO Wrap KEK** | AES-256, ephemeral | No | Derived from SO PIN by PBKDF2 | SO login required to derive |
 | **USER Wrap KEK** | AES-256, ephemeral | No | Derived from USER PIN by PBKDF2 | USER login required to derive |
 | **Audit MAC Key** | HMAC-SHA-256, 256-bit | Yes (separate file) | Plaintext (root-only access) | Audit-write only |
-| **Module Integrity Digest** | SHA-256 (32 octets) | Yes (in `.fhsm_digest`) | None (read-only ELF section) | None ; checked at boot |
+| **Module Integrity Digest** | SHA-384 (48 octets) | Yes (in `.fhsm_digest`) | None (read-only ELF section) | None ; checked at boot |
 | **Generated RSA / ECDSA / ML-DSA / SLH-DSA Private Keys** | Per-algorithm | Yes (via objects_blob, AES-GCM(DEK)) | Wrapped under DEK | USER login required |
 
 ### SSP Transitions
@@ -202,7 +202,7 @@ Documented residual side-channels are in `docs/SIDE_CHANNEL.md`.
 ### 9.1 Pre-Operational Self-Test (§7.10.2)
 
 Runs once at `C_Initialize` :
-1. **Software integrity check** : SHA-256 of `.text` vs `.fhsm_digest`.
+1. **Software integrity check** : SHA-384 of the whole file, digest area zeroed, vs `.fhsm_digest`.
 2. **FIPS provider load** : `OSSL_PROVIDER_load("fips")` non-NULL.
 3. **CSP zeroization** : `fhsm_secure_heap_init` allocates the secure arena and locks pages with `mlock`.
 
@@ -476,12 +476,12 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 
 1. Verifies the tag's GPG signature against the canonical fingerprint.
 2. Builds `libfreehsm.so` reproducibly in the pinned `freehsm-c-build:debian13-openssl-3.5` container.
-3. Patches the `.fhsm_digest` section with the post-link SHA-256 of the binary.
-4. Builds both source and binary tarballs (`freehsm-c-X.Y.Z-FIPS-src.tar.xz` and `-bin.tar.xz`).
+3. Patches the `.fhsm_digest` section with the post-link SHA-384 of the binary.
+4. Builds both source and binary tarballs (`freehsm-c-X.Y.Z-src.tar.xz` and `-bin.tar.xz`).
 5. Detached-signs both tarballs with the release GPG key.
 6. Publishes a GitHub Release with the signed assets attached.
 
-The mirror workflow (`mirror.yml`) cross-publishes the same tag and assets to GitLab (`gitlab.com/afchine.mad/freehsm-c`) and Codeberg (`codeberg.org/afchine1337/freehsm-c`) within seconds. This provides three independent hosts of every signed artifact, mitigating single-point-of-failure risk on the supply chain (ALC_DEL coverage).
+The mirror workflow (`mirror.yml`) cross-publishes the same tag and assets to GitLab (`gitlab.com/afchine.mad/freehsm`) and Codeberg (`codeberg.org/afchine1337/freehsm`) within seconds. This provides three independent hosts of every signed artifact, mitigating single-point-of-failure risk on the supply chain (ALC_DEL coverage).
 
 The unbroken signing chain across 23 releases — including the v1.1.13 → v1.1.18 patch cascade that fixed four latent KAT data bugs, the v1.2.0 structural decomposition of `C_CreateObject`, the v1.2.1 security patch on the integrity self-test, the v1.2.2 external-reporter-driven raw ECDSA fix plus boot-KAT extension, the v1.3.0 function-list completion + export-roundtrip extension, and the v1.4.0 v2.40 dispatch near-completion (85 % coverage) — is itself ALC_CMC evidence : every change that reached a shipping release passed through the signed-release pipeline, and the inventory of changes is verifiable in the `CHANGELOG.md` ledger plus the git commit history (each tagged commit is itself GPG-signed by the same fingerprint).
 
