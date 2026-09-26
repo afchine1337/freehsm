@@ -48,13 +48,14 @@ The arrows are one-way : the higher layers depend on the lower, never the revers
 | `fhsm_token.c`      | Token JSON file I/O, PIN derivation, DEK wrap/unwrap, throttle, lockout.        | internal   |
 | `fhsm_session.c`    | Bounded session table, slot↔token attach, role tracking.                        | internal   |
 | `fhsm_pkcs11.c`     | C_* entry points: validate args, emit audit, dispatch.                          | **TSFI**   |
+| `fhsm_integrity.c`  | Boot integrity self-test (FIPS 140-3 §7.10.2).                                  | internal   |
 | `kat/fhsm_kat_*.c`  | CAVP-derived KAT vectors and runner.                                            | internal   |
 
 Only `fhsm_pkcs11.c` exports symbols; all other modules are `static`-or-`hidden`-linked by the linker version script and `-fvisibility=hidden`.
 
 ## 4. Mechanism dispatch table
 
-The full PKCS#11 mechanism set is fed by a code-generated table (script `scripts/gen_p11_thunks.py`, output `src/fhsm_dispatch.c`). Each entry is:
+The full PKCS#11 mechanism set is fed by a code-generated table (script `scripts/gen_p11_thunks.py`, output `src/gen/fhsm_dispatch.c`). Each entry is:
 
 ```c
 { CKM_AES_GCM, FHSM_FIPS_APPROVED, &dispatch_aes_gcm },
@@ -122,7 +123,7 @@ include/fhsm_pkcs11.in.h       (template, one source of truth)
 scripts/gen_p11_thunks.py
         │
         ├──►  include/fhsm_pkcs11.h    (public ABI header)
-        ├──►  src/fhsm_dispatch.c     (mechanism dispatch table)
+        ├──►  src/gen/fhsm_dispatch.c (mechanism dispatch table)
         └──►  docs/MECHANISMS.md      (auto-generated reference)
 ```
 
@@ -134,6 +135,7 @@ Re-running the generator with a different `--profile=nist-approved-only` flag em
 |---------------------|---------------------------------------|---------------------------------------------|
 | KAT                 | `kat/fhsm_kat_vectors.c`              | Every approved primitive at init time       |
 | Smoke               | `tests/test_smoke.c`                  | End-to-end encrypt/decrypt + tamper         |
+| Dispatch            | `tests/test_dispatch.c`               | Weak/strong override, table ordering        |
 | Audit               | `tests/test_audit_verify.c` and six siblings | Chain verification, line injection rejection, back-pressure, group commit, multi-process |
 | Token interop       | *(none)*                              | **Not built.** See `docs/ATE_FUN.md` §Known gaps — and note that byte-level interop with the POC is not a goal: the store formats differ by design |
 | Fuzzing             | `tests/fuzz/` + AFL++                 | Token parser, PKCS#11 argument parsing      |

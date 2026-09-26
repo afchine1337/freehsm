@@ -81,7 +81,13 @@ fhsm_aes_gcm_encrypt(key_slice, iv_slice, aad_slice, pt_slice, ct, *len, tag)
 return CKR_OK
 ```
 
-Chaque étape est loguée en ordre chronologique. Les octets sensibles n'apparaissent jamais dans le log.
+Chaque étape est journalisée en ordre chronologique :
+- Entrée dans `C_Encrypt` (longueur des paramètres seulement)
+- `dispatch_aes_gcm` sélectionné
+- `fhsm_aes_gcm_encrypt` a retourné OK
+- Sortie de `C_Encrypt` (rv = CKR_OK, longueur de sortie)
+
+Les octets sensibles (`pData`, `pOut`, `key.data`) n'apparaissent jamais dans le log.
 
 ## 6. Build et reproductibilité
 
@@ -98,7 +104,22 @@ La cible de build reproductible est `make dist`, qui invoque un `Dockerfile.buil
 
 Aucun lock n'est détenu en traversant la frontière du provider OpenSSL. Le provider FIPS OpenSSL est lui-même réentrant per sa propre validation.
 
-## 8. Tests et couverture
+## 8. Chaîne de code-génération
+
+```
+include/fhsm_pkcs11.in.h       (gabarit, source de vérité unique)
+        │
+        ▼
+scripts/gen_p11_thunks.py
+        │
+        ├──►  include/fhsm_pkcs11.h    (en-tête ABI public)
+        ├──►  src/gen/fhsm_dispatch.c  (table de dispatch des mécanismes)
+        └──►  docs/MECHANISMS.md       (référence auto-générée)
+```
+
+Relancer le générateur avec `--profile=nist-approved-only` produit un build qui rejette tout mécanisme non approuvé dès l'édition de liens --- aucun branchement à l'exécution n'intervient, ce qui simplifie l'analyse AVA_VAN.5.
+
+## 9. Tests et couverture
 
 | Suite               | Driver                                | Portée                                  |
 |---------------------|---------------------------------------|-----------------------------------------|
@@ -109,8 +130,9 @@ Aucun lock n'est détenu en traversant la frontière du provider OpenSSL. Le pro
 | Interop token       | *(aucun)*                             | **Non construit.** Voir `docs/ATE_FUN.md` §Known gaps — l'interop au niveau des octets avec le POC n'est pas un objectif : les formats diffèrent par choix |
 | Fuzzing             | `tests/fuzz/` + AFL++                 | Parseur token, parseur args PKCS#11     |
 | Couverture          | `make coverage`                       | Cible gcov/lcov ≥ 95% lignes, 90% branches |
+| Memcheck / asan     | `make memcheck` / `make asan`         | Propre obligatoirement à chaque release |
 
-## 9. Migration depuis le POC Python
+## 10. Migration depuis le POC Python
 
 Le TOE C lit et écrit le **format JSON de token exact** du POC Python. Une organisation en production peut donc :
 

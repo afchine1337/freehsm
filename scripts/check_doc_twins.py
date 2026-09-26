@@ -50,7 +50,20 @@ from pathlib import Path
 # Identifiers in backticks. Restricted to things that look like code rather
 # than any backticked word: a French twin may quote `approuvé` and mean it.
 RE_BACKTICK = re.compile(r"`([A-Za-z_][A-Za-z0-9_./-]{2,})`")
-_CODEY = re.compile(r"^(CK[AMKORSU]?_|C_[A-Z]|FHSM_|fhsm_|[a-z_]+\.(c|h|py|sh|md|json|yml))")
+#
+# The `(?:[a-z_]+/)*` prefix is what lets a path with a directory in it
+# through. Without it the final alternative required the filename to start
+# the string, so `src/gen/fhsm_dispatch.c` was silently not a claim while
+# `fhsm_dispatch.c` was -- and a check that skips the qualified form skips
+# exactly the case where the two twins disagree about WHERE something lives.
+#
+# Found on 2026-09-26: ARCHITECTURE.md named `src/fhsm_dispatch.c`, a file
+# that does not exist, while the French twin named `src/gen/fhsm_dispatch.c`,
+# which does. The twins disagreed, one of them was wrong, and this check ran
+# green over it because of the anchor.
+_CODEY = re.compile(
+    r"^(CK[AMKORSU]?_|C_[A-Z]|FHSM_|fhsm_"
+    r"|(?:\.?[a-z_]+/)*[a-z_][a-z0-9_-]*\.(c|h|py|sh|md|json|yml))")
 
 # Standards. The spellings are fixed by the standards bodies, not by us, which
 # is what makes them comparable at all.
