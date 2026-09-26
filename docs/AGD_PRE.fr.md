@@ -201,9 +201,14 @@ La TOE est dans son état opérationnel sécurisé quand **tous** les éléments
 1. `C_Initialize` a retourné `CKR_OK`.
 2. `fhsm_kat_results()` rapporte chaque primitive approuvée comme `passed=1`.
 3. `fhsm_integrity_is_signed()` retourne 1.
-4. L'état module est `INITIALIZED` ou `AUTHENTICATED`.
+4. L'état module (introspecté via l'aide vendeur `fhsm_state_get()`) est `INITIALIZED` ou `AUTHENTICATED`.
 5. `/var/lib/freehsm/audit/slot0.audit.log` contient un événement `module_init` avec `result=OK`.
-6. `fips_strict=true` est défini dans `freehsm.conf`.
+6. `mode = strict` est défini dans `/etc/freehsm/freehsm.conf`, **et** le module a été construit avec `PROFILE=nist-approved-only` — le fichier seul ne restreint pas l'ensemble des mécanismes (`make show-profile` confirme les deux). `mode = fips` est l'ancienne orthographe et fonctionne encore, avec un avertissement nommant son remplaçant.
+
+   *Cette ligne demandait `fips_strict=true` jusqu'au 2026-09-26. Cette clé n'existe pas : le module ne lit que `mode` et `secure_heap_kb`. Un opérateur qui suivait cette liste cochait la case sans avoir rien activé.*
+
+
+Si l'un de ces points est faux, le système n'est **pas** dans l'état certifié et doit être réinstallé avant toute exposition à des utilisateurs.
 
 ## 6. Responsabilités de l'opérateur (procédural)
 

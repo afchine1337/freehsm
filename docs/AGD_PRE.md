@@ -391,7 +391,7 @@ The TOE is in its secure operational state when **all** of the following hold si
 3. `fhsm_integrity_is_signed()` returns 1.
 4. The module state (introspected via vendor helper `fhsm_state_get()`) is `INITIALIZED` or `AUTHENTICATED`.
 5. `/var/lib/freehsm/audit/slot0.audit.log` contains a `module_init` event with `result=OK`.
-6. `mode = fips` is set in `/etc/freehsm/freehsm.conf`, **and** the module was built with `PROFILE=nist-approved-only` — the file alone does not restrict the mechanism set (`make show-profile` confirms both).
+6. `mode = strict` is set in `/etc/freehsm/freehsm.conf`, **and** the module was built with `PROFILE=nist-approved-only` — the file alone does not restrict the mechanism set (`make show-profile` confirms both). `mode = fips` is the former spelling and still works, with a note naming the replacement.
 
 If any of these is false, the system is **not** in the certified state and must be re-installed before exposing it to users.
 
@@ -404,11 +404,163 @@ The administrator confirms in writing (audit trail) that :
 - The audit log is reviewed at least weekly (cf. `AGD_OPE.md` §6).
 - Backup of the token files is performed under the **same access controls** as the live store ; backups copied to media must be encrypted at rest.
 
-## 7. Cryptographic end-to-end validation
+## 7. Debian 13 porting notes (gcc-14 / dash / OpenSSL 3.5)
+
+This section records the divergences met when moving a build station from
+Debian 12 / gcc-12 / OpenSSL 3.0 to a Debian 13 / gcc-14 / OpenSSL 3.5 target.
+The module stays reproducible on both distributions; the adjustments below are
+already on `main`.
+
+### 7.1 Compilation (gcc-14)
+
+gcc-14 enables by default several warnings gcc-12 passed over in silence. The
+build is `-Werror`, so each category was cleared with a targeted fix:
+
+| Warning | Cause | Remedy |
+|---|---|---|
+| `-Wmissing-prototypes` on the `C_*` | Exported symbols with no local declaration | Forward declarations marked `FHSM_EXPORT` in `src/fhsm_pkcs11.c` |
+| `-Wstringop-truncation` on `strncpy(dst, src, n-1); dst[n-1]=0` | gcc-14 refuses even the "safe manual" pattern | Replaced by `snprintf(dst, n, "%s", src)` in `fhsm_integrity.c` and `fhsm_state.c` |
+| `-Werror=array-bounds` on `memcpy(dst, "literal", 32)` | `_FORTIFY_SOURCE=2` sees an OOB read when the literal is shorter than 32 | Helper `fhsm_pack_field(dst, src, n)` using `strlen()`, which defeats the static inference |
+| `-Wmisleading-indentation` | Three statements on one line in `fhsm_dispatch_hybrid.c` | Split into three lines |
+| `-Wredundant-decls` on `dispatch_reject_fips` | The table generator emitted the declaration twice | Patch to `scripts/gen_p11_thunks.py` (skip inside the `extern` loop) |
+
+### 7.2 The Makefile and `dash`
+
+`/bin/sh` is **`dash`** on Debian, not bash, and dash refuses several
+constructions that are valid elsewhere:
+
+- multi-line `<<-EOF` heredocs combined with `if/then/fi` continued by `\`
+- `$(...)` substitution spanning several physical lines
+
+The `install` target was rewritten without `if/then/fi` and without heredocs,
+using `test X || command` and `printf '...\n...\n'` instead. Nothing needs to
+change if you target bash explicitly, but the port keeps dash compatibility so
+that minimal containers stay easy to deploy to.
+
+### 7.3 The OpenSSL 3.5 FIPS provider
+
+OpenSSL 3.5 still ships the FIPS provider but Debian 13 installs no
+configuration for it. Without one, `OSSL_PROVIDER_load(NULL, "fips")` can
+return a handle that looks active while serving no algorithm at all — every
+KAT then fails and `C_Initialize` returns `FHSM_RV_KAT_FAILED` (`0x80000001`).
+
+**Activating the FIPS provider on Debian 13:**
+
+```bash
+# Locate the module
+sudo find / -name "fips.so" 2>/dev/null
+# /usr/lib/x86_64-linux-gnu/ossl-modules/fips.so
+
+# Generate fipsmodule.cnf (computes the provider's integrity MAC)
+sudo openssl fipsinstall \
+    -out /usr/lib/ssl/fipsmodule.cnf \
+    -module /usr/lib/x86_64-linux-gnu/ossl-modules/fips.so
+
+# Enable it in /etc/ssl/openssl.cnf: uncomment "fips = fips_sect" and
+# include fipsmodule.cnf at the top of the file.
+echo ".include /usr/lib/ssl/fipsmodule.cnf" | sudo tee -a /etc/ssl/openssl.cnf
+sudo sed -i 's/^# fips = fips_sect/fips = fips_sect/' /etc/ssl/openssl.cnf
+
+# Verify
+openssl list -providers | grep -A2 fips
+# Expected:
+#   fips
+#     name: OpenSSL FIPS Provider
+#     status: active
+```
+
+### 7.4 PBKDF2 and the FIPS thresholds
+
+The OpenSSL 3.x FIPS provider enforces the NIST SP 800-132 §5 thresholds on
+PBKDF2:
+
+- password **≥ 14 bytes**
+- salt **≥ 16 bytes** (128 bits)
+- iterations ≥ 1000
+
+The KAT vectors in `kat/fhsm_kat_vectors.c` were adjusted accordingly
+(`"passwordPASSWORDpassword"` / `"saltSALTsaltSALTsalt"` at 200 000
+iterations). Any PBKDF2 vector added later must respect these thresholds or it
+will fail the FIPS self-test.
+
+### 7.5 The `FHSM_INTEGRITY_ALLOW_UNSIGNED` variable
+
+This environment variable bypasses `fhsm_integrity_verify()` **only** when the
+`.fhsm_digest` section is entirely zero — an unsigned development build. On a
+signed build (non-zero digest) the variable is ignored.
+
+**Legitimate use:** debugging a developer build between `make` and
+`make integrity`.
+
+**Strictly forbidden in production and on a certified build.** The TOE operator
+confirms at delivery that the variable is set nowhere in `/etc/environment`,
+`/etc/profile.d/`, systemd unit files, or cgroups:
+
+```bash
+sudo grep -r FHSM_INTEGRITY_ALLOW_UNSIGNED /etc/ /lib/systemd/ /usr/lib/systemd/ || \
+    echo "OK : variable absent from the system PATH"
+```
+
+### 7.5bis The `FHSM_KAT_ALLOW_FAIL` variable
+
+This environment variable, **effective only if `FHSM_INTEGRITY_ALLOW_UNSIGNED=1`
+is set as well**, lets `fhsm_crypto_init()` continue initialising after a Known
+Answer Test has failed. Its only reason to exist is running external test
+harnesses (Wycheproof, fuzz, interop) against an unsigned development image in
+a container where the OpenSSL FIPS provider layer is not configured.
+
+**Legitimate use:** the `wycheproof.yml` workflow, in a Debian 13 build
+container with no OpenSSL FIPS provider configured, where some KATs fail by
+construction.
+
+**Strictly forbidden in production and on a certified build**: FIPS 140-3
+§7.10.2 requires any KAT failure to latch the ERROR state. Pre-delivery check:
+
+```bash
+sudo grep -r FHSM_KAT_ALLOW_FAIL /etc/ /lib/systemd/ /usr/lib/systemd/ || \
+    echo "OK : variable absent from the system PATH"
+```
+
+When the bypass is active `libfreehsm.so` writes an explicit warning to
+`stderr` along with the list of failing KATs, which makes any such run
+audit-traceable and rules out confusion with a conformant build.
+
+### 7.6 Diagnostics: externalised KAT harness
+
+`fhsm_kat_results()` is exported (`visibility=default`) so that an external
+harness can read the KAT report after `C_Initialize` **without** exposing any
+key material. For diagnostics only:
+
+```c
+const fhsm_kat_result_t *r = fhsm_kat_results(&n);
+for (size_t i = 0; i < n; ++i)
+    printf("%-20s %s\n", r[i].algorithm, r[i].passed ? "PASS" : "FAIL");
+```
+
+The report is produced by `tests/test_smoke`, shipped in the distribution. (A
+`tests/kat_report.c` was named here; it was never written.) In production the
+report is also written to the audit log under the `FHSM_EV_KAT_REPORT` event
+with the chain's HMAC, so calling the harness is not necessary.
+
+### 7.7 PKCS#11 ABI compatibility
+
+The C binding of the PKCS#11 structures uses `unsigned char` (= `CK_BYTE`) for
+each field of a `CK_VERSION` — one byte per field, two bytes total. Any code
+using `unsigned short` (two bytes per field) shifts every field downstream by
+two bytes (`manufacturerID`, `libraryDescription`, and the rest), with two
+visible effects:
+
+- `pkcs11-tool --show-info` prints `Cryptoki version X.0` instead of `X.Y`
+- the ASCII fields look empty because they begin with `\x00`
+
+This rule is enforced by code review (CC EAL4+ ALC_DVS.1 §review procedure) on
+any PR touching `src/fhsm_pkcs11.c`.
+
+## 8. Cryptographic end-to-end validation
 
 This section describes the operational cryptographic verification procedure: prove, through interoperability with a third-party implementation, that the module produces cryptographic artifacts conforming to standards. This is the equivalent of *Functional Acceptance Testing* before production rollout.
 
-### 7.1 ECDSA-SHA256 test: HSM signs, external OpenSSL verifies
+### 8.1 ECDSA-SHA256 test: HSM signs, external OpenSSL verifies
 
 ```bash
 # 1. Generate the EC P-256 key pair
@@ -443,7 +595,7 @@ sudo openssl pkeyutl -provider default -verify \
 # Expected : "Signature Verified Successfully"
 ```
 
-### 7.2 RSA-PKCS-OAEP test: external OpenSSL encrypts, HSM decrypts
+### 8.2 RSA-PKCS-OAEP test: external OpenSSL encrypts, HSM decrypts
 
 This test proves that the private key never left the HSM in cleartext and that the module can consume ciphertext produced elsewhere.
 
@@ -482,7 +634,7 @@ sudo -u freehsm pkcs11-tool \
 sudo cmp /tmp/plain.bin /tmp/recovered.bin && echo "ROUND-TRIP OK"
 ```
 
-### 7.3 Acceptance criteria
+### 8.3 Acceptance criteria
 
 The module is *operationally validated* when **all** of the following criteria hold simultaneously:
 
@@ -508,7 +660,7 @@ The module is *operationally validated* when **all** of the following criteria h
    log truncated at the end is not detected, and a start-up integrity failure
    will not appear in it. See `AGD_OPE.md` §4.3.
 
-### 7.4 Automated suite
+### 8.4 Automated suite
 
 The `tests/full_crypto_pkcs11.sh` script automates §7.1, §7.2 and extends to AES-GCM, AES-CBC, AES-CTR, AES-CMAC, SHA-{256,384,512}, HMAC-SHA-256, ECDH1_DERIVE, ML-DSA. Run:
 
@@ -524,7 +676,7 @@ SUMMARY : N / N assertions PASS
 
 Any `FAIL` assertion must be documented and resolved before production deployment. The preserved `tokens_dir` (path printed on failure) allows post-test state inspection for diagnostic.
 
-## 8. De-installation
+## 9. De-installation
 
 ```bash
 # Stop any service holding the module
