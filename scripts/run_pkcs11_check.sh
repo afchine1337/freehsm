@@ -28,6 +28,19 @@
 #                             module (only needed if it was NOT signed
 #                             with `make integrity`)
 # ===========================================================================
+# This is a bash script, not a POSIX one: `local`, arrays and `${a[@]}` all
+# appear below. Run it directly (the shebang is bash) or as `bash <script>`.
+#
+# Invoked as `sh <script>` on Debian it is dash that reads it, and dash parses
+# command by command -- so it runs happily through token provisioning and dies
+# 260 lines later on `MATCH_ARGS=()` with "Syntax error: \"(\" unexpected",
+# after the side effects and nowhere near the cause. Observed 2026-09-26.
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "run_pkcs11_check.sh needs bash (it uses arrays and \`local\`)." >&2
+    echo "Run:  scripts/run_pkcs11_check.sh   or   bash scripts/run_pkcs11_check.sh" >&2
+    exit 2
+fi
+
 set -u
 
 MODULE="${1:-./libfreehsm.so}"
@@ -143,7 +156,20 @@ HARNESS_VERSION="$(p11c_version || echo unknown)"
 # that is not there and stays quiet about the one that is. Between this
 # morning and that commit it did exactly that -- every run printed a warning
 # about 0.1.9 while 0.1.9 was the version nothing used any more.
-EXPECTED_VERSION="${FHSM_PKCS11CHECK_EXPECT:-0.2.0}"
+# What the workflows actually pin. Not overridable, because this is a fact
+# about the repository and not a preference of the run.
+WORKFLOW_PIN="0.2.0"
+
+# What this run compares against. FHSM_PKCS11CHECK_EXPECT exists so a run can
+# be made against an unpinned harness without the warning drowning the output.
+#
+# It used to be the same variable as the line below printed, so
+# `FHSM_PKCS11CHECK_EXPECT=0.2.1` made the provenance line read
+# "(workflows pin 0.2.1)" while the workflows pinned 0.2.0. The override
+# silenced the warning and then falsified the one line written precisely so a
+# later reader could tell whether two runs are comparable. Observed
+# 2026-09-26, by the person who had set the variable one command earlier.
+EXPECTED_VERSION="${FHSM_PKCS11CHECK_EXPECT:-$WORKFLOW_PIN}"
 
 # Everything a later reader needs to know whether two runs are comparable.
 #
@@ -205,7 +231,11 @@ fi
 } > "$REPORTS/provenance.txt"
 
 echo "== harness =="
-echo "  pkcs11-check : $HARNESS_VERSION   (workflows pin $EXPECTED_VERSION)"
+echo "  pkcs11-check : $HARNESS_VERSION   (workflows pin $WORKFLOW_PIN)"
+if [ "$EXPECTED_VERSION" != "$WORKFLOW_PIN" ]; then
+    echo "  NOTE : FHSM_PKCS11CHECK_EXPECT=$EXPECTED_VERSION overrides the"
+    echo "         comparison. The workflow pin above is unchanged."
+fi
 echo "  openssl      : $OPENSSL_VERSION"
 echo "  module       : $MODULE"
 echo "  sha256       : $MODULE_SHA"

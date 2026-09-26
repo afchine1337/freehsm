@@ -44,7 +44,13 @@ vendor-neutral and reads no FreeHSM code.
 
 ### 1. One harness, one corpus, for both runs
 
-    pip install 'pkcs11-check==0.1.9'
+    # Use the version the workflows pin, and read it rather than copy it --
+    # this line said 0.1.9 for a week after the pin moved to 0.2.0, because a
+    # version written in two places is a version that will disagree with
+    # itself.
+    grep -o "pkcs11-check==[0-9.]*" .github/workflows/pkcs11-check.yml
+
+    pip install 'pkcs11-check==<the version printed above>'
     pkcs11-check fetch-data all
     pkcs11-check fetch-data --status
 
