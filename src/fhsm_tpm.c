@@ -61,8 +61,38 @@
 #include <errno.h>
 
 #define TPM_DIR        "/var/lib/freehsm/tpm"
-#define TPM_PCR_LIST   "sha256:0,1,2,3,4,5,6,7"
 #define TPM_PARENT_HANDLE "0x81010001"   /* persistent primary key */
+
+/* The PCR bank the sealing policy binds to, and the one place SHA-256 is
+ * still relied upon internally (#16).
+ *
+ * The rest of the module moved off it: the integrity digest is SHA-384 as of
+ * 4b91308, the entropy conditioner as of 5a7c254. The remaining `SHA2-256`
+ * strings in src/ are name tables translating a hash the CALLER asked for --
+ * the module offering SHA-256 through CKM_SHA256, not depending on it. This
+ * constant is the exception, and it stays, for two reasons that have nothing
+ * to do with preferring SHA-256.
+ *
+ * The bank may not exist. A SHA-384 PCR bank is optional in the TPM 2.0
+ * specification and plenty of shipped parts expose only sha1 and sha256.
+ * Sealing under a bank the part does not have does not degrade; it fails.
+ *
+ * Changing it is destructive to existing installations. The policy digest is
+ * computed over the PCR selection, bank included, so a blob sealed under
+ * sha256 does not unseal under sha384 -- it is not a weaker unseal, it is no
+ * unseal. An operator who updated would lose the sealed audit key, which is
+ * a worse outcome than the digest margin is worth.
+ *
+ * A probe-and-record design would solve both (choose the best bank present,
+ * write which one into the blob so unsealing finds it again), and is the
+ * right shape if this is ever revisited. It is not written because nothing
+ * yet needs it, and an unused migration path is a migration path nobody has
+ * exercised.
+ *
+ * Recorded here rather than left as a bare constant so that "no SHA-256
+ * anywhere" is a claim that names its one exception instead of being quietly
+ * untrue. */
+#define TPM_PCR_LIST   "sha256:0,1,2,3,4,5,6,7"
 
 /* ---------------------------------------------------------------------------
  * Test seam.

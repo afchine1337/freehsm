@@ -36,6 +36,24 @@ project adheres to [Semantic Versioning](https://semver.org/).
   an integrity check.
 
 ### Changed
+* **The one remaining internal SHA-256 is named** (#16). The integrity digest
+  and the entropy conditioner moved to SHA-384 in 4b91308 and 5a7c254, and
+  the posture stated then was "no SHA-256 anywhere". An audit of the tree
+  found one place that is not covered by it: `TPM_PCR_LIST` in
+  `src/fhsm_tpm.c` binds the sealing policy to the SHA-256 PCR bank.
+
+  It stays, and now says why. A SHA-384 PCR bank is optional in TPM 2.0 and
+  many shipped parts do not have one. More decisively, the policy digest
+  covers the bank, so a blob sealed under sha256 does not unseal under
+  sha384 — an operator who updated would lose the sealed audit key. A
+  probe-and-record design would handle both and is the right shape if this
+  is revisited; it is not written because nothing needs it yet.
+
+  The other `SHA2-256` strings in `src/` are name tables translating a hash
+  the *caller* asked for — the module offering `CKM_SHA256`, not relying on
+  it. A claim that names its exception can be checked; one that does not is
+  only untrue more quietly.
+
 * **Three axes, three vocabularies** (#11). The module has three independent
   switches, and they were sharing words. The build profile was `fips-strict`
   or `interop`; the runtime mode was `fips` or `legacy` — and also accepted
