@@ -419,9 +419,32 @@ check-profile:
 	@want=$$( [ "$(PROFILE_CANON)" = "all-mechanisms" ] && echo 0 || echo 1 ); 	got=$$(sed -n 's/^const int fhsm_build_fips_strict = \([01]\);.*/\1/p' \
 	        src/gen/fhsm_dispatch.c 2>/dev/null); 	if [ -z "$$got" ]; then 	    echo "[freehsm] cannot read fhsm_build_fips_strict from src/gen/fhsm_dispatch.c" >&2; 	    exit 1; 	fi; 	if [ "$$got" != "$$want" ]; then 	    echo "[freehsm] PROFILE=$(PROFILE_CANON) but the generated dispatch says" >&2; 	    echo "          fhsm_build_fips_strict = $$got (expected $$want)." >&2; 	    echo "          The generated sources and the profile stamp disagree --" >&2; 	    echo "          usually a checkout or merge replaced src/gen underneath." >&2; 	    echo "          Run:  rm -f $(PROFILE_STAMP) && make PROFILE=$(PROFILE_CANON) generate" >&2; 	    exit 1; 	fi
 
+# `generate` writes the stamp, so that `make PROFILE=X generate` leaves a tree
+# whose witness matches what was generated. It did not until 2026-09-27: the
+# recovery procedure check-profile prints -- `rm -f .profile.stamp && make
+# PROFILE=X generate` -- regenerated for X and left NO stamp behind, so
+# show-profile then reported `<jamais genere>` for a tree that had just been
+# generated. A small inconsistency, fixed here.
+#
+# It is NOT what makes a profile switch revert, and that is worth writing down
+# because it was misdiagnosed as such on the day. PROFILE defaults to
+# nist-approved-only, so a bare `make` does not mean "leave the tree alone",
+# it means "build the default profile" -- and the stamp then correctly detects
+# the disagreement and regenerates. Switching profiles means carrying
+# PROFILE=... on EVERY invocation until you switch back, which is why the
+# ocsp-delegated target below spells out `$(MAKE) PROFILE=all-mechanisms all`
+# rather than relying on a previous command having set it.
+#
+# What that cost, once: `make clean && make PROFILE=all-mechanisms` followed by
+# a bare `make service-guards` put the tree back to nist-approved-only. Three
+# service scripts refused with the right diagnosis, and a 45-minute corpus run
+# was started against the wrong profile before the stamp was read.
 .PHONY: generate
 generate:
 	python3 scripts/gen_p11_thunks.py --profile=$(PROFILE_CANON)
+	@mkdir -p $(dir $(PROFILE_STAMP))
+	@printf '%s' '$(PROFILE_CANON)' > $(PROFILE_STAMP)
+	@echo "[freehsm] generated for $(PROFILE_CANON), stamp written"
 
 # Generated artifacts depend on the script (so editing it triggers a re-gen)
 # AND on the profile witness (so switching profiles does too).

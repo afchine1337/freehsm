@@ -895,6 +895,30 @@ Only then is there a decision to make, and it is a scoping decision rather than
 a coverage one: which of the category-2 mechanisms are worth implementing for
 something other than a number.
 
+### service-guards failed twice, once, and nobody knows which assertions (noted 2026-09-27)
+
+`make PROFILE=all-mechanisms service-guards` reported `FAIL : 2 failure(s)`
+on one run and passed on the five that followed. Which two assertions failed
+was never captured: the output scrolled and nothing was teeing it.
+
+One difference between the failing run and the clean ones, offered as a lead
+and not a diagnosis: the failure was the first run after `make clean && make
+PROFILE=all-mechanisms`, and the five clean runs all followed on an already
+built tree where make had nothing to do. A first daemon start on a cold tree
+is slower, and this script asserts on throttle delays and burst counts across
+sixteen concurrent requests. The machine also reports clock skew, the shared
+folder's clock running about a minute ahead.
+
+To settle it, run it cold — `make clean && make PROFILE=all-mechanisms` before
+each attempt — with the output teed.
+
+What makes this worth an entry rather than a shrug: `service-guards` is in no
+automatic suite and in no CI job. A test that fails intermittently and that
+nothing re-runs is the worst of both — it will go red one day for somebody who
+has no way to know it is known. The `make tools-smoke` idea from the same day
+needs two halves, one per build profile, because half the tools cannot start
+under the default one.
+
 ### Verify that what is published is what was written (noted 2026-09-03)
 
 Three defects in one evening had the same shape, and none was a bug in the code
