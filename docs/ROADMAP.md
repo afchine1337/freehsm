@@ -362,9 +362,18 @@ in a copy-pasted block, skipped three times running; and
 `git push --follow-tags` silently declining to overwrite a tag that already
 existed on the remote, leaving the published tag on the wrong commit.
 
-The check that cannot be recovered afterwards is the build profile: an interop
-build ships the non-approved mechanisms live while every visible sign says
-fips-strict.
+The check that cannot be recovered afterwards is the build profile: an
+`all-mechanisms` build ships the non-approved mechanisms live while every
+visible sign says `nist-approved-only`. `scripts/release.sh` makes that its
+second gate, reading the flag back out of the generated sources rather than
+trusting the profile it was asked for.
+
+The rest of this document keeps the former names `fips-strict` and `interop`
+wherever a dated entry uses them, because those entries record what the names
+were on their dates. This paragraph is not dated — it describes a check that
+runs today — which is why it moved and they did not. Two lines in a document
+of a thousand, and they were missed on 2026-09-26 by treating the whole file
+as a journal rather than sorting it.
 
 ### The reproducibility claim has never been anchored (noted 2026-08-15)
 
