@@ -38,7 +38,30 @@ _SNIFF_LINES = 8
 
 
 def tally_jsonl(lines):
-    """pytest --report-log : reduce to one outcome per nodeid."""
+    """pytest --report-log : reduce to one outcome per nodeid.
+
+    An xfail is separated from a skip. pytest reports both with
+    `outcome: "skipped"` and distinguishes them only by a `wasxfail` field, so
+    tallying the outcome alone folds them together -- and they are not the same
+    thing. A skip means the case did not run; an xfail means it ran, deviated,
+    and the harness classified the deviation as expected. The `order` dict below
+    has listed "xfailed" since this script was written, for a key nothing
+    produced.
+
+    On the 0.2.1 corpus that merge reported `skipped 37313` where the truth is
+    23 208 skipped and 14 200 xfail: a 61/39 split presented as one number. The
+    harness's own report prints them apart, so the two disagreed, and the
+    disagreement was in this file.
+
+    Against `results.json` for the same run, this now agrees exactly on passed,
+    failed and xfailed, and is 8 short on skipped. Those 8 are not lost here:
+    `report.jsonl` carries 92 601 distinct node-ids where `results.json` counts
+    92 609 tests, so eight tests have no record in the log at all. Recorded so
+    the next reader does not look for them in this function. Reporting a run
+    whose per-test log is missing eight tests is a question for upstream, and
+    a small instance of the thing this project keeps meeting: the tests that
+    say nothing are the ones worth finding.
+    """
     per = {}   # nodeid -> outcome (call wins ; else setup error/fail)
     for line in lines:
         line = line.strip()
@@ -54,8 +77,16 @@ def tally_jsonl(lines):
         when = o.get("when")
         outcome = o.get("outcome")
         if when == "call":
+            if outcome == "skipped" and o.get("wasxfail") is not None:
+                outcome = "xfailed"
             per[nid] = outcome
-        elif when == "setup" and outcome in ("failed", "error"):
+        elif when == "setup" and outcome in ("failed", "error", "skipped"):
+            # "skipped" belongs here too. A test skipped at setup never reaches
+            # a call phase, so keeping only failed/error dropped it entirely:
+            # 87 tests on the 0.2.1 corpus, and with the 8 the report.jsonl
+            # itself does not carry, 95 of 92 609 went uncounted. The tally
+            # summed to 92 514 while the harness's own results.json summed to
+            # 92 609, and neither number said the other was missing anything.
             per.setdefault(nid, outcome)
     return Counter(per.values())
 

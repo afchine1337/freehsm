@@ -879,9 +879,15 @@ opens with now has a target of 3 265 tests rather than 23 113. The second run
 under `PROFILE=all-mechanisms` is still the right next step; it is a much
 smaller and better-defined job than when this was written.
 
-Two corrections to the numbers above this line. They are from v2.0.2, when the
-corpus was 3 813 tests; it is 92 609 now, so *2105 skipped* is not comparable
-to anything measured today. And pytest reports an xfail as `outcome: skipped`
+Three corrections to the numbers above this line. They are from v2.0.2, when
+the corpus was smaller by a factor of twenty-four, so *2105 skipped* is not
+comparable to anything measured today.
+
+*2105* and *3813* are also wrong for their own run. Re-tallying that archived
+report with the fixed `pkcs11_check_summary.py` gives 2 failed, 1706 passed,
+317 xfail and 1986 skipped — 4 011 tests, not 3 813. The old tally merged xfail
+into skipped and dropped every test skipped during setup, so the entry was
+built on a count that was short by 198 and conflated by 317. And pytest reports an xfail as `outcome: skipped`
 with a `wasxfail` field — counting skips without separating them inflates the
 figure by 14 200, which is what the first pass at this measurement did.
 
