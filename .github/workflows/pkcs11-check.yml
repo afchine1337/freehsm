@@ -110,7 +110,30 @@ jobs:
           # Which means the baseline this workflow compares against is reset,
           # not continued. A run under 0.2.0 read as a delta from a 0.1.9
           # number says nothing.
-          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.0'
+          #
+          # 0.2.0 -> 0.2.1 on 2026-09-27. Full corpus, signed module:
+          #
+          #   passed 55199 (was 55202) · fail 2 · crash 0 · xfail 14300 (was 14299)
+          #
+          # The two failures are the same two by node-id, not merely the same
+          # count: EDDSA C_SignInit and C_VerifyInit accepting a call with the
+          # required params missing, which is the open upstream dispute
+          # mingulov#23.
+          #
+          # The -3 passed / +1 xfail is NOT attributed, and saying so is the
+          # point. There was no stored 0.2.0 report to diff by node-id -- the
+          # three archived runs are all 0.1.9 -- so the likeliest reading (0.2.1
+          # repins datasets and grows one pin test from 5 to 14 probes, moving a
+          # few cases between buckets) is a reading and not a measurement. A
+          # 0.2.1 run is archived locally now so the next bump has a baseline
+          # instead of the same gap.
+          #
+          # KMAC is still skipped, and correctly: the skip now names its remedy
+          # (--p11-vendor-mechanism KMAC_128=0x...) rather than being silent,
+          # which is the upstream improvement. It does not help here -- this
+          # module advertises no KMAC at all, the mechanisms having been removed
+          # for want of an assigned code point.
+          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.1'
           ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
           ln -sf /opt/p11check/bin/pkcs11-check-report /usr/local/bin/pkcs11-check-report
           pkcs11-check version
@@ -128,7 +151,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /root/.local/share/pkcs11-check/data
-          key: p11check-data-0.2.0
+          key: p11check-data-0.2.1
 
       - name: Fetch third-party vectors
         if: env.FULL_CORPUS == '1'

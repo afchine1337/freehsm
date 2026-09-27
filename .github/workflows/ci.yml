@@ -86,7 +86,21 @@ jobs:
           # The workstation had been on 0.2.0 since this morning while CI
           # compared against 0.1.9 -- two references for one question, which is
           # the arrangement that made the 0.1.8 decoy expensive on 09-07.
-          /tmp/p11spec/bin/pip install --quiet 'pkcs11-check==0.2.0'
+          #
+          # 0.2.0 -> 0.2.1 on 2026-09-27, measured the same way:
+          #
+          #   --spec <0.2.1 types_std.py>   322 conform, 30 not in ref, 0 divergent
+          #   --spec <0.2.0 types_std.py>   322 conform, 30 not in ref, 0 divergent
+          #
+          # Both against today's tree, and that second line is the one that
+          # made this a bump rather than a change of reference. The count fell
+          # 32 -> 30 and the tempting reading was that 0.2.1's extraction had
+          # absorbed two of our names. It had not: two names left OUR side when
+          # #17 de-advertised the PQ/T hybrids on 09-24, five days after the
+          # 322/32 baseline was taken. Running the OLD reference against the
+          # NEW tree separated the two explanations; comparing only the new
+          # numbers to a five-day-old baseline could not have.
+          /tmp/p11spec/bin/pip install --quiet 'pkcs11-check==0.2.1'
           # Locate types_std.py without importing it: the module uses
           # `from typing import Self` (3.11+) and importing it would tie this
           # step to the runner's Python version. We only need to read the file.
