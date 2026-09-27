@@ -2195,3 +2195,64 @@ cause is not.
 No action here. Noted so the message does not send the next reader — or the
 next session — looking for a `C_CreateObject` gap that does not exist. Worth
 reporting upstream.
+
+## Full corpus under pkcs11-check 0.2.1 (2026-09-27)
+
+Signed module, OpenSSL 3.5.7, `provenance.txt` module-sha256 `fd29c09b…`
+matching the binary on disk.
+
+    passed 55199 / 92609   fail 2 (CRITICAL 1 · HIGH 1)   crash 0   xfail 14300
+
+Against the 0.2.0 baseline of 55 202 / 2 / 0 / 14 299.
+
+### The two failures are the same two, checked by node-id
+
+`EDDSA C_SignInit` and `C_VerifyInit` accepting a call with the required
+parameters missing — `got CKR_OK`, harness wants `CKR_MECHANISM_PARAM_INVALID`.
+This is the open upstream dispute mingulov#23, where the harness's own comment
+in `_resolve_mechanism` contradicts its `param_required=True`.
+
+Verified by node-id rather than by the count agreeing. Two runs can both show
+"fail 2" and be showing different failures, and a version bump is exactly the
+occasion where that happens.
+
+### The −3 passed / +1 xfail is not attributed, and that is the finding
+
+There was no stored 0.2.0 report to diff against: the three archived runs are
+all 0.1.9. The plausible reading is that 0.2.1 moved a few cases between
+buckets — it repins the vector datasets and grows one pin test from 5 probes to
+14 — but that is a reading, and this document is for measurements.
+
+Fixed for next time rather than for this one: `reports/pkcs11-check-021` now
+holds `outcomes.tsv.gz`, one `outcome<TAB>nodeid` line per test for all 92 514
+`call` records, 317 KB compressed. The next reference change can diff by
+node-id instead of comparing two totals.
+
+The raw `report.jsonl` is **370 MB** under 0.2.1 against 12 MB under 0.1.9 — it
+writes setup, call and teardown per test, each carrying the same keyword dict.
+That is the announced "evidence intact end to end" and not a defect, but it is
+why archiving the raw file the way the 0.1.9 runs did is no longer sensible,
+and it is the same weight that made `pkcs11_check_summary.py` expensive in
+September.
+
+### KMAC: the skip now names its remedy, and it does not help us
+
+    Skipped: CKM_KMAC_128: no code point known to pkcs11-check
+             (pass --p11-vendor-mechanism KMAC_128=0x... for a vendor mechanism)
+
+This is our upstream issue #22 partly addressed: the skip used to be silent
+about why it could never run. The flag is spelled `--p11-vendor-mechanism`, not
+`--vendor-mechanism` as the release notes have it.
+
+It changes nothing here. This module advertises 85 mechanisms and no KMAC —
+they were removed for want of an assigned code point — so registering a vendor
+id would exercise a mechanism that is not there. Recorded because the next
+reader meeting that skip message will otherwise reach for the flag.
+
+### A counting trap worth writing down
+
+Counting outcomes out of `report.jsonl` by `outcome` field gives roughly three
+times the real number: pytest writes one record per phase, and setup and
+teardown both say `passed` for a test whose `call` says `skipped`. An early
+pass at this entry read "18 KMAC tests passed" from exactly that, for a
+mechanism the module does not implement. Filter on `when == "call"`.
