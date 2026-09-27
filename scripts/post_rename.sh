@@ -55,9 +55,17 @@ MSG
 fi
 
 # --- 1. mirror.yml push URLs -------------------------------------------------
-# These are the only hard-coded repo URLs that break on rename. The ghcr.io
-# image names (freehsm-c-build / freehsm-c-test) are image names, not repo
-# names: they keep working after the rename and are deliberately left alone.
+# These are the only hard-coded repo URLs that BREAK on rename -- GitLab does
+# not redirect git remotes. They are not the only ones that go STALE, and this
+# comment said they were until 2026-09-27, when five more turned up: REUSE.toml,
+# Dockerfile.test's OCI source label, two URLs printed by
+# setup-release-secrets.sh and one by tag-rc.sh. GitHub redirects, so nothing
+# failed and nothing complained -- which is why section 4 below now sweeps for
+# them instead of this comment claiming there are none.
+#
+# The ghcr.io image names (freehsm-c-build / freehsm-c-test) are image names,
+# not repo names: they keep working after the rename and are deliberately left
+# alone. Section 4 excludes them by name for that reason.
 for pair in "gitlab.com:afchine.mad" "codeberg.org:afchine1337"; do
     host="${pair%%:*}"; ns="${pair##*:}"
     if grep -q "git@${host}:${ns}/${OLD}.git" .github/workflows/mirror.yml 2>/dev/null; then
@@ -104,6 +112,34 @@ if command -v curl >/dev/null 2>&1; then
         say "TODO  https://github.com/afchine1337/${NEW} -> ${code} : rename not done yet"
         rc=1
     fi
+fi
+
+# --- 4. any remaining reference to the old repository ------------------------
+# A redirect is not a fix. It works until somebody registers a repository at
+# the old name, and it hides the staleness meanwhile: five references survived
+# the rename here because nothing ever failed.
+#
+# Excluded, deliberately:
+#   ghcr.io image names        freehsm-c-build / freehsm-c-test really exist
+#   the tarball prefix         `make dist` still produces freehsm-c-src.tar.xz
+#   CHANGELOG / RELEASE_v*     dated records; the URLs were right then
+#   SECURITY.md's clone notice names the repo as it was called in June
+#   docs/blog/*                dated posts; same rule as the CHANGELOG
+#   pr_pkcs11check_*.md        a PR draft whose subject IS the rename, and
+#                              which shows the old URL as the line it removes
+#   reports/, .git/            not source
+stale=$(grep -rn "github\.com/afchine1337/${OLD}\b" . 2>/dev/null \
+    | grep -v '/\.git/\|/reports/\|^\./CHANGELOG\.md\|^\./RELEASE_v\|^\./SECURITY\.md' \
+    | grep -v '/docs/blog/\|^\./pr_pkcs11check_' \
+    | grep -v "${OLD}-build\|${OLD}-test\|${OLD}-src\.tar" \
+    | cut -c1-140 || true)
+
+if [ -n "$stale" ]; then
+    say "TODO  references to github.com/afchine1337/${OLD} remain:"
+    printf '%s\n' "$stale" | sed 's/^/        /'
+    rc=1
+else
+    say "ok    no stale github.com/afchine1337/${OLD} reference outside the exclusions"
 fi
 
 [ "$CHECK" = 1 ] && exit $rc

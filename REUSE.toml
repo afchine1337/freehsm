@@ -1,7 +1,7 @@
 version = 1
 SPDX-PackageName = "FreeHSM C"
 SPDX-PackageSupplier = "Afchine Madjlessi <afchine.mad@gmail.com>"
-SPDX-PackageDownloadLocation = "https://github.com/afchine1337/freehsm-c"
+SPDX-PackageDownloadLocation = "https://github.com/afchine1337/freehsm"
 
 # -----------------------------------------------------------------------------
 # Bulk declarations for files that cannot carry an SPDX header in their body.

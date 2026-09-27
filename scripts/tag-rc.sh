@@ -79,7 +79,7 @@ cat <<EOF
 Tag $TAG pushed.
 
 Watch the workflow at :
-   https://github.com/afchine1337/freehsm-c/actions/workflows/release.yml
+   https://github.com/afchine1337/freehsm/actions/workflows/release.yml
 
 Expected stages :
    1. Verify tag GPG signature                  — should match Ed25519 fpr.

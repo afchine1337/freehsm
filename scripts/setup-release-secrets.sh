@@ -93,7 +93,7 @@ DONE. Two files are ready in $SECRETS_DIR :
    $PASS_FILE    ($(wc -c < "$PASS_FILE") bytes, single line)
 
 NEXT STEPS — go to:
-   https://github.com/afchine1337/freehsm-c/settings/secrets/actions
+   https://github.com/afchine1337/freehsm/settings/secrets/actions
 
 For each secret, click "New repository secret":
 
@@ -125,7 +125,7 @@ v1.1.1-rc1 :
    git tag -a v1.1.1-rc1 -m "Test release pipeline" -s
    git push origin v1.1.1-rc1
 The release workflow will appear under :
-   https://github.com/afchine1337/freehsm-c/actions/workflows/release.yml
+   https://github.com/afchine1337/freehsm/actions/workflows/release.yml
 
 If CLEANUP=1 was set, the key file is now shredded :
 EOF

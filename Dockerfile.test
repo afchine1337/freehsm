@@ -30,7 +30,7 @@ FROM debian:13-slim
 
 LABEL org.opencontainers.image.title="freehsm-c-test"
 LABEL org.opencontainers.image.description="PKCS#11 test runtime for FreeHSM C CI"
-LABEL org.opencontainers.image.source="https://github.com/afchine1337/freehsm-c"
+LABEL org.opencontainers.image.source="https://github.com/afchine1337/freehsm"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 ENV DEBIAN_FRONTEND=noninteractive
