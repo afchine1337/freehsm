@@ -852,9 +852,38 @@ defects have lived.
 
 **Cheap first measurement, before any decision.** Run the harness under
 `PROFILE=all-mechanisms`, which advertises SHA-1, MD5, 3DES and RSA-PKCS v1.5, and diff
-the skip sets per node-id against the `fips-strict` run. Whatever moves is
+the skip sets per node-id against the `nist-approved-only` run. Whatever moves is
 category 1; whatever stays skipped in both is 2, 3 or 4 and is the set worth
 reading. That partitions two thousand tests with one run and no code.
+
+#### Most of it partitioned itself, for free (2026-09-27)
+
+The second run was not needed to get most of the way. pkcs11-check 0.2.1
+states a reason on nearly every skip, and reading them out of one run's
+`report.jsonl` partitions the set. Full corpus, signed module, 0.2.1:
+
+| | count | category |
+|---|---|---|
+| failures | 2 | the open upstream EDDSA dispute, mingulov#23 |
+| xfail | 14 200 | all severity LOW: 13 686 `not_operational`, 398 `nonspec_reject`, 216 `honest_deviation` |
+| harness deduplicating its own corpus | 17 925 | 4 — *"Duplicate PKCS#11 ECDH/ECDSA/XDH operation input; covered by …"* |
+| not representable in PKCS#11 | 1 923 | 4 — malformed DER the API cannot express, RFC 6979 nonce control, OAEP param gaps |
+| **mechanism not advertised by the module** | **3 265** | **1 or 2 — the only set still worth a second run** |
+
+The five rows sum to 37 315, which is every non-passed record in the run.
+Stated because an approximation in that column would let the table look
+right while hiding a bucket nobody had looked at.
+
+So 86 % of the skips were never about this module, and the question the entry
+opens with now has a target of 3 265 tests rather than 23 113. The second run
+under `PROFILE=all-mechanisms` is still the right next step; it is a much
+smaller and better-defined job than when this was written.
+
+Two corrections to the numbers above this line. They are from v2.0.2, when the
+corpus was 3 813 tests; it is 92 609 now, so *2105 skipped* is not comparable
+to anything measured today. And pytest reports an xfail as `outcome: skipped`
+with a `wasxfail` field — counting skips without separating them inflates the
+figure by 14 200, which is what the first pass at this measurement did.
 
 Only then is there a decision to make, and it is a scoping decision rather than
 a coverage one: which of the category-2 mechanisms are worth implementing for
