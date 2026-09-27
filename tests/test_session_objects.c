@@ -117,6 +117,38 @@ int main(void) {
       else if (b_out != 0) { fprintf(stderr,"FAIL: concurrent session sees %d after logout (want 0)\n",b_out); fails++; }
       else printf("  per-application logout hides private in concurrent session : OK\n"); }
 
+    /* C_Logout's return when nobody is logged in (PKCS#11 v3.2 §5.6.8).
+     *
+     * This returned CKR_OK unconditionally until 2026-09-27: a logout on a
+     * token nobody had logged into reported success. pkcs11-check had been
+     * classifying it as a tolerated deviation, which is how it survived four
+     * full corpus runs -- a finding that is filed as expected stops being
+     * read.
+     *
+     * The third assertion is the one that decides WHERE the check belongs.
+     * Login state belongs to the token, not the session (§5.6.6), so a logout
+     * issued from a second session that never called C_Login itself is a
+     * legitimate call. Checking the session's own role would have refused it. */
+    { CK_RV (*C_Logout)(CK_SESSION_HANDLE); *(void**)&C_Logout = dlsym(H,"C_Logout");
+      CK_SESSION_HANDLE sx, sy; OS(0,6,NULL,NULL,&sx);
+
+      CK_RV r1 = C_Logout(sx);
+      if (r1 != 0x101UL) { fprintf(stderr,"FAIL: logout with no login 0x%lx (want 0x101)\n",(unsigned long)r1); fails++; }
+      else printf("  C_Logout with nobody logged in : CKR_USER_NOT_LOGGED_IN : OK\n");
+
+      (void)L(sx,1,up,8);
+      CK_RV r2 = C_Logout(sx);
+      CK_RV r3 = C_Logout(sx);
+      if (r2 != 0UL)     { fprintf(stderr,"FAIL: first logout 0x%lx (want 0)\n",(unsigned long)r2); fails++; }
+      else if (r3 != 0x101UL) { fprintf(stderr,"FAIL: second logout 0x%lx (want 0x101)\n",(unsigned long)r3); fails++; }
+      else printf("  a second C_Logout is refused, the first is not : OK\n");
+
+      OS(0,6,NULL,NULL,&sy);
+      (void)L(sx,1,up,8);               /* login on sx only */
+      CK_RV r4 = C_Logout(sy);          /* logout from a session that never logged in */
+      if (r4 != 0UL) { fprintf(stderr,"FAIL: logout from a peer session 0x%lx (want 0)\n",(unsigned long)r4); fails++; }
+      else printf("  a peer session may log the token out : OK\n"); }
+
     if (fails) { fprintf(stderr, "test_session_objects : %d FAIL\n", fails); return 1; }
     printf("test_session_objects : PASS\n");
     return 0;

@@ -8,6 +8,29 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **`C_Logout` reported success when nobody was logged in.** PKCS#11 v3.2
+  §5.6.8 lists `CKR_USER_NOT_LOGGED_IN` among its returns;
+  `fhsm_session_logout` returned `CKR_OK` unconditionally, so a logout on a
+  token no session had logged into was indistinguishable from one that
+  undid a login.
+
+  The check is on the **token's** login state rather than the calling
+  session's role. Login state belongs to the token (§5.6.6): when one session
+  logs in, every session on that token is logged in, so a logout issued from
+  a second session that never called `C_Login` itself is legitimate — and the
+  common case in a multi-session application. Checking `s->role` would have
+  refused it. `tests/test_session_objects.c` asserts all three: refused with
+  no login, refused on the second consecutive call, accepted from a peer
+  session.
+
+  All four existing callers of `C_Logout` in the tree were checked before the
+  change: each follows a successful login and ignores the return.
+
+  Found by diffing an archived 0.1.9 run against the 0.2.1 one. pkcs11-check
+  had classified it as a tolerated deviation — *"C_Logout without login
+  returned CKR_OK"* — which is how it survived four full corpus runs. A
+  finding filed as expected stops being read.
+
 * **The optional key-wrap IV was accepted and dropped** (#14). PKCS#11 v3.2
   §6.16.2 gives `CKM_AES_KEY_WRAP` and `CKM_AES_KEY_WRAP_KWP` an optional
   `pParameter`: absent means the SP 800-38F default initial value, present
@@ -34,6 +57,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
   directions — including that a blob wrapped under one IV does **not** unwrap
   under another or under the default, since an ICV that can be ignored is not
   an integrity check.
+
+### Added
+* **`scripts/diff_pkcs11_runs.py`** — what moved between two harness runs, by
+  node-id. Two totals cannot say what changed: the 0.2.0 → 0.2.1 move cost
+  three passes that went into the record unattributed because no earlier
+  report had been kept in a diffable form.
+
+  Node-ids are normalised before comparing. pytest builds them from the path
+  it collected, so the same test is `src/pkcs11_check/…` from a checkout and
+  `…/python3.13/site-packages/pkcs11_check/…` from a venv — the second
+  carrying the interpreter version. Without that, its first real use reported
+  that all 96 525 tests had moved, which is not reporting.
+
+  The phase reduction is imported from `pkcs11_check_summary.reduce_jsonl`,
+  extracted for the purpose. A second copy of that rule, written by hand the
+  same morning, counted setup and teardown as passes and produced "18 KMAC
+  tests passed" for a mechanism this module does not implement.
 
 ### Changed
 * **The internal uses of SHA-256 are enumerated** (#16). The integrity digest

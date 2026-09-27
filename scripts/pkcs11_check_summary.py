@@ -37,8 +37,14 @@ from collections import Counter
 _SNIFF_LINES = 8
 
 
-def tally_jsonl(lines):
+def reduce_jsonl(lines):
     """pytest --report-log : reduce to one outcome per nodeid.
+
+    Returns the {nodeid: outcome} map. tally_jsonl() counts it; diff_pkcs11_runs.py
+    compares two of them. Exposed rather than copied: an ad-hoc re-implementation
+    of this reduction on 2026-09-27 counted setup and teardown as passes and
+    reported "18 KMAC tests passed" for a mechanism the module does not have.
+    One phase rule, one place.
 
     An xfail is separated from a skip. pytest reports both with
     `outcome: "skipped"` and distinguishes them only by a `wasxfail` field, so
@@ -88,7 +94,12 @@ def tally_jsonl(lines):
             # summed to 92 514 while the harness's own results.json summed to
             # 92 609, and neither number said the other was missing anything.
             per.setdefault(nid, outcome)
-    return Counter(per.values())
+    return per
+
+
+def tally_jsonl(lines):
+    """The counts, for the summary. The map lives in reduce_jsonl()."""
+    return Counter(reduce_jsonl(lines).values())
 
 
 def tally_raw(text):

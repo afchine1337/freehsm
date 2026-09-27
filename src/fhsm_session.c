@@ -99,6 +99,19 @@ fhsm_rv_t fhsm_session_login(unsigned long h, fhsm_role_t role,
     return rv;
 }
 
+/* PKCS#11 v3.2 §5.6.8 lists CKR_USER_NOT_LOGGED_IN among C_Logout's returns,
+ * and this returned CKR_OK unconditionally: a logout on a token nobody had
+ * logged into reported success. Found on 2026-09-27 by diffing an archived
+ * 0.1.9 run against a 0.2.1 one, where pkcs11-check had reclassified it from
+ * pass to xfail ("C_Logout without login returned CKR_OK (tolerated
+ * deviation)"). Tolerated is not the same as correct.
+ *
+ * The check is on the TOKEN's login state, not this session's role. PKCS#11
+ * login state belongs to the token: when one session logs in, every session on
+ * that token is logged in (§5.6.6). Checking `s->role` would have refused a
+ * logout issued from a second session that never called C_Login itself, which
+ * is a legitimate call and the more common one in a multi-session
+ * application. */
 fhsm_rv_t fhsm_session_logout(unsigned long h) {
     if (h == 0 || h >= FHSM_MAX_SESSIONS) return FHSM_RV_SESSION_HANDLE_INVALID;
     pthread_mutex_lock(&g_sess_mu);
@@ -107,7 +120,15 @@ fhsm_rv_t fhsm_session_logout(unsigned long h) {
         pthread_mutex_unlock(&g_sess_mu);
         return FHSM_RV_SESSION_HANDLE_INVALID;
     }
-    if (s->token) fhsm_token_logout(s->token);
+    if (!s->token || fhsm_token_current_role(s->token) == FHSM_ROLE_NONE) {
+        /* s->role is cleared anyway: a session may hold a stale cached role
+         * after another session logged the token out, and leaving it set
+         * would make the refusal depend on which session asked. */
+        s->role = FHSM_ROLE_NONE;
+        pthread_mutex_unlock(&g_sess_mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    fhsm_token_logout(s->token);
     s->role = FHSM_ROLE_NONE;
     pthread_mutex_unlock(&g_sess_mu);
     return FHSM_RV_OK;
