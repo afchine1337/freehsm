@@ -220,6 +220,11 @@ tests/test_decrypt_null_args
 # pkcs11-check runtime artifacts (#125)
 reports/
 .pkcs11-check-isolation-*.json
+# ...and the lock beside it. The pattern above ends in .json, so it never
+# matched .pkcs11-check-isolation-state.json.lock, which the harness leaves
+# at the repository root. Three patterns for this family and the one file
+# that actually turns up untracked was not among them.
+.pkcs11-check-isolation-*.json.lock
 .pkcs11-check-isolation-*.report-records/
 ..pkcs11-check-isolation-*.report-records/
 tests/test_mech_advertise
