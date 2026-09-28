@@ -133,6 +133,29 @@ int main(void) {
     CK_OBJECT_HANDLE dk = 0;
     if ((rv = GK(s, &kg, NULL, 0, &dk))) { fprintf(stderr, "  FAIL DES3 keygen 0x%lx\n", rv); return 1; }
     printf("  3DES keygen : OK\n");
+
+    /* The IV is required, and refused at Init (PKCS#11 v3.2 §6.3). Until
+     * 2026-09-28 a missing IV passed C_EncryptInit with CKR_OK and was refused
+     * one call later at C_Encrypt as CKR_ARGUMENTS_BAD -- nothing ever ran
+     * without an IV, but the refusal was at the wrong call with the wrong code.
+     *
+     * The last check in each pair is the one that matters for the fix's shape:
+     * an Init that returns early must not leave the operation active, or the
+     * caller's correct retry would be answered CKR_OPERATION_ACTIVE. */
+    {
+        const CK_RV PARAM_INVALID = 0x71UL;
+        CK_BYTE iv4[4] = {1,2,3,4};
+        CK_MECHANISM noiv  = { 0x133, NULL, 0 };
+        CK_MECHANISM shortiv = { 0x133, iv4, 4 };
+        CK_RV r;
+        if ((r = EI(s, &noiv, dk))    != PARAM_INVALID) { fprintf(stderr, "  FAIL 3DES EncryptInit no IV -> 0x%lx, want 0x71\n", (unsigned long)r); return 1; }
+        if ((r = EI(s, &shortiv, dk)) != PARAM_INVALID) { fprintf(stderr, "  FAIL 3DES EncryptInit 4-byte IV -> 0x%lx, want 0x71\n", (unsigned long)r); return 1; }
+        if ((r = DI(s, &noiv, dk))    != PARAM_INVALID) { fprintf(stderr, "  FAIL 3DES DecryptInit no IV -> 0x%lx, want 0x71\n", (unsigned long)r); return 1; }
+        printf("  3DES-CBC without an 8-byte IV refused at Init (0x71) : OK\n");
+    }
+    /* ...and the round trip below is the retry: it starts with EI/DI on the
+     * same session, which would fail with CKR_OPERATION_ACTIVE if a refused
+     * Init above had left an operation open. */
     rc |= roundtrip(s, &d3, dk, "3DES-CBC");
     if (rc) return 1;
     printf("test_legacy_cipher : PASS\n");

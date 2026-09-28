@@ -2290,3 +2290,70 @@ the 0.2.0 → 0.2.1 move: it was not the harness being noisy, it was the version
 
 Archived as `reports/pkcs11-check-021b` rather than under the `-all` name it
 was run with, since it is not that.
+
+## The all-mechanisms profile, through the corpus for the first time (2026-09-28)
+
+`PROFILE=all-mechanisms`, signed module, pkcs11-check 0.2.1, the profile read
+out of the module by `run_pkcs11_check.sh` and asserted with
+`FHSM_EXPECT_PROFILE`:
+
+    passed 56180/92778 · fail 11 (CRITICAL 6 · HIGH 5) · crash 0 · xfail 13795
+
+Every earlier corpus run in this file tested `nist-approved-only`, which is what
+CI builds. The thirteen mechanisms only this profile compiles in had never been
+through the corpus.
+
+Diffed by node-id against the `nist-approved-only` run of the day before,
+1 149 tests moved. 403 went skipped → passed and 547 xfailed → passed: the
+mechanisms the approved profile correctly leaves out, working where they exist.
+That is category 1 of the ROADMAP's "2105 tests report nothing" entry,
+measured rather than inferred.
+
+Eleven failures, two of them the EDDSA pair already open upstream. Nine new:
+
+| test | reading | status |
+|---|---|---|
+| `TestRSAPaddingOracle::test_pkcs1v15_bleichenbacher_structured_oracle` | OpenSSL implicit rejection, relied on deliberately | **module correct** |
+| `TestInvalidOperations::test_decrypt_garbage` | same | **module correct** |
+| `TestDecryptDataErrors::test_rsa_ciphertext_wrong_length` | no length check in `C_Decrypt` | **fixed** |
+| `test_registry_encrypt_missing_required_param[DES3_CBC]` | IV refused at `C_Encrypt`, not at Init | **fixed** |
+| `test_registry_decrypt_missing_required_param[DES3_CBC]` | same | **fixed** |
+| `TestDES3KeySizeBoundary::test_des3_below_min_is_refused` | "weaker than advertised" | open |
+| `TestECKeySizeBoundary::test_ec_below_min_is_refused` | same, and passed → failed | open |
+| `test_ecdh_montgomery_low_order_point[x25519-u0]` | module refuses, harness expected CKR_OK | open |
+| `test_ecdh_montgomery_low_order_point[x448-u0]` | same | open |
+
+### The two that are the module being right
+
+Both flag `CKR_OK` on a malformed PKCS#1 v1.5 block — one as a Bleichenbacher
+oracle, one as a "padding bypass", both CRITICAL. That `CKR_OK` is OpenSSL 3.2+
+implicit rejection: a deterministic pseudo-random plaintext instead of an error,
+which is the Marvin countermeasure. `fhsm_pkcs11.c` above `rsa_unwrap` has
+documented relying on it since before this run, with a measurement on 3.5.6.
+Returning an error here would rebuild the oracle. Raised upstream rather than
+changed, because a harness that scores the countermeasure CRITICAL pushes the
+next implementer to remove it.
+
+### The three that were real, and were the same defect twice
+
+Neither was a weakness — no operation ever ran without an IV, and a
+wrong-length RSA input never recovered a real plaintext — but both answered
+the wrong call with the wrong code. In both cases the correct rule was already
+in the tree on a neighbouring path: `rsa_unwrap` checked the ciphertext length,
+with the reasoning that makes it safe, and `C_Decrypt` never got it; the
+key-wrap IV had been validated at Init since #14, and the 3DES one never was.
+A scoped re-run after the fix
+(`FHSM_PKCS11CHECK_MATCH="test_rsa_ciphertext_wrong_length or (missing_required_param and DES3_CBC)"`)
+passed all three.
+
+### The four still open
+
+The two key-size boundaries say the module performed an operation weaker than
+it advertises. The EC one passes under `nist-approved-only` and fails here, so
+something in this profile widens what is accepted — not yet read. The two
+low-order-point cases are the module refusing a u=0 point, which RFC 7748 §6.1
+permits; the harness expected success. Whether `CKR_FUNCTION_FAILED` is the
+right refusal is a smaller question than whether refusing is.
+
+None of the nine touches the default build: eight are in mechanisms only this
+profile compiles in, and the EC boundary behaves in the approved one.

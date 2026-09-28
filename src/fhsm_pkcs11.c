@@ -7938,7 +7938,9 @@ static fhsm_rv_t fhsm_rsa_v15_unwrap(const uint8_t *priv_der, size_t priv_len,
      * unlike a check on the decryption result. */
     int sz = EVP_PKEY_get_size(pkey);
     if (sz <= 0) { EVP_PKEY_free(pkey); return FHSM_RV_FUNCTION_FAILED; }
-    if (in_len != (size_t)sz) { EVP_PKEY_free(pkey); return 0x00000110UL; }
+    /* CKR_WRAPPED_KEY_LEN_RANGE, not CKR_WRAPPED_KEY_INVALID: PKCS#11 has a
+     * code for exactly this case, and until 2026-09-28 this used the vaguer one. */
+    if (in_len != (size_t)sz) { EVP_PKEY_free(pkey); return 0x00000112UL; }
 
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
     if (!ctx || EVP_PKEY_decrypt_init(ctx) <= 0
@@ -8298,9 +8300,30 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         memcpy(op->iv, pMechanism->pParameter, 16);
         op->have_iv = 1;
     }
-    /* 3DES-CBC (non-FIPS) : 8-byte IV passed directly as pParameter. */
-    if (pMechanism->mechanism == 0x00000133UL /* CKM_DES3_CBC */ &&
-        pMechanism->pParameter && pMechanism->ulParameterLen == 8) {
+    /* 3DES-CBC (non-approved) : the 8-byte IV is pParameter itself, and it is
+     * required -- CBC has no default IV in PKCS#11 v3.2 §6.3.
+     *
+     * This used to copy the IV when it was well formed and otherwise do
+     * nothing, so C_EncryptInit / C_DecryptInit with no parameter, or one of
+     * the wrong length, returned CKR_OK. The refusal came one call later, at
+     * C_Encrypt, as CKR_ARGUMENTS_BAD. No encryption ever ran without an IV,
+     * so this was never a zero-IV weakness -- but the parameter was judged at
+     * the wrong call, with the wrong code, and a caller who checked the Init
+     * return was told the mechanism was ready when it was not.
+     *
+     * Same shape as #14, where the key-wrap IV was honoured on none of four
+     * entry points: a rule wired to one of the paths that reach the state and
+     * not the other. Found 2026-09-28, the first time the all-mechanisms
+     * profile went through the pkcs11-check corpus, as
+     * TestBadParameters::test_registry_{encrypt,decrypt}_missing_required_param
+     * [DES3_CBC].
+     *
+     * The profile check in C_EncryptInit / C_DecryptInit runs before this, so
+     * a nist-approved-only build still answers CKR_MECHANISM_INVALID for 3DES
+     * rather than complaining about a parameter it would never use. */
+    if (pMechanism->mechanism == 0x00000133UL /* CKM_DES3_CBC */) {
+        if (!pMechanism->pParameter || pMechanism->ulParameterLen != 8)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
         memcpy(op->iv, pMechanism->pParameter, 8);
         op->have_iv = 1;
     }
@@ -9023,6 +9046,8 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
     if (op->mechanism == 0x00000133UL /* CKM_DES3_CBC */) {
         if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         if (kt != CKK_DES3) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        /* Unreachable since op_init refuses a missing IV with
+         * CKR_MECHANISM_PARAM_INVALID. Kept as a second line, not as the check. */
         if (!op->have_iv)   { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
         if (kvl != 24)      { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
         EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "DES-EDE3-CBC", NULL);
@@ -9302,6 +9327,29 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         const uint8_t *pp = kv;
         EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &pp, (long)kvl);
         if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
+        /* A ciphertext that is not modulus-sized is refused before anything is
+         * decrypted. OpenSSL rejects one that is too long, but takes a shorter
+         * one as a smaller integer; implicit rejection then hands back
+         * pseudo-random bytes and the call returned CKR_OK for input that was
+         * never a ciphertext under this key.
+         *
+         * rsa_unwrap below had this check all along, with the reasoning that
+         * makes it safe: it is a check on the CIPHERTEXT, which the caller
+         * controls and already knows, so it reveals nothing about the
+         * plaintext -- unlike any check on the decryption result, which would
+         * rebuild the oracle implicit rejection removes. C_Decrypt never got
+         * it. Found 2026-09-28 as TestDecryptDataErrors::
+         * test_rsa_ciphertext_wrong_length, on the first all-mechanisms run.
+         * Placed before the size query too: a wrong-length input has no
+         * output size to report. */
+        {
+            int modlen = EVP_PKEY_get_size(pkey);
+            if (modlen <= 0) { EVP_PKEY_free(pkey); op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
+            if (ulEncLen != (CK_ULONG)modlen) {
+                EVP_PKEY_free(pkey); op->active = 0;
+                return FHSM_RV_ENCRYPTED_DATA_LEN_RANGE;
+            }
+        }
         EVP_PKEY_CTX *dctx = EVP_PKEY_CTX_new(pkey, NULL);
         if (!dctx || EVP_PKEY_decrypt_init(dctx) <= 0
             || EVP_PKEY_CTX_set_rsa_padding(dctx, pad) <= 0) {
@@ -9496,6 +9544,8 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
     if (op->mechanism == 0x00000133UL /* CKM_DES3_CBC */) {
         if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         if (kt != CKK_DES3) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        /* Unreachable since op_init refuses a missing IV with
+         * CKR_MECHANISM_PARAM_INVALID. Kept as a second line, not as the check. */
         if (!op->have_iv)   { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
         if (kvl != 24)      { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
         EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "DES-EDE3-CBC", NULL);

@@ -8,6 +8,32 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **3DES-CBC accepted a missing IV at Init, and RSA v1.5 / X.509 decryption
+  accepted a ciphertext of the wrong length.** Both found the first time the
+  `all-mechanisms` profile went through the pkcs11-check corpus, and both are
+  the same defect as #14: the correct rule was already in the tree, on a
+  neighbouring path.
+
+  `CKM_DES3_CBC` with no parameter, or one not 8 bytes long, returned `CKR_OK`
+  from `C_EncryptInit` / `C_DecryptInit` and was refused one call later at
+  `C_Encrypt` as `CKR_ARGUMENTS_BAD`. No encryption ever ran without an IV.
+  It is now `CKR_MECHANISM_PARAM_INVALID` at Init, after the profile check, so
+  a `nist-approved-only` build still answers `CKR_MECHANISM_INVALID` first.
+
+  `C_Decrypt` under `CKM_RSA_PKCS` / `CKM_RSA_X_509` did not compare the input
+  to the modulus length. OpenSSL takes a shorter input as a smaller integer;
+  implicit rejection then returned pseudo-random bytes with `CKR_OK`. It is now
+  `CKR_ENCRYPTED_DATA_LEN_RANGE`, on the size query as well. `rsa_unwrap` had
+  this check all along, with the reasoning that makes it safe — it examines
+  the ciphertext, which the caller already knows, not the result. Its own
+  length refusal now uses `CKR_WRAPPED_KEY_LEN_RANGE` rather than the vaguer
+  `CKR_WRAPPED_KEY_INVALID`.
+
+  Two further findings of that run are the module being right: the
+  "Bleichenbacher oracle" and "padding bypass" failures are OpenSSL's implicit
+  rejection, the Marvin countermeasure, which this code relies on deliberately.
+  Four remain open and are recorded in `docs/PKCS11_CHECK_FINDINGS.md`.
+
 * **`C_Logout` reported success when nobody was logged in.** PKCS#11 v3.2
   §5.6.8 lists `CKR_USER_NOT_LOGGED_IN` among its returns;
   `fhsm_session_logout` returned `CKR_OK` unconditionally, so a logout on a

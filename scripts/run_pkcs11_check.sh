@@ -221,15 +221,6 @@ if [ -z "${FHSM_ALLOW_STALE_MODULE:-}" ]; then
     fi
 fi
 
-{
-    echo "pkcs11-check $HARNESS_VERSION"
-    echo "openssl      $OPENSSL_VERSION"
-    echo "module       $MODULE"
-    echo "module-sha256 $MODULE_SHA"
-    echo "module-vs-tree $([ -n "$STALE" ] && echo "STALE (override)" || echo "up to date")"
-    echo "date         $(date -Is)"
-} > "$REPORTS/provenance.txt"
-
 # The build profile of the module under test, read out of the module itself.
 #
 # Not out of src/gen and not out of the stamp: those say what the TREE is,
@@ -259,6 +250,20 @@ module_profile() {
     esac
 }
 MODULE_PROFILE="$(module_profile "$MODULE")"
+
+{
+    echo "pkcs11-check $HARNESS_VERSION"
+    echo "openssl      $OPENSSL_VERSION"
+    echo "module       $MODULE"
+    echo "module-sha256 $MODULE_SHA"
+    # The profile belongs in the archived record, not only on stdout: on
+    # 2026-09-27 the one question about a finished run that mattered -- which
+    # profile did it test? -- had no answer in the directory it left behind.
+    echo "module-profile $MODULE_PROFILE"
+    echo "module-vs-tree $([ -n "$STALE" ] && echo "STALE (override)" || echo "up to date")"
+    echo "date         $(date -Is)"
+} > "$REPORTS/provenance.txt"
+
 
 echo "== harness =="
 echo "  pkcs11-check : $HARNESS_VERSION   (workflows pin $WORKFLOW_PIN)"

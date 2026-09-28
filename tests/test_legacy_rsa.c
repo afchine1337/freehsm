@@ -61,7 +61,7 @@ int main(void){
   CK_SESSION_HANDLE s;OS(0,4|2,0,0,&s);LI(s,0,so,8);IP(s,us,8);LI(s,1,us,8);
   CK_ULONG mn=0;GML(0,0,&mn);CK_ULONG*ml=calloc(mn,sizeof(CK_ULONG));GML(0,ml,&mn);
   int strict=1;for(CK_ULONG i=0;i<mn;i++)if(ml[i]==0x1){strict=0;break;}free(ml);
-  printf("test_legacy_rsa : profile = %s\n",strict?"nist-approved-only":"interop");
+  printf("test_legacy_rsa : profile = %s\n",strict?"nist-approved-only":"all-mechanisms");
   CK_MECHANISM kg={0x0000,0,0};/*CKM_RSA_PKCS_KEY_PAIR_GEN*/
   CK_OBJECT_HANDLE pub=0,prv=0;CK_RV rv=GKP(s,&kg,0,0,0,0,&pub,&prv);
   if(rv){fprintf(stderr,"RSA keypair 0x%lx\n",rv);return 2;}
@@ -74,6 +74,27 @@ int main(void){
   rc|=rt(s,0x1,pub,prv,msg,16,"RSA-PKCS");
   CK_BYTE raw[256];for(int i=0;i<256;i++)raw[i]=(CK_BYTE)(i&0x7f);raw[0]=0;
   rc|=rt(s,0x3,pub,prv,raw,256,"RSA-X509");
+  /* A ciphertext that is not modulus-sized (256 bytes for this 2048-bit key)
+   * is refused with CKR_ENCRYPTED_DATA_LEN_RANGE (0x41), for both mechanisms
+   * and on the size query as well as the real call. Until 2026-09-28 C_Decrypt
+   * had no such check: a short input was taken as a smaller integer, implicit
+   * rejection returned pseudo-random bytes, and the call said CKR_OK. The
+   * unwrap path had the check all along. After each refusal the operation is
+   * closed, so the next DI must succeed rather than return OPERATION_ACTIVE. */
+  {
+    CK_ULONG mechs[2]={0x1,0x3}; const char*names[2]={"RSA-PKCS","RSA-X509"};
+    CK_BYTE shortct[255]; memset(shortct,0x5a,sizeof shortct);
+    for(int k=0;k<2;k++){
+      CK_MECHANISM m={mechs[k],0,0}; CK_BYTE pt[512]; CK_ULONG pl=512; CK_RV r;
+      if((r=DI(s,&m,prv))){fprintf(stderr,"  FAIL %s DecInit 0x%lx\n",names[k],r);rc|=1;continue;}
+      r=DE(s,shortct,255,NULL,&pl);
+      if(r!=0x41UL){fprintf(stderr,"  FAIL %s size query on 255 bytes -> 0x%lx, want 0x41\n",names[k],r);rc|=1;continue;}
+      if((r=DI(s,&m,prv))){fprintf(stderr,"  FAIL %s DecInit after refusal -> 0x%lx (op left open?)\n",names[k],r);rc|=1;continue;}
+      pl=512; r=DE(s,shortct,255,pt,&pl);
+      if(r!=0x41UL){fprintf(stderr,"  FAIL %s decrypt of 255 bytes -> 0x%lx, want 0x41\n",names[k],r);rc|=1;continue;}
+      printf("  %s refuses a 255-byte ciphertext (0x41), query and call : OK\n",names[k]);
+    }
+  }
   /* SHA1-RSA-PKCS sign+verify */
   CK_MECHANISM sm={0x6,0,0};CK_BYTE smsg[32];for(int i=0;i<32;i++)smsg[i]=(CK_BYTE)i;
   CK_BYTE sig[512];CK_ULONG sl=512;
