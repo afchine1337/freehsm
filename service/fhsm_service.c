@@ -2417,7 +2417,12 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         char *e = NULL;
         if (!strcmp(argv[i], "--profile")) {
-            puts(fhsm_build_fips_strict ? "nist-approved-only" : "interop");
+            /* The canonical profile names since 2026-09-26. This printed "interop"
+             * for two days after the rename, because the rename searched for the
+             * name in backticks and in phrases, not as a bare quoted string --
+             * and the three service scripts compared against the same stale word,
+             * so the pair agreed with each other and with nothing else. */
+            puts(fhsm_build_fips_strict ? "nist-approved-only" : "all-mechanisms");
             return 0;
         }
         else if (!strcmp(argv[i], "--socket") && i + 1 < argc) sock_path = argv[++i];

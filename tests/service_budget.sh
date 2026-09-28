@@ -24,7 +24,7 @@ ok()  { if [ "$1" = 0 ]; then say "$2" OK; else say "$2" FAIL; fail=$((fail+1));
 # The profile the binary carries, not the profile the tree was generated for.
 #
 # This used to read `[ "$("$SVC" --profile)" != "interop" ]` and print "was
-# built nist-approved-only" for anything that was not the word `all-mechanisms` -- including
+# built nist-approved-only" for anything that was not the word `interop` -- including
 # the empty string you get when the binary does not run at all. Under a TSAN
 # build that cannot map its shadow memory, that is exactly what happens, and
 # the message sent the reader to rebuild a profile that was already correct.
@@ -35,7 +35,7 @@ if [ -z "$p" ]; then
     "$SVC" --profile >&2 2>&1 || true
     exit 2
 fi
-if [ "$p" != "interop" ]; then
+if [ "$p" != "all-mechanisms" ]; then
     echo "service_budget.sh: $SVC was built $p, which cannot sign with the" >&2
     echo "  composite mechanism. Rebuild: make PROFILE=all-mechanisms" >&2
     exit 2

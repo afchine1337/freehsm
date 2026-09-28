@@ -89,7 +89,7 @@ int main(void) {
      * of the run asserts the whole behaviour that follows from it. */
     int strict = (gen == CKR_MECHANISM_INVALID);
     printf("=== test_composite_p11 : Composite ML-DSA via PKCS#11 (#112) ===\n");
-    printf("    profile detected: %s\n\n", strict ? "nist-approved-only" : "interop");
+    printf("    profile detected: %s\n\n", strict ? "nist-approved-only" : "all-mechanisms");
 
     if (strict) {
         printf("[nist-approved-only] the mechanism must be refused at EVERY entry point\n");

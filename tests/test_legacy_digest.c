@@ -71,7 +71,7 @@ int main(void) {
     CK_SESSION_HANDLE s; OS(0, 4|2, NULL, NULL, &s);
 
     int interop = advertised(GML, 0x220);   /* SHA-1 advertised iff interop */
-    printf("test_legacy_digest : profile = %s\n", interop ? "interop" : "nist-approved-only");
+    printf("test_legacy_digest : profile = %s\n", interop ? "all-mechanisms" : "nist-approved-only");
     int rc = 0;
     rc |= check_digest(h, s, 0x220, "a9993e364706816aba3e25717850c26c9cd0d89d", interop); /* SHA-1 */
     rc |= check_digest(h, s, 0x210, "900150983cd24fb0d6963f7d28e17f72", interop);         /* MD5   */

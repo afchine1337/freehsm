@@ -88,7 +88,7 @@ int main(void) {
      * is counted. */
     int strict = 1; for (CK_ULONG i = 0; i < mn; ++i) if (ml[i] == 0x131) { strict = 0; break; }
     free(ml);
-    printf("test_legacy_cipher : profile = %s\n", strict ? "nist-approved-only" : "interop");
+    printf("test_legacy_cipher : profile = %s\n", strict ? "nist-approved-only" : "all-mechanisms");
 
     /* AES key for ECB (imported). */
     CK_ULONG cls = 4, kt = 0x1F; CK_BYTE ak[16]; for (int i = 0; i < 16; ++i) ak[i] = (CK_BYTE)i;

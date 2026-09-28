@@ -57,12 +57,12 @@ chmod 600 "$FHSM_TOKENS_DIR/pin"
 # so that "not authorised" and "no such key" can be told apart -- or rather,
 # proved indistinguishable, which is what docs/RATE_LIMIT.md asks for.
 # Ask the binary under test, not a sibling. fhsm-csr is built separately and
-# can be interop while the service is nist-approved-only; the guard that consulted it
+# can be all-mechanisms while the service is nist-approved-only; the guard that consulted it
 # passed while /sign failed for exactly the reason the guard exists to catch.
 # The profile the binary carries, not the profile the tree was generated for.
 #
 # This used to read `[ "$("$SVC" --profile)" != "interop" ]` and print "was
-# built nist-approved-only" for anything that was not the word `all-mechanisms` -- including
+# built nist-approved-only" for anything that was not the word `interop` -- including
 # the empty string you get when the binary does not run at all. Under a TSAN
 # build that cannot map its shadow memory, that is exactly what happens, and
 # the message sent the reader to rebuild a profile that was already correct.
@@ -73,7 +73,7 @@ if [ -z "$p" ]; then
     "$SVC" --profile >&2 2>&1 || true
     exit 2
 fi
-if [ "$p" != "interop" ]; then
+if [ "$p" != "all-mechanisms" ]; then
     echo "service_guards.sh: $SVC was built $p, which cannot sign with the" >&2
     echo "  composite mechanism. Rebuild: make PROFILE=all-mechanisms" >&2
     exit 2
