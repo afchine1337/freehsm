@@ -2318,7 +2318,7 @@ Eleven failures, two of them the EDDSA pair already open upstream. Nine new:
 | `TestDecryptDataErrors::test_rsa_ciphertext_wrong_length` | no length check in `C_Decrypt` | **fixed** |
 | `test_registry_encrypt_missing_required_param[DES3_CBC]` | IV refused at `C_Encrypt`, not at Init | **fixed** |
 | `test_registry_decrypt_missing_required_param[DES3_CBC]` | same | **fixed** |
-| `TestDES3KeySizeBoundary::test_des3_below_min_is_refused` | "weaker than advertised" | open |
+| `TestDES3KeySizeBoundary::test_des3_below_min_is_refused` | request overridden, not refused | **fixed** |
 | `TestECKeySizeBoundary::test_ec_below_min_is_refused` | curves outside the advertised range accepted | **fixed** |
 | `test_ecdh_montgomery_low_order_point[x25519-u0]` | module refuses, harness expected CKR_OK | open |
 | `test_ecdh_montgomery_low_order_point[x448-u0]` | same | open |
@@ -2365,10 +2365,25 @@ the check, so the advertisement and the enforcement cannot drift apart again.
 `tests/test_ec_curve_bounds.c` asserts it in both profiles, including that
 brainpool still works where it is meant to. The scoped harness re-run passes.
 
-### The three still open
+### 3DES: a request overridden rather than refused
 
-The 3DES key-size boundary says the module performed an operation weaker than
-it advertises — not yet read. The two
+Read from the harness's own source before concluding. It takes
+`ulMinKeySize` from `C_GetMechanismInfo(CKM_DES3_KEY_GEN)` — 8, which it reads
+as bytes — and asks for a key with `CKA_VALUE_LEN = 7`. The module answered
+`CKR_OK`.
+
+No 56-bit key was ever made. 3DES key generation fixed `key_len = 24` and never
+looked at `CKA_VALUE_LEN`; the comment above it even said "no CKA_VALUE_LEN".
+So the caller asked for 7 bytes, got 24, and was told its request had been met.
+Two causes, as with EC: the advertisement was wrong — 3DES shared an 8..24
+range with single DES, which is never implemented here — and the enforcement
+was absent.
+
+3DES now advertises 24..24 and refuses any other `CKA_VALUE_LEN` with
+`CKR_TEMPLATE_INCONSISTENT`. The scoped re-run passes both boundaries, below
+and above.
+
+### The two still open The two
 low-order-point cases are the module refusing a u=0 point, which RFC 7748 §6.1
 permits; the harness expected success. Whether `CKR_FUNCTION_FAILED` is the
 right refusal is a smaller question than whether refusing is.

@@ -129,7 +129,35 @@ int main(void) {
         return 0;
     }
 
-    /* interop : 3DES round-trips too. */
+    /* 3DES has one key length, and the module now says so and holds to it
+     * (2026-09-28). It advertised 8..24 and ignored CKA_VALUE_LEN, so a
+     * request for 7 bytes returned CKR_OK and a 24-byte key; pkcs11-check
+     * took that for a 56-bit key made below the advertised minimum. */
+    {
+        typedef struct { CK_ULONG mn, mx, fl; } MI;
+        CK_RV (*GMI)(CK_SLOT_ID, CK_ULONG, MI*); SY(GMI, "C_GetMechanismInfo");
+        MI mi = {0,0,0};
+        if (!GMI || GMI(0, 0x131, &mi) || mi.mn != 24 || mi.mx != 24) {
+            fprintf(stderr, "  FAIL DES3_KEY_GEN advertises %lu..%lu, want 24..24\n", mi.mn, mi.mx);
+            return 1;
+        }
+        printf("  CKM_DES3_KEY_GEN advertises 24..24 : OK\n");
+        CK_ULONG seven = 7, twentyfour = 24;
+        CK_ATTRIBUTE t7[]  = { { 0x161, &seven, sizeof seven } };            /* CKA_VALUE_LEN */
+        CK_ATTRIBUTE t24[] = { { 0x161, &twentyfour, sizeof twentyfour } };
+        CK_OBJECT_HANDLE h = 0; CK_RV r;
+        if ((r = GK(s, &kg, t7, 1, &h)) != 0xD1UL) {
+            fprintf(stderr, "  FAIL DES3 keygen with CKA_VALUE_LEN=7 -> 0x%lx, want 0xD1\n", (unsigned long)r);
+            return 1;
+        }
+        if ((r = GK(s, &kg, t24, 1, &h)) != 0) {
+            fprintf(stderr, "  FAIL DES3 keygen with CKA_VALUE_LEN=24 -> 0x%lx, want 0\n", (unsigned long)r);
+            return 1;
+        }
+        printf("  3DES keygen refuses CKA_VALUE_LEN=7 (0xD1), accepts 24 : OK\n");
+    }
+
+    /* all-mechanisms : 3DES round-trips too. */
     CK_OBJECT_HANDLE dk = 0;
     if ((rv = GK(s, &kg, NULL, 0, &dk))) { fprintf(stderr, "  FAIL DES3 keygen 0x%lx\n", rv); return 1; }
     printf("  3DES keygen : OK\n");

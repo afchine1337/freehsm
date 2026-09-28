@@ -1501,8 +1501,14 @@ static void fhsm_mech_keysizes_for(const char *fam,
     *mn = 0; *mx = 0;
     if (!fam) return;
     if (!strcmp(fam, "AES"))     { *mn = 16;   *mx = 32;   return; }
-    if (!strcmp(fam, "TDES") || !strcmp(fam, "DES"))
-                                 { *mn = 8;    *mx = 24;   return; }
+    /* 3DES has one key length. Grouped with single DES as 8..24 until
+     * 2026-09-28, which advertised 8-byte 3DES keys the module has never
+     * made -- key generation fixes key_len at 24 and C_Encrypt refuses any
+     * other. pkcs11-check read the 8, asked for a 7-byte key, and was told
+     * CKR_OK. CKM_DES_KEY_GEN itself is never implemented (dispatch_reject_fips),
+     * so "DES" keeps its own single length and advertises nothing usable. */
+    if (!strcmp(fam, "TDES"))    { *mn = 24;   *mx = 24;   return; }
+    if (!strcmp(fam, "DES"))     { *mn = 8;    *mx = 8;    return; }
     if (!strcmp(fam, "RSA"))     { *mn = 2048; *mx = 4096; return; }
     if (!strcmp(fam, "EC") || !strcmp(fam, "EdDSA") || !strcmp(fam, "ECM"))
                                  { *mn = FHSM_EC_MIN_BITS; *mx = FHSM_EC_MAX_BITS; return; }
@@ -2760,6 +2766,21 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         key_len = (uint32_t)req;
     } else if (pMechanism->mechanism == 0x00000131UL) {
         if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+        /* A 3DES key is 24 bytes and only 24. CKA_VALUE_LEN was ignored here:
+         * a template asking for 7 bytes got a 24-byte key and CKR_OK, so the
+         * caller was told its request had been met when it had been
+         * overridden. Nothing weak was ever made -- but a module that answers
+         * "done" to a request it did not carry out cannot be relied on to
+         * report the ones it does. Absent or 24 is accepted; anything else is
+         * a template the mechanism cannot satisfy. */
+        { long vl = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+          if (vl >= 0) {
+              CK_ULONG req = 0;
+              if (!pTemplate[vl].pValue || pTemplate[vl].ulValueLen != sizeof(CK_ULONG))
+                  return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+              memcpy(&req, pTemplate[vl].pValue, sizeof(CK_ULONG));
+              if (req != 24) return FHSM_RV_TEMPLATE_INCONSISTENT;
+          } }
         key_type = CKK_DES3; key_len = 24;
     } else {
         switch (pMechanism->mechanism) {

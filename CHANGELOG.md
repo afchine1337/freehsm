@@ -8,6 +8,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **3DES key generation ignored `CKA_VALUE_LEN`, and 3DES advertised a size it
+  never makes.** `CKM_DES3_KEY_GEN` fixed the key at 24 bytes whatever the
+  template asked for, so `CKA_VALUE_LEN = 7` returned `CKR_OK` and a 24-byte
+  key — a request overridden and reported as met. And the "TDES" family shared
+  an 8..24 range with single DES, which this module never implements. 3DES now
+  advertises 24..24 and refuses any other length with
+  `CKR_TEMPLATE_INCONSISTENT`. Found by pkcs11-check as a CRITICAL below-minimum
+  keygen on the first `all-mechanisms` corpus run; no weak key was ever
+  produced, which the harness could not see from the return code alone.
+
 * **An all-mechanisms build accepted EC curves weaker than it advertised.**
   `C_GetMechanismInfo(CKM_EC_KEY_PAIR_GEN)` reports 256..521 bits, but
   `match_curve_ex()` passed every curve outside its NIST table to OpenSSL's
