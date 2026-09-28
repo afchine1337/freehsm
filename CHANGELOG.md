@@ -8,6 +8,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **An all-mechanisms build accepted EC curves weaker than it advertised.**
+  `C_GetMechanismInfo(CKM_EC_KEY_PAIR_GEN)` reports 256..521 bits, but
+  `match_curve_ex()` passed every curve outside its NIST table to OpenSSL's
+  registry — 82 curves, down to `secp112r1` — so key generation and import
+  would take a 112-bit curve. The fallback existed for brainpool and nothing
+  bounded it to that. `nist-approved-only` builds never reached it.
+
+  Curves from the registry must now have a degree within the advertised range
+  and a prime field. Thirteen of 82 remain, brainpool 256–512 among them.
+  The bounds are one pair of constants shared by the advertisement and the
+  check. Found by pkcs11-check as `test_ec_below_min_is_refused`, a CRITICAL
+  self-contradiction, on the first corpus run of that profile; asserted in
+  both profiles by `tests/test_ec_curve_bounds.c`.
+
+  Expect Wycheproof EC counts under `all-mechanisms` to move: vectors on
+  curves below 256 bits now meet a refusal rather than an operation.
+
 * **3DES-CBC accepted a missing IV at Init, and RSA v1.5 / X.509 decryption
   accepted a ciphertext of the wrong length.** Both found the first time the
   `all-mechanisms` profile went through the pkcs11-check corpus, and both are

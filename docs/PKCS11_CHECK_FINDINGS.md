@@ -2319,7 +2319,7 @@ Eleven failures, two of them the EDDSA pair already open upstream. Nine new:
 | `test_registry_encrypt_missing_required_param[DES3_CBC]` | IV refused at `C_Encrypt`, not at Init | **fixed** |
 | `test_registry_decrypt_missing_required_param[DES3_CBC]` | same | **fixed** |
 | `TestDES3KeySizeBoundary::test_des3_below_min_is_refused` | "weaker than advertised" | open |
-| `TestECKeySizeBoundary::test_ec_below_min_is_refused` | same, and passed → failed | open |
+| `TestECKeySizeBoundary::test_ec_below_min_is_refused` | curves outside the advertised range accepted | **fixed** |
 | `test_ecdh_montgomery_low_order_point[x25519-u0]` | module refuses, harness expected CKR_OK | open |
 | `test_ecdh_montgomery_low_order_point[x448-u0]` | same | open |
 
@@ -2346,14 +2346,32 @@ A scoped re-run after the fix
 (`FHSM_PKCS11CHECK_MATCH="test_rsa_ciphertext_wrong_length or (missing_required_param and DES3_CBC)"`)
 passed all three.
 
-### The four still open
+### The EC boundary: the one of the nine that was a real weakness
 
-The two key-size boundaries say the module performed an operation weaker than
-it advertises. The EC one passes under `nist-approved-only` and fails here, so
-something in this profile widens what is accepted — not yet read. The two
+`C_GetMechanismInfo(CKM_EC_KEY_PAIR_GEN)` reports 256..521 bits. Under
+`all-mechanisms`, `match_curve_ex()` handed every curve outside its three-entry
+NIST table to OpenSSL's registry — 82 curves on the build host, from
+`secp112r1` to `sect571k1` — so the module would generate or import a 112-bit
+key while advertising a 256-bit minimum. The fallback's own comment said it
+was there for brainpool; nothing bounded it to that. Under `nist-approved-only`
+the fallback is refused outright, which is why the same test passed there.
+
+It now accepts only what the module advertises: degree within 256..521, and a
+prime field, since nothing advertises binary curves. Thirteen of the 82
+survive — the three NIST curves, secp256k1, brainpool 256 through 512, and SM2.
+`FHSM_EC_MIN_BITS` / `FHSM_EC_MAX_BITS` now feed both `C_GetMechanismInfo` and
+the check, so the advertisement and the enforcement cannot drift apart again.
+`tests/test_ec_curve_bounds.c` asserts it in both profiles, including that
+brainpool still works where it is meant to. The scoped harness re-run passes.
+
+### The three still open
+
+The 3DES key-size boundary says the module performed an operation weaker than
+it advertises — not yet read. The two
 low-order-point cases are the module refusing a u=0 point, which RFC 7748 §6.1
 permits; the harness expected success. Whether `CKR_FUNCTION_FAILED` is the
 right refusal is a smaller question than whether refusing is.
 
 None of the nine touches the default build: eight are in mechanisms only this
-profile compiles in, and the EC boundary behaves in the approved one.
+profile compiles in, and the EC boundary behaved in the approved one — the
+approved profile never reached the fallback that was unbounded.

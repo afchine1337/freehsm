@@ -1489,6 +1489,13 @@ static CK_ULONG fhsm_mech_flags_for(const char *op) {
 /* Coarse key-size hints by family. Precise per-mechanism reporting is
  * increment 2 ; 0/0 is spec-valid where a key size is not meaningful
  * (hashes, PQ parameter-set mechanisms, KDFs). */
+/* The EC key sizes this module advertises through C_GetMechanismInfo, and
+ * enforces in match_curve_ex(). One definition for both, because they were
+ * two facts that had to agree and did not: 256..521 was advertised while the
+ * all-mechanisms build accepted any curve OpenSSL knew, down to secp112r1. */
+#define FHSM_EC_MIN_BITS 256u
+#define FHSM_EC_MAX_BITS 521u
+
 static void fhsm_mech_keysizes_for(const char *fam,
                                     CK_ULONG *mn, CK_ULONG *mx) {
     *mn = 0; *mx = 0;
@@ -1498,7 +1505,7 @@ static void fhsm_mech_keysizes_for(const char *fam,
                                  { *mn = 8;    *mx = 24;   return; }
     if (!strcmp(fam, "RSA"))     { *mn = 2048; *mx = 4096; return; }
     if (!strcmp(fam, "EC") || !strcmp(fam, "EdDSA") || !strcmp(fam, "ECM"))
-                                 { *mn = 256;  *mx = 521;  return; }
+                                 { *mn = FHSM_EC_MIN_BITS; *mx = FHSM_EC_MAX_BITS; return; }
     if (!strcmp(fam, "HMAC") || !strcmp(fam, "KMAC") || !strcmp(fam, "GENERIC"))
                                  { *mn = 1;    *mx = 64;   return; }
 }
@@ -5773,7 +5780,26 @@ static const char *match_curve_ex(const uint8_t *der, size_t len,
      * be refused rather than turned into a curve name lookup failure later. */
     EC_GROUP *g = EC_GROUP_new_by_curve_name(nid);
     if (!g) return NULL;
+    /* Only a curve this module would advertise. The comment above meant
+     * brainpool, and the code took every curve in OpenSSL's registry -- 82 on
+     * the build host, from secp112r1 at 112 bits to sect571k1 at 571. So an
+     * all-mechanisms build generated and imported keys on curves weaker than
+     * the minimum its own C_GetMechanismInfo reports, which pkcs11-check
+     * scored as a CRITICAL self-contradiction on the first run of that profile
+     * (TestECKeySizeBoundary::test_ec_below_min_is_refused, 2026-09-28).
+     *
+     * Two conditions, both taken from what the module says of itself:
+     *   - degree inside [FHSM_EC_MIN_BITS, FHSM_EC_MAX_BITS];
+     *   - a prime field. Brainpool is prime, as are the three NIST curves in
+     *     the table; the binary-field sect and c2pnb families were never
+     *     intended here and nothing advertises them. Accepting them would be
+     *     the same contradiction by another route.
+     * Brainpool P256 through P512 survive; P160 through P224 do not. */
+    int deg = EC_GROUP_get_degree(g);
+    int prime = (EC_GROUP_get_field_type(g) == NID_X9_62_prime_field);
     EC_GROUP_free(g);
+    if (!prime || deg < (int)FHSM_EC_MIN_BITS || deg > (int)FHSM_EC_MAX_BITS)
+        return NULL;
     if (non_approved) *non_approved = 1;
     return OBJ_nid2sn(nid);
 }
