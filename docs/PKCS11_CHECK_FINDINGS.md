@@ -2256,3 +2256,37 @@ times the real number: pytest writes one record per phase, and setup and
 teardown both say `passed` for a test whose `call` says `skipped`. An early
 pass at this entry read "18 KMAC tests passed" from exactly that, for a
 mechanism the module does not implement. Filter on `when == "call"`.
+
+## Two runs of the same profile, a day apart (2026-09-28)
+
+Meant to be an `all-mechanisms` run. It was not: a bare `make integrity`
+regenerated the tree for the default profile before signing it, and the run
+tested `nist-approved-only` again. `run_pkcs11_check.sh` now prints the
+profile read out of the module itself, and refuses to start when
+`FHSM_EXPECT_PROFILE` disagrees.
+
+What the mistake produced instead is worth more than a re-run. Diffed by
+node-id against `reports/pkcs11-check-021` with `scripts/diff_pkcs11_runs.py`:
+
+    before : 92601 tests   module fd29c09b…   2026-09-26
+    after  : 92601 tests   module d74efa61…   2026-09-27
+
+    1 test(s) moved:
+        1  xfailed -> passed     TestLogoutErrors::test_logout_when_not_logged_in
+
+**That one test is the `C_Logout` fix**, made between the two builds: logout
+with nobody logged in now returns `CKR_USER_NOT_LOGGED_IN` where it returned
+`CKR_OK`. An external harness that reads no FreeHSM code scores it as fixed.
+
+**And nothing else moved.** Between the two modules sit a day's work — the
+three-axis rename, the SHA-384 documentation, the doc-twin synchronisation,
+the C_Logout change. Across 92 601 tests the only difference is the intended
+one.
+
+**The run-to-run noise is zero on this pair.** The same harness version, a day
+apart, gave the same outcome on 92 600 of 92 601 tests, and the one exception
+has a known cause. That refines, without settling, the −3 passed recorded for
+the 0.2.0 → 0.2.1 move: it was not the harness being noisy, it was the version.
+
+Archived as `reports/pkcs11-check-021b` rather than under the `-all` name it
+was run with, since it is not that.

@@ -230,6 +230,36 @@ fi
     echo "date         $(date -Is)"
 } > "$REPORTS/provenance.txt"
 
+# The build profile of the module under test, read out of the module itself.
+#
+# Not out of src/gen and not out of the stamp: those say what the TREE is,
+# and the tree and the .so can disagree -- a bare `make integrity` on an
+# all-mechanisms tree regenerates for the default profile, rebuilds, and signs
+# the result. On 2026-09-27 that sent a 45-minute corpus run against a
+# nist-approved-only module that was meant to be all-mechanisms, and nothing
+# printed the profile before the run started. The only evidence was afterwards,
+# in totals that matched the previous night's to within one test.
+#
+# fhsm_build_fips_strict is a local symbol in .rodata. Its section is taken
+# from the symbol table rather than assumed: debug sections have their own
+# address space, and at this symbol's address .debug_info and .debug_str hold
+# unrelated bytes -- a first version of this read whichever section objdump
+# listed first, and was right only because .rodata happened to come first.
+module_profile() {
+    _sym=$(objdump -t "$1" 2>/dev/null | awk '$NF=="fhsm_build_fips_strict"{print $1, $(NF-2); exit}')
+    [ -z "$_sym" ] && { echo "unknown (no symbol -- stripped?)"; return; }
+    _addr=${_sym%% *}; _sec=${_sym##* }
+    _b=$(objdump -s -j "$_sec" --start-address=0x$_addr \
+            --stop-address=$(printf '0x%x' $((0x$_addr + 4))) "$1" 2>/dev/null \
+         | awk '/^ [0-9a-f]+ / {print substr($2,1,2); exit}')
+    case "$_b" in
+        01) echo nist-approved-only ;;
+        00) echo all-mechanisms ;;
+        *)  echo "unknown (read '$_b' from $_sec)" ;;
+    esac
+}
+MODULE_PROFILE="$(module_profile "$MODULE")"
+
 echo "== harness =="
 echo "  pkcs11-check : $HARNESS_VERSION   (workflows pin $WORKFLOW_PIN)"
 if [ "$EXPECTED_VERSION" != "$WORKFLOW_PIN" ]; then
@@ -238,6 +268,13 @@ if [ "$EXPECTED_VERSION" != "$WORKFLOW_PIN" ]; then
 fi
 echo "  openssl      : $OPENSSL_VERSION"
 echo "  module       : $MODULE"
+echo "  profile      : $MODULE_PROFILE   (read from the module, not the tree)"
+if [ -n "${FHSM_EXPECT_PROFILE:-}" ] && [ "$MODULE_PROFILE" != "$FHSM_EXPECT_PROFILE" ]; then
+    echo "FATAL: FHSM_EXPECT_PROFILE=$FHSM_EXPECT_PROFILE but the module is $MODULE_PROFILE." >&2
+    echo "       Rebuild with PROFILE=$FHSM_EXPECT_PROFILE on EVERY make invocation," >&2
+    echo "       make integrity included -- a bare make restores the default." >&2
+    exit 2
+fi
 echo "  sha256       : $MODULE_SHA"
 if [ "$HARNESS_VERSION" != "$EXPECTED_VERSION" ]; then
     echo "  NOTE : this is not the pinned version. The run is still valid --"
