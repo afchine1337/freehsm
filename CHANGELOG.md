@@ -16,7 +16,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   bounded it to that. `nist-approved-only` builds never reached it.
 
   Curves from the registry must now have a degree within the advertised range
-  and a prime field. Thirteen of 82 remain, brainpool 256–512 among them.
+  and a prime field. Twelve of 82 remain, brainpool 256–512 among them; SM2 passes the range
+  check and is excluded by name, since no SM2 mechanism exists here to use it.
   The bounds are one pair of constants shared by the advertisement and the
   check. Found by pkcs11-check as `test_ec_below_min_is_refused`, a CRITICAL
   self-contradiction, on the first corpus run of that profile; asserted in

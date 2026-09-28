@@ -5800,6 +5800,18 @@ static const char *match_curve_ex(const uint8_t *der, size_t len,
     EC_GROUP_free(g);
     if (!prime || deg < (int)FHSM_EC_MIN_BITS || deg > (int)FHSM_EC_MAX_BITS)
         return NULL;
+    /* SM2 passes both tests -- prime, 256 bits -- and is refused anyway. Its
+     * curve is meant for the SM2 signature scheme, which has its own signing
+     * equation and hashes a signer identifier with SM3; this module implements
+     * no SM2 mechanism. A key on that curve could only be used through
+     * CKM_ECDSA, producing a signature no SM2 verifier accepts. It passed the
+     * filter by coincidence, not by intent, so it is named here rather than
+     * left to the filter. Compared by short name rather than NID_sm2, so a
+     * header without the macro cannot turn the exclusion off in silence. */
+    {
+        const char *sn = OBJ_nid2sn(nid);
+        if (sn && strcmp(sn, "SM2") == 0) return NULL;
+    }
     if (non_approved) *non_approved = 1;
     return OBJ_nid2sn(nid);
 }

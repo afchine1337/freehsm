@@ -2357,8 +2357,9 @@ was there for brainpool; nothing bounded it to that. Under `nist-approved-only`
 the fallback is refused outright, which is why the same test passed there.
 
 It now accepts only what the module advertises: degree within 256..521, and a
-prime field, since nothing advertises binary curves. Thirteen of the 82
-survive — the three NIST curves, secp256k1, brainpool 256 through 512, and SM2.
+prime field, since nothing advertises binary curves. Twelve of the 82
+survive — the three NIST curves, secp256k1, and brainpool 256 through 512. SM2
+passes both tests and is excluded by name: this module has no SM2 mechanism.
 `FHSM_EC_MIN_BITS` / `FHSM_EC_MAX_BITS` now feed both `C_GetMechanismInfo` and
 the check, so the advertisement and the enforcement cannot drift apart again.
 `tests/test_ec_curve_bounds.c` asserts it in both profiles, including that

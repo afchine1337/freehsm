@@ -107,6 +107,11 @@ int main(void) {
     ok(keygen(s, "\x06\x05\x2b\x81\x04\x00\x10", 7) != 0,
        "sect283k1 (binary field) is refused");
 
+    /* SM2: prime and 256 bits, so the range check alone would let it through.
+     * Excluded by name, in both profiles -- the module has no SM2 mechanism. */
+    ok(keygen(s, "\x06\x08\x2a\x81\x1c\xcf\x55\x01\x82\x2d", 10) != 0,
+       "SM2 is refused (no SM2 mechanism to use it with)");
+
     /* Brainpool: the curve the fallback was written for. Present only in
      * all-mechanisms, where it must still work after the fix. */
     CK_RV bp = keygen(s, "\x06\x09\x2b\x24\x03\x03\x02\x08\x01\x01\x07", 11);
