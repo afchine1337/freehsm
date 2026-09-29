@@ -1445,8 +1445,43 @@ fhsm_rv_t dispatch_reject_fips(unsigned long, unsigned long,
 
 /* A mechanism is advertised iff it dispatches to a real handler in the
  * active profile (not the FIPS reject stub). */
+/* Can the providers loaded in this process serve X25519 and X448?
+ *
+ * Asked of OpenSSL rather than inferred from the build profile, because the
+ * two are independent. The build profile decides what is compiled in; whether
+ * the FIPS provider is loaded depends on whether the module is signed. A
+ * signed all-mechanisms module loads the FIPS provider, enables fips=yes by
+ * default and does not load the default provider -- and the FIPS provider has
+ * no X25519 or X448. So CKM_EC_MONTGOMERY_KEY_PAIR_GEN was advertised by every
+ * signed all-mechanisms build and failed every time: 0 passed and 1 607 xfailed
+ * across the X25519/X448 tests of the first corpus run of that profile,
+ * 2026-09-28. The keygen comment below already said the FIPS provider lacks
+ * them; it assumed that only happened in the strict profile.
+ *
+ * Local tests never saw it: they run under the integrity bypass, which loads
+ * the default provider instead.
+ *
+ * A failed fetch leaves an entry on OpenSSL's error queue, and the module
+ * prints that queue on some failure paths. The probe is bracketed so it cannot
+ * appear in the diagnosis of an unrelated operation. */
+static int fhsm_ecm_available(void) {
+    ERR_set_mark();
+    EVP_KEYMGMT *a = EVP_KEYMGMT_fetch(NULL, "X25519", NULL);
+    EVP_KEYMGMT *b = EVP_KEYMGMT_fetch(NULL, "X448",   NULL);
+    int ok = (a != NULL && b != NULL);
+    EVP_KEYMGMT_free(a);
+    EVP_KEYMGMT_free(b);
+    ERR_pop_to_mark();
+    return ok;
+}
+
+/* Advertised means operational in THIS process, not merely compiled in:
+ * a mechanism whose algorithm no loaded provider can serve is not offered. */
 static int fhsm_mech_advertised(const fhsm_mech_entry_t *e) {
-    return e != NULL && e->handler != dispatch_reject_fips;
+    if (e == NULL || e->handler == dispatch_reject_fips) return 0;
+    if (e->family && strcmp(e->family, "ECM") == 0 && !fhsm_ecm_available())
+        return 0;
+    return 1;
 }
 
 /* One operation class -> CK_MECHANISM_INFO flags. */
@@ -4329,7 +4364,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     /* Same reason as CKM_EC_MONTGOMERY_KEY_PAIR_GEN: the FIPS provider has no
      * X25519 or X448 to fetch. A Montgomery key cannot exist in a strict
      * build, but a caller could still present one imported from elsewhere. */
-    if (base_is_ecm && fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+    if (base_is_ecm && (fhsm_build_fips_strict || !fhsm_ecm_available()))
+        return FHSM_RV_MECHANISM_INVALID;
     if (!base_is_ecm && kt != (uint32_t)CKK_EC)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     const uint8_t *dp = kv;
@@ -6061,6 +6097,10 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * commits ago: tests/test_advertised_operational does not probe key
          * generation, so its ratchet could not catch it. */
         if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+        /* Not advertised when no loaded provider can make these keys (see
+         * fhsm_ecm_available), and refused the same way rather than attempted
+         * and failed with CKR_FUNCTION_FAILED. */
+        if (!fhsm_ecm_available()) return FHSM_RV_MECHANISM_INVALID;
         /* Advertised and refused until now, like its Edwards neighbour. The
          * keys it makes are what CKM_X25519_DERIVE and CKM_X448_DERIVE will
          * need; those two are still in

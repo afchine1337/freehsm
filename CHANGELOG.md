@@ -8,6 +8,22 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **A signed `all-mechanisms` module advertised X25519 and X448, and could not
+  make either key.** A signed module loads the OpenSSL FIPS provider, which
+  implements neither curve, so `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` returned
+  `CKR_FUNCTION_FAILED` on every call. The strict-profile guard assumed only
+  `nist-approved-only` builds lack them; whether a provider can serve a curve
+  depends on what is loaded, not on what is compiled. The module now asks
+  OpenSSL (`fhsm_ecm_available()`), and when the answer is no, the mechanism
+  is left out of `C_GetMechanismList`, `C_GetMechanismInfo` answers
+  `CKR_MECHANISM_INVALID`, and key generation and `CKM_ECDH1_DERIVE` on a
+  Montgomery key refuse the same way. Local tests had not seen it because they run
+  under the integrity bypass, which loads the default provider. Found by
+  pkcs11-check on the first `all-mechanisms` corpus run: 1 607 X25519/X448
+  tests not operational, and two HIGH findings, `test_ecdh_montgomery_low_order_point`
+  for X25519 and X448, whose failure was the key generation that precedes the
+  probe, not the low-order point.
+
 * **3DES key generation ignored `CKA_VALUE_LEN`, and 3DES advertised a size it
   never makes.** `CKM_DES3_KEY_GEN` fixed the key at 24 bytes whatever the
   template asked for, so `CKA_VALUE_LEN = 7` returned `CKR_OK` and a 24-byte
