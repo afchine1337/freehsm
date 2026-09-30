@@ -118,7 +118,7 @@ fhsm_rv_t fhsm_session_login(unsigned long h, fhsm_role_t role,
      * is the boundary that the PKCS#11 façade calls. */
     if (!s->token) return FHSM_RV_TOKEN_NOT_PRESENT;
     /* An SO login needs every session on the token to be read-write :
-     * CKR_SESSION_READ_ONLY_EXISTS (§5.6.4). C_GetSessionInfo's comment
+     * CKR_SESSION_READ_ONLY_EXISTS (C_Login). C_GetSessionInfo's comment
      * said this function refused it ; nothing did. The session table is
      * read here and not held across fhsm_token_login, which runs PBKDF2 --
      * a read-only session opened in that window is not seen. C_OpenSession's

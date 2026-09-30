@@ -749,15 +749,22 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
                      CK_SESSION_HANDLE *phSession) {
     (void)pApp; (void)Notify;
     const CK_FLAGS rw_session = 0x2UL;   /* CKF_RW_SESSION */
+    const CK_FLAGS serial     = 0x4UL;   /* CKF_SERIAL_SESSION */
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!phSession) return FHSM_RV_ARGUMENTS_BAD;
     if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
+    /* CKF_SERIAL_SESSION must be set: parallel sessions have not existed
+     * since v2.01, and the spec keeps the flag for backward compatibility
+     * with a fixed answer when it is absent (C_OpenSession). This accepted any
+     * flags, so a caller that forgot it was never told. Every caller in this
+     * repository sets it (CKF_RW is 6 wherever it is defined). */
+    if (!(flags & serial)) return FHSM_RV_SESSION_PARALLEL_NOT_SUPPORTED;
     /* Per PKCS#11 v3.2 §C.6.5 : C_OpenSession requires the token to be
      * present. C_InitToken uses a different path (no session needed). */
     fhsm_token_t *t = fhsm_slot_token(slotID);
     if (!t) return FHSM_RV_TOKEN_NOT_PRESENT;
     /* The SO works only in read-write sessions, so a read-only one cannot be
-     * opened while the SO is logged in (§5.6.1). The mirror of the refusal in
+     * opened while the SO is logged in (C_OpenSession). The mirror of the refusal in
      * fhsm_session_login ; neither existed before 2026-09-30. */
     if (!(flags & rw_session)
         && fhsm_token_current_role(t) == FHSM_ROLE_SO)

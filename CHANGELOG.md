@@ -8,6 +8,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **`C_OpenSession` accepted a call without `CKF_SERIAL_SESSION`.** PKCS#11
+  has had no parallel sessions since v2.01 and keeps the flag for
+  compatibility, with `CKR_SESSION_PARALLEL_NOT_SUPPORTED` as the answer when
+  it is missing; any flags were accepted. Every caller in this repository,
+  `pkcs11-tool` and the Wycheproof adapters set the flag, so nothing here
+  changes behaviour. Asserted in `tests/test_login_conflicts.c`.
+
 * **RSA-OAEP without its parameter block returned `CKR_ARGUMENTS_BAD`.** OAEP
   has no default parameters, so an absent or short `CK_RSA_PKCS_OAEP_PARAMS`
   is `CKR_MECHANISM_PARAM_INVALID`, now on all four entry points. `op_init`

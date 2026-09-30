@@ -1163,7 +1163,7 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
         return FHSM_RV_USER_ALREADY_LOGGED_IN;
     }
     /* The other role holds the token : CKR_USER_ANOTHER_ALREADY_LOGGED_IN
-     * (§5.6.4), decided before the PIN is looked at. Nothing refused this
+     * (PKCS#11 v3.2, C_Login), decided before the PIN is looked at. Nothing refused this
      * before. With the right PIN, an SO login on a token a USER held took the
      * token over, and the USER's sessions carried on under the SO role ; with
      * a wrong one it spent an SO attempt on a call that should never have

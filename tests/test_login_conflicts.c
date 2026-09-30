@@ -2,9 +2,11 @@
  * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
  * SPDX-License-Identifier: Apache-2.0
  * ===========================================================================
- * test_login_conflicts.c --- the three rules of PKCS#11 v3.2 §5.6 that keep
- * the SO and the USER apart, and the SO out of read-only sessions.
+ * test_login_conflicts.c --- the rules of PKCS#11 v3.2 §5.6 that keep the SO
+ * and the USER apart, keep the SO out of read-only sessions, and tie the login
+ * to the sessions that carry it.
  *
+ *   0. C_OpenSession without CKF_SERIAL_SESSION  -> CKR_SESSION_PARALLEL_NOT_SUPPORTED
  *   1. C_Login(SO) while USER holds the token  -> CKR_USER_ANOTHER_ALREADY_LOGGED_IN
  *      and C_Login(USER) while SO holds it     -> the same
  *   2. C_Login(SO) with a read-only session open -> CKR_SESSION_READ_ONLY_EXISTS
@@ -33,6 +35,7 @@ typedef struct { CK_ULONG slotID, state, flags, ulDeviceError; } CK_SESSION_INFO
 #define CKR_OK                              0x000UL
 #define CKR_SESSION_READ_ONLY_EXISTS        0x0B7UL
 #define CKR_SESSION_READ_WRITE_SO_EXISTS    0x0B8UL
+#define CKR_SESSION_PARALLEL_NOT_SUPPORTED  0x0B4UL
 #define CKR_USER_ALREADY_LOGGED_IN          0x100UL
 #define CKR_USER_ANOTHER_ALREADY_LOGGED_IN  0x104UL
 #define CKU_SO    0UL
@@ -82,6 +85,12 @@ int main(void) {
     if (C_Initialize(NULL) != CKR_OK) { fprintf(stderr,"C_Initialize\n"); return 2; }
     if (C_InitToken(0, so, 8, pad32(lbl, "logins")) != CKR_OK) { fprintf(stderr,"C_InitToken\n"); return 2; }
     CK_SESSION_HANDLE a, b, r;
+    printf("\n== CKF_SERIAL_SESSION ==\n");
+    ok(C_OpenSession(0, CKF_RW_SESSION, NULL, NULL, &r) == CKR_SESSION_PARALLEL_NOT_SUPPORTED,
+       "a session without CKF_SERIAL_SESSION is refused with CKR_SESSION_PARALLEL_NOT_SUPPORTED");
+    ok(C_OpenSession(0, 0, NULL, NULL, &r) == CKR_SESSION_PARALLEL_NOT_SUPPORTED,
+       "and so is one with no flags at all");
+
     if (C_OpenSession(0, RW, NULL, NULL, &a) != CKR_OK) { fprintf(stderr,"C_OpenSession\n"); return 2; }
     if (C_OpenSession(0, RW, NULL, NULL, &b) != CKR_OK) { fprintf(stderr,"C_OpenSession\n"); return 2; }
     if (C_Login(a, CKU_SO, so, 8) != CKR_OK) { fprintf(stderr,"C_Login SO\n"); return 2; }
