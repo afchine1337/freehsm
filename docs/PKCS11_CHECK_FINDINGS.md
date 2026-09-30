@@ -2320,8 +2320,8 @@ Eleven failures, two of them the EDDSA pair already open upstream. Nine new:
 | `test_registry_decrypt_missing_required_param[DES3_CBC]` | same | **fixed** |
 | `TestDES3KeySizeBoundary::test_des3_below_min_is_refused` | request overridden, not refused | **fixed** |
 | `TestECKeySizeBoundary::test_ec_below_min_is_refused` | curves outside the advertised range accepted | **fixed** |
-| `test_ecdh_montgomery_low_order_point[x25519-u0]` | module refuses, harness expected CKR_OK | open |
-| `test_ecdh_montgomery_low_order_point[x448-u0]` | same | open |
+| `test_ecdh_montgomery_low_order_point[x25519-u0]` | X25519 key generation fails on a signed module; the probe never ran | **fixed** (de-advertised) |
+| `test_ecdh_montgomery_low_order_point[x448-u0]` | same, X448 | **fixed** (de-advertised) |
 
 ### The two that are the module being right
 
@@ -2332,7 +2332,8 @@ which is the Marvin countermeasure. `fhsm_pkcs11.c` above `rsa_unwrap` has
 documented relying on it since before this run, with a measurement on 3.5.6.
 Returning an error here would rebuild the oracle. Raised upstream rather than
 changed, because a harness that scores the countermeasure CRITICAL pushes the
-next implementer to remove it.
+next implementer to remove it: mingulov/pkcs11-check#37, opened 2026-09-30.
+This paragraph said "raised upstream" two days before it was.
 
 ### The three that were real, and were the same defect twice
 
@@ -2383,11 +2384,45 @@ was absent.
 `CKR_TEMPLATE_INCONSISTENT`. The scoped re-run passes both boundaries, below
 and above.
 
-### The two still open The two
-low-order-point cases are the module refusing a u=0 point, which RFC 7748 §6.1
-permits; the harness expected success. Whether `CKR_FUNCTION_FAILED` is the
-right refusal is a smaller question than whether refusing is.
+### The two low-order-point cases were not about the low-order point
+
+They were first read as the module refusing a u=0 point, which RFC 7748 §6.1
+permits, and left open on that reading. The harness trace says otherwise: the
+failure is at line 1063, `gen_keypair`, before the probe. A signed module loads
+the OpenSSL FIPS provider, which has neither X25519 nor X448, so
+`CKM_EC_MONTGOMERY_KEY_PAIR_GEN` was advertised by every signed all-mechanisms
+build and failed on every call -- 1 607 tests not operational in the same run.
+The module now asks the loaded providers (`fhsm_ecm_available()`) and leaves
+the mechanism out when they cannot serve it. Local tests had never seen it:
+they run under the integrity bypass, which loads the default provider.
 
 None of the nine touches the default build: eight are in mechanisms only this
 profile compiles in, and the EC boundary behaved in the approved one — the
 approved profile never reached the fallback that was unbounded.
+
+## 2026-09-29 — all-mechanisms again, after the fixes
+
+    pkcs11-check 0.2.1 · full corpus · signed module · all-mechanisms
+    passed 55653/92760 · fail 4 (CRITICAL 3 · HIGH 1) · crash 0 · xfail 14316
+
+The four failures are the ones accounted for: the EDDSA pair (#23) and the two
+implicit-rejection cases (#37). Passed fell by 527 and xfail rose by 521: the
+Wycheproof secp224r1 vectors, which now meet a refusal, since 224 bits is below
+the advertised 256-bit floor. Expected, and said in the CHANGELOG when the
+bound went in.
+
+One new xfail was a real defect: `TestLoginConflicts::test_so_login_while_user_logged_in`
+answered with the vendor code `0x80000004` (PIN_THROTTLED). Nothing refused a
+login by one role while the other held the token; with the right PIN an SO
+login took the token over. Three neighbouring rules were missing as well --
+SO login with a read-only session open, a read-only session while the SO is
+in, and closing the last session leaving the token logged in -- and
+`CKF_SERIAL_SESSION` was not required. All fixed; `tests/test_login_conflicts.c`.
+
+The `CKR_OPERATION_ACTIVE` xfails that moved between mechanisms from one run to
+the next are not the module's: `TestBadParameters` shares one session per file
+and never ends an Init the module accepted. Raised as mingulov/pkcs11-check#38.
+
+Since 2026-09-30 CI runs the harness against the signed module, FIPS provider
+loaded, in both profiles, and fails on any failure not listed with its reason
+in `tests/pkcs11_check_known_failures.txt` (`pkcs11-check-signed`).

@@ -29,7 +29,7 @@
 # RSA PKCS#1 v1.5 decryption of a malformed ciphertext returns CKR_OK and
 # pseudo-random bytes. That is OpenSSL's implicit rejection, the Marvin-attack
 # countermeasure, and it is deliberate: an error return here is the oracle.
-# Reported to the harness author. CKM_RSA_PKCS decryption exists only in
-# all-mechanisms builds.
+# See docs/PKCS11_CHECK_FINDINGS.md. Open upstream: mingulov/pkcs11-check#37.
+# CKM_RSA_PKCS decryption exists only in all-mechanisms builds.
 all-mechanisms  pkcs11_check/testcases/security/test_padding_oracle.py::TestRSAPaddingOracle::test_pkcs1v15_bleichenbacher_structured_oracle
 all-mechanisms  pkcs11_check/testcases/test_errors.py::TestInvalidOperations::test_decrypt_garbage
