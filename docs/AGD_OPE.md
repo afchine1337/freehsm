@@ -121,6 +121,32 @@ RFC 7366) or use `CKM_AES_GCM`, which does both in one pass.
 See R2 in `docs/PKCS11_CHECK_FINDINGS.md` for the measurement, and
 `tests/test_cbc_pad_oracle.c` for the regression guard.
 
+### 3.2 Through `p11-kit server`, fewer mechanisms reach the module
+
+An application that reaches the token through `p11-kit server` and
+`p11-kit-client.so` sees only the mechanisms p11-kit's RPC layer knows how to
+carry. The module is not involved: a call p11-kit does not carry is refused
+with `CKR_MECHANISM_INVALID` before it leaves the client, and the audit log
+records nothing.
+
+What crosses depends on the p11-kit version (checked 2026-09-30):
+
+| p11-kit | post-quantum mechanisms carried |
+|---|---|
+| 0.26.5 and earlier (every release to date) | none |
+| `master` since 2026-09-08 (PR #745, commit `63c7bc4f`) | `CKM_ML_KEM`, `CKM_ML_DSA`, `CKM_SLH_DSA` and their key-pair generators, HashML-DSA and HashSLH-DSA |
+| any version | not `CKM_COMPOSITE_MLDSA65_ED25519` |
+
+So until a p11-kit release after 0.26.5, remote access is for RSA, ECDSA, AES
+and HMAC. The composite stays out even then: its code point is
+vendor-defined, and p11-kit carries mechanisms it names. A change that carries
+every mechanism taken without a parameter, the composite included, is proposed
+upstream as p11-kit PR #779 and is not merged. Issue #778, which reported the
+limit, was closed as completed on 2026-09-18 by #745.
+
+Check what your installed p11-kit carries rather than relying on this table;
+`docs/P11_KIT_REMOTING.md` has the measurement and the setup.
+
 ## 4. Security advice (operator-actionable)
 
 ### 4.1 PIN management
@@ -327,6 +353,8 @@ p11->C_CloseSession(s);
 ```
 
 `C_Logout` zeroizes the DEK in process memory. `C_CloseSession` zeroizes the session-local key buffers. Failing to log out *does not* leak material on a process crash (the secure heap is process-local), but it does leave the audit trail with an unclosed session.
+
+**Since v2.3.0 the module enforces the login rules of PKCS#11 §5.6.** The SO and the USER cannot hold the token at the same time: provisioning a token -- `C_Login` as SO, `C_InitPIN`, then working as USER -- needs a `C_Logout` between the two logins, or `C_Login` answers `CKR_USER_ANOTHER_ALREADY_LOGGED_IN`. Before v2.3.0 the second login silently took the token over. An SO login is refused while a read-only session is open (`CKR_SESSION_READ_ONLY_EXISTS`), and a read-only session cannot be opened while the SO is logged in (`CKR_SESSION_READ_WRITE_SO_EXISTS`). Closing the last session logs the token out, and the audit log records it as a logout.
 
 ## 5. Service reference (selected)
 

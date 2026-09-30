@@ -68,9 +68,20 @@ through the patched socket verifies against the module loaded directly, and
 p11-kit's own suite still passes -- 44/44 on master; the 525 figure was 0.24.0,
 where the patch had a bug that master's suite caught. **Submitted on
 2026-08-22**: issue [#778](https://github.com/p11-glue/p11-kit/issues/778) and
-PR [#779](https://github.com/p11-glue/p11-kit/issues/779). It is not upstream --
-no maintainer has responded as of 2026-08-30 -- so read that directory before
-relying on it.
+PR [#779](https://github.com/p11-glue/p11-kit/issues/779). It is not upstream,
+so read that directory before relying on it.
+
+**Where upstream stands, checked 2026-09-30.** PR
+[#745](https://github.com/p11-glue/p11-kit/pull/745) was merged on 2026-09-08
+(commit `63c7bc4f`) and closed #778 as completed on 2026-09-18. It takes the
+other road: it adds the standard post-quantum mechanisms to the allow-list by
+name -- `CKM_ML_KEM`, `CKM_ML_DSA`, `CKM_SLH_DSA`, their key-pair generators,
+HashML-DSA and HashSLH-DSA. That covers FreeHSM's ML-KEM and ML-DSA. It does
+not cover `CKM_COMPOSITE_MLDSA65_ED25519`, whose code point is vendor-defined
+and which a named list cannot anticipate; #779, which carries any mechanism
+taken without a parameter, is still open. And no release carries #745 yet:
+0.26.5 (2026-08-06) is the latest and predates it. The operator-facing summary
+is `AGD_OPE` §3.2.
 
 Re-run the measurement rather than trusting this table, which was taken on
 unpatched p11-kit 0.24.0:
