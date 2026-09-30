@@ -32,7 +32,8 @@
 # What WOULD be evidence, and already exists: scripts/run_fips_tests.sh, which
 # unsets all three, refuses to run against an unsigned module, and proves the
 # provider is loaded with tests/probe_fips_loaded before counting anything.
-# 37 of 37 as of v2.0.2. If a §7.11 attestation is ever assembled, it is built
+# 37 of 37 as of v2.0.2; 62 of 62 on 2026-09-30, when CI began running it as
+# test-fips-provider. If a §7.11 attestation is ever assembled, it is built
 # from that, not from this.
 #
 # MEASURED 2026-09-04, and the answer is better than the correction above

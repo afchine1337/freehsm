@@ -173,8 +173,15 @@ digest_after=$(objcopy --dump-section .fhsm_digest=/dev/stdout "$LIB_SO" /dev/nu
                2>/dev/null | od -An -tx1 -v | tr -d ' \n')
 [ "$digest_after" = "$digest" ] \
     || { bad "$LIB_SO changed while the probe was built -- it is not the module step 2 checked"; exit 2; }
-probe_out=$($TEST_LD_ENV ./tests/probe_fips_loaded ./libfreehsm.so 2>&1)
+# Its own tokens directory, as every test below gets. Without one the module
+# falls back to /var/lib/freehsm/tokens: on the workstation that exists, so the
+# probe worked there and wrote into the system's token store; in a fresh CI
+# container /var/lib/freehsm does not, C_Initialize refused, and the probe
+# could not ask (2026-09-30, the first CI run of this script).
+PD=$(mktemp -d)
+probe_out=$(FHSM_TOKENS_DIR="$PD" $TEST_LD_ENV ./tests/probe_fips_loaded ./libfreehsm.so 2>&1)
 probe_rc=$?
+rm -rf "$PD"
 case "$probe_rc" in
     0) ok "$probe_out" ;;
     1) bad "$probe_out
