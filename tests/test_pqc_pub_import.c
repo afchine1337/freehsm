@@ -136,6 +136,8 @@ int main(void)
     if (C_OpenSession(0,CKF_RW,NULL,NULL,&s)) { fprintf(stderr,"C_OpenSession\n"); return 2; }
     if (C_Login(s,CKU_SO,(CK_BYTE*)SO_PIN,strlen(SO_PIN))) { fprintf(stderr,"SO\n"); return 2; }
     if (C_InitPIN(s,(CK_BYTE*)USER_PIN,strlen(USER_PIN))) { fprintf(stderr,"C_InitPIN\n"); return 2; }
+    /* SO and USER cannot hold the token at once (CKR_USER_ANOTHER_ALREADY_LOGGED_IN) */
+    { CK_RV (*lo)(CK_SESSION_HANDLE); *(void**)&lo = dlsym(lib, "C_Logout"); if (lo) (void)lo(s); }
     if (C_Login(s,CKU_USER,(CK_BYTE*)USER_PIN,strlen(USER_PIN))) { fprintf(stderr,"USER\n"); return 2; }
 
     CK_BYTE yes = 1;

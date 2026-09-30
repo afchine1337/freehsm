@@ -87,6 +87,8 @@ int main(void) {
     if ((rv = C_OpenSession(0,CKF_SERIAL_SESSION|CKF_RW_SESSION,NULL,NULL,&s))) { fprintf(stderr,"Open 0x%lx\n",rv); return 2; }
     if ((rv = C_Login(s,CKU_SO,(CK_BYTE*)so,8)))                  { fprintf(stderr,"LoginSO 0x%lx\n",rv); return 2; }
     if ((rv = C_InitPIN(s,(CK_BYTE*)user,8)))                     { fprintf(stderr,"InitPIN 0x%lx\n",rv); return 2; }
+    /* SO and USER cannot hold the token at once (CKR_USER_ANOTHER_ALREADY_LOGGED_IN) */
+    { CK_RV (*lo)(CK_SESSION_HANDLE); *(void**)&lo = dlsym(h, "C_Logout"); if (lo) (void)lo(s); }
     (void)C_Login(s,CKU_USER,(CK_BYTE*)user,8);   /* may already be logged in */
 
     CK_ULONG cls = CKO_SECRET_KEY, kt = CKK_AES; CK_BYTE key[16] = {0};

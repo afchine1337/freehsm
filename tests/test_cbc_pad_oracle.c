@@ -113,6 +113,8 @@ int main(void) {
     if (C_OpenSession(0, CKF_RW, NULL, NULL, &s) != CKR_OK) return 2;
     if (C_Login(s, 0, so, 8) != CKR_OK) return 2;
     if (C_InitPIN(s, up, 8) != CKR_OK) return 2;
+    /* SO and USER cannot hold the token at once (CKR_USER_ANOTHER_ALREADY_LOGGED_IN) */
+    { CK_RV (*lo)(CK_SESSION_HANDLE); *(void**)&lo = dlsym(h, "C_Logout"); if (lo) (void)lo(s); }
     if (C_Login(s, 1, up, 8) != CKR_OK) return 2;
 
     CK_ULONG cls = CKO_SECRET_KEY, kt = CKK_AES, vl = 32;

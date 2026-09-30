@@ -748,6 +748,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
                      CK_VOID_PTR pApp, CK_VOID_PTR Notify,
                      CK_SESSION_HANDLE *phSession) {
     (void)pApp; (void)Notify;
+    const CK_FLAGS rw_session = 0x2UL;   /* CKF_RW_SESSION */
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!phSession) return FHSM_RV_ARGUMENTS_BAD;
     if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
@@ -755,6 +756,12 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
      * present. C_InitToken uses a different path (no session needed). */
     fhsm_token_t *t = fhsm_slot_token(slotID);
     if (!t) return FHSM_RV_TOKEN_NOT_PRESENT;
+    /* The SO works only in read-write sessions, so a read-only one cannot be
+     * opened while the SO is logged in (§5.6.1). The mirror of the refusal in
+     * fhsm_session_login ; neither existed before 2026-09-30. */
+    if (!(flags & rw_session)
+        && fhsm_token_current_role(t) == FHSM_ROLE_SO)
+        return FHSM_RV_SESSION_READ_WRITE_SO_EXISTS;
     fhsm_rv_t rv = fhsm_session_open(slotID, flags, phSession);
     if (rv == FHSM_RV_OK) {
         /* A pooled session handle may carry stale operation state from a
@@ -775,9 +782,17 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE hSession) {
     /* Destroy the session objects this session created (CKA_TOKEN=FALSE) :
      * PKCS#11 requires session objects to be automatically destroyed when
      * their session is closed (#125). */
-    { fhsm_token_t *t = fhsm_session_token(hSession);
-      if (t) (void)fhsm_token_destroy_session_objects(t, (uint32_t)hSession); }
-    return fhsm_session_close(hSession);
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    if (t) (void)fhsm_token_destroy_session_objects(t, (uint32_t)hSession);
+    const fhsm_role_t before = t ? fhsm_token_current_role(t) : FHSM_ROLE_NONE;
+    fhsm_rv_t rv = fhsm_session_close(hSession);
+    /* Closing the last session logs the token out (fhsm_session_close). That
+     * is a logout, and the audit log records it as one. */
+    if (rv == FHSM_RV_OK && before != FHSM_ROLE_NONE
+        && fhsm_token_current_role(t) == FHSM_ROLE_NONE)
+        (void)fhsm_audit_event(FHSM_EV_LOGOUT, -1, (int)hSession, before, rv,
+                                "cause", "last-session-closed", NULL);
+    return rv;
 }
 
 /* PKCS#11 v3.2 §C.6.6.5 --- C_GetSessionInfo
@@ -820,10 +835,11 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE hSession, CK_VOID_PTR pInfo) {
     CK_ULONG state;
     switch (role) {
         case FHSM_ROLE_SO:
-            /* SO is always RW per PKCS#11 v3.2 §C.6.6.6 ; if a session
-             * was opened RO and then SO-login attempted, fhsm_session_login
-             * already rejected with CKR_SESSION_READ_ONLY_EXISTS, so we
-             * can assume RW here. */
+            /* SO is always RW per PKCS#11 v3.2 §C.6.6.6 : fhsm_session_login
+             * refuses an SO login while a read-only session exists
+             * (CKR_SESSION_READ_ONLY_EXISTS), and C_OpenSession refuses a
+             * read-only session while the SO is logged in. Until 2026-09-30
+             * this comment described the first refusal and neither existed. */
             state = 4;  /* CKS_RW_SO_FUNCTIONS */
             break;
         case FHSM_ROLE_USER:

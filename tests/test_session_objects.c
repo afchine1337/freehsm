@@ -60,7 +60,10 @@ int main(void) {
 
     I(NULL); CK_BYTE so[] = "00000000";
     IT(0, so, 8, fhsm_pad_label((CK_BYTE[32]){0}, "sess")); CK_SESSION_HANDLE s1; OS(0,6,NULL,NULL,&s1);
-    L(s1,0,so,8); IP(s1,up,8); (void)L(s1,1,up,8);
+    L(s1,0,so,8); IP(s1,up,8);
+    /* SO and USER cannot hold the token at once (CKR_USER_ANOTHER_ALREADY_LOGGED_IN) */
+    { CK_RV (*LO)(CK_SESSION_HANDLE); S(LO, "C_Logout"); if (LO) (void)LO(s1); }
+    (void)L(s1,1,up,8);
 
     mkaes(s1, 0);   /* session object (CKA_TOKEN=FALSE default) */
     mkaes(s1, 1);   /* token object (CKA_TOKEN=TRUE) */

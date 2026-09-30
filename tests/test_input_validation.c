@@ -111,7 +111,10 @@ int main(void) {
 
     I(NULL); CK_BYTE so[] = "00000000";
     IT(0, so, 8, fhsm_pad_label((CK_BYTE[32]){0}, "val")); CK_SESSION_HANDLE s0; OS(0,6,NULL,NULL,&s0);
-    L(s0,0,so,8); IP(s0,up,8); (void)L(s0,1,up,8);
+    L(s0,0,so,8); IP(s0,up,8);
+    /* SO and USER cannot hold the token at once (CKR_USER_ANOTHER_ALREADY_LOGGED_IN) */
+    { CK_RV (*LO)(CK_SESSION_HANDLE); S(LO, "C_Logout"); if (LO) (void)LO(s0); }
+    (void)L(s0,1,up,8);
     CK_ULONG cls=4, kt=0x1F, vl=32;
     CK_ATTRIBUTE at[] = { {0,&cls,8}, {0x100,&kt,8}, {0x161,&vl,8} };
     GK(s0, &(CK_MECHANISM){0x1080,0,0}, at, 3, &AESK);

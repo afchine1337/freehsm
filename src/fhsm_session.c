@@ -71,10 +71,36 @@ fhsm_rv_t fhsm_session_close(unsigned long h) {
         pthread_mutex_unlock(&g_sess_mu);
         return FHSM_RV_SESSION_HANDLE_INVALID;
     }
+    fhsm_token_t *t = g_sessions[h].token;
     /* zeroize the entry so a stale handle cannot inherit residual state */
     fhsm_zeroize(&g_sessions[h], sizeof(g_sessions[h]));
+    /* Closing the application's last session on a token returns it to the
+     * public state (C_CloseSession, §5.6.2). Nothing did: a token stayed
+     * logged in with no session left, and the next C_OpenSession found it
+     * still authenticated -- invisible until C_Login refused a second role
+     * (CKR_USER_ANOTHER_ALREADY_LOGGED_IN), when tests that closed an SO
+     * session and logged in as USER on a new one began to fail. Both
+     * C_CloseSession and C_CloseAllSessions come through here. Lock order is
+     * session table then token, as in fhsm_session_logout. */
+    if (t) {
+        int others = 0;
+        for (size_t i = 1; i < FHSM_MAX_SESSIONS && !others; ++i)
+            others = g_sessions[i].in_use && g_sessions[i].token == t;
+        if (!others) fhsm_token_logout(t);
+    }
     pthread_mutex_unlock(&g_sess_mu);
     return FHSM_RV_OK;
+}
+
+/* 1 if a read-only session is open on token t. CKF_RW_SESSION is 0x2. */
+int fhsm_session_ro_exists(const fhsm_token_t *t) {
+    int found = 0;
+    pthread_mutex_lock(&g_sess_mu);
+    for (size_t i = 1; i < FHSM_MAX_SESSIONS && !found; ++i)
+        found = g_sessions[i].in_use && g_sessions[i].token == t
+                && !(g_sessions[i].flags & 0x2UL);
+    pthread_mutex_unlock(&g_sess_mu);
+    return found;
 }
 
 fhsm_rv_t fhsm_session_login(unsigned long h, fhsm_role_t role,
@@ -91,6 +117,14 @@ fhsm_rv_t fhsm_session_login(unsigned long h, fhsm_role_t role,
     /* The token attach + login lives in fhsm_token_login; this function
      * is the boundary that the PKCS#11 façade calls. */
     if (!s->token) return FHSM_RV_TOKEN_NOT_PRESENT;
+    /* An SO login needs every session on the token to be read-write :
+     * CKR_SESSION_READ_ONLY_EXISTS (§5.6.4). C_GetSessionInfo's comment
+     * said this function refused it ; nothing did. The session table is
+     * read here and not held across fhsm_token_login, which runs PBKDF2 --
+     * a read-only session opened in that window is not seen. C_OpenSession's
+     * CKR_SESSION_READ_WRITE_SO_EXISTS covers the other order. */
+    if (role == FHSM_ROLE_SO && fhsm_session_ro_exists(s->token))
+        return FHSM_RV_SESSION_READ_ONLY_EXISTS;
     fhsm_rv_t rv = fhsm_token_login(s->token, role, pin, pin_len);
     /* Set this session's role when the token is (already) logged in as
      * that role : CKR_USER_ALREADY_LOGGED_IN means the application is

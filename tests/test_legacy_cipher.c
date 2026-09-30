@@ -69,7 +69,10 @@ int main(void) {
     I(NULL); CK_BYTE so[] = "00000000", us[] = "user0000";
     IT(0, so, 8, fhsm_pad_label((CK_BYTE[32]){0}, "t"));
     CK_SESSION_HANDLE s; OS(0, 4|2, NULL, NULL, &s);
-    LI(s, 0, so, 8); IP(s, us, 8); LI(s, 1, us, 8);
+    LI(s, 0, so, 8); IP(s, us, 8);
+    /* SO and USER cannot hold the token at once (CKR_USER_ANOTHER_ALREADY_LOGGED_IN) */
+    { CK_RV (*LO)(CK_SESSION_HANDLE); SY(LO, "C_Logout"); LO(s); }
+    LI(s, 1, us, 8);
 
     CK_ULONG mn = 0; GML(0, NULL, &mn);
     CK_ULONG *ml = calloc(mn, sizeof *ml); GML(0, ml, &mn);

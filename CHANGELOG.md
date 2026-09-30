@@ -8,6 +8,35 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **An SO login took over a token a USER was logged into.** PKCS#11 v3.2
+  §5.6 keeps the two roles apart and the SO out of read-only sessions, and
+  none of its three rules was enforced:
+
+  - `C_Login` of one role while the other holds the token now returns
+    `CKR_USER_ANOTHER_ALREADY_LOGGED_IN`. It used to proceed: with the right
+    PIN the token switched roles under the sessions that had logged in, and
+    with a wrong one it spent an attempt of a role that should never have
+    reached the PIN check. While a throttle was running it returned the
+    vendor code `0x80000004`, which is how pkcs11-check found it
+    (`TestLoginConflicts::test_so_login_while_user_logged_in`).
+  - `C_Login(CKU_SO)` with a read-only session open now returns
+    `CKR_SESSION_READ_ONLY_EXISTS`. A comment in `C_GetSessionInfo` said
+    this was already done.
+  - `C_OpenSession` without `CKF_RW_SESSION` while the SO is logged in now
+    returns `CKR_SESSION_READ_WRITE_SO_EXISTS`.
+  - Closing the application's last session on a token now logs it out
+    (§5.6.2), through `C_CloseSession` and `C_CloseAllSessions` alike, and
+    the audit log records it as a logout (`cause=last-session-closed`).
+    Before, the token stayed authenticated with no session open, and the
+    next session found it so.
+
+  **Integrators:** a program that logs in as SO, calls `C_InitPIN`, then
+  logs in as USER must call `C_Logout` between the two logins, or close the
+  SO session first. 32 tests in this repository did neither and now log
+  out; `fhsm-token` and the Wycheproof adapters already did.
+  `tests/test_login_conflicts.c` covers the four rules, and checks that a
+  refused login leaves the current role in place and costs no PIN attempt.
+
 * **A signed `all-mechanisms` module advertised X25519 and X448, and could not
   make either key.** A signed module loads the OpenSSL FIPS provider, which
   implements neither curve, so `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` returned

@@ -41,6 +41,10 @@ fhsm_rv_t fhsm_session_attach_token(unsigned long h, fhsm_token_t *t);
 fhsm_token_t *fhsm_session_token(unsigned long h);
 fhsm_role_t   fhsm_session_role(unsigned long h);
 
+/* 1 if any read-only session is open on token t, 0 otherwise. An SO login
+ * is refused while one exists (CKR_SESSION_READ_ONLY_EXISTS). */
+int fhsm_session_ro_exists(const fhsm_token_t *t);
+
 /* Drop every session without touching the tokens they point at. Used by the
  * post-fork reset in C_Initialize: a forked child inherits the parent's whole
  * session table -- handles, roles, token pointers -- and must not keep using

@@ -1162,6 +1162,18 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_ALREADY_LOGGED_IN;
     }
+    /* The other role holds the token : CKR_USER_ANOTHER_ALREADY_LOGGED_IN
+     * (§5.6.4), decided before the PIN is looked at. Nothing refused this
+     * before. With the right PIN, an SO login on a token a USER held took the
+     * token over, and the USER's sessions carried on under the SO role ; with
+     * a wrong one it spent an SO attempt on a call that should never have
+     * reached the PIN. And while an SO throttle was running the caller got
+     * PIN_THROTTLED, a vendor code, which is how pkcs11-check saw it
+     * (test_so_login_while_user_logged_in, 2026-09-29). */
+    if (t->logged_in != FHSM_ROLE_NONE) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_ANOTHER_ALREADY_LOGGED_IN;
+    }
 
     /* Throttle check BEFORE PBKDF2 to defeat timing side-channels. */
     uint64_t now = now_ms();

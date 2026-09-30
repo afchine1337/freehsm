@@ -80,7 +80,7 @@ int main(void) {
     C_InitToken(0, so, 8, fhsm_pad_label((CK_BYTE[32]){0}, "opstate"));
     CK_SESSION_HANDLE s = 0;
     C_OpenSession(0, CKF_RW, NULL, NULL, &s);
-    C_Login(s, 0, so, 8); C_InitPIN(s, up, 8); (void)C_Login(s, 1, up, 8);
+    C_Login(s, 0, so, 8); C_InitPIN(s, up, 8); { CK_RV (*lo)(CK_SESSION_HANDLE); *(void**)&lo = dlsym(h, "C_Logout"); if (lo) (void)lo(s); } (void)C_Login(s, 1, up, 8);
 
     CK_ULONG cls = CKO_SECRET_KEY, kt = CKK_AES, vl = 32;
     /* CKA_TOKEN=TRUE : the key must survive the C_CloseSession below so

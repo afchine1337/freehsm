@@ -58,7 +58,9 @@ int main(void){
   CK_RV(*VI)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);SY(VI,"C_VerifyInit");
   CK_RV(*VE)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG);SY(VE,"C_Verify");
   I(0);CK_BYTE so[]="00000000",us[]="user0000";IT(0,so,8,fhsm_pad_label((CK_BYTE[32]){0}, "t"));
-  CK_SESSION_HANDLE s;OS(0,4|2,0,0,&s);LI(s,0,so,8);IP(s,us,8);LI(s,1,us,8);
+  CK_SESSION_HANDLE s;OS(0,4|2,0,0,&s);LI(s,0,so,8);IP(s,us,8);
+  {CK_RV(*LO)(CK_SESSION_HANDLE);SY(LO,"C_Logout");LO(s);}  /* SO and USER cannot hold the token at once */
+  LI(s,1,us,8);
   CK_ULONG mn=0;GML(0,0,&mn);CK_ULONG*ml=calloc(mn,sizeof(CK_ULONG));GML(0,ml,&mn);
   int strict=1;for(CK_ULONG i=0;i<mn;i++)if(ml[i]==0x1){strict=0;break;}free(ml);
   printf("test_legacy_rsa : profile = %s\n",strict?"nist-approved-only":"all-mechanisms");

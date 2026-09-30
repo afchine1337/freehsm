@@ -71,6 +71,7 @@ struct FN_LIST { CK_VERSION version; void *pfn[104]; };
 #define SLOT_C_InitPIN          10
 #define SLOT_C_OpenSession      12
 #define SLOT_C_Login            18
+#define SLOT_C_Logout           19
 #define SLOT_C_GetAttributeValue 24
 #define SLOT_C_GenerateKeyPair  59
 #define SLOT_C_GetInterfaceList 68
@@ -95,6 +96,7 @@ typedef CK_RV (*fn_inittoken_t)(CK_SLOT_ID, CK_BYTE*, CK_ULONG, CK_BYTE*);
 typedef CK_RV (*fn_initpin_t)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG);
 typedef CK_RV (*fn_open_t)(CK_SLOT_ID, CK_FLAGS, void*, void*, CK_SESSION_HANDLE*);
 typedef CK_RV (*fn_login_t)(CK_SESSION_HANDLE, CK_USER_TYPE, CK_BYTE*, CK_ULONG);
+typedef CK_RV (*fn_logout_t)(CK_SESSION_HANDLE);
 typedef CK_RV (*fn_getattr_t)(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE*, CK_ULONG);
 typedef CK_RV (*fn_keypair_t)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_ATTRIBUTE*, CK_ULONG,
                                CK_ATTRIBUTE*, CK_ULONG, CK_OBJECT_HANDLE*, CK_OBJECT_HANDLE*);
@@ -221,6 +223,7 @@ int main(void)
     fn_initpin_t  f_ipin   = AS_FN(fn_initpin_t,  f->pfn[SLOT_C_InitPIN]);
     fn_open_t     f_open   = AS_FN(fn_open_t,     f->pfn[SLOT_C_OpenSession]);
     fn_login_t    f_login  = AS_FN(fn_login_t,    f->pfn[SLOT_C_Login]);
+    fn_logout_t   f_logout = AS_FN(fn_logout_t,   f->pfn[SLOT_C_Logout]);
     fn_keypair_t  f_kpair  = AS_FN(fn_keypair_t,  f->pfn[SLOT_C_GenerateKeyPair]);
     fn_getattr_t  f_getatt = AS_FN(fn_getattr_t,  f->pfn[SLOT_C_GetAttributeValue]);
     fn_encap_t    f_encap  = AS_FN(fn_encap_t,    f->pfn[SLOT_C_EncapsulateKey]);
@@ -235,6 +238,8 @@ int main(void)
     if (f_open(0, CKF_RW, NULL, NULL, &s) != CKR_OK) { fprintf(stderr, "C_OpenSession\n"); return 2; }
     if (f_login(s, CKU_SO, (CK_BYTE*)SO_PIN, strlen(SO_PIN)) != CKR_OK) { fprintf(stderr, "SO\n"); return 2; }
     if (f_ipin(s, (CK_BYTE*)USER_PIN, strlen(USER_PIN)) != CKR_OK) { fprintf(stderr, "C_InitPIN\n"); return 2; }
+    /* SO and USER cannot hold the token at once (CKR_USER_ANOTHER_ALREADY_LOGGED_IN) */
+    (void)f_logout(s);
     if (f_login(s, CKU_USER, (CK_BYTE*)USER_PIN, strlen(USER_PIN)) != CKR_OK) { fprintf(stderr, "USER\n"); return 2; }
     ok(1, "the whole session was opened through the v3.2 table");
 

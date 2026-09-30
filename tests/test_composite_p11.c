@@ -76,7 +76,7 @@ int main(void) {
     C_InitToken(0, so, 8, padlbl(lbl, "composite-p11"));
     CK_SESSION_HANDLE s = 0;
     C_OpenSession(0, CKF_RW, NULL, NULL, &s);
-    C_Login(s, 0, so, 8); C_InitPIN(s, up, 8); C_Login(s, 1, up, 8);
+    C_Login(s, 0, so, 8); C_InitPIN(s, up, 8); { CK_RV (*lo)(CK_SESSION_HANDLE); *(void**)&lo = dlsym(h, "C_Logout"); if (lo) (void)lo(s); } C_Login(s, 1, up, 8);
 
     CK_MECHANISM m = { CKM_COMPOSITE_MLDSA65_ED25519, NULL, 0 };
     CK_ATTRIBUTE pub_t[]  = { {CKA_LABEL, (void*)"comp-pub",  8} };

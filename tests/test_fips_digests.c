@@ -75,7 +75,10 @@ int main(void) {
 
     I(NULL); CK_BYTE so[]="00000000", up[]="user0000";
     IT(0, so, 8, fhsm_pad_label((CK_BYTE[32]){0}, "fips")); CK_SESSION_HANDLE s = 0; OS(0, 6, NULL, NULL, &s);
-    L(s, 0, so, 8); IP(s, up, 8); (void)L(s, 1, up, 8);
+    L(s, 0, so, 8); IP(s, up, 8);
+    /* SO and USER cannot hold the token at once (CKR_USER_ANOTHER_ALREADY_LOGGED_IN) */
+    { CK_RV (*LO)(CK_SESSION_HANDLE); S(LO, "C_Logout"); if (LO) (void)LO(s); }
+    (void)L(s, 1, up, 8);
 
     /* Digest KATs for "abc" (FIPS 180-4 / 202 published values). */
     kat(s, 0x255, "SHA-224",     "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7");

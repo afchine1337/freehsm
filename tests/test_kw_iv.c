@@ -175,7 +175,7 @@ int main(void) {
     C_InitToken(0, so, 8, pad32(lbl, "kwiv"));
     CK_SESSION_HANDLE s;
     if (C_OpenSession(0, 6, NULL, NULL, &s) != CKR_OK) { fprintf(stderr,"C_OpenSession\n"); return 2; }
-    C_Login(s, 0, so, 8); C_InitPIN(s, up, 8); (void)C_Login(s, 1, up, 8);
+    C_Login(s, 0, so, 8); C_InitPIN(s, up, 8); { CK_RV (*lo)(CK_SESSION_HANDLE); *(void**)&lo = dlsym(h, "C_Logout"); if (lo) (void)lo(s); } (void)C_Login(s, 1, up, 8);
 
     CK_ULONG k32 = 32, k16 = 16; CK_BYTE yes = 1;
     CK_MECHANISM kg = { CKM_AES_KEY_GEN, NULL, 0 };

@@ -55,7 +55,10 @@ int main(void) {
 
     I(NULL); CK_BYTE so[]="00000000", up[]="user0000";
     IT(0, so, 8, fhsm_pad_label((CK_BYTE[32]){0}, "attr")); CK_SESSION_HANDLE s = 0; OS(0, 6, NULL, NULL, &s);
-    L(s, 0, so, 8); IP(s, up, 8); (void)L(s, 1, up, 8);
+    L(s, 0, so, 8); IP(s, up, 8);
+    /* SO and USER cannot hold the token at once (CKR_USER_ANOTHER_ALREADY_LOGGED_IN) */
+    { CK_RV (*LO)(CK_SESSION_HANDLE); S(LO, "C_Logout"); if (LO) (void)LO(s); }
+    (void)L(s, 1, up, 8);
 
     CK_ULONG cls = 4, kt = 0x1F, vl = 32;
     CK_ATTRIBUTE at[] = { {0,&cls,8}, {0x100,&kt,8}, {0x161,&vl,8} };

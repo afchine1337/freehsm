@@ -92,6 +92,8 @@ int main(void) {
     C_OpenSession(0, CKF_SERIAL_SESSION|CKF_RW_SESSION, NULL, NULL, &s);
     C_Login(s, CKU_SO, so, 8);
     C_InitPIN(s, user, 8);
+    /* SO and USER cannot hold the token at once (CKR_USER_ANOTHER_ALREADY_LOGGED_IN) */
+    { CK_RV (*lo)(CK_SESSION_HANDLE); *(void**)&lo = dlsym(h, "C_Logout"); if (lo) (void)lo(s); }
     (void)C_Login(s, CKU_USER, user, 8);
 
     /* --- template guards : NULL template + non-zero count, absurd count --- */
