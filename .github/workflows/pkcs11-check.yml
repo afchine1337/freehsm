@@ -275,30 +275,11 @@ jobs:
       - uses: actions/checkout@v7
 
       # A signed module will not start without the FIPS provider, and no CI
-      # image has one (see scripts/ci_install_openssl_fips.sh). Built once,
-      # cached by the script's own hash: changing the version or the checksum
-      # changes the key.
-      #
-      # Restore and save are separate steps: actions/cache saves in a post
-      # step that runs only when the job succeeds, so while this job was red
-      # every run rebuilt OpenSSL. The save below runs as soon as the install
-      # has proved the provider loads, whatever happens to the job afterwards.
-      - name: Restore OpenSSL with FIPS provider
-        id: ossl-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: /usr/local/ssl
-          key: openssl-fips-${{ hashFiles('scripts/ci_install_openssl_fips.sh') }}
-
-      - name: OpenSSL 3.5.7 with FIPS provider at /usr/local/ssl
+      # image has one. Debian's packaged provider, set up the way the
+      # workstation has it -- see scripts/ci_install_openssl_fips.sh, including
+      # why its first version built OpenSSL from source and should not have.
+      - name: Debian OpenSSL FIPS provider, installed and activated
         run: bash scripts/ci_install_openssl_fips.sh
-
-      - name: Save OpenSSL with FIPS provider
-        if: steps.ossl-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: /usr/local/ssl
-          key: openssl-fips-${{ hashFiles('scripts/ci_install_openssl_fips.sh') }}
 
       # PROFILE on every make, `make integrity` included: a bare make restores
       # the default profile, and the harness would then measure the wrong
@@ -336,16 +317,6 @@ jobs:
           set -o pipefail
           pkcs11-check fetch-data all
           pkcs11-check fetch-data --status
-
-      # The module was linked against /usr/local/ssl; at run time pkcs11-tool
-      # and the harness dlopen it, and nothing else would point the loader at
-      # that libcrypto. Registered here, after apt and pip have run, so only
-      # the measurement uses it. 00- sorts it ahead of the system directory.
-      - name: Put the FIPS-capable libcrypto on the loader path
-        run: |
-          echo /usr/local/ssl/lib64 > /etc/ld.so.conf.d/00-fhsm-openssl.conf
-          ldconfig
-          ldd libfreehsm.so | grep libcrypto | tee /dev/stderr | grep -q /usr/local/ssl/lib64
 
       # No FHSM_ALLOW_UNSIGNED: that is the point of this job.
       - name: Run pkcs11-check (signed, FIPS provider, ${{ matrix.profile }})
