@@ -8,6 +8,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **RSA-OAEP without its parameter block returned `CKR_ARGUMENTS_BAD`.** OAEP
+  has no default parameters, so an absent or short `CK_RSA_PKCS_OAEP_PARAMS`
+  is `CKR_MECHANISM_PARAM_INVALID`, now on all four entry points. `op_init`
+  carried its own copy of the parser used by `C_WrapKey` / `C_UnwrapKey`;
+  it now calls that one.
+
+* **`C_GetSessionInfo` reported the session's own login, not the token's.**
+  Login state is per token (§5.6), and every access check already read it
+  there; `C_GetSessionInfo` read a per-session copy. A sibling of the session
+  that logged in reported a public state, and a session whose token another
+  session had logged out still reported a logged-in one. Asserted in
+  `tests/test_login_conflicts.c`.
+
 * **An SO login took over a token a USER was logged into.** PKCS#11 v3.2
   §5.6 keeps the two roles apart and the SO out of read-only sessions, and
   none of its three rules was enforced:

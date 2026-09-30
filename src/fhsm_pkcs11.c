@@ -7876,9 +7876,14 @@ fail:
  * modulus size and the call returns FHSM_RV_OK without touching the key. */
 static fhsm_rv_t fhsm_oaep_params_from_mech(CK_MECHANISM *pMechanism,
                                              fhsm_oaep_params_t *out) {
+    /* OAEP has no default parameters: absent or short is a mechanism
+     * parameter defect, CKR_MECHANISM_PARAM_INVALID. It was ARGUMENTS_BAD,
+     * which pkcs11-check reported on the C_EncryptInit path
+     * (TestBadParameters::test_registry_encrypt_missing_required_param
+     * [RSA_PKCS_OAEP], 2026-09-29). */
     if (!pMechanism->pParameter
         || pMechanism->ulParameterLen < sizeof(fhsm_oaep_params_t))
-        return FHSM_RV_ARGUMENTS_BAD;
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
     memcpy(out, pMechanism->pParameter, sizeof(*out));
     if (out->source == CKZ_DATA_SPECIFIED && out->ulSourceDataLen > 0
         && !out->pSourceData)
@@ -8602,14 +8607,15 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     /* For RSA-OAEP, capture and validate the OAEP params at Init time so
      * the actual Encrypt/Decrypt call can be the bare key-material path. */
     if (pMechanism->mechanism == CKM_RSA_PKCS_OAEP) {
-        if (!pMechanism->pParameter
-            || pMechanism->ulParameterLen < sizeof(fhsm_oaep_params_t))
-            return FHSM_RV_ARGUMENTS_BAD;
         fhsm_session_oaep_t *o =
             (op == &g_op_enc[hSession]) ? &g_oaep_enc[hSession]
                                           : &g_oaep_dec[hSession];
         memset(o, 0, sizeof(*o));
-        memcpy(&o->p, pMechanism->pParameter, sizeof(o->p));
+        /* The parser C_WrapKey and C_UnwrapKey use. This was a second copy of
+         * it, and the two had already drifted: only this one bounded the label.
+         * The label bound stays below; the rest is no longer written twice. */
+        fhsm_rv_t prv = fhsm_oaep_params_from_mech(pMechanism, &o->p);
+        if (prv != FHSM_RV_OK) return prv;
         /* Validate the OAEP source (label) parameter : a non-zero length
          * with a NULL pointer, or a length beyond our label buffer, is an
          * invalid inner parameter rather than something to silently

@@ -106,11 +106,17 @@ int main(void) {
        "C_Login(SO) with the right PIN is refused with CKR_USER_ANOTHER_ALREADY_LOGGED_IN");
     ok(state_of(a) == CKS_RW_USER_FUNCTIONS,
        "and the USER still holds the token");
+    /* Login state is per token: C_GetSessionInfo on a sibling session that
+     * never called C_Login must say so. It read a per-session copy. */
+    ok(state_of(b) == CKS_RW_USER_FUNCTIONS,
+       "a sibling session reports the USER state too");
     /* Before the fix a wrong PIN here counted against the SO. Five of them
      * (FHSM_PIN_MAX_FAILED) would lock the SO out of a token it was never
      * allowed to log into. */
     for (int i = 0; i < 12; ++i) (void)C_Login(b, CKU_SO, bad, 8);
-    C_Logout(a);
+    C_Logout(b);   /* from the sibling: a peer session may log the token out */
+    ok(state_of(a) == 2UL /* CKS_RW_PUBLIC_SESSION */,
+       "and after it logs out, the session that logged in reports public");
     ok(C_Login(b, CKU_SO, so, 8) == CKR_OK,
        "twelve wrong SO PINs offered meanwhile cost no attempt: the SO still logs in");
     C_Logout(b);

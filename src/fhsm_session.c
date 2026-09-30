@@ -238,7 +238,13 @@ fhsm_rv_t fhsm_session_info(unsigned long h,
     }
     if (out_slot)  *out_slot  = g_sessions[h].slot;
     if (out_flags) *out_flags = g_sessions[h].flags;
-    if (out_role)  *out_role  = g_sessions[h].role;
+    /* The token's role, as in fhsm_session_role: login state is per token
+     * (§5.6). This read the session's own copy, so C_GetSessionInfo showed a
+     * public state on a sibling of the session that logged in, and a logged-in
+     * state on a session whose token another session had logged out. */
+    if (out_role)  *out_role  = g_sessions[h].token
+                                ? fhsm_token_current_role(g_sessions[h].token)
+                                : g_sessions[h].role;
     pthread_mutex_unlock(&g_sess_mu);
     return FHSM_RV_OK;
 }

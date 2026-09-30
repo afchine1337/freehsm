@@ -42,6 +42,7 @@ typedef struct {
 
 #define CKR_OK                  0x00000000UL
 #define CKR_BUFFER_TOO_SMALL    0x00000150UL
+#define CKR_MECHANISM_PARAM_INVALID 0x00000071UL
 #define CKM_RSA_PKCS_KEY_PAIR_GEN 0x00000000UL
 #define CKM_RSA_PKCS_OAEP       0x00000009UL
 #define CKM_SHA256              0x00000250UL
@@ -141,6 +142,15 @@ int main(void) {
     rv = C_Decrypt(s, ct, ct_len, out, &retry_len);
     ok(rv == CKR_OK && retry_len == pt_len && memcmp(out, pt, pt_len) == 0,
        "the retry with the reported size succeeds");
+
+    /* 4. OAEP has no default parameters: none, or a short block, is a
+     *    mechanism-parameter defect. It was CKR_ARGUMENTS_BAD. */
+    CK_MECHANISM bare  = { CKM_RSA_PKCS_OAEP, NULL, 0 };
+    CK_MECHANISM shrt  = { CKM_RSA_PKCS_OAEP, &op, sizeof op - 1 };
+    ok(C_EncryptInit(s, &bare, pub) == CKR_MECHANISM_PARAM_INVALID,
+       "C_EncryptInit without OAEP parameters is CKR_MECHANISM_PARAM_INVALID");
+    ok(C_DecryptInit(s, &shrt, prv) == CKR_MECHANISM_PARAM_INVALID,
+       "C_DecryptInit with a short parameter block is too");
 
     if (fails) { fprintf(stderr, "test_oaep_decrypt_size : %d FAIL\n", fails); return 1; }
     printf("test_oaep_decrypt_size : PASS\n");
