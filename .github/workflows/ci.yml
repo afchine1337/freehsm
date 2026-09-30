@@ -351,12 +351,17 @@ jobs:
             /tmp/freehsm-coverage.tsv
           retention-days: 14
 
-  test-fips-mode:
+  # The coverage matrix under the STRICT runtime mode: non-approved mechanisms
+  # refused at call time. Integrity bypassed and OPENSSL_CONF=/dev/null, as
+  # tests/coverage_matrix.sh sets by default -- so no FIPS provider.
+  #
+  # This job was called test-fips-mode and set FHSM_MODE=fips, and was cited
+  # as a "FIPS-strict" run in docs/FIPS_140_3_SECURITY_TARGET.md 13.2. It never
+  # loaded the provider. It tests the runtime policy, which is worth testing,
+  # under the name that says so. The provider itself is test-fips-provider.
+  test-strict-mode:
     runs-on: ubuntu-latest
     needs: build
-    # Image now published on ghcr.io ; symmetric with the
-    # test-coverage-matrix job. Gate off again if the image
-    # disappears or becomes unavailable.
     container:
       image: ghcr.io/${{ github.repository_owner }}/freehsm-c-test:debian13-pkcs11-tools
       options: --user root
@@ -365,13 +370,58 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: libfreehsm-so
-      - name: Run in FIPS strict mode
+      - name: Coverage matrix, strict runtime mode (no FIPS provider)
         env:
-          FHSM_MODE: fips
+          FHSM_MODE: strict
         run: |
           install -m 755 libfreehsm.so /opt/freehsm/lib/
-          bash tests/coverage_matrix.sh 2>&1 | tee matrix-fips.log
-          tail -1 matrix-fips.log | grep -q "ALL ASSERTIONS PASS"
+          bash tests/coverage_matrix.sh 2>&1 | tee matrix-strict.log
+          tail -1 matrix-strict.log | grep -q "ALL ASSERTIONS PASS"
+
+  # The suite with the OpenSSL FIPS provider loaded: the signed module, no
+  # integrity bypass, KATs enforced. scripts/run_fips_tests.sh has done this
+  # since v2.0.2 and refuses to count anything until tests/probe_fips_loaded
+  # has shown the provider is in the process -- but no workflow ran it, and no
+  # CI image had a provider to load (scripts/ci_install_openssl_fips.sh).
+  #
+  # Built here rather than taken from the build job's artefact: the tests are
+  # binaries of this tree, and run_fips_tests.sh signs copies of the ones that
+  # embed the module. Only built, from the prerequisites of `tests`: running
+  # that target would also run the ordinary suite under the bypass, which is
+  # not this job's question.
+  test-fips-provider:
+    runs-on: ubuntu-latest
+    needs: lint
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Debian OpenSSL FIPS provider, installed and activated
+        run: bash scripts/ci_install_openssl_fips.sh
+
+      - name: Build, sign, build the tests
+        run: |
+          set -o pipefail
+          make clean
+          make
+          make $(sed -n 's/^tests:[[:space:]]*//p' Makefile)
+          # Last: anything that relinked libfreehsm.so would drop the digest.
+          make integrity
+
+      - name: The suite against the FIPS provider
+        run: |
+          set -o pipefail
+          bash scripts/run_fips_tests.sh 2>&1 | tee fips-tests.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fips-tests
+          path: fips-tests.log
+          retention-days: 30
 
   reproducibility:
     runs-on: ubuntu-latest

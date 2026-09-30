@@ -156,8 +156,23 @@ echo
 echo "== Does the signed module load the provider? =="
 # Always ask make, never "build it if the file is missing": a probe left over
 # from another tree or another OpenSSL prefix is present, and would be run.
-make tests/probe_fips_loaded >/tmp/fips_probe_build.log 2>&1 \
+#
+# But never let that make touch the module. The probe's rule lists $(LIB) as a
+# prerequisite, so whenever make judged the library out of date -- an object
+# a second newer, which the clock skew of a shared VM folder produces on its
+# own -- it relinked libfreehsm.so on the way and dropped the digest step 2 had
+# just checked. The probe then reported an unsigned module (0x80000002), on
+# 2026-09-30, twenty lines after this script printed "module signed": the
+# pre-flight rule of step 2, broken one step later. -o libfreehsm.so tells
+# make the file is current whatever its date; the probe only dlopen()s it.
+make -o "$LIB_SO" tests/probe_fips_loaded >/tmp/fips_probe_build.log 2>&1 \
     || { bad "could not build tests/probe_fips_loaded -- see /tmp/fips_probe_build.log"; exit 2; }
+# And prove it, rather than trust the flag: the digest must be the one step 2
+# read.
+digest_after=$(objcopy --dump-section .fhsm_digest=/dev/stdout "$LIB_SO" /dev/null \
+               2>/dev/null | od -An -tx1 -v | tr -d ' \n')
+[ "$digest_after" = "$digest" ] \
+    || { bad "$LIB_SO changed while the probe was built -- it is not the module step 2 checked"; exit 2; }
 probe_out=$($TEST_LD_ENV ./tests/probe_fips_loaded ./libfreehsm.so 2>&1)
 probe_rc=$?
 case "$probe_rc" in

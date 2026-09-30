@@ -382,12 +382,16 @@ The post-quantum coverage makes FreeHSM C, at the time of writing, one of very f
 
 ### 13.2 Coverage matrix self-test
 
-A second tier runs on every push, inside a separate pinned Debian 13 container (`ghcr.io/<owner>/freehsm-c-test:debian13-pkcs11-tools`), exercising **32 PKCS#11 v3.2 function × mechanism × error path** assertions through OpenSC's `pkcs11-tool` against the freshly built `.so`. The matrix produces **24 PASS / 0 FAIL / 8 documented SKIP** in both default and FIPS-strict modes :
+A second tier runs on every push, inside a separate pinned Debian 13 container (`ghcr.io/<owner>/freehsm-c-test:debian13-pkcs11-tools`), exercising **32 PKCS#11 v3.2 function × mechanism × error path** assertions through OpenSC's `pkcs11-tool` against the freshly built `.so`. As of v1.1.18 the matrix produced **24 PASS / 0 FAIL / 8 documented SKIP** in both the permissive and the strict runtime mode :
 
 ```
 test-coverage-matrix         PASS = 24   FAIL = 0   SKIP = 8
-test-fips-mode               PASS = 24   FAIL = 0   SKIP = 8
+test-fips-mode               PASS = 24   FAIL = 0   SKIP = 8    (now test-strict-mode)
 ```
+
+**What these two jobs do not show.** Both run with the integrity self-test bypassed and `OPENSSL_CONF=/dev/null`, so the OpenSSL FIPS provider is never loaded: every EVP fetch is served by the default provider. "Strict" is the runtime policy — non-approved mechanisms refused at call time — not the provider. Until 2026-09-30 the second job was named `test-fips-mode` and this section called it a "FIPS-strict" run, which invited the reading that the provider had been exercised. It had not been, in any CI job.
+
+The run that does load it is `test-fips-provider` (since 2026-09-30): the signed module, no bypass, KATs enforced, Debian's `openssl-provider-fips` activated in the system configuration, and `scripts/run_fips_tests.sh`, which counts nothing until `tests/probe_fips_loaded` has shown the provider is in the process. The pkcs11-check harness also runs against the signed module with the provider loaded, in both build profiles (`pkcs11-check-signed`).
 
 The 8 skips are all due to tooling gaps in the harness layer (e.g., OpenSC's `pkcs11-tool` does not propose SHA-3 mechanisms, MD5 is intentionally absent from `g_mech_list` per FIPS 140-3 §C.A removal), not module behaviour.
 
@@ -403,7 +407,7 @@ Every release tag triggers a deterministic build inside a pinned Docker image (`
 |---|---|---|
 | 51 boot KAT vectors (Section 9.3) | Per-invocation | Mandatory per FIPS 140-3 §7.10.2 |
 | 6 978 Wycheproof vectors, 9 families | Per push to main | 100 % match, 0 violation |
-| 32 matrix assertions, default + FIPS modes | Per push to main | 24/0/8 |
+| 32 matrix assertions, permissive + strict runtime modes (no FIPS provider, §13.2) | Per push to main | 24/0/8 |
 | 37.9 million fuzz inputs across 3 harnesses | Per push (5 min) / nightly (1 h) | 0 crash, 0 leak, 12 invariants checked (§13.5) |
 | Reproducible build (sha256 bit-identical) | Per release tag | Verified by `dist-verify` |
 | GPG signed releases (Ed25519 fingerprint `743A 6A59 04A1 461A 6464 08DE 4856 0162 DBBF 28A2`) | Per release tag | **18 consecutive releases** since v1.1.0 (§13.7) |
