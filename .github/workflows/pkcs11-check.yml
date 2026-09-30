@@ -47,6 +47,7 @@ on:
       - 'Makefile'
       - 'scripts/run_pkcs11_check.sh'
       - 'scripts/pkcs11_check_gate.py'
+      - 'scripts/ci_install_openssl_fips.sh'
       - 'scripts/diff_pkcs11_runs.py'
       - 'scripts/pkcs11_check_summary.py'
       - 'tests/pkcs11_check_known_failures.txt'
@@ -273,6 +274,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # A signed module will not start without the FIPS provider, and no CI
+      # image has one (see scripts/ci_install_openssl_fips.sh). Built once,
+      # cached by the script's own hash: changing the version or the checksum
+      # changes the key.
+      - name: Cache OpenSSL with FIPS provider
+        uses: actions/cache@v6
+        with:
+          path: /usr/local/ssl
+          key: openssl-fips-${{ hashFiles('scripts/ci_install_openssl_fips.sh') }}
+
+      - name: OpenSSL 3.5.7 with FIPS provider at /usr/local/ssl
+        run: bash scripts/ci_install_openssl_fips.sh
+
       # PROFILE on every make, `make integrity` included: a bare make restores
       # the default profile, and the harness would then measure the wrong
       # module under the right name. FHSM_EXPECT_PROFILE below catches that
@@ -309,6 +323,16 @@ jobs:
           set -o pipefail
           pkcs11-check fetch-data all
           pkcs11-check fetch-data --status
+
+      # The module was linked against /usr/local/ssl; at run time pkcs11-tool
+      # and the harness dlopen it, and nothing else would point the loader at
+      # that libcrypto. Registered here, after apt and pip have run, so only
+      # the measurement uses it. 00- sorts it ahead of the system directory.
+      - name: Put the FIPS-capable libcrypto on the loader path
+        run: |
+          echo /usr/local/ssl/lib64 > /etc/ld.so.conf.d/00-fhsm-openssl.conf
+          ldconfig
+          ldd libfreehsm.so | grep libcrypto | tee /dev/stderr | grep -q /usr/local/ssl/lib64
 
       # No FHSM_ALLOW_UNSIGNED: that is the point of this job.
       - name: Run pkcs11-check (signed, FIPS provider, ${{ matrix.profile }})
