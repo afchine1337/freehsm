@@ -23,11 +23,17 @@
 #
 # The description of a tool is not a statement about what you ran with it.
 #
-# NON-GATING by design : per pkcs11-check's own guidance, large
-# xfail/fail counts are normal findings (PKCS#11 cannot express many
-# capability constraints), so the job fails only if the harness itself
-# fails to run or produce a report. Baseline regression comparison
-# (pkcs11-check compare-results) is tracked as follow-up work.
+# TWO JOBS.
+#
+#   pkcs11-check          default profile, integrity bypassed, default
+#                         provider. NON-GATING by design: per pkcs11-check's
+#                         own guidance, large xfail/fail counts are normal
+#                         findings, so it fails only if the harness does not
+#                         run or produce a report.
+#   pkcs11-check-signed   both build profiles, signed module, FIPS provider
+#                         loaded. GATING on node-ids: a failure not listed in
+#                         tests/pkcs11_check_known_failures.txt fails the job
+#                         (scripts/pkcs11_check_gate.py). Added 2026-09-30.
 # ===========================================================================
 name: pkcs11-check
 
@@ -40,6 +46,10 @@ on:
       - 'kat/**'
       - 'Makefile'
       - 'scripts/run_pkcs11_check.sh'
+      - 'scripts/pkcs11_check_gate.py'
+      - 'scripts/diff_pkcs11_runs.py'
+      - 'scripts/pkcs11_check_summary.py'
+      - 'tests/pkcs11_check_known_failures.txt'
       - '.github/workflows/pkcs11-check.yml'
   workflow_dispatch:
     inputs:
@@ -227,4 +237,113 @@ jobs:
             reports/pkcs11-check/
             harness.log
             corpus.txt
+          retention-days: 30
+
+  # The deliberate job the note above asks for: the signed module, integrity
+  # check on, FIPS provider loaded -- what a deployment runs -- in both build
+  # profiles.
+  #
+  # Two blind spots, and the week of 2026-09-27 went through both. No job built
+  # all-mechanisms, so its first corpus run found nine failures at once: EC
+  # curves below the advertised floor, 3DES keys of a size nobody asked for,
+  # 3DES-CBC accepted without an IV. And no job ran the harness against a
+  # signed module, so X25519 and X448 were advertised by every signed
+  # all-mechanisms build and failed on every call -- the FIPS provider has
+  # neither -- while every test here, run under the bypass, passed.
+  #
+  # GATING, unlike the job above, and on node-ids rather than counts:
+  # scripts/pkcs11_check_gate.py fails on any failure that is not listed, with
+  # its reason, in tests/pkcs11_check_known_failures.txt. Replayed on the
+  # 2026-09-28 run it names seven failures; on the 2026-09-29 run, none.
+  pkcs11-check-signed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [nist-approved-only, all-mechanisms]
+    env:
+      FULL_CORPUS: >-
+        ${{ (github.event_name == 'schedule'
+             || (github.event_name == 'workflow_dispatch' && inputs.full_corpus))
+            && '1' || '0' }}
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    steps:
+      - uses: actions/checkout@v7
+
+      # PROFILE on every make, `make integrity` included: a bare make restores
+      # the default profile, and the harness would then measure the wrong
+      # module under the right name. FHSM_EXPECT_PROFILE below catches that
+      # by reading the profile out of the module.
+      - name: Build + sign module (${{ matrix.profile }})
+        run: |
+          set -o pipefail
+          make clean
+          make PROFILE=${{ matrix.profile }}
+          make PROFILE=${{ matrix.profile }} integrity
+          test -f libfreehsm.so
+
+      - name: Install harness (opensc + pkcs11-check)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq opensc python3-pip python3-venv
+          python3 -m venv /opt/p11check
+          # Same pin as the job above; see the note there before changing it.
+          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.1'
+          ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
+          ln -sf /opt/p11check/bin/pkcs11-check-report /usr/local/bin/pkcs11-check-report
+          pkcs11-check version
+
+      - name: Cache third-party vectors
+        if: env.FULL_CORPUS == '1'
+        uses: actions/cache@v6
+        with:
+          path: /root/.local/share/pkcs11-check/data
+          key: p11check-data-0.2.1
+
+      - name: Fetch third-party vectors
+        if: env.FULL_CORPUS == '1'
+        run: |
+          set -o pipefail
+          pkcs11-check fetch-data all
+          pkcs11-check fetch-data --status
+
+      # No FHSM_ALLOW_UNSIGNED: that is the point of this job.
+      - name: Run pkcs11-check (signed, FIPS provider, ${{ matrix.profile }})
+        env:
+          FHSM_EXPECT_PROFILE: ${{ matrix.profile }}
+        run: |
+          set -o pipefail
+          bash scripts/run_pkcs11_check.sh ./libfreehsm.so ./reports/pkcs11-check \
+            2>&1 | tee harness.log
+
+      - name: Gate on unlisted failures
+        run: |
+          python3 scripts/pkcs11_check_gate.py reports/pkcs11-check/report.jsonl \
+            --profile ${{ matrix.profile }}
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## pkcs11-check, signed module, ${{ matrix.profile }}"
+            echo
+            [ "$FULL_CORPUS" = "1" ] && echo "corpus: full" || echo "corpus: embedded only"
+            echo
+            echo '```'
+            cat reports/pkcs11-check/provenance.txt 2>/dev/null || true
+            grep -A 20 "== Summary ==" harness.log | head -25 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pkcs11-check-signed-${{ matrix.profile }}
+          path: |
+            reports/pkcs11-check/
+            harness.log
           retention-days: 30
