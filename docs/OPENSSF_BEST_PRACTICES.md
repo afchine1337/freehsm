@@ -36,18 +36,15 @@ for months: `contribution`, `contribution_requirements`, `license_location`,
 `release_notes`, `report_process`. The other two Unmet entries, `achieve_passing`
 and `achieve_silver`, are computed by the site.
 
-## Two answers that depend on a change in the repository
+## Two answers that needed a change in the repository
 
-- **`static_analysis` (MUST).** The Makefile has a `lint` target running
-  `cppcheck`, and its comment says the build refuses to ship if `cppcheck` or
-  `scan-build` flags a defect. Nothing runs that target — not CI, not
-  `scripts/release.sh`, not `scripts/tag-release.sh` — and `scan-build` is not in
-  it. Until it runs, the honest answer is **Unmet**. Running `make lint` in CI on
-  every push makes `static_analysis`, `static_analysis_often` and
-  `static_analysis_fixed` Met.
-- **`test_invocation` (SHOULD).** The standard invocations for a Makefile project
-  are `make check` and `make test`; this one uses `make tests`. Two aliases make it
-  Met.
+- **`static_analysis` (MUST).** The Makefile had a `lint` target running
+  `cppcheck`, and its comment said the build refused to ship if `cppcheck` or
+  `scan-build` flagged a defect. Nothing ran it, and `scan-build` was never in it.
+  Since 2026-10-01 CI's `static-analysis` job runs `make lint` on every push,
+  gating; its first CI run (commit `336a0db`) was green.
+- **`test_invocation` (SHOULD).** `make test` and `make check` now alias
+  `make tests`.
 
 ## Basics
 
@@ -102,7 +99,7 @@ and `achieve_silver`, are computed by the site.
 | `build_common_tools` | Met | GNU Make, GCC, Python 3. |
 | `build_floss_tools` | Met | Every build tool and dependency is FLOSS. |
 | `test` | Met | About 90 test programs and scripts in `tests/`, run by `make tests`, documented in CONTRIBUTING.md §3. https://github.com/afchine1337/freehsm/tree/main/tests |
-| `test_invocation` | **Met after the alias** | See above: `make test` / `make check` alongside `make tests`. |
+| `test_invocation` | Met | `make test` and `make check`, aliases of `make tests`. |
 | `test_most` | Met | Functional coverage, measured externally: every corpus run of pkcs11-check (about 92,000 tests) exercises 76 of PKCS#11 v3.2's 104 functions and every advertised mechanism. Branch coverage is not measured. https://github.com/afchine1337/freehsm/blob/main/docs/PKCS11_CHECK_FINDINGS.md |
 | `test_continuous_integration` | Met | GitHub Actions on every push. https://github.com/afchine1337/freehsm/actions |
 | `test_policy` | Met | CONTRIBUTING.md §5: a new mechanism comes with a KAT vector and a coverage-matrix assertion. https://github.com/afchine1337/freehsm/blob/main/CONTRIBUTING.md |
@@ -137,10 +134,10 @@ and `achieve_silver`, are computed by the site.
 
 | Criterion | Answer | Justification and evidence |
 |---|---|---|
-| `static_analysis` | **Unmet until `make lint` runs** | See above. |
-| `static_analysis_common_vulnerabilities` | Met once running | `cppcheck` checks buffer overruns, null dereferences, use after free and leaks. |
-| `static_analysis_fixed` | Met once running | `--error-exitcode=1`: a finding fails the job. |
-| `static_analysis_often` | Met once running | On every push. |
+| `static_analysis` | Met | cppcheck (`make lint`) on every push, CI job `static-analysis`, failing on any finding. https://github.com/afchine1337/freehsm/actions/workflows/ci.yml |
+| `static_analysis_common_vulnerabilities` | Met | cppcheck checks buffer overruns, null dereferences, use after free, uninitialised variables and leaks; run with `--check-level=exhaustive`. |
+| `static_analysis_fixed` | Met | `--error-exitcode=1`: a finding fails CI. The first run (2026-10-01) found no defect; its 124 findings were fixed, or suppressed with a stated reason (Makefile, and in place). |
+| `static_analysis_often` | Met | On every push. |
 | `dynamic_analysis` | Met | AddressSanitizer + UBSan over the whole suite on every push (`sanitizers` job), libFuzzer nightly (`fuzz.yml`), and external harnesses: pkcs11-check on the signed module, Wycheproof. https://github.com/afchine1337/freehsm/actions |
 | `dynamic_analysis_unsafe` | Met | C code: ASan/UBSan and four libFuzzer harnesses, routinely. |
 | `dynamic_analysis_enable_assertions` | Met | The sanitizer build enables ASan and UBSan runtime checks across the suite. |
