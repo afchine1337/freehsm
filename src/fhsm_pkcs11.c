@@ -525,14 +525,14 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
 
     rv = fhsm_state_set(FHSM_STATE_INITIALIZED);
     (void)fhsm_audit_event(FHSM_EV_MODULE_INIT, -1, -1,
-                            FHSM_ROLE_NONE, rv, NULL);
+                            FHSM_ROLE_NONE, rv, FHSM_AUDIT_END);
     return rv;
 }
 
 CK_RV C_Finalize(CK_VOID_PTR pReserved) {
     (void)pReserved;
     (void)fhsm_audit_event(FHSM_EV_MODULE_FINALIZE, -1, -1,
-                            FHSM_ROLE_NONE, FHSM_RV_OK, NULL);
+                            FHSM_ROLE_NONE, FHSM_RV_OK, FHSM_AUDIT_END);
     /* Release before the crypto layer goes down: the operation contexts being
      * freed are OpenSSL objects, and freeing them after fhsm_crypto_finalize
      * would be using a layer that has just been told it is finished. */
@@ -798,7 +798,7 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE hSession) {
     if (rv == FHSM_RV_OK && before != FHSM_ROLE_NONE
         && fhsm_token_current_role(t) == FHSM_ROLE_NONE)
         (void)fhsm_audit_event(FHSM_EV_LOGOUT, -1, (int)hSession, before, rv,
-                                "cause", "last-session-closed", NULL);
+                                "cause", "last-session-closed", FHSM_AUDIT_END);
     return rv;
 }
 
@@ -926,7 +926,7 @@ CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
                 (ctx_rv == FHSM_RV_PIN_THROTTLED) ? FHSM_EV_LOGIN_THROTTLED :
                                                      FHSM_EV_LOGIN_FAIL,
                 -1, (int)hSession, FHSM_ROLE_USER, ctx_rv,
-                "role", "CONTEXT_SPECIFIC", "pin_len", ctx_len_str, NULL);
+                "role", "CONTEXT_SPECIFIC", "pin_len", ctx_len_str, FHSM_AUDIT_END);
         }
         if (ctx_rv != FHSM_RV_OK) return ctx_rv;
         fhsm_session_ctx_auth_grant(hSession);
@@ -955,7 +955,7 @@ CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
         (rv == FHSM_RV_PIN_THROTTLED)  ? FHSM_EV_LOGIN_THROTTLED :
                                           FHSM_EV_LOGIN_FAIL,
         -1, (int)hSession, role, rv,
-        "role", rolename, "pin_len", pin_len_str, NULL);
+        "role", rolename, "pin_len", pin_len_str, FHSM_AUDIT_END);
     return rv;
 }
 
@@ -963,7 +963,7 @@ CK_RV C_Logout(CK_SESSION_HANDLE hSession) {
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     fhsm_rv_t rv = fhsm_session_logout(hSession);
     (void)fhsm_audit_event(FHSM_EV_LOGOUT, -1, (int)hSession,
-                            FHSM_ROLE_NONE, rv, NULL);
+                            FHSM_ROLE_NONE, rv, FHSM_AUDIT_END);
     return rv;
 }
 
@@ -1667,7 +1667,7 @@ CK_RV C_InitToken(CK_SLOT_ID slotID, CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen,
     }
     fhsm_zeroize(pin, sizeof(pin));
     (void)fhsm_audit_event(FHSM_EV_TOKEN_INIT, (int)slotID, -1,
-                            FHSM_ROLE_SO, rv, NULL);
+                            FHSM_ROLE_SO, rv, FHSM_AUDIT_END);
     return rv;
 }
 
@@ -1691,7 +1691,7 @@ CK_RV C_InitPIN(CK_SESSION_HANDLE hSession, CK_UTF8CHAR_PTR pPin,
     fhsm_rv_t rv = fhsm_token_init_user_pin(t, pin);
     fhsm_zeroize(pin, sizeof(pin));
     (void)fhsm_audit_event(FHSM_EV_SET_PIN, -1, (int)hSession,
-                            FHSM_ROLE_SO, rv, NULL);
+                            FHSM_ROLE_SO, rv, FHSM_AUDIT_END);
     return rv;
 }
 
@@ -1723,7 +1723,7 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
     fhsm_zeroize(op, sizeof(op));
     fhsm_zeroize(np, sizeof(np));
     (void)fhsm_audit_event(FHSM_EV_SET_PIN, -1, (int)hSession,
-                            r, rv, NULL);
+                            r, rv, FHSM_AUDIT_END);
     return rv;
 }
 
@@ -3144,7 +3144,7 @@ static CK_RV fhsm_apply_allowed_mechs(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
     if (tmpl[i].ulValueLen % sizeof(CK_ULONG)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     CK_ULONG cnt = tmpl[i].ulValueLen / sizeof(CK_ULONG);
     if (cnt > FHSM_POLICY_MECH_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-    uint32_t mechs[FHSM_POLICY_MECH_MAX];
+    uint32_t mechs[FHSM_POLICY_MECH_MAX] = {0};   /* cnt may be 0 */
     for (CK_ULONG k = 0; k < cnt; ++k)
         mechs[k] = (uint32_t)((CK_ULONG *)tmpl[i].pValue)[k];
     return fhsm_token_object_set_allowed_mechs(t, handle, mechs, (uint8_t)cnt);
@@ -4620,7 +4620,7 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
     (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(obj_class, pTemplate, ulCount));
     (void)fhsm_audit_event(FHSM_EV_DERIVE, -1, (int)hSession,
-                            fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                            fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
     return FHSM_RV_OK;
 }
 
@@ -4855,7 +4855,7 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         *pulWrappedKeyLen = (CK_ULONG)(outl + finl);
         EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
         (void)fhsm_audit_event(FHSM_EV_WRAP, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -4884,7 +4884,7 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (orv != FHSM_RV_OK) return orv;
         *pulWrappedKeyLen = (CK_ULONG)got;
         (void)fhsm_audit_event(FHSM_EV_WRAP, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -4910,7 +4910,7 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (wrv != FHSM_RV_OK) return wrv;
         *pulWrappedKeyLen = (CK_ULONG)got;
         (void)fhsm_audit_event(FHSM_EV_WRAP, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -5167,7 +5167,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
     (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
     (void)fhsm_audit_event(FHSM_EV_UNWRAP, -1, (int)hSession,
-                            fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                            fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
     return FHSM_RV_OK;
 }
 
@@ -6211,7 +6211,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                                 -1, (int)hSession,
                                 fhsm_session_role(hSession),
                                 pw_rv,
-                                "pairwise_family", pw_fam, NULL);
+                                "pairwise_family", pw_fam, FHSM_AUDIT_END);
         if (pw_rv != FHSM_RV_OK) {
             (void)fhsm_state_set(FHSM_STATE_ERROR);
             EVP_PKEY_free(pkey);
@@ -6219,6 +6219,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         }
     }
 
+    /* cppcheck-suppress duplicateCondition ; two consecutive !composite blocks with different jobs */
     if (!composite) {
         /* Serialize public key (SubjectPublicKeyInfo). */
         pub_len = i2d_PUBKEY(pkey, &pub_der);
@@ -6586,6 +6587,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         const void *src = NULL; size_t src_len = 0;
         unsigned char bval = 0;
+        /* cppcheck-suppress unreadVariable ; defaults that some attribute branches overwrite and others do not read */
         CK_ULONG  tmp_class = cko_class, tmp_type = ckk_type, tmp_len = value_len;
         const char    *label_p = NULL; size_t label_len = 0;
         const uint8_t *id_p    = NULL; size_t id_len    = 0;
@@ -8994,7 +8996,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         op->active = 0;
         g_oaep_enc[hSession].active = 0;
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -9027,7 +9029,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         *pulEncLen = bl;
         EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey); op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -9111,7 +9113,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         *pulEncLen = (CK_ULONG)(kwoutl + kwfinl);
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -9166,7 +9168,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -9200,7 +9202,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -9247,7 +9249,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         }
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), rv, NULL);
+                                fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
         return rv;
     }
 
@@ -9304,7 +9306,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
     }
     op->active = 0;
     (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
-                            fhsm_session_role(hSession), rv, NULL);
+                            fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
     return rv;
 }
 
@@ -9443,7 +9445,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
                                 fhsm_session_role(hSession),
                                 dres == FHSM_RV_OK
                                     ? FHSM_RV_OK
-                                    : FHSM_RV_ENCRYPTED_DATA_INVALID, NULL);
+                                    : FHSM_RV_ENCRYPTED_DATA_INVALID, FHSM_AUDIT_END);
         return dres;
     }
 
@@ -9503,7 +9505,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         op->active = 0;
         if (dres != FHSM_RV_OK) return dres;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -9595,7 +9597,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             op->active = 0;
             (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
                                     fhsm_session_role(hSession),
-                                    FHSM_RV_ENCRYPTED_DATA_INVALID, NULL);
+                                    FHSM_RV_ENCRYPTED_DATA_INVALID, FHSM_AUDIT_END);
             return FHSM_RV_ENCRYPTED_DATA_INVALID;
         }
         EVP_CIPHER_CTX_free(kwctx); EVP_CIPHER_free(kwc);
@@ -9612,7 +9614,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         *pulDataLen = (CK_ULONG)kwgot;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -9664,7 +9666,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -9697,7 +9699,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, NULL);
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
     }
 
@@ -9746,7 +9748,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         }
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), rv, NULL);
+                                fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
         return rv;
     }
 
@@ -9823,7 +9825,7 @@ gcm_out:
     *pulDataLen = out_len;
     op->active = 0;
     (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
-                            fhsm_session_role(hSession), rv, NULL);
+                            fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
     return rv;
 }
 
@@ -10458,7 +10460,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         *pulSignatureLen = (rv == FHSM_RV_OK) ? slen : 0;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
-                                fhsm_session_role(hSession), rv, "alg", "composite", NULL);
+                                fhsm_session_role(hSession), rv, "alg", "composite", FHSM_AUDIT_END);
         return rv;
     }
 
@@ -10477,7 +10479,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         *pulSignatureLen = mac_len;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
-                                fhsm_session_role(hSession), rv, NULL);
+                                fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
         return rv;
     }
 
@@ -10521,7 +10523,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         *pulSignatureLen = mac_len;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
-                                fhsm_session_role(hSession), rv, NULL);
+                                fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
         return rv;
     }
 
@@ -10560,7 +10562,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         if (scratch != stackbuf) free(scratch);
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
-                                fhsm_session_role(hSession), rv, NULL);
+                                fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
         return rv;
     }
     if (*pulSignatureLen < sig_buf_len) {
@@ -10575,7 +10577,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
     if (scratch != stackbuf) free(scratch);
     op->active = 0;
     (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
-                            fhsm_session_role(hSession), rv, NULL);
+                            fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
     return FHSM_RV_OK;
 }
 
@@ -10674,7 +10676,7 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
                                     kv, kvl, pData, ulDataLen, NULL, 0,
                                     pSig, ulSigLen);
         (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
-                                fhsm_session_role(hSession), rv, "alg", "composite", NULL);
+                                fhsm_session_role(hSession), rv, "alg", "composite", FHSM_AUDIT_END);
         return rv;
     }
 
@@ -10822,7 +10824,7 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
         op->active = 0;
         rv = vok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
         (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
-                                fhsm_session_role(hSession), rv, NULL);
+                                fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
         return rv;
     }
 
@@ -10926,7 +10928,7 @@ vcleanup:
     op->active = 0;
     rv = verify_ok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
     (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
-                            fhsm_session_role(hSession), rv, NULL);
+                            fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
     return rv;
 }
 
@@ -11197,6 +11199,7 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
      * of this file has been moving that way: a rule wired to some of the
      * paths that reach a state and not the rest is how all of these
      * started. */
+    /* cppcheck-suppress unreadVariable ; a safe default: every path that reads rv assigns it first */
     fhsm_rv_t rv = FHSM_RV_OK;
     if (!op->mac_ctx) {
         const uint8_t *kv = NULL; size_t kvl = 0;
@@ -11281,7 +11284,7 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
         OPENSSL_cleanse(ph, sizeof ph);
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
-                                fhsm_session_role(hSession), crv, "alg", "composite-multipart", NULL);
+                                fhsm_session_role(hSession), crv, "alg", "composite-multipart", FHSM_AUDIT_END);
         return crv;
     }
 
@@ -11336,7 +11339,7 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
             op_free_multipart(op); op->active = 0;
             (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
                                     fhsm_session_role(hSession), srv,
-                                    "mode", "multipart", NULL);
+                                    "mode", "multipart", FHSM_AUDIT_END);
             return srv;
         }
         if (*pulSigLen < slen) {
@@ -11355,7 +11358,7 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
                                 fhsm_session_role(hSession), srv,
-                                "mode", "multipart", NULL);
+                                "mode", "multipart", FHSM_AUDIT_END);
         return srv;
     }
 
@@ -11449,6 +11452,7 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
      * applied to C_SignUpdate and not to its mirror here -- which is the
      * defect shape this file keeps producing, committed while fixing an
      * instance of it. */
+    /* cppcheck-suppress unreadVariable ; a safe default: every path that reads rv assigns it first */
     fhsm_rv_t rv = FHSM_RV_OK;
     if (!op->mac_ctx) {
         const uint8_t *kv = NULL; size_t kvl = 0;
@@ -11518,7 +11522,7 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
                                                    pSig, ulSigLen);
         OPENSSL_cleanse(ph, sizeof ph);
         (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
-                                fhsm_session_role(hSession), crv, "alg", "composite-multipart", NULL);
+                                fhsm_session_role(hSession), crv, "alg", "composite-multipart", FHSM_AUDIT_END);
         return crv;
     }
     /* Asymmetric: the parts were accumulated by C_VerifyUpdate and checked

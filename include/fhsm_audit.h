@@ -230,6 +230,13 @@ void fhsm_audit_barrier_stats(uint64_t *events, uint64_t *barriers);
  * never open and the function returned before reading its arguments. A
  * variadic contract nobody can check by reading is one the compiler should
  * check instead. */
+/* End every call with FHSM_AUDIT_END, not a bare NULL. NULL may be a plain 0,
+ * and an int read back by va_arg as a char * is undefined behaviour (C11
+ * 7.16.1.1). glibc's NULL is ((void *)0), so it never bit here; cppcheck
+ * flagged all 58 call sites the first time anyone ran it (2026-10-01). The
+ * sentinel attribute accepts this, since it is a null pointer. */
+#define FHSM_AUDIT_END ((const char *)NULL)
+
 #if defined(__GNUC__)
 __attribute__((sentinel))
 #endif

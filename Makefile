@@ -952,7 +952,11 @@ asan:
 # above points TSAN=1 at tests/test_concurrency, which is what it is known
 # to do.
 
-.PHONY: tests
+.PHONY: tests test check
+# `make test` and `make check` are what a Makefile project is expected to
+# answer to (OpenSSF test_invocation); both are `make tests`.
+test check: tests
+
 # Every test gets its own tokens directory. It used to be only the ones that
 # touch a token -- but C_Initialize now opens the audit log, which lives
 # beside the tokens, so any test that initialises the module writes there.
@@ -1196,14 +1200,35 @@ release: $(LIB)
 	@scripts/sign_module.sh $(LIB)
 
 # ---------------------------------------------------------------------------
-# Lint --- the build refuses to ship if cppcheck or scan-build flags any
-# defect. Both are part of the CC EAL4+ ALC_TAT.1 ("well-defined
-# development tools") evidence package.
+# Lint --- cppcheck over src/ and kat/; any finding fails it.
+#
+# This comment used to say the build refuses to ship if cppcheck or
+# scan-build flags a defect. Nothing ran this target -- not CI, not
+# release.sh, not tag-release.sh -- and scan-build was never in it. Found on
+# 2026-10-01 while answering OpenSSF's static_analysis criterion, which this
+# file had been cited for. CI's static-analysis job runs it on every push.
 # ---------------------------------------------------------------------------
 .PHONY: lint
+#
+# The first run, on 2026-10-01, reported 124 findings and no defect: 58
+# variadic NULL sentinels (now FHSM_AUDIT_END), 16 functions whose analysis
+# was cut short (hence --check-level=exhaustive), 36 suggestions below, and
+# a dozen style notes, each now suppressed in place with its reason.
+#
+# Suppressed here, for the whole tree:
+#   const*             "this could be const". Worth taking when a function is
+#                      touched anyway; not worth a tree-wide edit, and not
+#                      what a gate is for.
+#   unusedStructMember the PKCS#11 ABI structures (CK_VERSION,
+#                      CK_FUNCTION_LIST*) carry fields this file never reads;
+#                      their layout is not ours to trim.
 lint:
 	cppcheck --enable=warning,style,performance,portability \
 	         --error-exitcode=1 --std=c11 --inline-suppr \
+	         --check-level=exhaustive \
+	         --suppress=constParameterPointer --suppress=constVariablePointer \
+	         --suppress=constParameterCallback --suppress=constVariable \
+	         --suppress=unusedStructMember \
 	         -Iinclude src/ kat/
 
 # ---------------------------------------------------------------------------

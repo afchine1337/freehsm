@@ -167,6 +167,7 @@ fhsm_rv_t dispatch_hybrid_x25519_ml_kem_768(unsigned long session, unsigned long
     uint8_t *ct_pq  = out + 32;
     uint8_t *ss_out = out + 32 + 1088;
     uint8_t ss_x[32]; size_t ss_x_len = sizeof(ss_x);
+    /* cppcheck-suppress unreadVariable ; hybrid KEM path, de-advertised in #17 */
     uint8_t ss_pq[32]; size_t ss_pq_len = sizeof(ss_pq);
 
     rv = FHSM_RV_FUNCTION_FAILED;
@@ -222,7 +223,7 @@ fhsm_rv_t dispatch_hybrid_x25519_ml_kem_768(unsigned long session, unsigned long
     (void)fhsm_audit_event(FHSM_EV_DERIVE, -1, -1, FHSM_ROLE_NONE,
                             FHSM_RV_FIPS_NOT_APPROVED,
                             "warning", "PQ-KEM stub --- non-FIPS degraded mode",
-                            NULL);
+                            FHSM_AUDIT_END);
     memset(ct_pq, 0, 1088);
     memset(ss_pq, 0, 32);
 #endif
@@ -327,7 +328,7 @@ fhsm_rv_t dispatch_hybrid_ed25519_ml_dsa_65(unsigned long session, unsigned long
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, -1, FHSM_ROLE_NONE,
                                 rv,
                                 "warning", "ML-DSA-65 signature unavailable",
-                                NULL);
+                                FHSM_AUDIT_END);
         goto out;
     }
     *outlen = sig_ed_len + sig_pq_len;

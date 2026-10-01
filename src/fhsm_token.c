@@ -1064,19 +1064,19 @@ fhsm_rv_t fhsm_token_init(const char *path, const char *so_pin,
         rv = fhsm_token_tpm_seal(t->path, t->dek);
         if (rv != FHSM_RV_OK) {
             (void)fhsm_audit_event(FHSM_EV_SEAL_FAILURE, -1, -1,
-                                    FHSM_ROLE_SO, rv, "tpm-seal-init", NULL);
+                                    FHSM_ROLE_SO, rv, "tpm-seal-init", FHSM_AUDIT_END);
             goto err;
         }
         (void)fhsm_audit_event(FHSM_EV_SEAL_SUCCESS, -1, -1,
                                 FHSM_ROLE_SO, FHSM_RV_OK,
-                                "tpm-seal-init", NULL);
+                                "tpm-seal-init", FHSM_AUDIT_END);
     }
 
     if (write_atomic(t) != FHSM_RV_OK) { rv = FHSM_RV_FUNCTION_FAILED; goto err; }
 
     *out = t;
     (void)fhsm_audit_event(FHSM_EV_TOKEN_INIT, -1, -1, FHSM_ROLE_SO,
-                            FHSM_RV_OK, "label", t->label, NULL);
+                            FHSM_RV_OK, "label", t->label, FHSM_AUDIT_END);
     return FHSM_RV_OK;
 
 err:
@@ -1279,7 +1279,7 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
                      * fault, and recoverable without losing the token. */
                     (void)fhsm_audit_event(FHSM_EV_UNSEAL_FAILURE, -1, -1,
                                             role, tpm_rv,
-                                            "tpm-unseal-failed", NULL);
+                                            "tpm-unseal-failed", FHSM_AUDIT_END);
                     return FHSM_RV_DEVICE_ERROR;
                 }
                 /* Unsealed cleanly but the DEK does not match the one the
@@ -1287,18 +1287,18 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
                  * key. Someone substituted a store file, or a sealed blob. */
                 (void)fhsm_audit_event(FHSM_EV_UNSEAL_FAILURE, -1, -1,
                                         role, FHSM_RV_DEVICE_ERROR,
-                                        "tpm-dek-mismatch", NULL);
+                                        "tpm-dek-mismatch", FHSM_AUDIT_END);
                 return FHSM_RV_DEVICE_ERROR;
             }
             (void)fhsm_audit_event(FHSM_EV_UNSEAL_SUCCESS, -1, -1, role,
-                                    FHSM_RV_OK, "tpm-check-login", NULL);
+                                    FHSM_RV_OK, "tpm-check-login", FHSM_AUDIT_END);
         } else if (fhsm_token_tpm_required()) {
             /* TPM required by config but no companion file exists for
              * this token. Refuse login --- the operator must re-init
              * the token under TPM sealing. */
             (void)fhsm_audit_event(FHSM_EV_UNSEAL_FAILURE, -1, -1, role,
                                     FHSM_RV_TPM_UNAVAILABLE,
-                                    "tpm-required-but-missing", NULL);
+                                    "tpm-required-but-missing", FHSM_AUDIT_END);
             fhsm_zeroize(t->dek, DEK_LEN);
             pthread_mutex_unlock(&t->mu);
             /* Configuration problem, not an authentication problem -- and
@@ -1564,7 +1564,7 @@ fhsm_rv_t fhsm_token_set_pin(fhsm_token_t *t, fhsm_role_t role,
 
     rv = write_atomic(t);
     pthread_mutex_unlock(&t->mu);
-    (void)fhsm_audit_event(FHSM_EV_SET_PIN, -1, -1, role, rv, NULL);
+    (void)fhsm_audit_event(FHSM_EV_SET_PIN, -1, -1, role, rv, FHSM_AUDIT_END);
     return rv;
 }
 
@@ -1637,7 +1637,7 @@ fhsm_rv_t fhsm_token_reinit(fhsm_token_t *t, const char *new_so_pin,
 out:
     pthread_mutex_unlock(&t->mu);
     (void)fhsm_audit_event(FHSM_EV_TOKEN_REINIT, -1, -1, FHSM_ROLE_SO, rv,
-                            "label", t->label, NULL);
+                            "label", t->label, FHSM_AUDIT_END);
     return rv;
 }
 /* ---------------------------------------------------------------------------
@@ -1687,7 +1687,7 @@ fhsm_rv_t fhsm_token_object_add(fhsm_token_t *t, uint32_t cko_class,
     fhsm_rv_t rv = write_atomic(t);
     pthread_mutex_unlock(&t->mu);
     (void)fhsm_audit_event(FHSM_EV_OBJECT_CREATE, -1, -1, t->logged_in, rv,
-                            "label", label ? label : "", NULL);
+                            "label", label ? label : "", FHSM_AUDIT_END);
     return rv;
 }
 
@@ -2357,7 +2357,7 @@ fhsm_rv_t fhsm_token_object_destroy(fhsm_token_t *t, uint32_t handle) {
             fhsm_rv_t rv = write_atomic(t);
             pthread_mutex_unlock(&t->mu);
             (void)fhsm_audit_event(FHSM_EV_OBJECT_DESTROY, -1, -1,
-                                    t->logged_in, rv, NULL);
+                                    t->logged_in, rv, FHSM_AUDIT_END);
             return rv;
         }
     }

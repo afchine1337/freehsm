@@ -2137,6 +2137,7 @@ fhsm_rv_t fhsm_composite_cms_wrap(const uint8_t *digalg, size_t digalg_len,
     /* EncapsulatedContentInfo with eContent absent -- this is what makes the
      * signature detached, and it is one omitted field rather than a flag. */
     uint8_t ec_l[5]; size_t ec_ln = der_len(sizeof OID_DATA, ec_l, sizeof ec_l);
+    /* cppcheck-suppress knownConditionTrueFalse ; der_len() of a constant cannot fail here; the check stays for the day the constant changes */
     if (!ec_ln) return FHSM_RV_FUNCTION_FAILED;
     const size_t ec_total = 1 + ec_ln + sizeof OID_DATA;
 
@@ -2298,6 +2299,7 @@ fhsm_rv_t fhsm_composite_cms(fhsm_composite_alg_t alg,
     sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
     if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
     size_t slen = FHSM_COMPOSITE_SIG_MAX;
+    /* cppcheck-suppress redundantAssignment ; error default set before each step, overwritten by the step: the pattern this file uses throughout */
     rv = sign(sign_ctx, attrs, (size_t)n_attrs, sig, &slen);
     if (rv != FHSM_RV_OK) goto out;
     rv = FHSM_RV_FUNCTION_FAILED;

@@ -564,7 +564,7 @@ static void ident_flush_bursts(void)
         (void)fhsm_audit_event(FHSM_EV_IDENTITY_RESUMED, -1, -1,
                                 FHSM_ROLE_NONE, FHSM_RV_OK,
                                 "suppressed", n, "window_s", w,
-                                "ended", "shutdown", NULL);
+                                "ended", "shutdown", FHSM_AUDIT_END);
         fhsm_audit_set_actor(NULL);
         g_ident[i].limited = 0;
     }
@@ -1405,13 +1405,13 @@ static verdict_t do_sign(int fd, request_t *r)
     if (rv != 0) {
         (void)fhsm_audit_event(FHSM_EV_SIGN, (int)g_slot_id, (int)sess,
                                 FHSM_ROLE_USER, FHSM_RV_FUNCTION_FAILED,
-                                "key", r->key, NULL);
+                                "key", r->key, FHSM_AUDIT_END);
         return (verdict_t){ 500, "sign_failed" };
     }
 
     (void)fhsm_audit_event(FHSM_EV_SIGN, (int)g_slot_id, (int)sess,
                             FHSM_ROLE_USER, FHSM_RV_OK,
-                            "key", r->key, NULL);
+                            "key", r->key, FHSM_AUDIT_END);
 
     char hdr[256];
     int n = snprintf(hdr, sizeof hdr,
@@ -1492,7 +1492,7 @@ static verdict_t do_verify(int fd, request_t *r)
     if (!valid && !invalid) {
         (void)fhsm_audit_event(FHSM_EV_VERIFY, (int)g_slot_id, (int)sess,
                                 FHSM_ROLE_USER, FHSM_RV_FUNCTION_FAILED,
-                                "key", r->key, NULL);
+                                "key", r->key, FHSM_AUDIT_END);
         return (verdict_t){ 500, "verify_failed" };
     }
 
@@ -1500,7 +1500,7 @@ static verdict_t do_verify(int fd, request_t *r)
                             FHSM_ROLE_USER,
                             valid ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID,
                             "key", r->key,
-                            "result", valid ? "valid" : "invalid", NULL);
+                            "result", valid ? "valid" : "invalid", FHSM_AUDIT_END);
 
     /* 200 ONLY WHEN IT VERIFIES. A client that checks the status and ignores
      * the body is then correct by default; the opposite arrangement -- 200 with
@@ -1571,14 +1571,14 @@ static void serve(int fd, uid_t proxy_uid)
         snprintf(w, sizeof w, "%ld", note.window_s);
         (void)fhsm_audit_event(FHSM_EV_IDENTITY_RESUMED, -1, -1,
                                 FHSM_ROLE_NONE, FHSM_RV_OK,
-                                "suppressed", n, "window_s", w, NULL);
+                                "suppressed", n, "window_s", w, FHSM_AUDIT_END);
     }
 
     if (v.reason == NULL) {
         if (strcmp(r.target, "/health") == 0 && strcmp(r.method, "GET") == 0) {
             (void)fhsm_audit_event(FHSM_EV_REQUEST_ACCEPTED, -1, -1,
                                     FHSM_ROLE_NONE, FHSM_RV_OK,
-                                    "route", "/health", NULL);
+                                    "route", "/health", FHSM_AUDIT_END);
             respond(fd, 200, "ok\n");
             goto done;
         }
@@ -1608,7 +1608,7 @@ static void serve(int fd, uid_t proxy_uid)
                     snprintf(body, sizeof body, "label=%s\nserial=%s\n", label, serial);
                     (void)fhsm_audit_event(FHSM_EV_REQUEST_ACCEPTED, (int)g_slot_id,
                                             (int)sess, FHSM_ROLE_USER, FHSM_RV_OK,
-                                            "route", "/token", NULL);
+                                            "route", "/token", FHSM_AUDIT_END);
                     respond(fd, 200, body);
                     goto done;
                 }
@@ -1679,7 +1679,7 @@ static void serve(int fd, uid_t proxy_uid)
              * differently is worth more than the refusal itself. */
             (void)fhsm_audit_event(FHSM_EV_IDENTITY_LIMITED, -1, -1,
                                     FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
-                                    "refusals", cnt, "delay_s", del, NULL);
+                                    "refusals", cnt, "delay_s", del, FHSM_AUDIT_END);
         }
     }
 
@@ -1696,7 +1696,7 @@ static void serve(int fd, uid_t proxy_uid)
                                 FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
                                 "reason", v.reason,
                                 "route", r.target[0] ? r.target : "-",
-                                NULL);
+                                FHSM_AUDIT_END);
     }
     /* Retry-After, on both kinds of 429 and with different honesty. From the
      * budget it is the interval actually derived from the count. From the
@@ -2100,7 +2100,7 @@ static void burst_note(listener_t *L, int kind, time_t now)
         (void)fhsm_audit_event(FHSM_EV_REQUEST_REFUSED, -1, -1,
                                 FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
                                 "reason", BURST_OPEN_REASON[kind],
-                                "route", "-", NULL);
+                                "route", "-", FHSM_AUDIT_END);
         L->burst[kind].open = 1;
         L->burst[kind].since = now;
         L->burst[kind].count = 0;
@@ -2120,7 +2120,7 @@ static void burst_flush(listener_t *L, time_t now, int force)
         (void)fhsm_audit_event(FHSM_EV_REQUEST_REFUSED, -1, -1,
                                 FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
                                 "reason", BURST_CLOSE_REASON[k],
-                                "refused", cnt, "window_s", win, NULL);
+                                "refused", cnt, "window_s", win, FHSM_AUDIT_END);
         L->burst[k].open = 0; L->burst[k].count = 0;
     }
 }
@@ -2230,7 +2230,7 @@ static void *acceptor(void *argp)
                 (void)fhsm_audit_event(FHSM_EV_REQUEST_REFUSED, -1, -1,
                                         FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
                                         "reason", "request_timeout",
-                                        "route", "-", NULL);
+                                        "route", "-", FHSM_AUDIT_END);
                 close(L->wait[i].fd);
                 L->wait[i] = L->wait[--L->nwait];
                 continue;                /* the moved entry still needs looking at */
@@ -2739,7 +2739,7 @@ int main(int argc, char **argv)
                             "public_socket", pub_path ? pub_path : "-",
                             "certificate", g_ca_cert_len ? "loaded" : "-",
                             "ocsp", g_ocsp_on ? g_ocsp_label : "-",
-                            NULL);
+                            FHSM_AUDIT_END);
     fprintf(stderr, "fhsm-service: listening on %s, uid %ld only,"
                     " %ld workers, pool ceiling %ld\n",
             sock_path, proxy_uid, workers, pool_max);
@@ -2804,7 +2804,7 @@ int main(int argc, char **argv)
     ident_flush_bursts();
 
     (void)fhsm_audit_event(FHSM_EV_SERVICE_STOP, -1, -1,
-                            FHSM_ROLE_NONE, FHSM_RV_OK, NULL);
+                            FHSM_ROLE_NONE, FHSM_RV_OK, FHSM_AUDIT_END);
     (void)unlink(sock_path);
     (void)C_Finalize(NULL);
     fprintf(stderr, "fhsm-service: stopped\n");

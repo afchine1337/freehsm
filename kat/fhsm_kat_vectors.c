@@ -163,6 +163,7 @@ fhsm_rv_t fhsm_kat_run_all(fhsm_kat_result_t *out, size_t cap, size_t *count) {
     struct timespec t0;
 
     /* --- AES-GCM-256 encrypt --- */
+    /* cppcheck-suppress unsignedLessThanZero ; with *count still 0 this is the cap == 0 guard, and it is wanted */
     if (*count >= cap) return FHSM_RV_ARGUMENTS_BAD;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     uint8_t ct[sizeof(kat_aesgcm_pt)]; size_t ct_len = sizeof(ct);

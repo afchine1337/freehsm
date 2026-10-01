@@ -273,6 +273,24 @@ jobs:
             integrity.log
           retention-days: 14
 
+  # cppcheck over src/ and kat/, gating. The Makefile has had a `lint` target
+  # whose comment said the build refused to ship on a finding; nothing ran
+  # it. Found 2026-10-01 answering OpenSSF's static_analysis criterion, which
+  # docs/OPENSSF_BEST_PRACTICES.md had marked Met on the strength of that
+  # comment. The build image carries cppcheck already.
+  static-analysis:
+    runs-on: ubuntu-latest
+    needs: lint
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    steps:
+      - uses: actions/checkout@v7
+      - name: cppcheck (make lint)
+        run: |
+          cppcheck --version
+          make lint
+
   # AddressSanitizer + UBSan over the whole test suite.
   #
   # `make SANITIZE=1` had been in the Makefile for months and the suite had

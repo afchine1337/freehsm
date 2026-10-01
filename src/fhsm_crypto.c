@@ -145,6 +145,7 @@ static void crypto_init_once(void) {
      * Under the integrity bypass the default provider supersedes both
      * base+fips, so
      * we skip the explicit load (which can fail in minimal containers). */
+    /* cppcheck-suppress duplicateCondition ; two consecutive !dev_mode blocks, each loading one provider */
     if (!dev_mode) {
         g_base_prov = OSSL_PROVIDER_load(NULL, "base");
         if (g_base_prov == NULL) {

@@ -87,7 +87,7 @@ fhsm_rv_t fhsm_state_set(fhsm_module_state_t s) {
     snprintf(to_s,   sizeof(to_s),   "%d", s);
     (void)fhsm_audit_event(FHSM_EV_STATE_TRANSITION, -1, -1,
                             FHSM_ROLE_NONE, FHSM_RV_OK,
-                            "from", from_s, "to", to_s, NULL);
+                            "from", from_s, "to", to_s, FHSM_AUDIT_END);
     return FHSM_RV_OK;
 }
 
@@ -139,5 +139,5 @@ void fhsm_state_latch_error(const char *reason) {
                             FHSM_ROLE_NONE, FHSM_RV_FUNCTION_FAILED,
                             "to", "ERROR",
                             "reason", reason ? reason : "(none)",
-                            NULL);
+                            FHSM_AUDIT_END);
 }

@@ -282,6 +282,7 @@ fhsm_rv_t fhsm_audit_key_provision(const char *dir, uint8_t key[32],
      *    exist the operator turned sealing on at some point, and the sealed
      *    one is the stronger statement. */
     if (want_tpm) {
+        /* cppcheck-suppress variableScope ; scope already limited to the TPM branch; narrower would split it from its zeroize */
         uint8_t blob[2048];
         int fd = open(blob_p, O_RDONLY | O_CLOEXEC);
         if (fd >= 0) {

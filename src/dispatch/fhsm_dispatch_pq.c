@@ -73,7 +73,7 @@ static fhsm_rv_t pq_unavailable(fhsm_audit_event_t ev, const char *family)
                             FHSM_RV_FUNCTION_FAILED,
                             "family", fam,
                             "reason", "PQ provider unavailable",
-                            NULL);
+                            FHSM_AUDIT_END);
     return FHSM_RV_FUNCTION_FAILED;
 }
 
@@ -204,6 +204,7 @@ fhsm_rv_t dispatch_ml_kem_encap(unsigned long s, unsigned long k,
     rv = pq_unavailable(FHSM_EV_DERIVE, "ML-KEM");
 #endif
 
+/* cppcheck-suppress unusedLabelConfiguration ; used by the goto out paths when EVP_PKEY_OP_ENCAPSULATE is defined */
 out:
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(pk);
