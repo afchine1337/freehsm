@@ -280,10 +280,17 @@ static void install_wrappers(void) {
 static int g_initialised;
 
 int pkiops_load(const char *module, struct p11_err *e) {
-    if (p11_load_module_e(module, e)) return e->code;
+    /* Whatever was loaded before is finalised and forgotten first, and a load
+     * that fails part way leaves nothing behind: either way the next call
+     * starts from an empty table. */
+    pkiops_unload();
+    if (p11_load_module_e(module, e)) { pkiops_unload(); return e->code; }
     install_wrappers();
     CK_RV rv = p11.Initialize(NULL);
-    if (rv != CKR_OK) return p11_fail(e, 2, "C_Initialize failed (0x%lx)\n", (unsigned long)rv);
+    if (rv != CKR_OK) {
+        pkiops_unload();
+        return p11_fail(e, 2, "C_Initialize failed (0x%lx)\n", (unsigned long)rv);
+    }
     g_initialised = 1;
     return 0;
 }
@@ -302,6 +309,14 @@ int pkiops_open(const char *module, long want, enum pkiops_slot_intent intent,
 
 void pkiops_close(void) {
     if (g_initialised) { p11.Finalize(NULL); g_initialised = 0; }
+}
+
+void pkiops_unload(void) {
+    pkiops_close();
+    /* Not dlclose'd -- see pkiops.h. Forgetting the table is what makes the
+     * next pkiops_load start from nothing. */
+    memset(&p11,  0, sizeof p11);
+    memset(&real, 0, sizeof real);
 }
 
 int pkiops_parse_slot(const char *text, long *out, struct p11_err *e) {

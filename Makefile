@@ -341,6 +341,21 @@ tools/fhsm-token: tools/fhsm_token.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.
 tests/test_pkiops: tests/test_pkiops.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
 	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
+# fhsm-gui --- the desktop interface over pkiops (docs/fhsm-gui-plan.md).
+# Not part of `all`: building the module, the tools and the tests must not
+# need GTK, and neither must CI. The GTK flags go in as -isystem so that
+# this project's -Werror applies to its own code and not to GTK's headers.
+# Recursive (=) so pkg-config runs only when the target is built.
+GTK_CFLAGS = $(shell pkg-config --cflags gtk4 2>/dev/null | sed 's/-I/-isystem /g')
+GTK_LIBS   = $(shell pkg-config --libs gtk4 2>/dev/null)
+
+.PHONY: gui
+gui: tools/fhsm-gui
+
+tools/fhsm-gui: tools/fhsm_gui.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
+	@pkg-config --exists gtk4 || { echo "fhsm-gui needs GTK 4: sudo apt install libgtk-4-dev" >&2; exit 2; }
+	$(CC) $(CFLAGS) $(GTK_CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) $(GTK_LIBS) -ldl
+
 # ---------------------------------------------------------------------------
 # Code generation --- runs scripts/gen_p11_thunks.py to regenerate
 # include/fhsm_pkcs11_mechanisms.h, src/gen/fhsm_dispatch.c, docs/MECHANISMS.md.
@@ -1396,7 +1411,7 @@ clean:
 	# asserting the previous buffer size and failed two cases that had just
 	# been fixed, which for a minute looked like the fix was wrong.
 	rm -f $(basename $(wildcard tests/*.c))
-	rm -f tools/freehsm-audit $(TOOLS)
+	rm -f tools/freehsm-audit $(TOOLS) tools/fhsm-gui
 	# The service too. Leaving it behind meant a `make clean && make` handed
 	# back a binary from the previous build's flags -- a TSAN one, in the run
 	# that found this, which then refused to start and looked like a service

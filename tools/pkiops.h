@@ -18,7 +18,8 @@
  *  it, and the caller zeroes it.
  *
  *  One module at a time, process-wide: pkiops_open loads it, pkiops_close
- *  finalises it. This file is the only one that includes tools/p11_util.h
+ *  finalises it, pkiops_unload forgets it so that another can be loaded. This
+ *  file is the only one that includes tools/p11_util.h
  *  (see tools/p11_err.h for why).
  * ========================================================================= */
 #ifndef FHSM_TOOLS_PKIOPS_H
@@ -41,7 +42,8 @@ enum pkiops_slot_intent {
 
 /* --- the module ----------------------------------------------------------- */
 
-/* Load the module and C_Initialize it. */
+/* Load the module and C_Initialize it. A module already loaded is unloaded
+ * first (pkiops_unload); a load that fails leaves none loaded. */
 int  pkiops_load(const char *module, struct p11_err *e);
 
 /* pkiops_load, then resolve the slot: `want` is the slot the caller named, or
@@ -50,6 +52,13 @@ int  pkiops_load(const char *module, struct p11_err *e);
 int  pkiops_open(const char *module, long want, enum pkiops_slot_intent intent,
                  pkiops_handle *slot, struct p11_err *e);
 void pkiops_close(void);
+
+/* pkiops_close, then forget the module, so that another -- or the same one
+ * again -- can be loaded with pkiops_load. The library is not dlclose'd: a
+ * PKCS#11 module, or the libcrypto under it, may have registered handlers to
+ * run at process exit, and unmapping their code turns exit into a crash. The
+ * mapping stays; nothing calls into it any more. */
+void pkiops_unload(void);
 
 /* Every slot the module reports, in a malloc'd array the caller frees. */
 struct pkiops_slot {

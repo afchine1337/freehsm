@@ -129,6 +129,23 @@ int main(void) {
     pkiops_close();
     ok(logged("C_Finalize"), "pkiops_close finalises, and that is logged too");
 
+    /* What the interface's Unload button relies on: forget the module, load
+     * one again, and find the same token -- it lives in the tokens directory,
+     * not in the process. */
+    pkiops_unload();
+    ok(pkiops_load("./does-not-exist.so", &e) == 2, "a module that cannot be loaded is an error");
+    ok(pkiops_load("./libfreehsm.so", &e) == 0, "  and a load after it, and after an unload, works");
+    sl = NULL; ns = 0;
+    ok(pkiops_slots(&sl, &ns, &e) == 0 && ns > 0 && sl[0].has_token
+       && !strcmp(sl[0].label, "pkiops"),
+       "  and finds the token initialised before the unload");
+    free(sl);
+    ok(pkiops_load("./libfreehsm.so", &e) == 0,
+       "loading while loaded finalises the first and starts again");
+    pkiops_unload();
+    pkiops_unload();
+    ok(1, "pkiops_unload twice in a row is harmless");
+
     printf("\n%zu calls logged.\n", g_n);
     if (fails) { fprintf(stderr, "test_pkiops : %d FAIL\n", fails); return 1; }
     printf("test_pkiops : PASS\n");
