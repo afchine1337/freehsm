@@ -14,6 +14,11 @@
  *  1; a certificate for 365 days, or 30 for a delegated OCSP responder.
  *  Inputs are read as DER or PEM; output is written as either.
  *
+ *  Stage 3, the Revocation tab: what fhsm-ca revoke, crl and ocsp-respond do,
+ *  on the same database file and in the same order. Recording a revocation
+ *  signs nothing and needs no login; publishing a CRL and answering an OCSP
+ *  request do. A new database is never written over an existing file.
+ *
  *  Everything it does goes through tools/pkiops, the same operations the
  *  command-line tools call, so the window adds no second way of talking to
  *  the module. Every pkiops call runs on a worker thread, one at a time, so
@@ -44,6 +49,7 @@
 #include <gtk/gtk.h>
 #include <openssl/crypto.h>
 #include <openssl/pem.h>
+#include <openssl/x509.h>
 
 #include <errno.h>
 #include <stdarg.h>
@@ -69,6 +75,14 @@ static struct {
     GtkWidget *ca_btn, *csr_btn, *issue_subject_entry, *san_entry, *crl_view;
     GtkWidget *profile_drop, *issue_days_spin;
     char *ca_path, *csr_path;
+
+    /* The Revocation tab. */
+    GtkWidget *rv_db_box, *rv_revoke_box, *rv_sign_box;
+    GtkWidget *db_btn, *db_info, *db_list;
+    GtkWidget *serial_entry, *reason_drop, *date_entry;
+    GtkWidget *rv_key_drop, *rv_ca_btn, *crl_days_spin, *crl_pem_check;
+    GtkWidget *req_btn, *responder_btn, *ocsp_days_spin;
+    char *db_path, *rv_ca_path, *req_path, *responder_path;
 
     int loaded, logged_in, busy;
     int closing;                    /* the widgets are going: touch none */
@@ -172,6 +186,9 @@ static void update_sensitivity(void) {
     gtk_widget_set_sensitive(A.label_entry,  !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.keygen_btn,   !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.cert_page,    !A.busy && A.logged_in);
+    gtk_widget_set_sensitive(A.rv_db_box,     !A.busy);
+    gtk_widget_set_sensitive(A.rv_revoke_box, !A.busy && A.db_path);
+    gtk_widget_set_sensitive(A.rv_sign_box,   !A.busy && A.db_path && A.logged_in);
 }
 
 static void clear_list(GtkWidget *box) {
@@ -191,7 +208,7 @@ static void list_add(GtkWidget *box, const char *text) {
 /* --- jobs on the worker thread ------------------------------------------ */
 
 enum job_kind { J_LOAD, J_UNLOAD, J_SLOTS, J_LOGIN, J_KEYS, J_KEYGEN, J_LOGOUT,
-                J_CSR, J_ROOT, J_ISSUE };
+                J_CSR, J_ROOT, J_ISSUE, J_DB_LOAD, J_REVOKE, J_CRL, J_OCSP };
 
 struct job {
     enum job_kind kind;
@@ -203,6 +220,9 @@ struct job {
     char **crl_urls;                /* NULL-terminated; NULL for none */
     int pem, days, profile;
     long serial;
+    /* revocation */
+    char *db_path, *serial_hex, *date, *req_path, *responder_path;
+    int reason;                     /* RFC 5280 code, or -1 for none */
     /* results */
     int rc;
     struct p11_err e;
@@ -210,6 +230,9 @@ struct job {
     struct pkiops_key  *keys;  size_t n_keys;
     int pop_valid;
     size_t out_len;
+    fhsm_rev_db_t db; int have_db;  /* the database as the job left it */
+    int already; char already_date[16];
+    fhsm_ocsp_stats_t stats;
 };
 
 static void job_free(gpointer p) {
@@ -223,6 +246,12 @@ static void job_free(gpointer p) {
     g_free(j->csr_path);
     g_free(j->out_path);
     g_strfreev(j->crl_urls);
+    g_free(j->db_path);
+    g_free(j->serial_hex);
+    g_free(j->date);
+    g_free(j->req_path);
+    g_free(j->responder_path);
+    if (j->have_db) fhsm_rev_db_free(&j->db);
     free(j->slots);
     free(j->keys);
     g_free(j);
@@ -288,6 +317,116 @@ static int write_out(const char *path, const uint8_t *der, size_t n, int pem,
     }
     if (fclose(f) != 0) bad = 1;
     return bad ? err_set(e, 2, "writing %s failed\n", path) : 0;
+}
+
+/* The revocation database, with the library's diagnostic as the message. */
+static int db_load_e(const char *path, fhsm_rev_db_t *d, struct p11_err *e) {
+    char err[FHSM_REV_ERR_MAX] = "";
+    int rc = fhsm_rev_db_load(path, d, err, sizeof err);
+    return rc == FHSM_REV_OK ? 0 : err_set(e, rc, "%s", err);
+}
+
+static int db_save_e(const char *path, const fhsm_rev_db_t *d, struct p11_err *e) {
+    char err[FHSM_REV_ERR_MAX] = "";
+    int rc = fhsm_rev_db_save(path, d, err, sizeof err);
+    return rc == FHSM_REV_OK ? 0 : err_set(e, rc, "%s", err);
+}
+
+/* fhsm-ca revoke, minus the command line. */
+static void run_revoke(struct job *j) {
+    fhsm_rev_entry_t en;
+    memset(&en, 0, sizeof en);
+    if (!fhsm_rev_hex_to_bytes(j->serial_hex, en.serial, sizeof en.serial, &en.serial_len)) {
+        j->rc = err_set(&j->e, 2,
+            "the serial must be an even number of hex digits, exactly as the\n"
+            "certificate carries it. openssl x509 -noout -serial prints it in that form.\n");
+        return;
+    }
+    en.reason = j->reason;
+    if (j->date) {
+        int64_t t = 0;
+        if (strlen(j->date) != 15 || !fhsm_rev_date_to_time(j->date, &t)) {
+            j->rc = err_set(&j->e, 2, "the date must be YYYYMMDDHHMMSSZ, in UTC.\n");
+            return;
+        }
+        memcpy(en.date, j->date, 15);
+        en.date[15] = '\0';
+    } else if (!fhsm_rev_time_to_date((int64_t)time(NULL), en.date)) {
+        j->rc = err_set(&j->e, 2, "unrepresentable date\n");
+        return;
+    }
+
+    if ((j->rc = db_load_e(j->db_path, &j->db, &j->e)) != 0) return;
+    j->have_db = 1;
+    /* Already there: say so and change nothing -- re-revoking would duplicate
+     * the entry in every future list or move its date. */
+    const fhsm_rev_entry_t *had = fhsm_rev_db_find(&j->db, en.serial, en.serial_len);
+    if (had) {
+        j->already = 1;
+        memcpy(j->already_date, had->date, sizeof j->already_date);
+        return;
+    }
+    char err[FHSM_REV_ERR_MAX] = "";
+    int rc = fhsm_rev_db_add(&j->db, &en, err, sizeof err);
+    if (rc != FHSM_REV_OK) { j->rc = err_set(&j->e, rc, "%s", err); return; }
+    j->rc = db_save_e(j->db_path, &j->db, &j->e);
+}
+
+/* fhsm-ca crl, in its order: the number advances, the list is signed, the
+ * database is saved, and only then is the list written. A failure after the
+ * save leaves a number consumed and nothing published -- a gap, which is
+ * harmless; the other order could publish two lists under one number. */
+static void run_crl(struct job *j) {
+    uint8_t *ca = NULL; size_t ca_len = 0;
+    if ((j->rc = read_der(j->ca_path, &ca, &ca_len, &j->e)) != 0) return;
+    if ((j->rc = db_load_e(j->db_path, &j->db, &j->e)) != 0) { g_free(ca); return; }
+    j->have_db = 1;
+    j->db.crl_number++;
+    uint8_t *der = NULL; size_t n = 0;
+    j->rc = pkiops_crl(j->session, j->label, ca, ca_len, &j->db, j->days, &der, &n, &j->e);
+    g_free(ca);
+    if (!j->rc) j->rc = db_save_e(j->db_path, &j->db, &j->e);
+    if (!j->rc) j->rc = write_out(j->out_path, der, n, j->pem, "X509 CRL", &j->e);
+    j->out_len = n;
+    free(der);
+}
+
+/* fhsm-ca ocsp-respond: the CA answers, or a delegate it issued. */
+static void run_ocsp(struct job *j) {
+    uint8_t *ca = NULL, *rcert = NULL, *req = NULL;
+    size_t ca_len = 0, rcert_len = 0, req_len = 0;
+    j->rc = read_der(j->ca_path, &ca, &ca_len, &j->e);
+    /* Parsed before the delegation check, which reads its subject: fhsm-ca
+     * once reached X509_get_subject_name(NULL) that way. */
+    if (!j->rc) {
+        const unsigned char *p = ca;
+        X509 *t = d2i_X509(NULL, &p, (long)ca_len);
+        if (!t) j->rc = err_set(&j->e, 2, "the CA certificate is not a certificate.\n");
+        X509_free(t);
+    }
+    if (!j->rc && j->responder_path) {
+        j->rc = read_der(j->responder_path, &rcert, &rcert_len, &j->e);
+        if (!j->rc) {
+            char err[FHSM_REV_ERR_MAX] = "";
+            int rc = fhsm_ocsp_check_responder(rcert, rcert_len, ca, ca_len,
+                                               j->responder_path, j->ca_path,
+                                               err, sizeof err);
+            if (rc != FHSM_REV_OK) j->rc = err_set(&j->e, rc, "%s", err);
+        }
+    }
+    if (!j->rc) j->rc = read_der(j->req_path, &req, &req_len, &j->e);
+    if (!j->rc) { j->rc = db_load_e(j->db_path, &j->db, &j->e); j->have_db = !j->rc; }
+    if (!j->rc) {
+        uint8_t *resp = NULL; size_t rn = 0;
+        j->rc = pkiops_ocsp(j->session, j->label, req, req_len, ca, ca_len,
+                            rcert ? rcert : ca, rcert ? rcert_len : ca_len,
+                            &j->db, j->days, j->req_path, &resp, &rn, &j->stats, &j->e);
+        if (!j->rc) j->rc = write_out(j->out_path, resp, rn, 0, NULL, &j->e);
+        free(resp);
+    }
+    g_free(ca);
+    g_free(rcert);
+    g_free(req);
 }
 
 static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
@@ -365,6 +504,13 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
         g_free(csr);
         break;
     }
+    case J_DB_LOAD:
+        j->rc = db_load_e(j->db_path, &j->db, &j->e);
+        j->have_db = !j->rc;
+        break;
+    case J_REVOKE: run_revoke(j); break;
+    case J_CRL:    run_crl(j);    break;
+    case J_OCSP:   run_ocsp(j);   break;
     }
 }
 
@@ -382,6 +528,28 @@ static void show_slots(struct job *j) {
             snprintf(t, sizeof t, "slot %lu   (no token)", A.slots[i].id);
         list_add(A.slots_box, t);
     }
+}
+
+/* The database as a job left it: every entry, and the number the next CRL
+ * will carry. */
+static void show_db(struct job *j) {
+    clear_list(A.db_list);
+    for (size_t i = 0; i < j->db.n; i++) {
+        const fhsm_rev_entry_t *en = &j->db.e[i];
+        char hex[sizeof en->serial * 2 + 1];
+        for (size_t k = 0; k < en->serial_len && k < sizeof en->serial; k++)
+            snprintf(hex + 2 * k, 3, "%02X", en->serial[k]);
+        hex[2 * (en->serial_len < sizeof en->serial ? en->serial_len : sizeof en->serial)] = '\0';
+        const char *why = en->reason >= 0 ? fhsm_rev_reason_name(en->reason) : NULL;
+        char t[256];
+        snprintf(t, sizeof t, "%s   %s   %s", hex, en->date, why ? why : "-");
+        list_add(A.db_list, t);
+    }
+    if (j->db.n == 0) list_add(A.db_list, "(nothing revoked)");
+    char info[160];
+    snprintf(info, sizeof info, "%zu revoked; the next CRL will be number %llu.",
+             j->db.n, j->db.crl_number + 1);
+    gtk_label_set_text(GTK_LABEL(A.db_info), info);
 }
 
 static void clear_key_labels(void) {
@@ -493,6 +661,56 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
         status(msg);
         break;
     }
+    case J_DB_LOAD:
+        if (j->rc) {
+            /* Not kept as the database: what cannot be read cannot be added to. */
+            g_free(A.db_path);
+            A.db_path = NULL;
+            gtk_button_set_label(GTK_BUTTON(A.db_btn), "Open\xe2\x80\xa6");
+            gtk_widget_set_tooltip_text(A.db_btn, NULL);
+            clear_list(A.db_list);
+            status_err("Reading the database", &j->e);
+            break;
+        }
+        show_db(j);
+        status(NULL);
+        break;
+    case J_REVOKE: {
+        if (j->rc) { status_err("Recording the revocation", &j->e); break; }
+        show_db(j);
+        char msg[600];
+        if (j->already)
+            snprintf(msg, sizeof msg,
+                     "Serial %s is already revoked, on %s. The database was left "
+                     "unchanged. Remove the line by hand if the date or reason must "
+                     "be corrected.", j->serial_hex, j->already_date);
+        else
+            snprintf(msg, sizeof msg,
+                     "Recorded. %zu revoked in total. Nothing is signed yet: publish "
+                     "a CRL to say so.", j->db.n);
+        status(msg);
+        break;
+    }
+    case J_CRL: {
+        if (j->rc) { status_err("Signing the CRL", &j->e); break; }
+        show_db(j);
+        char msg[1200];
+        snprintf(msg, sizeof msg, "CRL number %llu, %zu revoked, valid %d days, "
+                 "written to %s.", j->db.crl_number, j->db.n, j->days, j->out_path);
+        status(msg);
+        break;
+    }
+    case J_OCSP: {
+        if (j->rc) { status_err("Answering the OCSP request", &j->e); break; }
+        char msg[1200];
+        snprintf(msg, sizeof msg, "%zu asked, %zu ours (%zu revoked), %zu unknown, "
+                 "valid %d days, %s. Response written to %s.",
+                 j->stats.asked, j->stats.ours, j->stats.revoked, j->stats.unknown,
+                 j->days, j->stats.nonce_echoed ? "nonce echoed" : "no nonce",
+                 j->out_path);
+        status(msg);
+        break;
+    }
     }
     update_sensitivity();
 }
@@ -584,8 +802,8 @@ static void on_keygen(GtkWidget *w, gpointer ud) {
 
 /* --- the Certificates tab ------------------------------------------------- */
 
-static const char *chosen_key(void) {
-    GtkStringObject *o = gtk_drop_down_get_selected_item(GTK_DROP_DOWN(A.key_drop));
+static const char *chosen_key(GtkWidget *drop) {
+    GtkStringObject *o = gtk_drop_down_get_selected_item(GTK_DROP_DOWN(drop));
     return o ? gtk_string_object_get_string(o) : NULL;
 }
 
@@ -606,9 +824,11 @@ static void on_saved(GObject *src, GAsyncResult *res, gpointer data) {
     if (A.closing || !A.logged_in) { g_free(path); job_free(j); return; }
     j->out_path = path;
     j->session = A.session;
-    status(j->kind == J_CSR  ? "Signing the request..."
-         : j->kind == J_ROOT ? "Signing the root..."
-         :                     "Checking the request, then issuing...");
+    status(j->kind == J_CSR   ? "Signing the request..."
+         : j->kind == J_ROOT  ? "Signing the root..."
+         : j->kind == J_ISSUE ? "Checking the request, then issuing..."
+         : j->kind == J_CRL   ? "Signing the CRL..."
+         :                      "Answering the OCSP request...");
     start(j);
 }
 
@@ -622,11 +842,12 @@ static void ask_where(struct job *j, const char *stem) {
     g_object_unref(d);
 }
 
-/* What every operation of the tab needs: a key, and the format. NULL, with
- * the reason in the status line, when there is no key to sign with. */
-static struct job *cert_job(enum job_kind kind) {
+/* What every signing operation needs: a key, and the format. NULL, with the
+ * reason in the status line, when there is no key to sign with. The format is
+ * the Certificates tab's; the Revocation tab sets its own. */
+static struct job *cert_job(enum job_kind kind, GtkWidget *key_drop) {
     if (A.busy || !A.logged_in) return NULL;
-    const char *key = chosen_key();
+    const char *key = chosen_key(key_drop);
     if (!key) {
         status("No private key on this token to sign with. Generate a key pair first.");
         return NULL;
@@ -642,7 +863,7 @@ static void on_csr(GtkButton *b, gpointer ud) {
     (void)b; (void)ud;
     const char *subject = gtk_editable_get_text(GTK_EDITABLE(A.subject_entry));
     if (!subject || !*subject) { status("Give the request a subject."); return; }
-    struct job *j = cert_job(J_CSR);
+    struct job *j = cert_job(J_CSR, A.key_drop);
     if (!j) return;
     j->subject = g_strdup(subject);
     ask_where(j, "request");
@@ -652,7 +873,7 @@ static void on_root(GtkButton *b, gpointer ud) {
     (void)b; (void)ud;
     const char *subject = gtk_editable_get_text(GTK_EDITABLE(A.subject_entry));
     if (!subject || !*subject) { status("Give the root a subject."); return; }
-    struct job *j = cert_job(J_ROOT);
+    struct job *j = cert_job(J_ROOT, A.key_drop);
     if (!j) return;
     j->subject = g_strdup(subject);
     j->serial = (long)gtk_spin_button_get_value(GTK_SPIN_BUTTON(A.serial_spin));
@@ -687,7 +908,7 @@ static void on_issue(GtkButton *b, gpointer ud) {
     int too_many = 0;
     char **urls = crl_urls(&too_many);
     if (too_many) { g_strfreev(urls); status("At most 8 CRL URLs."); return; }
-    struct job *j = cert_job(J_ISSUE);
+    struct job *j = cert_job(J_ISSUE, A.key_drop);
     if (!j) { g_strfreev(urls); return; }
     j->crl_urls = urls;
     j->ca_path = g_strdup(A.ca_path);
@@ -714,7 +935,8 @@ static void on_picked(GObject *src, GAsyncResult *res, gpointer data) {
     char *path = f ? g_file_get_path(f) : NULL;
     if (f) g_object_unref(f);
     if (!path || A.closing) { g_free(path); return; }
-    char **slot = btn == A.ca_btn ? &A.ca_path : &A.csr_path;
+    /* Each file button carries the path it sets; see file_button. */
+    char **slot = g_object_get_data(G_OBJECT(btn), "path-slot");
     g_free(*slot);
     *slot = path;
     char *base = g_path_get_basename(path);
@@ -728,6 +950,157 @@ static void on_pick(GtkButton *b, gpointer title) {
     gtk_file_dialog_set_title(d, title);
     gtk_file_dialog_open(d, GTK_WINDOW(A.win), NULL, on_picked, b);
     g_object_unref(d);
+}
+
+/* --- the Revocation tab --------------------------------------------------- */
+
+static void on_db_picked(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)data;
+    GFile *f = gtk_file_dialog_open_finish(GTK_FILE_DIALOG(src), res, NULL);
+    char *path = f ? g_file_get_path(f) : NULL;
+    if (f) g_object_unref(f);
+    if (!path || A.closing || A.busy) { g_free(path); return; }
+    g_free(A.db_path);
+    A.db_path = path;
+    char *base = g_path_get_basename(path);
+    gtk_button_set_label(GTK_BUTTON(A.db_btn), base);
+    g_free(base);
+    gtk_widget_set_tooltip_text(A.db_btn, path);
+    struct job *j = g_new0(struct job, 1);
+    j->kind = J_DB_LOAD;
+    j->db_path = g_strdup(path);
+    start(j);
+}
+
+static void on_db_open(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    GtkFileDialog *d = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(d, "The revocation database");
+    gtk_file_dialog_open(d, GTK_WINDOW(A.win), NULL, on_db_picked, NULL);
+    g_object_unref(d);
+}
+
+/* A new database is a name, not a file: like fhsm-ca, the file is created by
+ * the first revocation. A name that already exists is refused rather than
+ * emptied, whatever the save dialog said about replacing it -- an emptied
+ * database signs a list that leaves out every revocation it held. */
+static void on_db_named(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)data;
+    GFile *f = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(src), res, NULL);
+    char *path = f ? g_file_get_path(f) : NULL;
+    if (f) g_object_unref(f);
+    if (!path || A.closing || A.busy) { g_free(path); return; }
+    if (g_file_test(path, G_FILE_TEST_EXISTS)) {
+        char msg[1200];
+        snprintf(msg, sizeof msg, "%s already exists, and was left as it is. Open it "
+                 "instead: a new database is never written over an existing file.", path);
+        status(msg);
+        g_free(path);
+        return;
+    }
+    g_free(A.db_path);
+    A.db_path = path;
+    char *base = g_path_get_basename(path);
+    gtk_button_set_label(GTK_BUTTON(A.db_btn), base);
+    g_free(base);
+    gtk_widget_set_tooltip_text(A.db_btn, path);
+    clear_list(A.db_list);
+    list_add(A.db_list, "(nothing revoked)");
+    gtk_label_set_text(GTK_LABEL(A.db_info),
+                       "New: the file is created by the first revocation recorded.");
+    status(NULL);
+    update_sensitivity();
+}
+
+static void on_db_new(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    GtkFileDialog *d = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(d, "A new revocation database");
+    gtk_file_dialog_set_initial_name(d, "revocations.db");
+    gtk_file_dialog_save(d, GTK_WINDOW(A.win), NULL, on_db_named, NULL);
+    g_object_unref(d);
+}
+
+/* Index 0 is "no reason"; the rest are the names fhsm_rev_reason_code knows. */
+static const char *const reasons[] = {
+    "(no reason given)", "unspecified", "keyCompromise", "cACompromise",
+    "affiliationChanged", "superseded", "cessationOfOperation",
+    "certificateHold", "privilegeWithdrawn", "aACompromise", NULL
+};
+
+static void on_revoke_answered(GObject *src, GAsyncResult *res, gpointer data) {
+    struct job *j = data;
+    int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(src), res, NULL);
+    if (choice != 1 || A.closing || A.busy || !A.db_path) { job_free(j); return; }
+    status("Recording the revocation...");
+    start(j);
+}
+
+static void on_revoke(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (A.busy || !A.db_path) return;
+    const char *serial = gtk_editable_get_text(GTK_EDITABLE(A.serial_entry));
+    if (!serial || !*serial) { status("Type the serial to revoke, in hex."); return; }
+    guint ri = gtk_drop_down_get_selected(GTK_DROP_DOWN(A.reason_drop));
+    int reason = ri == 0 || ri >= G_N_ELEMENTS(reasons) - 1
+               ? -1 : fhsm_rev_reason_code(reasons[ri]);
+    if (reason == -2) { status("Unknown reason."); return; }
+
+    struct job *j = g_new0(struct job, 1);
+    j->kind = J_REVOKE;
+    j->db_path = g_strdup(A.db_path);
+    j->serial_hex = g_strdup(serial);
+    j->reason = reason;
+    j->date = text_or_null(A.date_entry);
+
+    /* Revoking is not undone from here: the line has to be removed by hand.
+     * The command line trusts its user; a window asks once. */
+    GtkAlertDialog *d = gtk_alert_dialog_new("Revoke serial %s?", serial);
+    gtk_alert_dialog_set_detail(d,
+        "This records the revocation in the database. It is not undone from here: "
+        "the line would have to be removed by hand. Nothing is signed until a CRL "
+        "is published.");
+    const char *const buttons[] = { "Cancel", "Revoke", NULL };
+    gtk_alert_dialog_set_buttons(d, buttons);
+    gtk_alert_dialog_set_cancel_button(d, 0);
+    gtk_alert_dialog_set_default_button(d, 0);
+    gtk_alert_dialog_choose(d, GTK_WINDOW(A.win), NULL, on_revoke_answered, j);
+    g_object_unref(d);
+}
+
+static void on_crl(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.rv_ca_path) { status("Choose the CA's certificate."); return; }
+    struct job *j = cert_job(J_CRL, A.rv_key_drop);
+    if (!j) return;
+    j->pem = gtk_check_button_get_active(GTK_CHECK_BUTTON(A.crl_pem_check));
+    j->ca_path = g_strdup(A.rv_ca_path);
+    j->db_path = g_strdup(A.db_path);
+    j->days = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(A.crl_days_spin));
+    ask_where(j, "crl");
+}
+
+static void on_ocsp(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.rv_ca_path) { status("Choose the CA's certificate."); return; }
+    if (!A.req_path)   { status("Choose the OCSP request to answer."); return; }
+    struct job *j = cert_job(J_OCSP, A.rv_key_drop);
+    if (!j) return;
+    j->pem = 0;                     /* an OCSP response is DER, as fhsm-ca writes it */
+    j->ca_path = g_strdup(A.rv_ca_path);
+    j->db_path = g_strdup(A.db_path);
+    j->req_path = g_strdup(A.req_path);
+    j->responder_path = A.responder_path ? g_strdup(A.responder_path) : NULL;
+    j->days = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(A.ocsp_days_spin));
+    ask_where(j, "response");
+}
+
+static void on_responder_clear(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    g_free(A.responder_path);
+    A.responder_path = NULL;
+    gtk_button_set_label(GTK_BUTTON(A.responder_btn), "None: the CA answers");
+    gtk_widget_set_tooltip_text(A.responder_btn, NULL);
 }
 
 static void on_clear_log(GtkButton *b, gpointer ud) {
@@ -805,6 +1178,13 @@ static GtkWidget *note_label(const char *text) {
     return l;
 }
 
+/* A button that opens a file chooser and remembers the answer in *slot. */
+static GtkWidget *file_button(const char *title, char **slot) {
+    GtkWidget *b = button_to("Choose\xe2\x80\xa6", G_CALLBACK(on_pick), (gpointer)title);
+    g_object_set_data(G_OBJECT(b), "path-slot", slot);
+    return b;
+}
+
 /* Stage 2: requests, roots, issuance. */
 static GtkWidget *cert_tab(void) {
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
@@ -838,9 +1218,9 @@ static GtkWidget *cert_tab(void) {
 
     gtk_box_append(GTK_BOX(page), heading("Issue a certificate"));
     g = form();
-    A.ca_btn = button_to("Choose\xe2\x80\xa6", G_CALLBACK(on_pick), (gpointer)"The CA's certificate");
+    A.ca_btn = file_button("The CA's certificate", &A.ca_path);
     form_row(g, 0, "CA certificate", A.ca_btn);
-    A.csr_btn = button_to("Choose\xe2\x80\xa6", G_CALLBACK(on_pick), (gpointer)"The request to sign");
+    A.csr_btn = file_button("The request to sign", &A.csr_path);
     form_row(g, 1, "Request", A.csr_btn);
     A.issue_subject_entry = entry_with("as requested");
     form_row(g, 2, "Subject", A.issue_subject_entry);
@@ -871,6 +1251,105 @@ static GtkWidget *cert_tab(void) {
         "above is the CA's."));
 
     A.cert_page = page;
+    GtkWidget *s = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(s), page);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(s), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    return s;
+}
+
+/* Stage 3: the revocation database, CRLs, OCSP. */
+static GtkWidget *revocation_tab(void) {
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_margin_start(page, 4);
+    gtk_widget_set_margin_end(page, 8);
+
+    /* The database. */
+    A.rv_db_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(row), gtk_label_new("Database"));
+    A.db_btn = button_to("Open\xe2\x80\xa6", G_CALLBACK(on_db_open), NULL);
+    gtk_widget_set_hexpand(A.db_btn, TRUE);
+    gtk_box_append(GTK_BOX(row), A.db_btn);
+    gtk_box_append(GTK_BOX(row), button_to("New\xe2\x80\xa6", G_CALLBACK(on_db_new), NULL));
+    gtk_box_append(GTK_BOX(A.rv_db_box), row);
+    A.db_list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(A.db_list), GTK_SELECTION_NONE);
+    GtkWidget *db_scroll = scrolled(A.db_list, 110);
+    gtk_widget_set_vexpand(db_scroll, FALSE);
+    gtk_box_append(GTK_BOX(A.rv_db_box), db_scroll);
+    A.db_info = note_label("Open a revocation database, or name a new one.");
+    gtk_box_append(GTK_BOX(A.rv_db_box), A.db_info);
+    gtk_box_append(GTK_BOX(page), A.rv_db_box);
+
+    /* Recording a revocation: no key, no login. */
+    A.rv_revoke_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_box_append(GTK_BOX(A.rv_revoke_box), heading("Revoke"));
+    GtkWidget *g = form();
+    A.serial_entry = entry_with("serial in hex, as the certificate carries it");
+    form_row(g, 0, "Serial", A.serial_entry);
+    A.reason_drop = gtk_drop_down_new_from_strings(reasons);
+    form_row(g, 1, "Reason", A.reason_drop);
+    A.date_entry = entry_with("now, or YYYYMMDDHHMMSSZ (UTC)");
+    form_row(g, 2, "Date", A.date_entry);
+    gtk_box_append(GTK_BOX(A.rv_revoke_box), g);
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(row), button_to("Record revocation\xe2\x80\xa6", G_CALLBACK(on_revoke), NULL));
+    gtk_box_append(GTK_BOX(A.rv_revoke_box), row);
+    gtk_box_append(GTK_BOX(A.rv_revoke_box), note_label(
+        "Recording signs nothing and needs no login. A CRL is what tells verifiers."));
+    gtk_box_append(GTK_BOX(page), A.rv_revoke_box);
+
+    /* What signs: the CRL and OCSP answers. */
+    A.rv_sign_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_box_append(GTK_BOX(A.rv_sign_box), heading("Sign with the token"));
+    g = form();
+    /* The same list of private keys as the Certificates tab; the model is
+     * shared, so the drop-down takes a reference of its own. */
+    A.rv_key_drop = gtk_drop_down_new(G_LIST_MODEL(g_object_ref(A.key_labels)), NULL);
+    form_row(g, 0, "Signing key", A.rv_key_drop);
+    A.rv_ca_btn = file_button("The CA's certificate", &A.rv_ca_path);
+    form_row(g, 1, "CA certificate", A.rv_ca_btn);
+    gtk_box_append(GTK_BOX(A.rv_sign_box), g);
+
+    gtk_box_append(GTK_BOX(A.rv_sign_box), heading("Publish a CRL"));
+    g = form();
+    A.crl_days_spin = gtk_spin_button_new_with_range(1, 3650, 1);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(A.crl_days_spin), 30);
+    form_row(g, 0, "Days", A.crl_days_spin);
+    A.crl_pem_check = gtk_check_button_new_with_label("Write PEM (otherwise DER)");
+    form_row(g, 1, "Output", A.crl_pem_check);
+    gtk_box_append(GTK_BOX(A.rv_sign_box), g);
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(row), button_to("Sign CRL\xe2\x80\xa6", G_CALLBACK(on_crl), NULL));
+    gtk_box_append(GTK_BOX(A.rv_sign_box), row);
+    gtk_box_append(GTK_BOX(A.rv_sign_box), note_label(
+        "The number advances and the database is saved before the list is written, "
+        "so no number is ever published twice."));
+
+    gtk_box_append(GTK_BOX(A.rv_sign_box), heading("Answer an OCSP request"));
+    g = form();
+    A.req_btn = file_button("The OCSP request", &A.req_path);
+    form_row(g, 0, "Request", A.req_btn);
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    A.responder_btn = file_button("The delegated responder's certificate", &A.responder_path);
+    gtk_button_set_label(GTK_BUTTON(A.responder_btn), "None: the CA answers");
+    gtk_widget_set_hexpand(A.responder_btn, TRUE);
+    gtk_box_append(GTK_BOX(row), A.responder_btn);
+    gtk_box_append(GTK_BOX(row), button_to("Clear", G_CALLBACK(on_responder_clear), NULL));
+    form_row(g, 1, "Responder", row);
+    A.ocsp_days_spin = gtk_spin_button_new_with_range(1, 365, 1);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(A.ocsp_days_spin), 7);
+    form_row(g, 2, "Days", A.ocsp_days_spin);
+    gtk_box_append(GTK_BOX(A.rv_sign_box), g);
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(row), button_to("Answer\xe2\x80\xa6", G_CALLBACK(on_ocsp), NULL));
+    gtk_box_append(GTK_BOX(A.rv_sign_box), row);
+    gtk_box_append(GTK_BOX(A.rv_sign_box), note_label(
+        "A delegated responder must carry extendedKeyUsage OCSPSigning and be issued "
+        "by this CA; the signing key is then the delegate's. Certificates of another "
+        "issuer are answered unknown, not good."));
+    gtk_box_append(GTK_BOX(page), A.rv_sign_box);
+
     GtkWidget *s = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(s), page);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(s), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
@@ -955,6 +1434,7 @@ static void activate(GtkApplication *app, gpointer ud) {
     GtkWidget *tabs = gtk_notebook_new();
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), left, gtk_label_new("Token"));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), cert_tab(), gtk_label_new("Certificates"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), revocation_tab(), gtk_label_new("Revocation"));
     gtk_paned_set_start_child(GTK_PANED(paned), tabs);
 
     /* Right: the call log. */
