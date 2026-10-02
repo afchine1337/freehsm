@@ -698,6 +698,11 @@ tests/probe_fips_loaded: tests/probe_fips_loaded.c $(LIB)
 tests/probe_secure_heap: tests/probe_secure_heap.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -ldl
 
+# Two copies of the module in one process share libcrypto's secure heap; the
+# second must adopt it, not fail. dlopen()s both, so it links nothing of ours.
+tests/test_secure_heap_shared: tests/test_secure_heap_shared.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -ldl
+
 # The service links the library objects rather than dlopen()ing the module:
 # it is the PKCS#11 application, and it needs fhsm_audit_set_actor(), which is
 # not part of PKCS#11 and is not exported from the shared object.
@@ -1058,7 +1063,8 @@ TEST_BINS = \
 	tests/test_audit_key_diag \
 	tests/test_kw_iv \
 	tests/test_login_conflicts \
-	tests/test_pkiops
+	tests/test_pkiops \
+	tests/test_secure_heap_shared
 
 .PHONY: test-bins
 test-bins: $(TEST_BINS) tools/fhsm-token
@@ -1186,6 +1192,11 @@ tests: $(TEST_BINS) tools/fhsm-token
 		$(TEST_LD) ./tests/test_fork_child
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_pkiops
+# A copy under another name, so the loader maps a second instance -- as it
+# would a second build.
+	d=$$(mktemp -d) && cp $(LIB) $$d/libfreehsm-copy.so && \
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_secure_heap_shared ./$(LIB) $$d/libfreehsm-copy.so
 
 # External behavioral harness (#125) : Denis Mingulov's pkcs11-check
 # (>100k vendor-neutral checks) against the built module. Findings are

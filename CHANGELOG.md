@@ -8,6 +8,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **A second copy of the module in one process failed `C_Initialize`.** The
+  secure heap is libcrypto's, one per process, and `CRYPTO_secure_malloc_init`
+  returns 0 when it already exists, which the module reported as "could not
+  allocate it at all". That stopped a second build loaded beside the first,
+  as `fhsm-gui` does when it switches modules, and two FreeHSM modules under
+  one p11-kit proxy. The module now adopts the existing arena, but only once
+  `/proc/self/smaps` shows it locked; an unlocked one is still refused.
+  Asserted in `tests/test_secure_heap_shared.c`.
+
 * **`C_OpenSession` accepted a call without `CKF_SERIAL_SESSION`.** PKCS#11
   has had no parallel sessions since v2.01 and keeps the flag for
   compatibility, with `CKR_SESSION_PARALLEL_NOT_SUPPORTED` as the answer when

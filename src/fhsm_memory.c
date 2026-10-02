@@ -37,6 +37,7 @@
 
 #include <openssl/crypto.h>
 #include <pthread.h>
+#include <stdint.h>             /* uintptr_t, for the smaps lookup */
 #include <stdio.h>              /* fprintf on the heap-init failure path */
 #include <string.h>
 #include <sys/resource.h>       /* getrlimit(RLIMIT_MEMLOCK) --- so the message
@@ -52,7 +53,66 @@ static pthread_once_t g_heap_once = PTHREAD_ONCE_INIT;
 static int            g_heap_ok   = 0;
 static size_t         g_heap_bytes = (size_t)FHSM_SECURE_HEAP_BYTES;
 
+/* The secure heap belongs to libcrypto, not to this module: there is one per
+ * process. A second copy of the module in the same process -- another build
+ * loaded beside this one, as fhsm-gui does when it switches modules, or two
+ * FreeHSM modules under one p11-kit proxy -- finds it already created, and
+ * CRYPTO_secure_malloc_init then returns 0, which used to stop that copy with
+ * "could not allocate it at all".
+ *
+ * Adopting the arena is right only if it is what this module would have
+ * insisted on: locked. Whoever created it may have accepted OpenSSL's
+ * unlocked fallback (a return of 2), and OpenSSL does not say which. The
+ * kernel does: allocate one block, find the mapping that holds it in
+ * /proc/self/smaps, and require the VM_LOCKED flag ("lo" in VmFlags). The
+ * mapping's size is the arena's, and becomes g_heap_bytes.
+ *
+ * Returns 1 when the arena is locked, 0 when it is not or cannot be checked.
+ * A check that cannot run refuses: the claim is "locked", not "probably". */
+static int adopt_existing_arena(void) {
+    void *probe = OPENSSL_secure_malloc(16);
+    if (probe == NULL) return 0;
+    int ok = 0;
+    if (CRYPTO_secure_allocated(probe)) {
+        FILE *f = fopen("/proc/self/smaps", "r");
+        if (f) {
+            uintptr_t p = (uintptr_t)probe;
+            unsigned long lo, hi;
+            int inside = 0;
+            char line[512];
+            while (fgets(line, sizeof line, f)) {
+                char dash;
+                if (sscanf(line, "%lx%c%lx", &lo, &dash, &hi) == 3 && dash == '-') {
+                    if (inside) break;          /* past our mapping, no VmFlags seen */
+                    inside = p >= lo && p < hi;
+                    continue;
+                }
+                if (inside && strncmp(line, "VmFlags:", 8) == 0) {
+                    ok = strstr(line + 8, " lo ") != NULL
+                      || strstr(line + 8, " lo\n") != NULL;
+                    if (ok) g_heap_bytes = (size_t)(hi - lo);
+                    break;
+                }
+            }
+            fclose(f);
+        }
+    }
+    OPENSSL_secure_clear_free(probe, 16);
+    return ok;
+}
+
 static void heap_init_once(void) {
+    g_heap_bytes = fhsm_conf_secure_heap_bytes();
+    if (CRYPTO_secure_malloc_initialized()) {
+        if (adopt_existing_arena()) { g_heap_ok = 1; return; }
+        fputs("[freehsm-c] FATAL : the secure heap could not be created.\n"
+              "  This process already has one -- another library, or another copy\n"
+              "  of this module, created it first -- and it is NOT locked in\n"
+              "  memory, or that could not be checked in /proc/self/smaps. An\n"
+              "  unlocked arena is refused: key material there could reach swap.\n",
+              stderr);
+        return;
+    }
     /* OPENSSL_secure_malloc_init: arg1 = arena size in bytes, arg2 = min
      * allocation size (must be a power of 2). Both are build-time
      * configurable through FHSM_SECURE_HEAP_BYTES / FHSM_SECURE_HEAP_MINSIZE.
@@ -96,8 +156,8 @@ static void heap_init_once(void) {
      * to be: once sensitive key material lives in this arena (#127) and
      * exhaustion is a hard failure rather than a silent fallback, an operator
      * with a large token needs a way to raise the ceiling. A compile-time
-     * constant would make that a rebuild. */
-    g_heap_bytes = fhsm_conf_secure_heap_bytes();
+     * constant would make that a rebuild. g_heap_bytes is read above, before
+     * the shared-arena check. */
     int rc = CRYPTO_secure_malloc_init(g_heap_bytes, FHSM_SECURE_HEAP_MINSIZE);
     if (rc == 1) {
         g_heap_ok = 1;

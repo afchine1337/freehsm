@@ -234,6 +234,12 @@ for t in tests/test_*; do
     # test_p11_loader takes the module path, as it does in the Makefile.
     arg=""; [ "$name" = "test_p11_loader" ] && arg="./libfreehsm.so"
     D=$(mktemp -d)
+    # test_secure_heap_shared takes the module and a copy of it under another
+    # name, so the loader maps it twice. A byte-for-byte copy keeps the digest.
+    if [ "$name" = "test_secure_heap_shared" ]; then
+        cp ./libfreehsm.so "$D/libfreehsm-copy.so"
+        arg="./libfreehsm.so $D/libfreehsm-copy.so"
+    fi
     out=$(FHSM_TOKENS_DIR="$D" $TEST_LD_ENV "./$t" $arg 2>&1); rc=$?
     rm -rf "$D"
     # Belt and braces: the notice must not appear, and it cannot now that the
