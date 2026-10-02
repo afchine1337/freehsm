@@ -378,7 +378,9 @@ The release tier validates the module against the open Google Wycheproof crypto 
 | **ML-DSA (FIPS 204, post-quantum)** | 614 | 0 | 15 | All three NIST parameter sets (44/65/87) ; 15 skips = `ctx` length > 255 (FIPS 204 §5.2.1 spec violation, unreachable through `CK_ML_DSA_PARAMS`) |
 | **TOTAL** | **6 978** | **0** | **20 583** | **9 families** |
 
-The post-quantum coverage makes FreeHSM C, at the time of writing, one of very few open-source PKCS#11 v3.2 modules with both NIST PQ primitives (KEM + signature) cross-validated against an external independent corpus. The Wycheproof `aes_gmac_test.json` corpus is wired through the `tests/wycheproof/adapters/aes_gmac.py` adapter added in v1.1.18 ; the corpus will be enabled in the full sweep once the test runner declaration is updated in a follow-up release.
+Both of the module's NIST post-quantum primitives, ML-KEM (FIPS 203) and ML-DSA (FIPS 204), are cross-validated against an external, independent corpus: the Wycheproof rows above. AES-GMAC is part of the full sweep as well: the runner discovers every adapter under `tests/wycheproof/adapters/`, and `tests/wycheproof/results/full.json` records `aes_gmac` beside the other families.
+
+*Until 2026-10-02 this paragraph called the module "one of very few" open-source PKCS#11 v3.2 modules with this coverage, which is a comparison with other projects rather than a statement about this one; `docs/PRIMACY_AUDIT_PQC_COMPOSITE.md` is why it was removed. It also said the GMAC corpus would be enabled in a later release; it already had been.*
 
 ### 13.2 Coverage matrix self-test
 
