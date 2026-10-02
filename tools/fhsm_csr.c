@@ -5,17 +5,14 @@
 /* ===========================================================================
  * fhsm-csr --- certification requests and self-signed roots, with a composite
  *              post-quantum key held in a PKCS#11 module (#112).
- *
  *  Usage :
  *    fhsm-csr keygen --label NAME [--module PATH] [--slot N]
  *    fhsm-csr csr    --label NAME --subject DN [--out FILE] [--pem]
  *    fhsm-csr root   --label NAME --subject DN [--days N] [--serial N] ...
- *
  *  The PIN comes from the FHSM_PIN environment variable and from nowhere else.
  *  There is deliberately no --pin option: an argument is visible in `ps` to
  *  every user on the machine, and a tool that offers the convenient insecure
  *  option is a tool whose users take it.
- *
  *  The module is loaded at runtime and driven only through the PKCS#11
  *  interface, so this works against any PKCS#11 module that implements the
  *  composite mechanism -- not only against FreeHSM. That is the point: a
@@ -23,10 +20,23 @@
  *  tools with it. The composite DER encoding travels with the tool
  *  (src/fhsm_composite.o links standalone against libcrypto), the key stays
  *  wherever the module keeps it, and the private half is never seen here.
+ *  The work is in tools/pkiops.c, which the planned graphical interface calls
+ *  too (docs/fhsm-gui-plan.md). What stays here is the command line.
  * ========================================================================= */
-#include "p11_util.h"
+#include "pkiops.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <openssl/pem.h>
+
+static const char *prog = "fhsm-csr";
+
+static void fail(const struct p11_err *e) {
+    fprintf(stderr, "%s: %s", prog, e->msg);
+    exit(e->code);
+}
 
 static void emit(const uint8_t *der, size_t n, const char *path,
                   int pem, const char *pem_label) {
@@ -64,7 +74,7 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
-    p11_progname = "fhsm-csr";
+    struct p11_err e;
     if (argc < 2) usage();
     const char *cmd = argv[1];
     const char *module = "./libfreehsm.so", *label = NULL, *subject = NULL;
@@ -76,7 +86,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--label")   && i+1<argc) label   = argv[++i];
         else if (!strcmp(argv[i],"--subject") && i+1<argc) subject = argv[++i];
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out     = argv[++i];
-        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot    = p11_slot_arg(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")    && i+1<argc) {
+            if (pkiops_parse_slot(argv[++i], &slot, &e)) fail(&e);
+        }
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days    = atoi(argv[++i]);
         else if (!strcmp(argv[i],"--serial")  && i+1<argc) serial  = atol(argv[++i]);
         else if (!strcmp(argv[i],"--pem")) pem = 1;
@@ -95,26 +107,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "fhsm-csr: FHSM_PIN is not set.\n"); return 1;
     }
 
-    load_module(module);
-    CK_RV rv = p11.Initialize(NULL);
-    if (rv != CKR_OK) die("C_Initialize", rv);
-    CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession(p11_resolve_slot(slot, P11_SLOT_WITH_TOKEN),
-                          CKF_RW, NULL, NULL, &s);
-    if (rv != CKR_OK) die("C_OpenSession", rv);
-    rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
-    if (rv != CKR_OK) die("C_Login", rv);
+    pkiops_handle sid = 0, s = 0;
+    if (pkiops_open(module, slot, PKIOPS_SLOT_WITH_TOKEN, &sid, &e)) fail(&e);
+    if (pkiops_session_user(sid, (const uint8_t *)pin, strlen(pin), &s, &e)) fail(&e);
 
     if (!strcmp(cmd, "keygen")) {
-        CK_MECHANISM m = { CKM_COMPOSITE_MLDSA65_ED25519, NULL, 0 };
-        CK_BYTE t = 1;
-        CK_ATTRIBUTE pub_t[]  = { {CKA_LABEL,(void*)label,(CK_ULONG)strlen(label)},
-                                   {CKA_TOKEN,&t,1} };
-        CK_ATTRIBUTE priv_t[] = { {CKA_LABEL,(void*)label,(CK_ULONG)strlen(label)},
-                                   {CKA_TOKEN,&t,1} };
-        CK_OBJECT_HANDLE hp = 0, hk = 0;
-        rv = p11.GenerateKeyPair(s, &m, pub_t, 2, priv_t, 2, &hp, &hk);
-        if (rv != CKR_OK) die("C_GenerateKeyPair", rv);
+        pkiops_handle hp = 0, hk = 0;
+        if (pkiops_keygen(s, label, &hp, &hk, &e)) fail(&e);
         fprintf(stderr, "fhsm-csr: composite key pair \"%s\" created "
                         "(public %lu, private %lu)\n",
                 label, (unsigned long)hp, (unsigned long)hk);
@@ -122,29 +121,12 @@ int main(int argc, char **argv) {
     }
 
     if (!strcmp(cmd,"csr") || !strcmp(cmd,"root")) {
-        CK_OBJECT_HANDLE hpub  = find_one(s, CKO_PUBLIC_KEY,  label);
-        CK_OBJECT_HANDLE hpriv = find_one(s, CKO_PRIVATE_KEY, label);
-
-        static uint8_t pub[FHSM_COMPOSITE_PUB_MAX];
-        CK_ATTRIBUTE g = { CKA_VALUE, pub, (CK_ULONG)sizeof pub };
-        rv = p11.GetAttributeValue(s, hpub, &g, 1);
-        if (rv != CKR_OK) die("C_GetAttributeValue(CKA_VALUE)", rv);
-
-        struct signer sg = { s, hpriv };
         static uint8_t der[32768]; size_t n = sizeof der;
-        fhsm_rv_t r;
-        if (!strcmp(cmd,"csr"))
-            r = fhsm_composite_csr(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
-                                    subject, pub, (size_t)g.ulValueLen,
-                                    p11_sign, &sg, der, &n);
-        else
-            r = fhsm_composite_selfsigned(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
-                                           subject, serial, days,
-                                           pub, (size_t)g.ulValueLen,
-                                           p11_sign, &sg, der, &n);
-        if (r != FHSM_RV_OK) die(!strcmp(cmd,"csr") ? "building the request"
-                                                    : "building the certificate",
-                                  (CK_RV)r);
+        if (!strcmp(cmd,"csr")) {
+            if (pkiops_csr(s, label, subject, der, &n, &e)) fail(&e);
+        } else {
+            if (pkiops_root(s, label, subject, serial, days, der, &n, &e)) fail(&e);
+        }
         emit(der, n, out, pem,
              !strcmp(cmd,"csr") ? "CERTIFICATE REQUEST" : "CERTIFICATE");
         goto done;
@@ -152,7 +134,7 @@ int main(int argc, char **argv) {
 
     usage();
 done:
-    p11.CloseSession(s);
-    p11.Finalize(NULL);
+    pkiops_session_close(s);
+    pkiops_close();
     return 0;
 }

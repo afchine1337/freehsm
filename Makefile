@@ -312,8 +312,13 @@ tools/freehsm-audit: tools/freehsm_audit.c
 # CK_SLOT_ID and defaults to 0. A module whose slot IDs are not small
 # integers cannot be addressed at all, because the tools never call
 # C_GetSlotList. See docs/ROADMAP.md.
-tools/fhsm-csr: tools/fhsm_csr.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
+# The tools' operations as a library (docs/fhsm-gui-plan.md, stage 0). Compiled
+# into each tool that has moved onto it; tools/pkiops.c is the one file that
+# includes tools/p11_util.h, whose function table is static per file.
+PKIOPS_SRC = tools/pkiops.c tools/pkiops.h tools/p11_util.h tools/p11_err.h
+
+tools/fhsm-csr: tools/fhsm_csr.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
 
 # fhsm-ca signs for other people; fhsm-csr makes requests and its own root.
 # Separate binaries because they are separate authorities, usually separate
@@ -324,8 +329,8 @@ tools/fhsm-ca: tools/fhsm_ca.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o $
 tools/fhsm-sign: tools/fhsm_sign.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
 
-tools/fhsm-token: tools/fhsm_token.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
+tools/fhsm-token: tools/fhsm_token.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
 
 # ---------------------------------------------------------------------------
 # Code generation --- runs scripts/gen_p11_thunks.py to regenerate

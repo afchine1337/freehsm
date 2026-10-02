@@ -17,6 +17,7 @@
 #define FHSM_TOOLS_P11_UTIL_H
 
 #include "fhsm_composite.h"
+#include "p11_err.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -115,7 +116,7 @@ P11_MAYBE_UNUSED static void die(const char *what, CK_RV rv) {
  * whole message without the tool's name, final newline included, and may run
  * over several lines -- a slot list, for instance.
  * ------------------------------------------------------------------------- */
-struct p11_err { int code; char msg[4096]; };
+/* struct p11_err is in tools/p11_err.h, which tools/pkiops.h shares. */
 
 #if defined(__GNUC__) || defined(__clang__)
 #  define P11_PRINTF(a, b) __attribute__((format(printf, a, b)))
