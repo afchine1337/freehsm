@@ -20,6 +20,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,6 +100,56 @@ P11_MAYBE_UNUSED static void die(const char *what, CK_RV rv) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Errors that are returned rather than ending the process.
+ *
+ * Every helper below used to print and exit, which is right for a command and
+ * wrong for anything that must survive a refused PIN or a missing key -- the
+ * planned graphical interface first of all (docs/fhsm-gui-plan.md, stage 0).
+ * So each has a `_e` form that fills a p11_err and returns its code, and the
+ * old name is now a thin wrapper that prints "<tool>: <msg>" and exits with
+ * that code. The tools' messages and exit codes are unchanged, byte for byte;
+ * tests/pki_tools_characterize.sh is how that is checked.
+ *
+ * `code` is the exit status a tool would use: 2 for the module or a PKCS#11
+ * call, 3 for a slot or a key that is missing or ambiguous. `msg` holds the
+ * whole message without the tool's name, final newline included, and may run
+ * over several lines -- a slot list, for instance.
+ * ------------------------------------------------------------------------- */
+struct p11_err { int code; char msg[4096]; };
+
+#if defined(__GNUC__) || defined(__clang__)
+#  define P11_PRINTF(a, b) __attribute__((format(printf, a, b)))
+#else
+#  define P11_PRINTF(a, b)
+#endif
+
+P11_MAYBE_UNUSED P11_PRINTF(3, 4)
+static int p11_fail(struct p11_err *e, int code, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(e->msg, sizeof e->msg, fmt, ap);
+    va_end(ap);
+    e->code = code;
+    return code;
+}
+
+P11_MAYBE_UNUSED P11_PRINTF(2, 3)
+static void p11_append(struct p11_err *e, const char *fmt, ...) {
+    size_t n = strlen(e->msg);
+    if (n >= sizeof e->msg - 1) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(e->msg + n, sizeof e->msg - n, fmt, ap);
+    va_end(ap);
+}
+
+/* What the old helpers did on failure, in one place. */
+P11_MAYBE_UNUSED static void p11_exit_on(const struct p11_err *e) {
+    fprintf(stderr, "%s: %s", p11_progname, e->msg);
+    exit(e->code);
+}
+
+/* ---------------------------------------------------------------------------
  * How a PKCS#11 module is actually loaded.
  *
  * This used to dlsym every C_* symbol by name and exit if one was missing.
@@ -153,9 +204,9 @@ struct p11_function_list {
     void *pfn[P11_SLOT_COUNT];
 };
 
-P11_MAYBE_UNUSED static void load_module(const char *path) {
+P11_MAYBE_UNUSED static int p11_load_module_e(const char *path, struct p11_err *e) {
     p11.h = dlopen(path, RTLD_NOW);
-    if (!p11.h) { fprintf(stderr, "%s: cannot load %s: %s\n", p11_progname, path, dlerror()); exit(2); }
+    if (!p11.h) return p11_fail(e, 2, "cannot load %s: %s\n", path, dlerror());
 
     /* The conforming path first. */
     CK_RV (*getlist)(struct p11_function_list **) = NULL;
@@ -163,16 +214,13 @@ P11_MAYBE_UNUSED static void load_module(const char *path) {
     if (getlist) {
         struct p11_function_list *fl = NULL;
         CK_RV rv = getlist(&fl);
-        if (rv != 0 || !fl) {
-            fprintf(stderr, "%s: C_GetFunctionList failed (0x%lx)\n",
-                    p11_progname, (unsigned long)rv);
-            exit(2);
-        }
+        if (rv != 0 || !fl)
+            return p11_fail(e, 2, "C_GetFunctionList failed (0x%lx)\n", (unsigned long)rv);
         #define T(f,slot) do { \
             p11.f = (void*)0; \
             *(void**)&p11.f = fl->pfn[slot]; \
-            if (!p11.f) { fprintf(stderr, "%s: the module leaves C_%s unimplemented\n", \
-                                   p11_progname, #f); exit(2); } } while (0)
+            if (!p11.f) return p11_fail(e, 2, "the module leaves C_%s unimplemented\n", #f); \
+            } while (0)
         T(Initialize, P11_SLOT_Initialize);   T(Finalize, P11_SLOT_Finalize);
         T(OpenSession, P11_SLOT_OpenSession); T(CloseSession, P11_SLOT_CloseSession);
         T(Login, P11_SLOT_Login);             T(GenerateKeyPair, P11_SLOT_GenerateKeyPair);
@@ -193,14 +241,14 @@ P11_MAYBE_UNUSED static void load_module(const char *path) {
         T(GetMechanismList, P11_SLOT_GetMechanismList);
         T(GetMechanismInfo, P11_SLOT_GetMechanismInfo);
         #undef T
-        return;
+        return 0;
     }
 
     /* No C_GetFunctionList. Not conforming, but some modules and test doubles
      * export the functions directly, and refusing them buys nothing. */
     #define S(f,n) do { *(void**)&p11.f = dlsym(p11.h, n); \
-        if (!p11.f) { fprintf(stderr,"%s: the module exports neither C_GetFunctionList nor %s\n", \
-                              p11_progname, n); exit(2); } } while (0)
+        if (!p11.f) return p11_fail(e, 2, \
+            "the module exports neither C_GetFunctionList nor %s\n", n); } while (0)
     S(Initialize,"C_Initialize"); S(Finalize,"C_Finalize");
     S(OpenSession,"C_OpenSession"); S(CloseSession,"C_CloseSession");
     S(Login,"C_Login"); S(GenerateKeyPair,"C_GenerateKeyPair");
@@ -217,25 +265,40 @@ P11_MAYBE_UNUSED static void load_module(const char *path) {
     S(GenerateRandom,"C_GenerateRandom");
     S(GetSlotList,"C_GetSlotList");
     #undef S
+    return 0;
+}
+
+P11_MAYBE_UNUSED static void load_module(const char *path) {
+    struct p11_err e;
+    if (p11_load_module_e(path, &e)) p11_exit_on(&e);
 }
 
 /* Find exactly one object of a class carrying a label. "Exactly": two objects
  * with the same label is an ambiguity the operator has to resolve, and picking
  * the first would silently sign with a key they did not mean. */
-P11_MAYBE_UNUSED static CK_OBJECT_HANDLE find_one(CK_SESSION_HANDLE s, CK_ULONG cls, const char *label) {
+P11_MAYBE_UNUSED static int p11_find_one_e(CK_SESSION_HANDLE s, CK_ULONG cls, const char *label,
+                                          CK_OBJECT_HANDLE *out, struct p11_err *e) {
     CK_ULONG c = cls;
     CK_ATTRIBUTE t[] = { {CKA_CLASS,&c,sizeof c},
                           {CKA_LABEL,(void*)label,(CK_ULONG)strlen(label)} };
-    if (p11.FindObjectsInit(s, t, 2) != CKR_OK) die("C_FindObjectsInit", 0);
+    if (p11.FindObjectsInit(s, t, 2) != CKR_OK) return p11_fail(e, 2, "C_FindObjectsInit\n");
     CK_OBJECT_HANDLE h[4]; CK_ULONG n = 0;
     CK_RV rv = p11.FindObjects(s, h, 4, &n);
     p11.FindObjectsFinal(s);
-    if (rv != CKR_OK) die("C_FindObjects", rv);
-    if (n == 0) { fprintf(stderr, "%s: no %s key labelled \"%s\"\n", p11_progname,
-                          cls == CKO_PUBLIC_KEY ? "public" : "private", label); exit(3); }
-    if (n > 1)  { fprintf(stderr, "%s: %lu keys labelled \"%s\" -- ambiguous, "
-                          "refusing to guess\n", p11_progname, (unsigned long)n, label); exit(3); }
-    return h[0];
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_FindObjects failed (0x%lx)\n", (unsigned long)rv);
+    if (n == 0) return p11_fail(e, 3, "no %s key labelled \"%s\"\n",
+                                cls == CKO_PUBLIC_KEY ? "public" : "private", label);
+    if (n > 1)  return p11_fail(e, 3, "%lu keys labelled \"%s\" -- ambiguous, "
+                                "refusing to guess\n", (unsigned long)n, label);
+    *out = h[0];
+    return 0;
+}
+
+P11_MAYBE_UNUSED static CK_OBJECT_HANDLE find_one(CK_SESSION_HANDLE s, CK_ULONG cls, const char *label) {
+    struct p11_err e;
+    CK_OBJECT_HANDLE h = 0;
+    if (p11_find_one_e(s, cls, label, &h, &e)) p11_exit_on(&e);
+    return h;
 }
 
 /* The signing callback. This is the whole point of the seam: the CSR and
@@ -349,43 +412,55 @@ static long p11_slot_arg(const char *s) {
     return v;
 }
 
-/* One enumeration. `ids` is owned by the caller. */
-static CK_SLOT_ID *p11_enumerate(int token_present, CK_ULONG *out_n) {
+/* One enumeration. `*ids` is owned by the caller, and NULL when there are none. */
+P11_MAYBE_UNUSED static int p11_enumerate_e(int token_present, CK_SLOT_ID **ids_out, CK_ULONG *out_n,
+                           struct p11_err *e) {
     CK_ULONG n = 0;
+    *ids_out = NULL;
+    *out_n = 0;
     CK_RV rv = p11.GetSlotList((unsigned char)(token_present ? 1 : 0), NULL, &n);
-    if (rv != CKR_OK) die("C_GetSlotList", rv);
-    *out_n = n;
-    if (n == 0) return NULL;
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_GetSlotList failed (0x%lx)\n", (unsigned long)rv);
+    if (n == 0) return 0;
     CK_SLOT_ID *ids = calloc(n, sizeof *ids);
-    if (!ids) { fprintf(stderr, "%s: out of memory\n", p11_progname); exit(2); }
+    if (!ids) return p11_fail(e, 2, "out of memory\n");
     rv = p11.GetSlotList((unsigned char)(token_present ? 1 : 0), ids, &n);
     /* n can only have shrunk between the two calls if a reader was removed;
      * trust the second answer, which is the one describing the buffer. */
-    if (rv != CKR_OK) { free(ids); die("C_GetSlotList", rv); }
+    if (rv != CKR_OK) {
+        free(ids);
+        return p11_fail(e, 2, "C_GetSlotList failed (0x%lx)\n", (unsigned long)rv);
+    }
+    *ids_out = ids;
     *out_n = n;
-    return ids;
+    return 0;
 }
 
-static void p11_list_slots(FILE *f, const CK_SLOT_ID *ids, CK_ULONG n) {
+/* The slot list printed beside a refusal, one "--slot N   label" per line. */
+P11_MAYBE_UNUSED static void p11_append_slots(struct p11_err *e, const CK_SLOT_ID *ids, CK_ULONG n) {
     for (CK_ULONG i = 0; i < n; i++) {
         char lbl[33]; p11_label_of(ids[i], lbl);
-        fprintf(f, "    --slot %lu   %s\n", (unsigned long)ids[i], lbl);
+        p11_append(e, "    --slot %lu   %s\n", (unsigned long)ids[i], lbl);
     }
 }
 
 /* `want` is the value of --slot, or -1 when the operator did not give one.
- * Exits with a diagnostic rather than returning an error: every caller would
- * do the same, and four copies of the same message is how they drift. */
+ * Every refusal names the slots there are, so the four tools and the
+ * interface say the same thing; four copies of the same message is how they
+ * drift. */
 P11_MAYBE_UNUSED
-static CK_SLOT_ID p11_resolve_slot(long want, enum p11_slot_intent intent) {
+static int p11_resolve_slot_e(long want, enum p11_slot_intent intent,
+                              CK_SLOT_ID *out, struct p11_err *e) {
     CK_ULONG n_all = 0, n_tok = 0;
-    CK_SLOT_ID *all = p11_enumerate(0, &n_all);
-    CK_SLOT_ID *tok = p11_enumerate(1, &n_tok);
+    CK_SLOT_ID *all = NULL, *tok = NULL;
     CK_SLOT_ID chosen = 0;
+    int rc = 0;
+
+    if ((rc = p11_enumerate_e(0, &all, &n_all, e)) != 0) goto done;
+    if ((rc = p11_enumerate_e(1, &tok, &n_tok, e)) != 0) goto done;
 
     if (n_all == 0) {
-        fprintf(stderr, "%s: the module reports no slot at all.\n", p11_progname);
-        exit(3);
+        rc = p11_fail(e, 3, "the module reports no slot at all.\n");
+        goto done;
     }
 
     /* --slot given: it must exist. Checked against the full list even for the
@@ -396,20 +471,19 @@ static CK_SLOT_ID p11_resolve_slot(long want, enum p11_slot_intent intent) {
         for (CK_ULONG i = 0; i < n_all; i++) if (all[i] == (CK_SLOT_ID)want) exists = 1;
         for (CK_ULONG i = 0; i < n_tok; i++) if (tok[i] == (CK_SLOT_ID)want) has_token = 1;
         if (!exists) {
-            fprintf(stderr, "%s: no slot %ld on this module. Available:\n",
-                    p11_progname, want);
-            p11_list_slots(stderr, all, n_all);
-            exit(3);
+            rc = p11_fail(e, 3, "no slot %ld on this module. Available:\n", want);
+            p11_append_slots(e, all, n_all);
+            goto done;
         }
         if (intent == P11_SLOT_WITH_TOKEN && !has_token) {
-            fprintf(stderr, "%s: slot %ld holds no initialised token.\n"
-                            "  `fhsm-token init --slot %ld` creates one.\n",
-                    p11_progname, want, want);
+            rc = p11_fail(e, 3, "slot %ld holds no initialised token.\n"
+                                "  `fhsm-token init --slot %ld` creates one.\n",
+                          want, want);
             if (n_tok) {
-                fprintf(stderr, "  Slots that do hold one:\n");
-                p11_list_slots(stderr, tok, n_tok);
+                p11_append(e, "  Slots that do hold one:\n");
+                p11_append_slots(e, tok, n_tok);
             }
-            exit(3);
+            goto done;
         }
         chosen = (CK_SLOT_ID)want;
         goto done;
@@ -418,15 +492,15 @@ static CK_SLOT_ID p11_resolve_slot(long want, enum p11_slot_intent intent) {
     switch (intent) {
     case P11_SLOT_WITH_TOKEN:
         if (n_tok == 0) {
-            fprintf(stderr, "%s: no slot on this module holds an initialised token.\n"
-                            "  `fhsm-token init` creates one.\n", p11_progname);
-            exit(3);
+            rc = p11_fail(e, 3, "no slot on this module holds an initialised token.\n"
+                                "  `fhsm-token init` creates one.\n");
+            goto done;
         }
         if (n_tok > 1) {
-            fprintf(stderr, "%s: %lu slots hold a token; name one with --slot:\n",
-                    p11_progname, (unsigned long)n_tok);
-            p11_list_slots(stderr, tok, n_tok);
-            exit(3);
+            rc = p11_fail(e, 3, "%lu slots hold a token; name one with --slot:\n",
+                          (unsigned long)n_tok);
+            p11_append_slots(e, tok, n_tok);
+            goto done;
         }
         chosen = tok[0];
         break;
@@ -440,12 +514,11 @@ static CK_SLOT_ID p11_resolve_slot(long want, enum p11_slot_intent intent) {
             if (!taken) { chosen = all[i]; found = 1; }
         }
         if (!found) {
-            fprintf(stderr, "%s: every slot already holds a token, so there is no\n"
-                            "  empty one to initialise. Name the slot to re-initialise\n"
-                            "  with --slot, and note that doing so DESTROYS its keys:\n",
-                    p11_progname);
-            p11_list_slots(stderr, all, n_all);
-            exit(3);
+            rc = p11_fail(e, 3, "every slot already holds a token, so there is no\n"
+                                "  empty one to initialise. Name the slot to re-initialise\n"
+                                "  with --slot, and note that doing so DESTROYS its keys:\n");
+            p11_append_slots(e, all, n_all);
+            goto done;
         }
         break;
     }
@@ -453,10 +526,10 @@ static CK_SLOT_ID p11_resolve_slot(long want, enum p11_slot_intent intent) {
     case P11_SLOT_ANY:
         if (n_tok == 1) { chosen = tok[0]; break; }
         if (n_tok > 1) {
-            fprintf(stderr, "%s: %lu slots hold a token; name one with --slot:\n",
-                    p11_progname, (unsigned long)n_tok);
-            p11_list_slots(stderr, tok, n_tok);
-            exit(3);
+            rc = p11_fail(e, 3, "%lu slots hold a token; name one with --slot:\n",
+                          (unsigned long)n_tok);
+            p11_append_slots(e, tok, n_tok);
+            goto done;
         }
         chosen = all[0];        /* none initialised: report on the first */
         break;
@@ -464,7 +537,16 @@ static CK_SLOT_ID p11_resolve_slot(long want, enum p11_slot_intent intent) {
 
 done:
     free(all); free(tok);
-    return chosen;
+    if (rc == 0) *out = chosen;
+    return rc;
+}
+
+P11_MAYBE_UNUSED
+static CK_SLOT_ID p11_resolve_slot(long want, enum p11_slot_intent intent) {
+    struct p11_err e;
+    CK_SLOT_ID sid = 0;
+    if (p11_resolve_slot_e(want, intent, &sid, &e)) p11_exit_on(&e);
+    return sid;
 }
 
 #endif /* FHSM_TOOLS_P11_UTIL_H */
