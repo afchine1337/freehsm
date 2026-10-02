@@ -53,6 +53,10 @@ jobs:
       # became 48. Those need a check against the code, which this is not.
       - name: Bilingual CC documents agree
         run: python3 scripts/check_doc_twins.py
+      # Every test binary `make tests` builds is one it runs, and the reverse.
+      # Two had been built and run by nothing (scripts/check_test_lists.py).
+      - name: Test lists agree
+        run: python3 scripts/check_test_lists.py
       - name: Verify LICENSE + NOTICE present
         run: |
           test -f LICENSE
@@ -404,7 +408,7 @@ jobs:
   #
   # Built here rather than taken from the build job's artefact: the tests are
   # binaries of this tree, and run_fips_tests.sh signs copies of the ones that
-  # embed the module. Only built, from the prerequisites of `tests`: running
+  # embed the module. Only built, with `make test-bins`: running
   # that target would also run the ordinary suite under the bypass, which is
   # not this job's question.
   test-fips-provider:
@@ -424,7 +428,7 @@ jobs:
           set -o pipefail
           make clean
           make
-          make $(sed -n 's/^tests:[[:space:]]*//p' Makefile)
+          make test-bins
           # Last: anything that relinked libfreehsm.so would drop the digest.
           make integrity
 

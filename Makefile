@@ -957,12 +957,88 @@ asan:
 # answer to (OpenSSF test_invocation); both are `make tests`.
 test check: tests
 
+# The test binaries, one list. `tests` builds them and runs each below, with
+# its own environment; `test-bins` only builds them (CI's test-fips-provider
+# job, which runs them its own way). The list and the recipe are still two
+# places, because each test has its own invocation, so
+# scripts/check_test_lists.py checks that every binary here is run there and
+# nothing is run that is not built. Until 2026-10-02 test_session_cap and
+# test_fork_child were built by `make tests` and run by nothing.
+TEST_BINS = \
+	tests/test_conf \
+	tests/test_session_cap \
+	tests/test_fork_child \
+	tests/test_tpm \
+	tests/test_cbc_pad_oracle \
+	tests/test_composite_mprime \
+	tests/test_composite_sign \
+	tests/test_composite_p11 \
+	tests/test_composite_x509 \
+	tests/test_composite_csr \
+	tests/test_composite_issue \
+	tests/test_composite_crl \
+	tests/test_composite_prehash \
+	tests/test_composite_cms \
+	tests/test_composite_ocsp \
+	tests/test_pin_length \
+	tests/test_throttle_reboot \
+	tests/test_audit_fsync \
+	tests/test_audit_concurrent \
+	tests/test_audit_multiproc \
+	tests/test_audit_switch \
+	tests/test_audit_key \
+	tests/test_audit_backpressure \
+	tests/test_audit_verify \
+	tests/test_p11_loader \
+	tests/test_smoke \
+	tests/test_token_capacity \
+	tests/test_decrypt_null_args \
+	tests/test_mech_advertise \
+	tests/test_legacy_digest \
+	tests/test_legacy_cipher \
+	tests/test_legacy_rsa \
+	tests/test_ec_curve_bounds \
+	tests/test_robustness_args \
+	tests/test_op_state \
+	tests/test_unwrap_len \
+	tests/test_hmac_multipart \
+	tests/test_advertised_operational \
+	tests/test_derive_concat \
+	tests/test_derive_hkdf \
+	tests/probe_ecdh_curves \
+	tests/probe_hkdf_data \
+	tests/test_pbkd2 \
+	tests/test_always_authenticate \
+	tests/test_interface_v32 \
+	tests/test_pqc_pub_import \
+	tests/test_gmac_params \
+	tests/test_encap_flags \
+	tests/test_encap_flags_store \
+	tests/test_v3_fixture \
+	tests/test_allowed_mechanisms \
+	tests/test_nested_templates \
+	tests/test_wrap_with_trusted \
+	tests/test_finalize_release \
+	tests/test_fips_digests \
+	tests/test_attributes \
+	tests/test_input_validation \
+	tests/test_session_objects \
+	tests/test_oaep_decrypt_size \
+	tests/test_sign_multipart \
+	tests/test_cbc_pad_update_size \
+	tests/test_audit_key_diag \
+	tests/test_kw_iv \
+	tests/test_login_conflicts
+
+.PHONY: test-bins
+test-bins: $(TEST_BINS) tools/fhsm-token
+
 # Every test gets its own tokens directory. It used to be only the ones that
 # touch a token -- but C_Initialize now opens the audit log, which lives
 # beside the tokens, so any test that initialises the module writes there.
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
-tests: tests/test_conf tests/test_session_cap tests/test_fork_child tests/test_tpm tests/test_cbc_pad_oracle tests/test_composite_mprime tests/test_composite_sign tests/test_composite_p11 tests/test_composite_x509 tests/test_composite_csr tests/test_composite_issue tests/test_composite_crl tests/test_composite_prehash tests/test_composite_cms tests/test_composite_ocsp tests/test_pin_length tests/test_throttle_reboot tests/test_audit_fsync tests/test_audit_concurrent tests/test_audit_multiproc tests/test_audit_switch tests/test_audit_key tests/test_audit_backpressure tests/test_audit_verify tests/test_p11_loader tests/test_smoke tests/test_token_capacity tests/test_decrypt_null_args tests/test_mech_advertise tests/test_legacy_digest tests/test_legacy_cipher tests/test_legacy_rsa tests/test_ec_curve_bounds tests/test_robustness_args tests/test_op_state tests/test_unwrap_len tests/test_hmac_multipart tests/test_advertised_operational tests/test_derive_concat tests/test_derive_hkdf tests/probe_ecdh_curves tests/probe_hkdf_data tests/test_pbkd2 tests/test_always_authenticate tests/test_interface_v32 tests/test_pqc_pub_import tests/test_gmac_params tests/test_encap_flags tests/test_encap_flags_store tests/test_v3_fixture tests/test_allowed_mechanisms tests/test_nested_templates tests/test_wrap_with_trusted tests/test_finalize_release tests/test_fips_digests tests/test_attributes tests/test_input_validation tests/test_session_objects tests/test_oaep_decrypt_size tests/test_sign_multipart tests/test_cbc_pad_update_size tests/test_audit_key_diag tests/test_kw_iv tests/test_login_conflicts tools/fhsm-token
+tests: $(TEST_BINS) tools/fhsm-token
 # test_conf had a build rule since #128 and appeared in no list: not in the
 # prerequisites above, not in the recipe below, not in any script, not in CI.
 # `make tests` never built it and nothing ever ran it. Found on 2026-09-26
@@ -1074,6 +1150,10 @@ tests: tests/test_conf tests/test_session_cap tests/test_fork_child tests/test_t
 		$(TEST_LD) ./tests/test_kw_iv
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_login_conflicts
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_session_cap
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_fork_child
 
 # External behavioral harness (#125) : Denis Mingulov's pkcs11-check
 # (>100k vendor-neutral checks) against the built module. Findings are
