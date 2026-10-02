@@ -23,17 +23,32 @@
  *  tests cross-verify signatures made each way, because a streamed signature
  *  that only verified through the streamed path would be a private
  *  construction wearing a standard OID.
+ *
+ *  The work is in tools/pkiops.c, which the planned graphical interface calls
+ *  too (docs/fhsm-gui-plan.md). What stays here is the command line and the
+ *  files: reading the data, the signature and the certificate, and writing
+ *  what is produced.
  * ========================================================================= */
-#include "p11_util.h"
+#include "pkiops.h"
 
 #include <errno.h>
-#include <openssl/evp.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <openssl/pem.h>
 
 #define CHUNK (1u << 20)          /* 1 MiB : large enough that the syscall and
                                      PKCS#11 crossing cost nothing measurable,
                                      small enough to sign from a pipe without
                                      buffering the whole stream. */
+
+
+static const char *prog = "fhsm-sign";
+
+static void fail(const struct p11_err *e) {
+    fprintf(stderr, "%s: %s", prog, e->msg);
+    exit(e->code);
+}
 
 static void usage(void) {
     fprintf(stderr,
@@ -67,6 +82,7 @@ static void usage(void) {
     exit(1);
 }
 
+
 /* Open the input, or standard input for "-" / absent. */
 static FILE *open_in(const char *path) {
     if (!path || !strcmp(path, "-")) return stdin;
@@ -79,15 +95,14 @@ static FILE *open_in(const char *path) {
  * so sign and verify cannot disagree about what they consumed -- a difference
  * there would show up as a signature that never validates, with nothing in
  * either message to say why. */
-static void stream_into(FILE *in, CK_SESSION_HANDLE s, int verifying) {
-    static CK_BYTE buf[CHUNK];
+static void stream_into(FILE *in, pkiops_handle s, int verifying) {
+    static uint8_t buf[CHUNK];
+    struct p11_err e;
     for (;;) {
         size_t n = fread(buf, 1, sizeof buf, in);
-        if (n) {
-            CK_RV rv = verifying ? p11.VerifyUpdate(s, buf, (CK_ULONG)n)
-                                 : p11.SignUpdate(s, buf, (CK_ULONG)n);
-            if (rv != CKR_OK) die(verifying ? "C_VerifyUpdate" : "C_SignUpdate", rv);
-        }
+        if (n && (verifying ? pkiops_verify_update(s, buf, n, &e)
+                            : pkiops_sign_update(s, buf, n, &e)))
+            fail(&e);
         if (n < sizeof buf) {
             if (ferror(in)) { fprintf(stderr, "fhsm-sign: read failed: %s\n", strerror(errno)); exit(2); }
             break;                       /* short read means end of file */
@@ -97,25 +112,26 @@ static void stream_into(FILE *in, CK_SESSION_HANDLE s, int verifying) {
 
 /* Open a session and log in. Shared so the two subcommands cannot drift on
  * the PIN policy. */
-static CK_SESSION_HANDLE open_session(const char *module, long slot) {
+static pkiops_handle open_session(const char *module, long slot) {
+    struct p11_err e;
     const char *pin = getenv("FHSM_PIN");
     if (!pin || !*pin) { fprintf(stderr, "fhsm-sign: FHSM_PIN is not set.\n"); exit(1); }
-    load_module(module);
-    CK_RV rv = p11.Initialize(NULL);
-    if (rv != CKR_OK) die("C_Initialize", rv);
-    CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession(p11_resolve_slot(slot, P11_SLOT_WITH_TOKEN),
-                          CKF_RW, NULL, NULL, &s);
-    if (rv != CKR_OK) die("C_OpenSession", rv);
-    rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
-    if (rv != CKR_OK) die("C_Login", rv);
+    pkiops_handle sid = 0, s = 0;
+    if (pkiops_open(module, slot, PKIOPS_SLOT_WITH_TOKEN, &sid, &e)) fail(&e);
+    if (pkiops_session_user(sid, (const uint8_t *)pin, strlen(pin), &s, &e)) fail(&e);
     return s;
+}
+
+static void close_session(pkiops_handle s) {
+    pkiops_session_close(s);
+    pkiops_close();
 }
 
 struct opts { const char *module, *label, *in, *out, *sig, *cert, *cms; long slot; };
 
 static struct opts parse(int argc, char **argv) {
     struct opts o;
+    struct p11_err e;
     o.module = "./libfreehsm.so";
     o.label = o.in = o.out = o.sig = o.cert = o.cms = NULL;
     o.slot = -1;
@@ -127,7 +143,9 @@ static struct opts parse(int argc, char **argv) {
         else if (!strcmp(argv[i],"--sig")    && i+1<argc) o.sig    = argv[++i];
         else if (!strcmp(argv[i],"--cert")   && i+1<argc) o.cert   = argv[++i];
         else if (!strcmp(argv[i],"--cms")    && i+1<argc) o.cms    = argv[++i];
-        else if (!strcmp(argv[i],"--slot")   && i+1<argc) o.slot   = p11_slot_arg(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")   && i+1<argc) {
+            if (pkiops_parse_slot(argv[++i], &o.slot, &e)) fail(&e);
+        }
         else if (!strncmp(argv[i],"--pin",5)) {
             fprintf(stderr, "fhsm-sign: --pin is not accepted. Set FHSM_PIN instead:\n"
                             "  an argument is visible in ps to every user on this machine.\n");
@@ -139,31 +157,19 @@ static struct opts parse(int argc, char **argv) {
 }
 
 static int cmd_sign(int argc, char **argv) {
+    struct p11_err e;
     struct opts o = parse(argc, argv);
     if (!o.label) usage();
     FILE *in = open_in(o.in);
 
-    CK_SESSION_HANDLE s = open_session(o.module, o.slot);
-    CK_OBJECT_HANDLE hpriv = find_one(s, CKO_PRIVATE_KEY, o.label);
-
-    CK_MECHANISM m = { CKM_COMPOSITE_MLDSA65_ED25519, NULL, 0 };
-    CK_RV rv = p11.SignInit(s, &m, hpriv);
-    if (rv != CKR_OK) die("C_SignInit", rv);
+    pkiops_handle s = open_session(o.module, o.slot);
+    if (pkiops_sign_begin(s, o.label, &e)) fail(&e);
 
     stream_into(in, s, 0);
     if (in != stdin) fclose(in);
 
-    /* Ask the module for the length rather than assuming it: the size is a
-     * property of the mechanism, and hard-coding one here is how the RSA
-     * query ended up wrong once already. */
-    CK_ULONG need = 0;
-    rv = p11.SignFinal(s, NULL, &need);
-    if (rv != CKR_OK) die("C_SignFinal (size query)", rv);
-    CK_BYTE *sig = malloc(need);
-    if (!sig) { fprintf(stderr, "fhsm-sign: out of memory\n"); return 2; }
-    CK_ULONG slen = need;
-    rv = p11.SignFinal(s, sig, &slen);
-    if (rv != CKR_OK) die("C_SignFinal", rv);
+    uint8_t *sig = NULL; size_t slen = 0;
+    if (pkiops_sign_end(s, &sig, &slen, &e)) fail(&e);
 
     FILE *out = o.out ? fopen(o.out, "wb") : stdout;
     if (!out) { fprintf(stderr, "fhsm-sign: cannot write %s: %s\n", o.out, strerror(errno)); return 2; }
@@ -173,11 +179,12 @@ static int cmd_sign(int argc, char **argv) {
 
     fprintf(stderr, "fhsm-sign: %lu-byte detached signature.\n", (unsigned long)slen);
     free(sig);
-    p11.CloseSession(s); p11.Finalize(NULL);
+    close_session(s);
     return 0;
 }
 
 static int cmd_verify(int argc, char **argv) {
+    struct p11_err e;
     struct opts o = parse(argc, argv);
     if (!o.label || !o.sig) usage();
 
@@ -185,7 +192,7 @@ static int cmd_verify(int argc, char **argv) {
      * the operator is asked for anything and before a stream is consumed. */
     FILE *sf = fopen(o.sig, "rb");
     if (!sf) { fprintf(stderr, "fhsm-sign: cannot read %s: %s\n", o.sig, strerror(errno)); exit(2); }
-    static CK_BYTE sig[65536];
+    static uint8_t sig[65536];
     size_t slen = fread(sig, 1, sizeof sig, sf);
     int overflow = !feof(sf) && !ferror(sf);
     if (ferror(sf)) { fprintf(stderr, "fhsm-sign: reading %s failed\n", o.sig); exit(2); }
@@ -195,27 +202,24 @@ static int cmd_verify(int argc, char **argv) {
                                      "this tool produces\n", o.sig); exit(2); }
 
     FILE *in = open_in(o.in);
-    CK_SESSION_HANDLE s = open_session(o.module, o.slot);
-    CK_OBJECT_HANDLE hpub = find_one(s, CKO_PUBLIC_KEY, o.label);
-
-    CK_MECHANISM m = { CKM_COMPOSITE_MLDSA65_ED25519, NULL, 0 };
-    CK_RV rv = p11.VerifyInit(s, &m, hpub);
-    if (rv != CKR_OK) die("C_VerifyInit", rv);
+    pkiops_handle s = open_session(o.module, o.slot);
+    if (pkiops_verify_begin(s, o.label, &e)) fail(&e);
 
     stream_into(in, s, 1);
     if (in != stdin) fclose(in);
 
-    rv = p11.VerifyFinal(s, sig, (CK_ULONG)slen);
-    p11.CloseSession(s); p11.Finalize(NULL);
+    int valid = 0;
+    int rc = pkiops_verify_end(s, sig, slen, &valid, &e);
+    close_session(s);
+    if (rc) fail(&e);
 
     /* A bad signature is not a tool failure, and it gets its own exit code so
      * a script can tell "did not verify" from "could not run". */
-    if (rv == CKR_SIGNATURE_INVALID) {
+    if (!valid) {
         fprintf(stderr, "fhsm-sign: the signature does not match this data "
                         "under key \"%s\".\n", o.label);
         return 4;
     }
-    if (rv != CKR_OK) die("C_VerifyFinal", rv);
     fprintf(stderr, "fhsm-sign: signature verified.\n");
     return 0;
 }
@@ -249,29 +253,23 @@ static uint8_t *slurp_der(const char *path, size_t *n) {
  * attributes the signature covers the attributes, so a file of any size costs
  * exactly one pass and nothing is held. */
 static void digest_stream(FILE *in, uint8_t out[64]) {
-    EVP_MD *md = EVP_MD_fetch(NULL, "SHA512", NULL);
-    EVP_MD_CTX *c = EVP_MD_CTX_new();
-    if (!md || !c) { fprintf(stderr, "fhsm-sign: digest init failed\n"); exit(2); }
-    if (EVP_DigestInit_ex(c, md, NULL) != 1) { fprintf(stderr, "fhsm-sign: digest init failed\n"); exit(2); }
+    struct p11_err e;
+    struct pkiops_sha512 *h = pkiops_sha512_begin(&e);
+    if (!h) fail(&e);
     static uint8_t buf[CHUNK];
     for (;;) {
         size_t n = fread(buf, 1, sizeof buf, in);
-        if (n && EVP_DigestUpdate(c, buf, n) != 1) {
-            fprintf(stderr, "fhsm-sign: digest failed\n"); exit(2);
-        }
+        if (n && pkiops_sha512_update(h, buf, n, &e)) fail(&e);
         if (n < sizeof buf) {
             if (ferror(in)) { fprintf(stderr, "fhsm-sign: read failed: %s\n", strerror(errno)); exit(2); }
             break;
         }
     }
-    unsigned int l = 0;
-    if (EVP_DigestFinal_ex(c, out, &l) != 1 || l != 64) {
-        fprintf(stderr, "fhsm-sign: digest failed\n"); exit(2);
-    }
-    EVP_MD_CTX_free(c); EVP_MD_free(md);
+    if (pkiops_sha512_end(h, out, &e)) fail(&e);
 }
 
 static int cmd_cms(int argc, char **argv) {
+    struct p11_err e;
     struct opts o = parse(argc, argv);
     if (!o.label || !o.cert) usage();
 
@@ -285,15 +283,9 @@ static int cmd_cms(int argc, char **argv) {
     digest_stream(in, dg);
     if (in != stdin) fclose(in);
 
-    CK_SESSION_HANDLE s = open_session(o.module, o.slot);
-    CK_OBJECT_HANDLE hpriv = find_one(s, CKO_PRIVATE_KEY, o.label);
-    struct signer sg = { s, hpriv };
-
+    pkiops_handle s = open_session(o.module, o.slot);
     static uint8_t der[262144]; size_t n = sizeof der;
-    fhsm_rv_t r = fhsm_composite_cms(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
-                                      cert, certlen, dg, sizeof dg,
-                                      p11_sign, &sg, der, &n);
-    if (r != FHSM_RV_OK) die("building the CMS", (CK_RV)r);
+    if (pkiops_cms_sign(s, o.label, cert, certlen, dg, der, &n, &e)) fail(&e);
 
     FILE *out = o.out ? fopen(o.out, "wb") : stdout;
     if (!out) { fprintf(stderr, "fhsm-sign: cannot write %s: %s\n", o.out, strerror(errno)); return 2; }
@@ -302,11 +294,12 @@ static int cmd_cms(int argc, char **argv) {
     else fflush(out);
 
     fprintf(stderr, "fhsm-sign: %zu-byte detached CMS SignedData.\n", n);
-    p11.CloseSession(s); p11.Finalize(NULL);
+    close_session(s);
     return 0;
 }
 
 static int cmd_cms_verify(int argc, char **argv) {
+    struct p11_err e;
     struct opts o = parse(argc, argv);
     if (!o.cms) usage();
 
@@ -322,25 +315,23 @@ static int cmd_cms_verify(int argc, char **argv) {
 
     /* No module, no token, no PIN. The signer's certificate travels inside
      * the structure, which is what CMS is for. */
-    fhsm_rv_t r = fhsm_composite_cms_verify(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
-                                             cms, cmslen, dg, sizeof dg);
-    if (r == FHSM_RV_SIGNATURE_INVALID) {
+    int verdict = 0;
+    if (pkiops_cms_verify(cms, cmslen, dg, &verdict, &e)) fail(&e);
+    if (verdict == 0) {
         fprintf(stderr, "fhsm-sign: the CMS does not match this data.\n");
         return 4;
     }
-    if (r == FHSM_RV_ARGUMENTS_BAD) {
+    if (verdict < 0) {
         fprintf(stderr, "fhsm-sign: %s is not a composite CMS this tool can read.\n"
                         "  That is a different problem from a signature that does\n"
                         "  not match, and exits 2 rather than 4.\n", o.cms);
         return 2;
     }
-    if (r != FHSM_RV_OK) die("verifying the CMS", (CK_RV)r);
     fprintf(stderr, "fhsm-sign: CMS verified.\n");
     return 0;
 }
 
 int main(int argc, char **argv) {
-    p11_progname = "fhsm-sign";
     if (argc < 2) usage();
     if (!strcmp(argv[1], "sign"))   return cmd_sign(argc, argv);
     if (!strcmp(argv[1], "verify")) return cmd_verify(argc, argv);

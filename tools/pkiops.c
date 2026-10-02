@@ -11,6 +11,8 @@
 #include "pkiops.h"
 #include "p11_util.h"
 
+#include <openssl/evp.h>
+
 /* --- the module ----------------------------------------------------------- */
 
 static int g_initialised;
@@ -206,4 +208,130 @@ int pkiops_root(pkiops_handle session, const char *label, const char *subject,
     if (r != FHSM_RV_OK)
         return p11_fail(e, 2, "building the certificate failed (0x%lx)\n", (unsigned long)r);
     return 0;
+}
+
+/* --- signing -------------------------------------------------------------- */
+
+int pkiops_sign_begin(pkiops_handle session, const char *label, struct p11_err *e) {
+    CK_SESSION_HANDLE s = (CK_SESSION_HANDLE)session;
+    CK_OBJECT_HANDLE hpriv = 0;
+    if (p11_find_one_e(s, CKO_PRIVATE_KEY, label, &hpriv, e)) return e->code;
+    CK_MECHANISM m = { CKM_COMPOSITE_MLDSA65_ED25519, NULL, 0 };
+    CK_RV rv = p11.SignInit(s, &m, hpriv);
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_SignInit failed (0x%lx)\n", (unsigned long)rv);
+    return 0;
+}
+
+int pkiops_sign_update(pkiops_handle session, const uint8_t *data, size_t len,
+                       struct p11_err *e) {
+    CK_RV rv = p11.SignUpdate((CK_SESSION_HANDLE)session, (CK_BYTE*)(uintptr_t)data, (CK_ULONG)len);
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_SignUpdate failed (0x%lx)\n", (unsigned long)rv);
+    return 0;
+}
+
+int pkiops_sign_end(pkiops_handle session, uint8_t **sig, size_t *sig_len,
+                    struct p11_err *e) {
+    CK_SESSION_HANDLE s = (CK_SESSION_HANDLE)session;
+    /* Ask the module for the length rather than assuming it: the size is a
+     * property of the mechanism, and hard-coding one here is how the RSA
+     * query ended up wrong once already. */
+    CK_ULONG need = 0;
+    CK_RV rv = p11.SignFinal(s, NULL, &need);
+    if (rv != CKR_OK)
+        return p11_fail(e, 2, "C_SignFinal (size query) failed (0x%lx)\n", (unsigned long)rv);
+    CK_BYTE *buf = malloc(need);
+    if (!buf) return p11_fail(e, 2, "out of memory\n");
+    CK_ULONG n = need;
+    rv = p11.SignFinal(s, buf, &n);
+    if (rv != CKR_OK) {
+        free(buf);
+        return p11_fail(e, 2, "C_SignFinal failed (0x%lx)\n", (unsigned long)rv);
+    }
+    *sig = buf;
+    *sig_len = (size_t)n;
+    return 0;
+}
+
+int pkiops_verify_begin(pkiops_handle session, const char *label, struct p11_err *e) {
+    CK_SESSION_HANDLE s = (CK_SESSION_HANDLE)session;
+    CK_OBJECT_HANDLE hpub = 0;
+    if (p11_find_one_e(s, CKO_PUBLIC_KEY, label, &hpub, e)) return e->code;
+    CK_MECHANISM m = { CKM_COMPOSITE_MLDSA65_ED25519, NULL, 0 };
+    CK_RV rv = p11.VerifyInit(s, &m, hpub);
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_VerifyInit failed (0x%lx)\n", (unsigned long)rv);
+    return 0;
+}
+
+int pkiops_verify_update(pkiops_handle session, const uint8_t *data, size_t len,
+                         struct p11_err *e) {
+    CK_RV rv = p11.VerifyUpdate((CK_SESSION_HANDLE)session, (CK_BYTE*)(uintptr_t)data, (CK_ULONG)len);
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_VerifyUpdate failed (0x%lx)\n", (unsigned long)rv);
+    return 0;
+}
+
+int pkiops_verify_end(pkiops_handle session, const uint8_t *sig, size_t sig_len,
+                      int *valid, struct p11_err *e) {
+    CK_RV rv = p11.VerifyFinal((CK_SESSION_HANDLE)session, (CK_BYTE*)(uintptr_t)sig, (CK_ULONG)sig_len);
+    if (rv == CKR_SIGNATURE_INVALID) { *valid = 0; return 0; }
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_VerifyFinal failed (0x%lx)\n", (unsigned long)rv);
+    *valid = 1;
+    return 0;
+}
+
+/* --- CMS ------------------------------------------------------------------ */
+
+struct pkiops_sha512 { EVP_MD *md; EVP_MD_CTX *c; };
+
+/* SHA-512 of a stream. The only thing that has to see the data: with signed
+ * attributes the signature covers the attributes, so a file of any size costs
+ * exactly one pass and nothing is held. pkiops_sha512_end frees the state
+ * whatever happened, so a caller that gives up after a failed update still
+ * calls it. */
+struct pkiops_sha512 *pkiops_sha512_begin(struct p11_err *e) {
+    struct pkiops_sha512 *h = calloc(1, sizeof *h);
+    if (h) { h->md = EVP_MD_fetch(NULL, "SHA512", NULL); h->c = EVP_MD_CTX_new(); }
+    if (!h || !h->md || !h->c || EVP_DigestInit_ex(h->c, h->md, NULL) != 1) {
+        if (h) { EVP_MD_CTX_free(h->c); EVP_MD_free(h->md); free(h); }
+        p11_fail(e, 2, "digest init failed\n");
+        return NULL;
+    }
+    return h;
+}
+
+int pkiops_sha512_update(struct pkiops_sha512 *h, const uint8_t *data, size_t len,
+                         struct p11_err *e) {
+    if (EVP_DigestUpdate(h->c, data, len) != 1) return p11_fail(e, 2, "digest failed\n");
+    return 0;
+}
+
+int pkiops_sha512_end(struct pkiops_sha512 *h, uint8_t out[64], struct p11_err *e) {
+    unsigned int l = 0;
+    int ok = EVP_DigestFinal_ex(h->c, out, &l) == 1 && l == 64;
+    EVP_MD_CTX_free(h->c); EVP_MD_free(h->md); free(h);
+    return ok ? 0 : p11_fail(e, 2, "digest failed\n");
+}
+
+int pkiops_cms_sign(pkiops_handle session, const char *label,
+                    const uint8_t *cert, size_t cert_len, const uint8_t digest[64],
+                    uint8_t *der, size_t *der_len, struct p11_err *e) {
+    CK_SESSION_HANDLE s = (CK_SESSION_HANDLE)session;
+    CK_OBJECT_HANDLE hpriv = 0;
+    if (p11_find_one_e(s, CKO_PRIVATE_KEY, label, &hpriv, e)) return e->code;
+    struct signer sg = { s, hpriv };
+    fhsm_rv_t r = fhsm_composite_cms(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                     cert, cert_len, digest, 64,
+                                     p11_sign, &sg, der, der_len);
+    if (r != FHSM_RV_OK)
+        return p11_fail(e, 2, "building the CMS failed (0x%lx)\n", (unsigned long)r);
+    return 0;
+}
+
+int pkiops_cms_verify(const uint8_t *cms, size_t cms_len, const uint8_t digest[64],
+                      int *verdict, struct p11_err *e) {
+    fhsm_rv_t r = fhsm_composite_cms_verify(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                            cms, cms_len, digest, 64);
+    if (r == FHSM_RV_OK)                { *verdict = 1;  return 0; }
+    if (r == FHSM_RV_SIGNATURE_INVALID) { *verdict = 0;  return 0; }
+    if (r == FHSM_RV_ARGUMENTS_BAD)     { *verdict = -1; return 0; }
+    return p11_fail(e, 2, "verifying the CMS failed (0x%lx)\n", (unsigned long)r);
 }

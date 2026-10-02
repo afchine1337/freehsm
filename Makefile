@@ -326,8 +326,8 @@ tools/fhsm-csr: tools/fhsm_csr.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o
 tools/fhsm-ca: tools/fhsm_ca.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
-tools/fhsm-sign: tools/fhsm_sign.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
+tools/fhsm-sign: tools/fhsm_sign.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
 
 tools/fhsm-token: tools/fhsm_token.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o
 	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
