@@ -335,3 +335,89 @@ int pkiops_cms_verify(const uint8_t *cms, size_t cms_len, const uint8_t digest[6
     if (r == FHSM_RV_ARGUMENTS_BAD)     { *verdict = -1; return 0; }
     return p11_fail(e, 2, "verifying the CMS failed (0x%lx)\n", (unsigned long)r);
 }
+
+/* --- the certification authority ----------------------------------------- */
+
+int pkiops_issue(pkiops_handle session, const char *label,
+                 const uint8_t *ca, size_t ca_len,
+                 const uint8_t *csr, size_t csr_len,
+                 const char *subject, const char *san,
+                 const char *const *crl_urls, size_t n_crl_urls,
+                 fhsm_cert_profile_t profile, int days,
+                 uint8_t *der, size_t *der_len, int *pop_valid,
+                 struct p11_err *e) {
+    CK_SESSION_HANDLE s = (CK_SESSION_HANDLE)session;
+    CK_OBJECT_HANDLE hpriv = 0;
+    if (p11_find_one_e(s, CKO_PRIVATE_KEY, label, &hpriv, e)) return e->code;
+    struct signer sg = { s, hpriv };
+    /* Serials come from the token's own DRBG through C_GenerateRandom -- see
+     * p11_rng in tools/p11_util.h. */
+    fhsm_rv_t r = fhsm_composite_issue(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                       ca, ca_len, csr, csr_len,
+                                       subject, san, crl_urls, n_crl_urls, profile,
+                                       days, p11_sign, &sg, p11_rng, &s,
+                                       der, der_len);
+    if (r == FHSM_RV_SIGNATURE_INVALID) { *pop_valid = 0; return 0; }
+    if (r != FHSM_RV_OK)
+        return p11_fail(e, 2, "issuing the certificate failed (0x%lx)\n", (unsigned long)r);
+    *pop_valid = 1;
+    return 0;
+}
+
+int pkiops_crl(pkiops_handle session, const char *label,
+               const uint8_t *ca, size_t ca_len, const fhsm_rev_db_t *db, int days,
+               uint8_t **der, size_t *der_len, struct p11_err *e) {
+    CK_SESSION_HANDLE s = (CK_SESSION_HANDLE)session;
+    CK_OBJECT_HANDLE hpriv = 0;
+    if (p11_find_one_e(s, CKO_PRIVATE_KEY, label, &hpriv, e)) return e->code;
+    struct signer sg = { s, hpriv };
+
+    fhsm_composite_revoked_t *list = NULL;
+    if (db->n) {
+        list = calloc(db->n, sizeof *list);
+        if (!list) return p11_fail(e, 2, "out of memory\n");
+        for (size_t i = 0; i < db->n; i++) {
+            int64_t t = 0;
+            (void)fhsm_rev_date_to_time(db->e[i].date, &t);  /* validated at load */
+            list[i].serial     = db->e[i].serial;
+            list[i].serial_len = db->e[i].serial_len;
+            list[i].date       = t;
+            list[i].reason     = db->e[i].reason;
+        }
+    }
+
+    size_t cap = 8192 + db->n * 80;
+    uint8_t *buf = malloc(cap);
+    if (!buf) { free(list); return p11_fail(e, 2, "out of memory\n"); }
+    size_t n = cap;
+    fhsm_rv_t r = fhsm_composite_crl(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                     ca, ca_len, list, db->n,
+                                     db->crl_number, days, p11_sign, &sg, buf, &n);
+    free(list);
+    if (r != FHSM_RV_OK) {
+        free(buf);
+        return p11_fail(e, 2, "building the revocation list failed (0x%lx)\n", (unsigned long)r);
+    }
+    *der = buf;
+    *der_len = n;
+    return 0;
+}
+
+int pkiops_ocsp(pkiops_handle session, const char *label,
+                const uint8_t *req, size_t req_len,
+                const uint8_t *ca, size_t ca_len,
+                const uint8_t *responder, size_t responder_len,
+                const fhsm_rev_db_t *db, int days, const char *req_name,
+                uint8_t **resp, size_t *resp_len, fhsm_ocsp_stats_t *stats,
+                struct p11_err *e) {
+    CK_SESSION_HANDLE s = (CK_SESSION_HANDLE)session;
+    CK_OBJECT_HANDLE hpriv = 0;
+    if (p11_find_one_e(s, CKO_PRIVATE_KEY, label, &hpriv, e)) return e->code;
+    struct signer sg = { s, hpriv };
+    char err[FHSM_REV_ERR_MAX] = "";
+    int rc = fhsm_ocsp_answer(req, req_len, ca, ca_len, responder, responder_len,
+                              db, days, req_name, p11_sign, &sg,
+                              resp, resp_len, stats, err, sizeof err);
+    if (rc != FHSM_REV_OK) return p11_fail(e, rc, "%s", err);
+    return 0;
+}

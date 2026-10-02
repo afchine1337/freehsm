@@ -3,7 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  * ========================================================================= */
 /* ===========================================================================
- * tools/p11_util.h --- the PKCS#11 plumbing shared by fhsm-csr and fhsm-ca.
+ * tools/p11_util.h --- the PKCS#11 plumbing under tools/pkiops.c.
+ *
+ *  Since 2026-10-02 the four PKI tools reach it only through tools/pkiops.c,
+ *  which is the one file that includes it; a few tests include it directly.
+ *  Its function table is `static`, one per file that includes it -- see
+ *  tools/p11_err.h.
  *
  *  Header-only, and shared rather than copied. Two tools that load a module,
  *  find a key by label and sign through C_Sign should do it the same way; a

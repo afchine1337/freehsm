@@ -277,7 +277,9 @@ LIB_VER = $(LIB).$(shell awk -F'"' '/FHSM_VERSION_STRING/{print $$2; exit}' incl
 # ---------------------------------------------------------------------------
 # Default target
 # ---------------------------------------------------------------------------
-# The four PKI tools link only src/fhsm_composite.o, not the module, so a
+# The four PKI tools link tools/pkiops.c, src/fhsm_composite.o and
+# src/fhsm_revocation.o, not the module (until 2026-10-02 only the composite
+# object, and fhsm-ca the revocation one too), so a
 # change to that file can compile inside the module and fail to link outside
 # it. That is exactly what happened: `all` did not name these binaries, the
 # release pre-flight ran `all`, and a tree in which a quarter of the shipped
@@ -315,22 +317,24 @@ tools/freehsm-audit: tools/freehsm_audit.c
 # The tools' operations as a library (docs/fhsm-gui-plan.md, stage 0). Compiled
 # into each tool that has moved onto it; tools/pkiops.c is the one file that
 # includes tools/p11_util.h, whose function table is static per file.
+# It signs CRLs and OCSP answers too, so every tool that links it links
+# $(REVOCATION_OBJ) as well.
 PKIOPS_SRC = tools/pkiops.c tools/pkiops.h tools/p11_util.h tools/p11_err.h
 
-tools/fhsm-csr: tools/fhsm_csr.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
+tools/fhsm-csr: tools/fhsm_csr.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
 # fhsm-ca signs for other people; fhsm-csr makes requests and its own root.
 # Separate binaries because they are separate authorities, usually separate
 # operators, and a single tool named for one of them would misname the other.
-tools/fhsm-ca: tools/fhsm_ca.c tools/p11_util.h $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
-	$(CC) $(CFLAGS) -Itools -o $@ $< $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+tools/fhsm-ca: tools/fhsm_ca.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
-tools/fhsm-sign: tools/fhsm_sign.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
+tools/fhsm-sign: tools/fhsm_sign.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
-tools/fhsm-token: tools/fhsm_token.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o
-	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(LDFLAGS) -ldl
+tools/fhsm-token: tools/fhsm_token.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
 # ---------------------------------------------------------------------------
 # Code generation --- runs scripts/gen_p11_thunks.py to regenerate

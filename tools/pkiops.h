@@ -25,6 +25,7 @@
 #define FHSM_TOOLS_PKIOPS_H
 
 #include "p11_err.h"
+#include "fhsm_revocation.h"        /* the revocation database and OCSP types */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -135,5 +136,47 @@ int pkiops_cms_sign(pkiops_handle session, const char *label,
  * structure is not a composite CMS this code can read. */
 int pkiops_cms_verify(const uint8_t *cms, size_t cms_len, const uint8_t digest[64],
                       int *verdict, struct p11_err *e);
+
+/* --- the certification authority -------------------------------------------
+ *
+ * The three CA operations that sign with the token. Recording a revocation
+ * signs nothing and needs no module: it is fhsm_rev_db_* in
+ * include/fhsm_revocation.h, which the tool and the interface call directly.
+ */
+
+/* Issue a certificate for `csr`, signed by the key `label` under the CA
+ * certificate `ca`. The request's proof of possession is checked first: if
+ * its signature does not match the key it carries, nothing is issued and
+ * *pop_valid is 0 -- a verdict about the request, not a failure to run.
+ * `subject` replaces the requested subject when not NULL; `san` and the CRL
+ * URLs are as fhsm_composite_issue takes them. */
+int pkiops_issue(pkiops_handle session, const char *label,
+                 const uint8_t *ca, size_t ca_len,
+                 const uint8_t *csr, size_t csr_len,
+                 const char *subject, const char *san,
+                 const char *const *crl_urls, size_t n_crl_urls,
+                 fhsm_cert_profile_t profile, int days,
+                 uint8_t *der, size_t *der_len, int *pop_valid,
+                 struct p11_err *e);
+
+/* A CRL listing every entry of `db`, numbered `db->crl_number` -- advancing
+ * it, and saving the database before the list is published, is the caller's
+ * job, because the order is what makes a number unique. The DER is in a
+ * malloc'd buffer the caller frees. */
+int pkiops_crl(pkiops_handle session, const char *label,
+               const uint8_t *ca, size_t ca_len, const fhsm_rev_db_t *db, int days,
+               uint8_t **der, size_t *der_len, struct p11_err *e);
+
+/* Answer one OCSP request from `db`, signed by the key `label`. `responder` is
+ * the certificate that answers -- the CA's own, or a delegate already checked
+ * with fhsm_ocsp_check_responder. `req_name` names the request in messages.
+ * The response is in a malloc'd buffer the caller frees. */
+int pkiops_ocsp(pkiops_handle session, const char *label,
+                const uint8_t *req, size_t req_len,
+                const uint8_t *ca, size_t ca_len,
+                const uint8_t *responder, size_t responder_len,
+                const fhsm_rev_db_t *db, int days, const char *req_name,
+                uint8_t **resp, size_t *resp_len, fhsm_ocsp_stats_t *stats,
+                struct p11_err *e);
 
 #endif /* FHSM_TOOLS_PKIOPS_H */

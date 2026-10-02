@@ -22,8 +22,12 @@
  *  The proof of possession on the incoming request is verified before anything
  *  is signed -- see fhsm_composite_issue. Extensions requested by the
  *  applicant are ignored; the CA sets its own.
+ *
+ *  The signing is in tools/pkiops.c, which the planned graphical interface
+ *  calls too (docs/fhsm-gui-plan.md). What stays here is the command line,
+ *  the files, and the revocation database, which signs nothing.
  * ========================================================================= */
-#include "p11_util.h"
+#include "pkiops.h"
 #include "fhsm_revocation.h"
 
 #include <openssl/pem.h>
@@ -32,6 +36,18 @@
 #include <errno.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static const char *prog = "fhsm-ca";
+
+/* What a refused operation does at the command line. */
+static void fail(const struct p11_err *e) {
+    fprintf(stderr, "%s: %s", prog, e->msg);
+    exit(e->code);
+}
 
 static uint8_t *slurp(const char *path, size_t *n) {
     FILE *f = fopen(path, "rb");
@@ -169,7 +185,7 @@ static int cmd_issue(int argc, char **argv) {
             crl_urls[n_crl_urls++] = argv[++i];
         }
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
-        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = p11_slot_arg(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")    && i+1<argc) { struct p11_err se; if (pkiops_parse_slot(argv[++i], &slot, &se)) fail(&se); }
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]), days_given = 1;
         else if (!strcmp(argv[i],"--profile") && i+1<argc) {
             const char *v = argv[++i];
@@ -215,26 +231,17 @@ static int cmd_issue(int argc, char **argv) {
       memcpy(cabuf, t, n); calen = n; }
     size_t csrlen = 0; uint8_t *csrbuf = slurp(csr_p, &csrlen);
 
-    load_module(module);
-    CK_RV rv = p11.Initialize(NULL);
-    if (rv != CKR_OK) die("C_Initialize", rv);
-    CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession(p11_resolve_slot(slot, P11_SLOT_WITH_TOKEN),
-                          CKF_RW, NULL, NULL, &s);
-    if (rv != CKR_OK) die("C_OpenSession", rv);
-    rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
-    if (rv != CKR_OK) die("C_Login", rv);
-
-    CK_OBJECT_HANDLE hpriv = find_one(s, CKO_PRIVATE_KEY, label);
-    struct signer sg = { s, hpriv };
+    pkiops_handle sid = 0, s = 0;
+    struct p11_err pe;
+    if (pkiops_open(module, slot, PKIOPS_SLOT_WITH_TOKEN, &sid, &pe)) fail(&pe);
+    if (pkiops_session_user(sid, (const uint8_t *)pin, strlen(pin), &s, &pe)) fail(&pe);
 
     static uint8_t der[32768]; size_t n = sizeof der;
-    fhsm_rv_t r = fhsm_composite_issue(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
-                                        cabuf, calen, csrbuf, csrlen,
-                                        subject, san, crl_urls, n_crl_urls, profile,
-                                        days, p11_sign, &sg, p11_rng, &s,
-                                        der, &n);
-    if (r == FHSM_RV_SIGNATURE_INVALID) {
+    int pop_valid = 0;
+    if (pkiops_issue(s, label, cabuf, calen, csrbuf, csrlen, subject, san,
+                     crl_urls, n_crl_urls, profile, days, der, &n, &pop_valid, &pe))
+        fail(&pe);
+    if (!pop_valid) {
         fprintf(stderr,
           "fhsm-ca: the request's signature does not match the key it carries.\n"
           "  Nothing was issued. Either the request was altered after signing,\n"
@@ -242,7 +249,6 @@ static int cmd_issue(int argc, char **argv) {
           "  have certified.\n");
         return 4;
     }
-    if (r != FHSM_RV_OK) die("issuing the certificate", (CK_RV)r);
 
     FILE *f = out ? fopen(out, "wb") : stdout;
     if (!f) { perror("fhsm-ca: open"); return 2; }
@@ -253,8 +259,8 @@ static int cmd_issue(int argc, char **argv) {
     } else if (fwrite(der, 1, n, f) != n) { perror("fhsm-ca: write"); return 2; }
     if (out) fclose(f);
 
-    p11.CloseSession(s);
-    p11.Finalize(NULL);
+    pkiops_session_close(s);
+    pkiops_close();
     return 0;
 }
 
@@ -364,7 +370,7 @@ static int cmd_crl(int argc, char **argv) {
         else if (!strcmp(argv[i],"--ca-cert") && i+1<argc) cacert_p = argv[++i];
         else if (!strcmp(argv[i],"--db")      && i+1<argc) db_p     = argv[++i];
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
-        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = p11_slot_arg(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")    && i+1<argc) { struct p11_err se; if (pkiops_parse_slot(argv[++i], &slot, &se)) fail(&se); }
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]);
         else if (!strcmp(argv[i],"--pem")) pem = 1;
         else if (!strncmp(argv[i],"--pin",5)) {
@@ -387,20 +393,6 @@ static int cmd_crl(int argc, char **argv) {
     fhsm_rev_db_t d;
     db_load(db_p, &d);
 
-    fhsm_composite_revoked_t *list = NULL;
-    if (d.n) {
-        list = calloc(d.n, sizeof *list);
-        if (!list) { fprintf(stderr, "fhsm-ca: out of memory\n"); return 2; }
-        for (size_t i = 0; i < d.n; i++) {
-            int64_t t = 0;
-            (void)fhsm_rev_date_to_time(d.e[i].date, &t);  /* validated at load */
-            list[i].serial     = d.e[i].serial;
-            list[i].serial_len = d.e[i].serial_len;
-            list[i].date       = t;
-            list[i].reason     = d.e[i].reason;
-        }
-    }
-
     /* The number advances before the list is signed, and the database is
      * written before the CRL leaves this process. If signing then fails, a
      * number has been consumed and nothing published -- a gap, which is
@@ -408,27 +400,13 @@ static int cmd_crl(int argc, char **argv) {
      * number, which is not. */
     d.crl_number++;
 
-    load_module(module);
-    CK_RV rv = p11.Initialize(NULL);
-    if (rv != CKR_OK) die("C_Initialize", rv);
-    CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession(p11_resolve_slot(slot, P11_SLOT_WITH_TOKEN),
-                          CKF_RW, NULL, NULL, &s);
-    if (rv != CKR_OK) die("C_OpenSession", rv);
-    rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
-    if (rv != CKR_OK) die("C_Login", rv);
+    pkiops_handle sid = 0, s = 0;
+    struct p11_err pe;
+    if (pkiops_open(module, slot, PKIOPS_SLOT_WITH_TOKEN, &sid, &pe)) fail(&pe);
+    if (pkiops_session_user(sid, (const uint8_t *)pin, strlen(pin), &s, &pe)) fail(&pe);
 
-    CK_OBJECT_HANDLE hpriv = find_one(s, CKO_PRIVATE_KEY, label);
-    struct signer sg = { s, hpriv };
-
-    size_t cap = 8192 + d.n * 80;
-    uint8_t *der = malloc(cap);
-    if (!der) { fprintf(stderr, "fhsm-ca: out of memory\n"); return 2; }
-    size_t n = cap;
-    fhsm_rv_t r = fhsm_composite_crl(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
-                                      cabuf, calen, list, d.n,
-                                      d.crl_number, days, p11_sign, &sg, der, &n);
-    if (r != FHSM_RV_OK) die("building the revocation list", (CK_RV)r);
+    uint8_t *der = NULL; size_t n = 0;
+    if (pkiops_crl(s, label, cabuf, calen, &d, days, &der, &n, &pe)) fail(&pe);
 
     db_save(db_p, &d);
 
@@ -444,9 +422,9 @@ static int cmd_crl(int argc, char **argv) {
     fprintf(stderr, "fhsm-ca: CRL number %llu, %zu revoked, valid %d days.\n",
             d.crl_number, d.n, days);
 
-    free(der); free(list); fhsm_rev_db_free(&d);
-    p11.CloseSession(s);
-    p11.Finalize(NULL);
+    free(der); fhsm_rev_db_free(&d);
+    pkiops_session_close(s);
+    pkiops_close();
     return 0;
 }
 
@@ -478,7 +456,7 @@ static int cmd_ocsp_respond(int argc, char **argv) {
         else if (!strcmp(argv[i],"--req")     && i+1<argc) req_p    = argv[++i];
         else if (!strcmp(argv[i],"--responder-cert") && i+1<argc) rcert_p = argv[++i];
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out      = argv[++i];
-        else if (!strcmp(argv[i],"--slot")    && i+1<argc) slot     = p11_slot_arg(argv[++i]);
+        else if (!strcmp(argv[i],"--slot")    && i+1<argc) { struct p11_err se; if (pkiops_parse_slot(argv[++i], &slot, &se)) fail(&se); }
         else if (!strcmp(argv[i],"--days")    && i+1<argc) days     = atoi(argv[++i]);
         else if (!strncmp(argv[i],"--pin",5)) {
             fprintf(stderr, "fhsm-ca: --pin is not accepted. Set FHSM_PIN instead:\n"
@@ -537,30 +515,20 @@ static int cmd_ocsp_respond(int argc, char **argv) {
     fhsm_rev_db_t d;
     db_load(db_p, &d);
 
-    load_module(module);
-    CK_RV rv = p11.Initialize(NULL);
-    if (rv != CKR_OK) die("C_Initialize", rv);
-    CK_SESSION_HANDLE s = 0;
-    rv = p11.OpenSession(p11_resolve_slot(slot, P11_SLOT_WITH_TOKEN),
-                          CKF_RW, NULL, NULL, &s);
-    if (rv != CKR_OK) die("C_OpenSession", rv);
-    rv = p11.Login(s, CKU_USER, (CK_BYTE*)(uintptr_t)pin, (CK_ULONG)strlen(pin));
-    if (rv != CKR_OK) die("C_Login", rv);
-
-    CK_OBJECT_HANDLE hpriv = find_one(s, CKO_PRIVATE_KEY, label);
-    struct signer sg = { s, hpriv };
+    pkiops_handle sid = 0, s = 0;
+    struct p11_err pe;
+    if (pkiops_open(module, slot, PKIOPS_SLOT_WITH_TOKEN, &sid, &pe)) fail(&pe);
+    if (pkiops_session_user(sid, (const uint8_t *)pin, strlen(pin), &s, &pe)) fail(&pe);
 
     uint8_t *resp = NULL; size_t rn = 0;
     fhsm_ocsp_stats_t st;
-    char err[FHSM_REV_ERR_MAX] = "";
-    int rc = fhsm_ocsp_answer(reqcopy, reqn, cabuf, calen,
-                              responder_der, responder_len, &d, days, req_p,
-                              p11_sign, &sg, &resp, &rn, &st, err, sizeof err);
-    if (rc != FHSM_REV_OK) {
-        fprintf(stderr, "fhsm-ca: %s", err);
+    if (pkiops_ocsp(s, label, reqcopy, reqn, cabuf, calen,
+                    responder_der, responder_len, &d, days, req_p,
+                    &resp, &rn, &st, &pe)) {
+        fprintf(stderr, "fhsm-ca: %s", pe.msg);
         fhsm_rev_db_free(&d);
-        p11.CloseSession(s); p11.Finalize(NULL);
-        return rc;
+        pkiops_session_close(s); pkiops_close();
+        return pe.code;
     }
 
     FILE *f = out ? fopen(out, "wb") : stdout;
@@ -575,13 +543,12 @@ static int cmd_ocsp_respond(int argc, char **argv) {
 
     free(resp);
     fhsm_rev_db_free(&d);
-    p11.CloseSession(s);
-    p11.Finalize(NULL);
+    pkiops_session_close(s);
+    pkiops_close();
     return 0;
 }
 
 int main(int argc, char **argv) {
-    p11_progname = "fhsm-ca";
     if (argc < 2) usage();
     if (!strcmp(argv[1], "issue"))  return cmd_issue(argc, argv);
     if (!strcmp(argv[1], "revoke")) return cmd_revoke(argc, argv);
