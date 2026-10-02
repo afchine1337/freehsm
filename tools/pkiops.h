@@ -41,11 +41,46 @@ enum pkiops_slot_intent {
 
 /* --- the module ----------------------------------------------------------- */
 
-/* Load the module, C_Initialize it, and resolve the slot: `want` is the slot
- * the caller named, or -1. */
+/* Load the module and C_Initialize it. */
+int  pkiops_load(const char *module, struct p11_err *e);
+
+/* pkiops_load, then resolve the slot: `want` is the slot the caller named, or
+ * -1. What the command-line tools use; an interface lists the slots instead
+ * and lets the operator choose. */
 int  pkiops_open(const char *module, long want, enum pkiops_slot_intent intent,
                  pkiops_handle *slot, struct p11_err *e);
 void pkiops_close(void);
+
+/* Every slot the module reports, in a malloc'd array the caller frees. */
+struct pkiops_slot {
+    pkiops_handle id;
+    int  has_token;
+    char label[33];             /* the token's, trimmed; empty without one */
+};
+int pkiops_slots(struct pkiops_slot **out, size_t *n, struct p11_err *e);
+
+/* --- the call log ----------------------------------------------------------
+ *
+ * Every PKCS#11 call pkiops makes, reported after it returns: the function,
+ * a summary of its arguments, its CK_RV, and how long it took. For the
+ * exploration interface, which shows the module at work.
+ *
+ * Never reported: a PIN, or its length, or any attribute value -- the same
+ * rule as the module's audit log. A summary says which session, slot, object
+ * and mechanism, and how many bytes went in; never which bytes.
+ *
+ * The callback runs on the thread that made the call. An interface that runs
+ * pkiops on a worker thread must hand the record to its own thread before
+ * touching a widget. NULL turns the log off. It may be set at any time; set
+ * before pkiops_load, it records C_Initialize as well. */
+struct pkiops_call {
+    const char   *fn;           /* "C_Login" */
+    char          args[160];    /* "session 3, CKU_USER, PIN not shown" */
+    unsigned long rv;           /* CK_RV */
+    double        ms;
+};
+typedef void (*pkiops_call_cb)(const struct pkiops_call *c, void *ctx);
+void pkiops_set_call_log(pkiops_call_cb cb, void *ctx);
 
 /* "--slot" as typed. Refuses what strtol would quietly turn into 0. */
 int  pkiops_parse_slot(const char *text, long *out, struct p11_err *e);
@@ -78,6 +113,17 @@ int  pkiops_session_user(pkiops_handle slot, const uint8_t *pin, size_t pin_len,
 void pkiops_session_close(pkiops_handle session);
 
 /* --- keys and requests ---------------------------------------------------- */
+
+/* The key objects a session can see -- public ones always, private ones once
+ * logged in -- in a malloc'd array the caller frees. */
+struct pkiops_key {
+    pkiops_handle handle;
+    int           is_private;
+    unsigned long key_type;     /* CKA_KEY_TYPE */
+    char          label[65];    /* truncated if longer */
+};
+int pkiops_keys(pkiops_handle session, struct pkiops_key **out, size_t *n,
+                struct p11_err *e);
 
 /* A composite (ML-DSA-65 + Ed25519) key pair, both halves on the token. */
 int pkiops_keygen(pkiops_handle session, const char *label,
