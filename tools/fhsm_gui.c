@@ -19,6 +19,11 @@
  *  signs nothing and needs no login; publishing a CRL and answering an OCSP
  *  request do. A new database is never written over an existing file.
  *
+ *  Stage 4, the Signing tab: what fhsm-sign does. Raw detached signatures,
+ *  streamed in 1 MiB blocks, and detached CMS over the SHA-512 of the data.
+ *  Checking a CMS needs no login. A signature that does not match is a
+ *  verdict, shown as one, and not an error.
+ *
  *  Everything it does goes through tools/pkiops, the same operations the
  *  command-line tools call, so the window adds no second way of talking to
  *  the module. Every pkiops call runs on a worker thread, one at a time, so
@@ -83,6 +88,11 @@ static struct {
     GtkWidget *rv_key_drop, *rv_ca_btn, *crl_days_spin, *crl_pem_check;
     GtkWidget *req_btn, *responder_btn, *ocsp_days_spin;
     char *db_path, *rv_ca_path, *req_path, *responder_path;
+
+    /* The Signing tab. */
+    GtkWidget *sg_data_box, *sg_key_box, *sg_cmsv_btn;
+    GtkWidget *sg_key_drop;
+    char *sg_data_path, *sg_cert_path;
 
     int loaded, logged_in, busy;
     int closing;                    /* the widgets are going: touch none */
@@ -189,6 +199,9 @@ static void update_sensitivity(void) {
     gtk_widget_set_sensitive(A.rv_db_box,     !A.busy);
     gtk_widget_set_sensitive(A.rv_revoke_box, !A.busy && A.db_path);
     gtk_widget_set_sensitive(A.rv_sign_box,   !A.busy && A.db_path && A.logged_in);
+    gtk_widget_set_sensitive(A.sg_data_box,   !A.busy);
+    gtk_widget_set_sensitive(A.sg_key_box,    !A.busy && A.sg_data_path && A.logged_in);
+    gtk_widget_set_sensitive(A.sg_cmsv_btn,   !A.busy && A.sg_data_path);
 }
 
 static void clear_list(GtkWidget *box) {
@@ -208,7 +221,8 @@ static void list_add(GtkWidget *box, const char *text) {
 /* --- jobs on the worker thread ------------------------------------------ */
 
 enum job_kind { J_LOAD, J_UNLOAD, J_SLOTS, J_LOGIN, J_KEYS, J_KEYGEN, J_LOGOUT,
-                J_CSR, J_ROOT, J_ISSUE, J_DB_LOAD, J_REVOKE, J_CRL, J_OCSP };
+                J_CSR, J_ROOT, J_ISSUE, J_DB_LOAD, J_REVOKE, J_CRL, J_OCSP,
+                J_SIGN, J_VERIFY, J_CMS_SIGN, J_CMS_VERIFY };
 
 struct job {
     enum job_kind kind;
@@ -223,6 +237,8 @@ struct job {
     /* revocation */
     char *db_path, *serial_hex, *date, *req_path, *responder_path;
     int reason;                     /* RFC 5280 code, or -1 for none */
+    /* signing: the data, and the signature, CMS or certificate read with it */
+    char *data_path, *in_path, *cert_path;
     /* results */
     int rc;
     struct p11_err e;
@@ -233,6 +249,7 @@ struct job {
     fhsm_rev_db_t db; int have_db;  /* the database as the job left it */
     int already; char already_date[16];
     fhsm_ocsp_stats_t stats;
+    int verdict;                    /* 1 matches, 0 does not, -1 unreadable CMS */
 };
 
 static void job_free(gpointer p) {
@@ -251,6 +268,9 @@ static void job_free(gpointer p) {
     g_free(j->date);
     g_free(j->req_path);
     g_free(j->responder_path);
+    g_free(j->data_path);
+    g_free(j->in_path);
+    g_free(j->cert_path);
     if (j->have_db) fhsm_rev_db_free(&j->db);
     free(j->slots);
     free(j->keys);
@@ -391,6 +411,115 @@ static void run_crl(struct job *j) {
     free(der);
 }
 
+/* --- signing, on the worker thread -------------------------------------- */
+
+#define CHUNK (1u << 20)        /* fhsm-sign's block: 1 MiB */
+
+enum feed { FEED_SIGN, FEED_VERIFY, FEED_SHA512 };
+
+/* The whole file, in blocks, to the module or to the hash -- one function for
+ * all three, as in fhsm-sign, so signing and verifying cannot disagree about
+ * what they consumed. Nothing holds the file whole. */
+static int feed_file(const char *path, enum feed how, pkiops_handle s,
+                     struct pkiops_sha512 *h, struct p11_err *e) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return err_set(e, 2, "cannot read %s: %s\n", path, g_strerror(errno));
+    uint8_t *buf = g_malloc(CHUNK);
+    int rc = 0;
+    for (;;) {
+        size_t n = fread(buf, 1, CHUNK, f);
+        if (n) {
+            rc = how == FEED_SIGN   ? pkiops_sign_update(s, buf, n, e)
+               : how == FEED_VERIFY ? pkiops_verify_update(s, buf, n, e)
+               :                      pkiops_sha512_update(h, buf, n, e);
+            if (rc) break;
+        }
+        if (n < CHUNK) {
+            if (ferror(f)) rc = err_set(e, 2, "reading %s failed\n", path);
+            break;
+        }
+    }
+    g_free(buf);
+    fclose(f);
+    return rc;
+}
+
+/* The SHA-512 of a file, for CMS. */
+static int hash_file(const char *path, uint8_t out[64], struct p11_err *e) {
+    struct pkiops_sha512 *h = pkiops_sha512_begin(e);
+    if (!h) return e->code ? e->code : 2;
+    int rc = feed_file(path, FEED_SHA512, 0, h, e);
+    /* Ended either way: the context is freed by the end call. */
+    struct p11_err ignored;
+    int end = pkiops_sha512_end(h, out, rc ? &ignored : e);
+    return rc ? rc : end;
+}
+
+static void run_sign(struct job *j) {
+    if ((j->rc = pkiops_sign_begin(j->session, j->label, &j->e)) != 0) return;
+    j->rc = feed_file(j->data_path, FEED_SIGN, j->session, NULL, &j->e);
+    /* The operation is ended even when reading failed: the session outlives
+     * this job here, unlike in fhsm-sign, and an operation left active would
+     * refuse the next C_SignInit. */
+    uint8_t *sig = NULL; size_t n = 0;
+    struct p11_err ignored;
+    int end = pkiops_sign_end(j->session, &sig, &n, j->rc ? &ignored : &j->e);
+    if (!j->rc) j->rc = end;
+    if (!j->rc) j->rc = write_out(j->out_path, sig, n, 0, NULL, &j->e);
+    j->out_len = n;
+    free(sig);
+}
+
+static void run_verify(struct job *j) {
+    /* The signature first: a missing or oversized one fails before any data
+     * is read. 64 KiB, as in fhsm-sign: larger than any signature it makes. */
+    gchar *sig = NULL; gsize n = 0; GError *ge = NULL;
+    if (!g_file_get_contents(j->in_path, &sig, &n, &ge)) {
+        j->rc = err_set(&j->e, 2, "cannot read %s: %s\n", j->in_path, ge->message);
+        g_error_free(ge);
+        return;
+    }
+    if (n == 0 || n > 65536) {
+        j->rc = err_set(&j->e, 2, n ? "%s is larger than any signature this tool produces\n"
+                                    : "%s is empty\n", j->in_path);
+        g_free(sig);
+        return;
+    }
+    if ((j->rc = pkiops_verify_begin(j->session, j->label, &j->e)) == 0) {
+        j->rc = feed_file(j->data_path, FEED_VERIFY, j->session, NULL, &j->e);
+        /* Ended either way, for the same reason as signing. */
+        struct p11_err ignored;
+        int end = pkiops_verify_end(j->session, (const uint8_t *)sig, n, &j->verdict,
+                                    j->rc ? &ignored : &j->e);
+        if (!j->rc) j->rc = end;
+    }
+    g_free(sig);
+}
+
+static void run_cms_sign(struct job *j) {
+    uint8_t *cert = NULL; size_t cert_len = 0, n = 262144;
+    uint8_t dg[64];
+    if ((j->rc = read_der(j->cert_path, &cert, &cert_len, &j->e)) != 0) return;
+    if ((j->rc = hash_file(j->data_path, dg, &j->e)) == 0) {
+        uint8_t *der = g_malloc(n);
+        j->rc = pkiops_cms_sign(j->session, j->label, cert, cert_len, dg, der, &n, &j->e);
+        if (!j->rc) j->rc = write_out(j->out_path, der, n, 0, NULL, &j->e);
+        j->out_len = n;
+        g_free(der);
+    }
+    g_free(cert);
+}
+
+/* No module, no PIN: the signer's certificate is inside the CMS. */
+static void run_cms_verify(struct job *j) {
+    uint8_t *cms = NULL; size_t cms_len = 0;
+    uint8_t dg[64];
+    if ((j->rc = read_der(j->in_path, &cms, &cms_len, &j->e)) != 0) return;
+    if ((j->rc = hash_file(j->data_path, dg, &j->e)) == 0)
+        j->rc = pkiops_cms_verify(cms, cms_len, dg, &j->verdict, &j->e);
+    g_free(cms);
+}
+
 /* fhsm-ca ocsp-respond: the CA answers, or a delegate it issued. */
 static void run_ocsp(struct job *j) {
     uint8_t *ca = NULL, *rcert = NULL, *req = NULL;
@@ -511,6 +640,10 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
     case J_REVOKE: run_revoke(j); break;
     case J_CRL:    run_crl(j);    break;
     case J_OCSP:   run_ocsp(j);   break;
+    case J_SIGN:       run_sign(j);       break;
+    case J_VERIFY:     run_verify(j);     break;
+    case J_CMS_SIGN:   run_cms_sign(j);   break;
+    case J_CMS_VERIFY: run_cms_verify(j); break;
     }
 }
 
@@ -711,6 +844,34 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
         status(msg);
         break;
     }
+    case J_SIGN:
+    case J_CMS_SIGN: {
+        if (j->rc) { status_err("Signing", &j->e); break; }
+        char msg[1200];
+        snprintf(msg, sizeof msg, "%zu-byte detached %s written to %s.", j->out_len,
+                 j->kind == J_SIGN ? "signature" : "CMS SignedData", j->out_path);
+        status(msg);
+        break;
+    }
+    case J_VERIFY: {
+        if (j->rc) { status_err("Verifying", &j->e); break; }
+        char msg[400];
+        /* A signature that does not match is a verdict, not a failure to run,
+         * and the two are worded apart, as fhsm-sign's exit codes are. */
+        snprintf(msg, sizeof msg, j->verdict
+                 ? "VERIFIED: the signature matches this data under key \"%s\"."
+                 : "NOT VERIFIED: the signature does not match this data under key \"%s\".",
+                 j->label);
+        status(msg);
+        break;
+    }
+    case J_CMS_VERIFY:
+        if (j->rc) { status_err("Checking the CMS", &j->e); break; }
+        status(j->verdict > 0 ? "VERIFIED: the CMS matches this data."
+             : j->verdict == 0 ? "NOT VERIFIED: the CMS does not match this data."
+             : "This is not a composite CMS this interface can read. That is a "
+               "different problem from a signature that does not match.");
+        break;
     }
     update_sensitivity();
 }
@@ -813,6 +974,22 @@ static char *text_or_null(GtkWidget *entry) {
     return t && *t ? g_strdup(t) : NULL;
 }
 
+/* What the status line says while a job runs. */
+static const char *running_text(enum job_kind k) {
+    switch (k) {
+    case J_CSR:        return "Signing the request...";
+    case J_ROOT:       return "Signing the root...";
+    case J_ISSUE:      return "Checking the request, then issuing...";
+    case J_CRL:        return "Signing the CRL...";
+    case J_OCSP:       return "Answering the OCSP request...";
+    case J_SIGN:       return "Signing: the data is streamed to the module...";
+    case J_VERIFY:     return "Verifying: the data is streamed to the module...";
+    case J_CMS_SIGN:   return "Hashing the data, then signing...";
+    case J_CMS_VERIFY: return "Hashing the data, then checking the CMS...";
+    default:           return "Working...";
+    }
+}
+
 /* The save dialog answered: run the job, or drop it if the operator
  * cancelled. */
 static void on_saved(GObject *src, GAsyncResult *res, gpointer data) {
@@ -824,22 +1001,23 @@ static void on_saved(GObject *src, GAsyncResult *res, gpointer data) {
     if (A.closing || !A.logged_in) { g_free(path); job_free(j); return; }
     j->out_path = path;
     j->session = A.session;
-    status(j->kind == J_CSR   ? "Signing the request..."
-         : j->kind == J_ROOT  ? "Signing the root..."
-         : j->kind == J_ISSUE ? "Checking the request, then issuing..."
-         : j->kind == J_CRL   ? "Signing the CRL..."
-         :                      "Answering the OCSP request...");
+    status(running_text(j->kind));
     start(j);
 }
 
-static void ask_where(struct job *j, const char *stem) {
-    char name[64];
-    snprintf(name, sizeof name, "%s.%s", stem, j->pem ? "pem" : "der");
+static void ask_where_named(struct job *j, const char *name) {
     GtkFileDialog *d = gtk_file_dialog_new();
     gtk_file_dialog_set_title(d, "Save as");
     gtk_file_dialog_set_initial_name(d, name);
     gtk_file_dialog_save(d, GTK_WINDOW(A.win), NULL, on_saved, j);
     g_object_unref(d);
+}
+
+/* "stem.pem" or "stem.der", by the job's format. */
+static void ask_where(struct job *j, const char *stem) {
+    char name[64];
+    snprintf(name, sizeof name, "%s.%s", stem, j->pem ? "pem" : "der");
+    ask_where_named(j, name);
 }
 
 /* What every signing operation needs: a key, and the format. NULL, with the
@@ -943,6 +1121,7 @@ static void on_picked(GObject *src, GAsyncResult *res, gpointer data) {
     gtk_button_set_label(GTK_BUTTON(btn), base);
     g_free(base);
     gtk_widget_set_tooltip_text(btn, path);
+    update_sensitivity();
 }
 
 static void on_pick(GtkButton *b, gpointer title) {
@@ -1101,6 +1280,84 @@ static void on_responder_clear(GtkButton *b, gpointer ud) {
     A.responder_path = NULL;
     gtk_button_set_label(GTK_BUTTON(A.responder_btn), "None: the CA answers");
     gtk_widget_set_tooltip_text(A.responder_btn, NULL);
+}
+
+/* --- the Signing tab ------------------------------------------------------ */
+
+/* "data.bin" + ".sig": the name the save dialog proposes. */
+static char *named_after_data(const char *suffix) {
+    char *base = g_path_get_basename(A.sg_data_path);
+    char *name = g_strconcat(base, suffix, NULL);
+    g_free(base);
+    return name;
+}
+
+/* The file to check was chosen: run the job, or drop it. */
+static void on_input_picked(GObject *src, GAsyncResult *res, gpointer data) {
+    struct job *j = data;
+    GFile *f = gtk_file_dialog_open_finish(GTK_FILE_DIALOG(src), res, NULL);
+    char *path = f ? g_file_get_path(f) : NULL;
+    if (f) g_object_unref(f);
+    if (!path || A.closing || A.busy || (j->kind == J_VERIFY && !A.logged_in)) {
+        g_free(path);
+        job_free(j);
+        return;
+    }
+    j->in_path = path;
+    j->session = A.session;
+    status(running_text(j->kind));
+    start(j);
+}
+
+static void ask_input(struct job *j, const char *title) {
+    GtkFileDialog *d = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(d, title);
+    gtk_file_dialog_open(d, GTK_WINDOW(A.win), NULL, on_input_picked, j);
+    g_object_unref(d);
+}
+
+static void on_sign(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.sg_data_path) { status("Choose the data first."); return; }
+    struct job *j = cert_job(J_SIGN, A.sg_key_drop);
+    if (!j) return;
+    j->pem = 0;
+    j->data_path = g_strdup(A.sg_data_path);
+    char *name = named_after_data(".sig");
+    ask_where_named(j, name);
+    g_free(name);
+}
+
+static void on_verify(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.sg_data_path) { status("Choose the data first."); return; }
+    struct job *j = cert_job(J_VERIFY, A.sg_key_drop);
+    if (!j) return;
+    j->data_path = g_strdup(A.sg_data_path);
+    ask_input(j, "The signature to check");
+}
+
+static void on_cms_sign(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.sg_data_path) { status("Choose the data first."); return; }
+    if (!A.sg_cert_path) { status("Choose the signer's certificate."); return; }
+    struct job *j = cert_job(J_CMS_SIGN, A.sg_key_drop);
+    if (!j) return;
+    j->pem = 0;                     /* written as DER, as fhsm-sign writes it */
+    j->data_path = g_strdup(A.sg_data_path);
+    j->cert_path = g_strdup(A.sg_cert_path);
+    char *name = named_after_data(".p7s");
+    ask_where_named(j, name);
+    g_free(name);
+}
+
+static void on_cms_verify(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (A.busy || !A.sg_data_path) return;
+    struct job *j = g_new0(struct job, 1);
+    j->kind = J_CMS_VERIFY;
+    j->data_path = g_strdup(A.sg_data_path);
+    ask_input(j, "The CMS to check");
 }
 
 static void on_clear_log(GtkButton *b, gpointer ud) {
@@ -1356,6 +1613,63 @@ static GtkWidget *revocation_tab(void) {
     return s;
 }
 
+/* Stage 4: detached signatures over files, raw and CMS. */
+static GtkWidget *signing_tab(void) {
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_margin_start(page, 4);
+    gtk_widget_set_margin_end(page, 8);
+
+    A.sg_data_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget *g = form();
+    form_row(g, 0, "Data", file_button("The data to sign or check", &A.sg_data_path));
+    gtk_box_append(GTK_BOX(A.sg_data_box), g);
+    gtk_box_append(GTK_BOX(A.sg_data_box), note_label(
+        "Streamed in 1 MiB blocks and never held whole, so its size is not bounded "
+        "by memory."));
+    gtk_box_append(GTK_BOX(page), A.sg_data_box);
+
+    /* Everything that needs the token. */
+    A.sg_key_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    g = form();
+    A.sg_key_drop = gtk_drop_down_new(G_LIST_MODEL(g_object_ref(A.key_labels)), NULL);
+    form_row(g, 0, "Key", A.sg_key_drop);
+    gtk_box_append(GTK_BOX(A.sg_key_box), g);
+
+    gtk_box_append(GTK_BOX(A.sg_key_box), heading("Raw, detached"));
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(row), button_to("Sign\xe2\x80\xa6", G_CALLBACK(on_sign), NULL));
+    gtk_box_append(GTK_BOX(row), button_to("Verify\xe2\x80\xa6", G_CALLBACK(on_verify), NULL));
+    gtk_box_append(GTK_BOX(A.sg_key_box), row);
+    gtk_box_append(GTK_BOX(A.sg_key_box), note_label(
+        "The signature is the bytes and nothing around them: it does not record which "
+        "key or algorithm made it, so whoever verifies must be told. Signing uses the "
+        "private key of this label, verifying the public one."));
+
+    gtk_box_append(GTK_BOX(A.sg_key_box), heading("CMS (RFC 5652), detached"));
+    g = form();
+    form_row(g, 0, "Signer's certificate",
+             file_button("The signer's certificate", &A.sg_cert_path));
+    gtk_box_append(GTK_BOX(A.sg_key_box), g);
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(row), button_to("Sign CMS\xe2\x80\xa6", G_CALLBACK(on_cms_sign), NULL));
+    gtk_box_append(GTK_BOX(A.sg_key_box), row);
+    gtk_box_append(GTK_BOX(page), A.sg_key_box);
+
+    /* Checking a CMS needs neither the token nor a login. */
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    A.sg_cmsv_btn = button_to("Verify CMS\xe2\x80\xa6", G_CALLBACK(on_cms_verify), NULL);
+    gtk_box_append(GTK_BOX(row), A.sg_cmsv_btn);
+    gtk_box_append(GTK_BOX(page), row);
+    gtk_box_append(GTK_BOX(page), note_label(
+        "A CMS carries the signer's certificate and says which algorithm made it, so "
+        "checking one needs only the file and the data: no token, no login."));
+
+    GtkWidget *s = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(s), page);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(s), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    return s;
+}
+
 static void activate(GtkApplication *app, gpointer ud) {
     (void)ud;
     A.win = gtk_application_window_new(app);
@@ -1435,6 +1749,7 @@ static void activate(GtkApplication *app, gpointer ud) {
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), left, gtk_label_new("Token"));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), cert_tab(), gtk_label_new("Certificates"));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), revocation_tab(), gtk_label_new("Revocation"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), signing_tab(), gtk_label_new("Signing"));
     gtk_paned_set_start_child(GTK_PANED(paned), tabs);
 
     /* Right: the call log. */
