@@ -118,6 +118,19 @@ the same rule as the module's audit log.
    where the command line trusts its user: a certificate without a revocation
    pointer, a CRL left to expire, a key label reused.
 
+   As built: a switch in the window, not a separate program. Operator mode
+   swaps the Certificates and Revocation tabs for three guided ones (CA,
+   Issue, Revoke) that work for one CA set once: its key, certificate,
+   database, the file where its CRL is published, and that file's URLs. The
+   refusals block; there is no "continue anyway", because exploration mode
+   and the command-line tools remain for the exception. The CRL's expiry is
+   read from the published file itself -- nothing new in the revocation
+   database, whose format fhsm-ca and fhsm-service share -- re-read every
+   minute, with a warning once less than a third of its validity is left.
+   Issuing is refused while that file is missing or expired, so a CA's first
+   act after its root is to publish an empty CRL. Every file the window
+   writes is written to a temporary name and renamed into place.
+
 ## Open questions
 
 - **Profile.** The composite exists only in `all-mechanisms` builds. Whether a
