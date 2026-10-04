@@ -134,12 +134,24 @@ the same rule as the module's audit log.
 ## Open questions
 
 - **Profile.** The composite exists only in `all-mechanisms` builds. Whether a
-  signed `all-mechanisms` module can sign with it under the FIPS provider is
+  signed `all-mechanisms` module can sign with it under the FIPS provider was
   to be measured, not assumed: the service tests refuse a
   `nist-approved-only` module for exactly this reason.
+
+  Measured 2026-10-04, Debian 13, the packaged OpenSSL FIPS provider, a
+  signed `all-mechanisms` build, `scripts/run_fips_tests.sh`: **it can.**
+  The provider was shown loaded before anything was counted, no test fell
+  back to the integrity bypass, and every composite test passed against it
+  -- `test_composite_p11` and `test_pkiops` through the signed `.so`, and
+  signed copies of `test_composite_sign`, `_cms`, `_crl`, `_csr`, `_issue`,
+  `_ocsp`, `_prehash`, `_mprime` and `_x509`. ML-DSA-65 and Ed25519 are
+  both served by that provider. 62 of 64 tests passed; the two that did not
+  are about other mechanisms, recorded in `PKCS11_CHECK_FINDINGS.md`.
 - **Testing the window.** The logic is tested through `pkiops` and the tools.
-  Whether to add a headless smoke test of the interface (GTK under a virtual
-  display in CI) is left for stage 1.
+  Settled after stage 5: `tests/gui_smoke.sh` starts the window under Xvfb
+  with a private session bus, closes it with `app.quit`, and fails on any
+  GTK or GLib CRITICAL or WARNING -- the class of bug, close-time criticals,
+  that reached a person on 2026-10-02. CI job `gui-smoke`.
 - **Packaging.** Debian first; nothing else is planned.
 
 ## Alternatives set aside

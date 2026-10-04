@@ -2426,3 +2426,35 @@ and never ends an Init the module accepted. Raised as mingulov/pkcs11-check#38.
 Since 2026-09-30 CI runs the harness against the signed module, FIPS provider
 loaded, in both profiles, and fails on any failure not listed with its reason
 in `tests/pkcs11_check_known_failures.txt` (`pkcs11-check-signed`).
+
+## 2026-10-04 — the suite against the FIPS provider, all-mechanisms
+
+    scripts/run_fips_tests.sh · Debian 13 · packaged OpenSSL FIPS provider
+    signed module · all-mechanisms · 62 of 64
+
+Run to answer one question from `docs/fhsm-gui-plan.md`: can a signed
+`all-mechanisms` module sign with the composite under the FIPS provider? It
+can. The provider was shown loaded before anything was counted, no test fell
+back to the integrity bypass, and every composite test passed — through the
+signed `.so` and as signed copies.
+
+CI runs this script on the default profile, where it passes 62 of 62. The
+two failures are in mechanisms only `all-mechanisms` compiles in, and are the
+X25519 defect of 2026-09-28 again, in two more places: the module offers
+something the loaded providers cannot serve, and says so only when it fails.
+
+- **`CKM_MD5` is advertised and `C_DigestInit` fails.** The FIPS provider has
+  no MD5; SHA-1 it has, and `test_legacy_digest` passed that half. The test
+  also decides the profile from SHA-1's advertisement and then expects MD5 to
+  work, so it asserts one mechanism's availability from another's.
+- **brainpool passes the curve check and key generation fails.** The bound of
+  2026-09-28 admits brainpool 256–512 under `all-mechanisms`; the FIPS
+  provider has no brainpool group, so `C_GenerateKeyPair` fails with
+  OpenSSL's `unknown group` rather than refusing the curve.
+  `test_ec_curve_bounds` asserts "brainpool still works where it is meant
+  to", which was only ever measured under the integrity bypass.
+
+Neither touches the default build or a deployment that follows the Security
+Target, which runs `nist-approved-only`. Both were invisible for the reason
+X25519 was: local tests run under the bypass, which loads the default
+provider.
