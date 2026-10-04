@@ -187,6 +187,25 @@ project adheres to [Semantic Versioning](https://semver.org/).
   an integrity check.
 
 ### Added
+* **`fhsm-gui`, a desktop interface over the PKI tools** (GTK 4, `make gui`,
+  not part of `make all`). Everything `fhsm-token`, `fhsm-csr`, `fhsm-ca` and
+  `fhsm-sign` do, through the same functions — the tools were first moved onto
+  `tools/pkiops`, and `tests/pki_tools_characterize.sh` showed their output
+  unchanged byte for byte — with every PKCS#11 call shown as it is made, never
+  with a PIN or an attribute value. Two modes:
+
+  - **exploration**, every operation with the command line's defaults;
+  - **operator**, guided steps for one CA, refusing to re-initialise a token
+    that holds one, a key label already on the token, a certificate without CRL URLs, and issuing while the published CRL
+    is missing or expired, and publishing a CRL as soon as a revocation is
+    recorded.
+
+  A token can be initialised from the window, each PIN typed twice and
+  re-initialisation confirmed. A module can be unloaded and another loaded
+  without restarting. Every file
+  the window writes goes through a temporary name and a rename. See
+  [`docs/FHSM_GUI.md`](docs/FHSM_GUI.md).
+
 * **`scripts/diff_pkcs11_runs.py`** — what moved between two harness runs, by
   node-id. Two totals cannot say what changed: the 0.2.0 → 0.2.1 move cost
   three passes that went into the record unattributed because no earlier

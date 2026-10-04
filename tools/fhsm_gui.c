@@ -27,7 +27,7 @@
  *  Stage 5, operator mode, behind the switch at the top. The Certificates and
  *  Revocation tabs give way to three guided ones -- CA, Issue, Revoke -- that
  *  work for one CA set once, and refuse what the command line leaves to its
- *  user: a key label already on the token, a certificate without CRL URLs,
+ *  user: re-initialising a token that holds one, a key label already on it, a certificate without CRL URLs,
  *  issuing while the published CRL is missing or expired. A revocation is
  *  published as soon as it is recorded, and the published CRL's expiry is
  *  re-read every minute. The refusals block; whoever needs the exception has
@@ -80,6 +80,7 @@ static struct {
     GtkWidget *module_entry, *load_btn, *unload_btn;
     GtkWidget *slots_box;
     GtkWidget *pin_entry, *login_btn, *logout_btn;
+    GtkWidget *init_box, *init_label, *init_so, *init_so2, *init_user, *init_user2;
     GtkWidget *keys_box, *label_entry, *keygen_btn;
     GtkWidget *log_view, *status;
 
@@ -216,6 +217,8 @@ static void update_sensitivity(void) {
     gtk_widget_set_sensitive(A.unload_btn,   !A.busy && A.loaded);
     gtk_widget_set_sensitive(A.slots_box,    !A.busy && A.loaded && !A.logged_in);
     gtk_widget_set_sensitive(A.pin_entry,    !A.busy && has_token && !A.logged_in);
+    gtk_widget_set_sensitive(A.init_box,     !A.busy && A.loaded && !A.logged_in
+                                             && A.selected >= 0);
     gtk_widget_set_sensitive(A.login_btn,    !A.busy && has_token && !A.logged_in);
     gtk_widget_set_sensitive(A.logout_btn,   !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.label_entry,  !A.busy && A.logged_in);
@@ -252,13 +255,14 @@ static void list_add(GtkWidget *box, const char *text) {
 enum job_kind { J_LOAD, J_UNLOAD, J_SLOTS, J_LOGIN, J_KEYS, J_KEYGEN, J_LOGOUT,
                 J_CSR, J_ROOT, J_ISSUE, J_DB_LOAD, J_REVOKE, J_CRL, J_OCSP,
                 J_SIGN, J_VERIFY, J_CMS_SIGN, J_CMS_VERIFY,
-                J_NEW_CA, J_REVOKE_PUBLISH };
+                J_NEW_CA, J_REVOKE_PUBLISH, J_TOKEN_INIT };
 
 struct job {
     enum job_kind kind;
     char *module, *label;
     pkiops_handle slot, session;
     uint8_t *pin; size_t pin_len;
+    uint8_t *so_pin; size_t so_pin_len;     /* J_TOKEN_INIT only */
     /* requests and issuance */
     char *subject, *san, *ca_path, *csr_path, *out_path;
     char **crl_urls;                /* NULL-terminated; NULL for none */
@@ -286,6 +290,7 @@ struct job {
 static void job_free(gpointer p) {
     struct job *j = p;
     if (j->pin) { OPENSSL_cleanse(j->pin, j->pin_len); g_free(j->pin); }
+    if (j->so_pin) { OPENSSL_cleanse(j->so_pin, j->so_pin_len); g_free(j->so_pin); }
     g_free(j->module);
     g_free(j->label);
     g_free(j->subject);
@@ -487,6 +492,33 @@ static void run_crl(struct job *j) {
     if (!j->rc) j->rc = write_out(j->out_path, der, n, j->pem, "X509 CRL", &j->e);
     j->out_len = n;
     free(der);
+}
+
+/* fhsm-token init, minus the command line: the PIN lengths checked against
+ * the bounds the token itself advertises, then C_InitToken and the user PIN.
+ * Both PINs are wiped as soon as the module has answered. */
+static void run_token_init(struct job *j) {
+    struct pkiops_token_info ti;
+    struct p11_err ignored;
+    unsigned long lo = 4, hi = 64;
+    if (pkiops_token_info(j->slot, &ti, &ignored) == 0 && ti.min_pin && ti.min_pin <= ti.max_pin) {
+        lo = ti.min_pin;
+        hi = ti.max_pin;
+    }
+    int bad_so   = j->so_pin_len < lo || j->so_pin_len > hi;
+    int bad_user = j->pin_len    < lo || j->pin_len    > hi;
+    const char *which = bad_so && bad_user ? "the SO PIN and the user PIN are"
+                      : bad_so             ? "the SO PIN is"
+                      : bad_user           ? "the user PIN is" : NULL;
+    if (which)
+        j->rc = err_set(&j->e, 1, "%s outside the token's accepted length (%lu..%lu "
+                        "characters). Nothing was changed.\n", which, lo, hi);
+    else
+        j->rc = pkiops_token_init(j->slot, j->so_pin, j->so_pin_len, j->pin, j->pin_len,
+                                  j->label, &j->e);
+    OPENSSL_cleanse(j->so_pin, j->so_pin_len);
+    OPENSSL_cleanse(j->pin, j->pin_len);
+    if (!j->rc) j->rc = pkiops_slots(&j->slots, &j->n_slots, &j->e);
 }
 
 /* --- signing, on the worker thread -------------------------------------- */
@@ -749,6 +781,7 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
     case J_REVOKE: run_revoke(j); break;
     case J_CRL:    run_crl(j);    break;
     case J_OCSP:   run_ocsp(j);   break;
+    case J_TOKEN_INIT: run_token_init(j); break;
     case J_SIGN:       run_sign(j);       break;
     case J_VERIFY:     run_verify(j);     break;
     case J_CMS_SIGN:   run_cms_sign(j);   break;
@@ -1097,6 +1130,15 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
              : "This is not a composite CMS this interface can read. That is a "
                "different problem from a signature that does not match.");
         break;
+    case J_TOKEN_INIT: {
+        if (j->rc) { status_err("Initialising the token", &j->e); break; }
+        show_slots(j);
+        char msg[300];
+        snprintf(msg, sizeof msg, "Slot %lu initialised as \"%s\", user PIN set. Next: "
+                 "choose it, log in, and generate a key pair.", j->slot, j->label);
+        status(msg);
+        break;
+    }
     case J_NEW_CA: {
         if (j->n_keys) show_keys(j);
         if (j->rc) { status_err("Creating the CA", &j->e); break; }
@@ -1144,6 +1186,24 @@ static void start(struct job *j) {
     g_object_unref(t);
 }
 
+/* What the status line says while a job runs. */
+static const char *running_text(enum job_kind k) {
+    switch (k) {
+    case J_CSR:        return "Signing the request...";
+    case J_ROOT:       return "Signing the root...";
+    case J_ISSUE:      return "Checking the request, then issuing...";
+    case J_CRL:        return "Signing the CRL...";
+    case J_OCSP:       return "Answering the OCSP request...";
+    case J_SIGN:       return "Signing: the data is streamed to the module...";
+    case J_VERIFY:     return "Verifying: the data is streamed to the module...";
+    case J_CMS_SIGN:   return "Hashing the data, then signing...";
+    case J_CMS_VERIFY: return "Hashing the data, then checking the CMS...";
+    case J_NEW_CA:     return "Creating the CA: key pair, then the root...";
+    case J_TOKEN_INIT: return "Initialising the token: both PINs are derived, which takes a moment...";
+    default:           return "Working...";
+    }
+}
+
 /* --- actions ------------------------------------------------------------- */
 
 static void on_load(GtkButton *b, gpointer ud) {
@@ -1171,7 +1231,7 @@ static void on_slot_selected(GtkListBox *box, GtkListBoxRow *row, gpointer ud) {
     if (A.closing) return;          /* the list empties itself as it is destroyed */
     A.selected = row ? gtk_list_box_row_get_index(row) : -1;
     if (A.selected >= 0 && (size_t)A.selected < A.n_slots && !A.slots[A.selected].has_token)
-        status("This slot holds no token. Initialising one is fhsm-token init, for now.");
+        status("This slot holds no token. Initialise one below.");
     else
         status(NULL);
     update_sensitivity();
@@ -1203,6 +1263,84 @@ static void on_logout(GtkButton *b, gpointer ud) {
     start(j);
 }
 
+static void clear_init_pins(void) {
+    gtk_editable_set_text(GTK_EDITABLE(A.init_so), "");
+    gtk_editable_set_text(GTK_EDITABLE(A.init_so2), "");
+    gtk_editable_set_text(GTK_EDITABLE(A.init_user), "");
+    gtk_editable_set_text(GTK_EDITABLE(A.init_user2), "");
+}
+
+static void on_init_answered(GObject *src, GAsyncResult *res, gpointer data) {
+    struct job *j = data;
+    int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(src), res, NULL);
+    if (choice != 1 || A.closing || A.busy || A.logged_in) { job_free(j); return; }
+    status(running_text(J_TOKEN_INIT));
+    start(j);
+}
+
+/* fhsm-token init. Each PIN is typed twice, as a window cannot be scrolled
+ * back to check what was typed; all four fields are cleared as soon as they
+ * are read, whatever happens next. Re-initialising a token that holds one
+ * destroys every key on it: exploration mode asks, as `--force` does at the
+ * command line, and operator mode refuses. */
+static void on_init(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (A.busy || !A.loaded || A.logged_in || A.selected < 0
+        || (size_t)A.selected >= A.n_slots) return;
+    const struct pkiops_slot *sl = &A.slots[A.selected];
+    const char *label = gtk_editable_get_text(GTK_EDITABLE(A.init_label));
+    if (!label || !*label) label = "freehsm";       /* fhsm-token's default */
+    if (strlen(label) > 32) {
+        status("The token label is at most 32 characters (PKCS#11 pads it to exactly that).");
+        return;
+    }
+    if (A.operator_mode && sl->has_token) {
+        clear_init_pins();
+        status("Refused in operator mode: this slot holds an initialised token, and "
+               "re-initialising it destroys every key on it. Exploration mode asks for "
+               "confirmation; fhsm-token init --force does it from the command line.");
+        return;
+    }
+    const char *so = gtk_editable_get_text(GTK_EDITABLE(A.init_so));
+    const char *so2 = gtk_editable_get_text(GTK_EDITABLE(A.init_so2));
+    const char *up = gtk_editable_get_text(GTK_EDITABLE(A.init_user));
+    const char *up2 = gtk_editable_get_text(GTK_EDITABLE(A.init_user2));
+    const char *wrong = !*so || !*up        ? "Type both PINs, each twice."
+                      : strcmp(so, so2)     ? "The two entries of the SO PIN differ."
+                      : strcmp(up, up2)     ? "The two entries of the user PIN differ."
+                      :                       NULL;
+    if (wrong) { clear_init_pins(); status(wrong); return; }
+
+    struct job *j = g_new0(struct job, 1);
+    j->kind = J_TOKEN_INIT;
+    j->slot = sl->id;
+    j->label = g_strdup(label);
+    j->so_pin_len = strlen(so);
+    j->so_pin = g_malloc(j->so_pin_len);
+    memcpy(j->so_pin, so, j->so_pin_len);
+    j->pin_len = strlen(up);
+    j->pin = g_malloc(j->pin_len);
+    memcpy(j->pin, up, j->pin_len);
+    clear_init_pins();
+
+    if (!sl->has_token) {
+        status(running_text(J_TOKEN_INIT));
+        start(j);
+        return;
+    }
+    GtkAlertDialog *d = gtk_alert_dialog_new("Re-initialise slot %lu (\"%s\")?",
+                                             sl->id, sl->label);
+    gtk_alert_dialog_set_detail(d,
+        "C_InitToken destroys every object on the token: every key, a CA's included. "
+        "This is not undone.");
+    const char *const buttons[] = { "Cancel", "Destroy and re-initialise", NULL };
+    gtk_alert_dialog_set_buttons(d, buttons);
+    gtk_alert_dialog_set_cancel_button(d, 0);
+    gtk_alert_dialog_set_default_button(d, 0);
+    gtk_alert_dialog_choose(d, GTK_WINDOW(A.win), NULL, on_init_answered, j);
+    g_object_unref(d);
+}
+
 static void on_keygen(GtkWidget *w, gpointer ud) {
     (void)w; (void)ud;
     if (A.busy || !A.logged_in) return;
@@ -1228,23 +1366,6 @@ static const char *chosen_key(GtkWidget *drop) {
 static char *text_or_null(GtkWidget *entry) {
     const char *t = gtk_editable_get_text(GTK_EDITABLE(entry));
     return t && *t ? g_strdup(t) : NULL;
-}
-
-/* What the status line says while a job runs. */
-static const char *running_text(enum job_kind k) {
-    switch (k) {
-    case J_CSR:        return "Signing the request...";
-    case J_ROOT:       return "Signing the root...";
-    case J_ISSUE:      return "Checking the request, then issuing...";
-    case J_CRL:        return "Signing the CRL...";
-    case J_OCSP:       return "Answering the OCSP request...";
-    case J_SIGN:       return "Signing: the data is streamed to the module...";
-    case J_VERIFY:     return "Verifying: the data is streamed to the module...";
-    case J_CMS_SIGN:   return "Hashing the data, then signing...";
-    case J_CMS_VERIFY: return "Hashing the data, then checking the CMS...";
-    case J_NEW_CA:     return "Creating the CA: key pair, then the root...";
-    default:           return "Working...";
-    }
 }
 
 /* The save dialog answered: run the job, or drop it if the operator
@@ -2381,6 +2502,31 @@ static void activate(GtkApplication *app, gpointer ud) {
     A.slots_box = gtk_list_box_new();
     g_signal_connect(A.slots_box, "row-selected", G_CALLBACK(on_slot_selected), NULL);
     gtk_box_append(GTK_BOX(left), scrolled(A.slots_box, 110));
+
+    /* Initialising a token: folded away, as it is done once per token. */
+    GtkWidget *init = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget *ig = form();
+    A.init_label = entry_with("freehsm");
+    form_row(ig, 0, "Token label", A.init_label);
+    A.init_so = gtk_password_entry_new();
+    form_row(ig, 1, "SO PIN", A.init_so);
+    A.init_so2 = gtk_password_entry_new();
+    form_row(ig, 2, "SO PIN again", A.init_so2);
+    A.init_user = gtk_password_entry_new();
+    form_row(ig, 3, "User PIN", A.init_user);
+    A.init_user2 = gtk_password_entry_new();
+    form_row(ig, 4, "User PIN again", A.init_user2);
+    gtk_box_append(GTK_BOX(init), ig);
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(row), button_to("Initialise\xe2\x80\xa6", G_CALLBACK(on_init), NULL));
+    gtk_box_append(GTK_BOX(init), row);
+    gtk_box_append(GTK_BOX(init), note_label(
+        "For the slot chosen above. The Security Officer PIN can re-initialise the "
+        "token and reset the user PIN; the user PIN is the one applications log in "
+        "with. Re-initialising a token destroys every key on it."));
+    A.init_box = gtk_expander_new("Initialise a token");
+    gtk_expander_set_child(GTK_EXPANDER(A.init_box), init);
+    gtk_box_append(GTK_BOX(left), A.init_box);
 
     gtk_box_append(GTK_BOX(left), heading("Log in"));
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
