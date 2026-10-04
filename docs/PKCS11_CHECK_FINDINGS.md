@@ -2458,3 +2458,12 @@ Neither touches the default build or a deployment that follows the Security
 Target, which runs `nist-approved-only`. Both were invisible for the reason
 X25519 was: local tests run under the bypass, which loads the default
 provider.
+
+Fixed the same day, the way X25519 was: the module asks the loaded
+providers. A digest is advertised, and accepted by `C_DigestInit`, only if
+`EVP_MD_fetch` finds it (`fhsm_md_available`); a curve outside the NIST table
+passes the curve check only if EC parameter generation on its group succeeds
+(`fhsm_ec_group_served`), and is otherwise refused with
+`CKR_ATTRIBUTE_VALUE_INVALID`. The two tests now ask the module instead of
+inferring from the profile, and still require MD5 and brainpool to work under
+the integrity bypass, where the default provider serves them.

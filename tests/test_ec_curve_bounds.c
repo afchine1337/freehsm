@@ -113,10 +113,20 @@ int main(void) {
        "SM2 is refused (no SM2 mechanism to use it with)");
 
     /* Brainpool: the curve the fallback was written for. Present only in
-     * all-mechanisms, where it must still work after the fix. */
+     * all-mechanisms -- and there only where a loaded provider can build it.
+     * Under the integrity bypass that is the default provider, which can, so
+     * it must work. A signed module loads the FIPS provider, which has no
+     * brainpool group: there it must be refused as an unsupported curve, not
+     * accepted and then failed in key generation, which is what it did until
+     * scripts/run_fips_tests.sh first ran on this profile (2026-10-04). */
     CK_RV bp = keygen(s, "\x06\x09\x2b\x24\x03\x03\x02\x08\x01\x01\x07", 11);
-    if (strict) ok(bp != 0, "brainpoolP256r1 is refused under nist-approved-only");
-    else        ok(bp == 0, "brainpoolP256r1 is still accepted under all-mechanisms");
+    if (strict)
+        ok(bp != 0, "brainpoolP256r1 is refused under nist-approved-only");
+    else if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED"))
+        ok(bp == 0, "brainpoolP256r1 is accepted under all-mechanisms (default provider)");
+    else
+        ok(bp == 0x13UL, "brainpoolP256r1 is refused as unsupported under the FIPS provider "
+                         "(CKR_ATTRIBUTE_VALUE_INVALID), not failed in key generation");
 
     printf("\ntest_ec_curve_bounds : %s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;

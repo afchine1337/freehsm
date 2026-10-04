@@ -11,6 +11,13 @@
  *  then asserts either correct computation (interop) or rejection
  *  (nist-approved-only). Works unchanged in `make tests` (nist-approved-only default)
  *  and in a `make PROFILE=interop tests` build.
+ *
+ *  Each digest is judged by its OWN advertisement. This test used to decide
+ *  the profile from SHA-1's and then require MD5 to work, which held until it
+ *  ran against the FIPS provider (2026-10-04): that provider has SHA-1 and no
+ *  MD5, so a signed all-mechanisms module offers one and not the other, and
+ *  the module now says so. What a digest may not do is be advertised and then
+ *  fail -- or be refused where the default provider is loaded and serves it.
  * ========================================================================= */
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,8 +44,8 @@ static int check_digest(void *h, CK_SESSION_HANDLE s, unsigned long mech,
     CK_MECHANISM m = { mech, 0, 0 };
     CK_RV rv = DI(s, &m);
     if (!interop) {
-        if (rv == CKR_MECHANISM_INVALID) { printf("  0x%lx rejected (nist-approved-only) : OK\n", mech); return 0; }
-        fprintf(stderr, "  FAIL: 0x%lx not rejected under nist-approved-only (0x%lx)\n", mech, rv); return 1;
+        if (rv == CKR_MECHANISM_INVALID) { printf("  0x%lx not advertised, and refused : OK\n", mech); return 0; }
+        fprintf(stderr, "  FAIL: 0x%lx not advertised and not refused (0x%lx)\n", mech, rv); return 1;
     }
     if (rv) { fprintf(stderr, "  FAIL: DigestInit 0x%lx -> 0x%lx\n", mech, rv); return 1; }
     CK_BYTE out[64]; CK_ULONG olen = 64;
@@ -73,8 +80,16 @@ int main(void) {
     int interop = advertised(GML, 0x220);   /* SHA-1 advertised iff interop */
     printf("test_legacy_digest : profile = %s\n", interop ? "all-mechanisms" : "nist-approved-only");
     int rc = 0;
+    int md5 = advertised(GML, 0x210);
+    /* Under the integrity bypass the default provider is loaded, and it has
+     * MD5: an all-mechanisms build that stopped offering it there would be a
+     * regression, not a provider's limit. */
+    if (interop && !md5 && getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED")) {
+        fprintf(stderr, "  FAIL: MD5 not advertised although the default provider is loaded\n");
+        rc = 1;
+    }
     rc |= check_digest(h, s, 0x220, "a9993e364706816aba3e25717850c26c9cd0d89d", interop); /* SHA-1 */
-    rc |= check_digest(h, s, 0x210, "900150983cd24fb0d6963f7d28e17f72", interop);         /* MD5   */
+    rc |= check_digest(h, s, 0x210, "900150983cd24fb0d6963f7d28e17f72", md5);             /* MD5   */
     if (rc) return 1;
     printf("test_legacy_digest : PASS\n");
     return 0;

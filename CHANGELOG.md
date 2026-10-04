@@ -8,6 +8,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **A signed `all-mechanisms` module offered MD5 and brainpool, which the FIPS
+  provider does not serve.** `CKM_MD5` was advertised and `C_DigestInit`
+  accepted, then `C_Digest` failed; brainpool curves passed the curve check,
+  then `C_GenerateKeyPair` failed with OpenSSL's `unknown group`. The X25519
+  defect of 2026-09-28 in two more places, measured by
+  `scripts/run_fips_tests.sh` on that profile for the first time. A digest is
+  now advertised, and `C_DigestInit` accepts it, only when a loaded provider
+  can fetch it; a curve outside the NIST table is accepted only when a loaded
+  provider can build its group, and is otherwise refused with
+  `CKR_ATTRIBUTE_VALUE_INVALID` like any curve outside the advertised set.
+  Nothing changes in the default profile, or under the integrity bypass,
+  where the default provider serves both. `tests/test_legacy_digest.c` and
+  `tests/test_ec_curve_bounds.c` now ask rather than infer from the profile.
+
 * **A second copy of the module in one process failed `C_Initialize`.** The
   secure heap is libcrypto's, one per process, and `CRYPTO_secure_malloc_init`
   returns 0 when it already exists, which the module reported as "could not

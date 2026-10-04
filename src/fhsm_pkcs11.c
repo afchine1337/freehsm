@@ -1498,12 +1498,41 @@ static int fhsm_ecm_available(void) {
     return ok;
 }
 
+/* Can the providers loaded in this process compute this digest?
+ *
+ * The X25519 question again, for digests. A signed all-mechanisms module
+ * advertised CKM_MD5, accepted C_DigestInit, and failed C_Digest: the FIPS
+ * provider has no MD5. Measured 2026-10-04 by scripts/run_fips_tests.sh on a
+ * signed all-mechanisms build, the first time that script ran on that
+ * profile. tests/test_advertised_operational could not see it -- it checks
+ * that Init is reached, and Init was. Bracketed like fhsm_ecm_available, so a
+ * failed fetch leaves nothing on the error queue. */
+static int fhsm_md_available(const char *name) {
+    if (name == NULL) return 0;
+    ERR_set_mark();
+    EVP_MD *md = EVP_MD_fetch(NULL, name, NULL);
+    int ok = (md != NULL);
+    EVP_MD_free(md);
+    ERR_pop_to_mark();
+    return ok;
+}
+
+static int digest_mech_to_hash(CK_ULONG mech, fhsm_hash_t *h, int *non_approved);
+
 /* Advertised means operational in THIS process, not merely compiled in:
  * a mechanism whose algorithm no loaded provider can serve is not offered. */
 static int fhsm_mech_advertised(const fhsm_mech_entry_t *e) {
     if (e == NULL || e->handler == dispatch_reject_fips) return 0;
     if (e->family && strcmp(e->family, "ECM") == 0 && !fhsm_ecm_available())
         return 0;
+    /* A digest, asked by the name C_Digest will fetch it under. */
+    if (e->operation && strcmp(e->operation, "digest") == 0) {
+        fhsm_hash_t h;
+        int na = 0;
+        if (digest_mech_to_hash(e->ckm_value, &h, &na)
+            && !fhsm_md_available(fhsm_hash_openssl_name(h)))
+            return 0;
+    }
     return 1;
 }
 
@@ -2605,6 +2634,11 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
       if (!digest_mech_to_hash(pMechanism->mechanism, &op->hash, &non_approved))
           return FHSM_RV_MECHANISM_INVALID;
       if ((non_approved & FHSM_HASH_NA_DIGEST) && fhsm_build_fips_strict)
+          return FHSM_RV_MECHANISM_INVALID;
+      /* Refused here, as it is left out of the mechanism list, when no
+       * loaded provider can compute it -- not accepted and then failed in
+       * C_Digest (fhsm_md_available). */
+      if (!fhsm_md_available(fhsm_hash_openssl_name(op->hash)))
           return FHSM_RV_MECHANISM_INVALID; }
     op->active = 1;
     op->mechanism = (uint32_t)pMechanism->mechanism;
@@ -5840,6 +5874,27 @@ done:
  *
  * Returned names are static storage owned by OpenSSL (OBJ_nid2sn) or by the
  * table, so the caller may hold them for the duration of the call. */
+/* Can a loaded provider build EC domain parameters on this group? Asked the
+ * way key generation will ask, through EVP, rather than of libcrypto's curve
+ * registry, which answers for every curve it knows whatever is loaded.
+ * Parameter generation, not key generation: it resolves the group in the
+ * provider without the scalar multiplication. Bracketed, as the other
+ * provider probes are. */
+static int fhsm_ec_group_served(const char *group) {
+    if (group == NULL) return 0;
+    ERR_set_mark();
+    EVP_PKEY_CTX *c = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+    EVP_PKEY *p = NULL;
+    int ok = c != NULL
+          && EVP_PKEY_paramgen_init(c) == 1
+          && EVP_PKEY_CTX_set_group_name(c, group) == 1
+          && EVP_PKEY_paramgen(c, &p) == 1;
+    EVP_PKEY_free(p);
+    EVP_PKEY_CTX_free(c);
+    ERR_pop_to_mark();
+    return ok;
+}
+
 static const char *match_curve_ex(const uint8_t *der, size_t len,
                                    int *non_approved) {
     if (non_approved) *non_approved = 0;
@@ -5892,6 +5947,15 @@ static const char *match_curve_ex(const uint8_t *der, size_t len,
         const char *sn = OBJ_nid2sn(nid);
         if (sn && strcmp(sn, "SM2") == 0) return NULL;
     }
+    /* And only a curve the loaded providers can build. The check above asks
+     * libcrypto's registry, which knows brainpool whichever providers are
+     * loaded; key generation asks the provider, and the FIPS provider has no
+     * brainpool group. So a signed all-mechanisms module accepted the curve
+     * here and failed in C_GenerateKeyPair with OpenSSL's "unknown group" --
+     * measured 2026-10-04, scripts/run_fips_tests.sh, the X25519 defect of
+     * 2026-09-28 in another place. Refused here instead, as any curve outside
+     * the advertised set is. */
+    if (!fhsm_ec_group_served(OBJ_nid2sn(nid))) return NULL;
     if (non_approved) *non_approved = 1;
     return OBJ_nid2sn(nid);
 }
