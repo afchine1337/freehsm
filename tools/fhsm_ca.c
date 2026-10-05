@@ -102,7 +102,7 @@ static void db_save(const char *path, const fhsm_rev_db_t *d) {
 
 static void usage(void) {
     fprintf(stderr,
-      "fhsm-ca --- issue and revoke certificates with a composite PQ key\n\n"
+      "fhsm-ca --- issue and revoke certificates with a key held in a PKCS#11 module\n\n"
       "  fhsm-ca issue  --label NAME --ca-cert FILE --csr FILE\n"
       "                 [--profile end-entity|ocsp-responder]\n"
       "                 [--subject DN] [--san LIST] [--crl-url URL]...\n"
@@ -112,7 +112,9 @@ static void usage(void) {
       "                 [--days N] [--out FILE] [--pem]\n"
       "  fhsm-ca ocsp-respond --label NAME --ca-cert FILE --db FILE --req FILE\n"
       "                 [--responder-cert FILE] [--days N] [--out FILE]\n\n"
-      "  --label NAME    label of the CA key inside the module\n"
+      "  --label NAME    label of the CA key inside the module. It signs with\n"
+      "                  the algorithm it was generated for (fhsm-csr keygen\n"
+      "                  --alg); the request it certifies may carry any key.\n"
       "  --ca-cert FILE  the CA's own certificate (DER or PEM)\n"
       "  --csr FILE      the request to sign (DER or PEM)\n"
       "  --db FILE       the revocation database (created on first revoke)\n"

@@ -1093,7 +1093,7 @@ test-bins: $(TEST_BINS) tools/fhsm-token
 # beside the tokens, so any test that initialises the module writes there.
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
-tests: $(TEST_BINS) tools/fhsm-token
+tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sign
 # test_conf had a build rule since #128 and appeared in no list: not in the
 # prerequisites above, not in the recipe below, not in any script, not in CI.
 # `make tests` never built it and nothing ever ran it. Found on 2026-09-26
@@ -1214,6 +1214,9 @@ tests: $(TEST_BINS) tools/fhsm-token
 		$(TEST_LD) ./tests/test_pkiops
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_pkiops_algs
+# The command-line tools with every algorithm but the composite, each file
+# checked by the openssl command line (docs/classic-algorithms-plan.md).
+	$(TEST_LD) sh tests/pki_tools_algs.sh
 # A copy under another name, so the loader maps a second instance -- as it
 # would a second build.
 	d=$$(mktemp -d) && cp $(LIB) $$d/libfreehsm-copy.so && \

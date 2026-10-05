@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: 2026 Afchine Madjlessi <afchine.mad@gmail.com>
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# `fhsm-ca` --- issuing, revoking and answering for a post-quantum CA
+# `fhsm-ca` --- issuing, revoking and answering for a CA
 
 `fhsm-ca` is the issuing side of the pair. `fhsm-csr` makes keys and requests
 and signs the CA's own certificate; everything a CA does *to somebody else's*
@@ -11,12 +11,24 @@ request happens here: issuing it, recording its revocation, publishing a
 revocation list, and answering OCSP.
 
 The CA's private key lives in a PKCS#11 module and never leaves it. Every
-signature below is made by the module through `C_Sign`.
+signature below is made by the module through `C_Sign`, with the algorithm the
+key was generated for (`fhsm-csr keygen --alg`, see
+[`FHSM_CSR.md`](FHSM_CSR.md)): the post-quantum composite, ECDSA, RSA-PSS or
+PKCS#1 v1.5, Ed25519 or ML-DSA. No command here takes an algorithm; each reads
+the CA's key.
 
-**Read [Limitations](#limitations) before relying on this for anything.** The
-composite algorithm is not yet implemented by general-purpose tooling, which
-constrains what these objects can be used for today. `docs/FHSM_CSR.md` states
-that limit in full and it applies to everything on this page.
+**Hierarchies may mix.** A CA signs with its own algorithm whatever key the
+request carries, so an ECDSA CA can certify a composite key and a composite CA
+an ECDSA one. The request's proof of possession is checked by the request's
+own algorithm — the composite verifier for a composite request, OpenSSL for the
+rest — before anything is signed.
+
+**For a composite CA, read [Limitations](#limitations) before relying on it.**
+The composite algorithm is not yet implemented by general-purpose tooling, which
+constrains what its certificates, lists and answers can be used for today.
+`docs/FHSM_CSR.md` states that limit in full. Everything a CA of any other
+algorithm produces here is checked by the `openssl` command line in
+`tests/pki_tools_algs.sh`.
 
 ---
 

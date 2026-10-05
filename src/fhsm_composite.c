@@ -944,7 +944,7 @@ fhsm_rv_t fhsm_pki_selfsigned(const fhsm_pki_signer_t *s, const char *subject,
     if (!x || !name) { rv = FHSM_RV_ARGUMENTS_BAD; goto out; }
     if (X509_set_version(x, 2) != 1) goto out;          /* v3 == INTEGER 2 */
     if (ASN1_INTEGER_set(X509_get_serialNumber(x), serial) != 1) goto out;
-    if (!X509_gmtime_adj(X509_getm_notBefore(x), 0)) goto out;
+    if (!X509_gmtime_adj(X509_getm_notBefore(x), -FHSM_PKI_BACKDATE_SECONDS)) goto out;
     if (!X509_gmtime_adj(X509_getm_notAfter(x), (long)days * 86400L)) goto out;
     /* Self-signed: issuer and subject are the same name. */
     if (X509_set_subject_name(x, name) != 1) goto out;
@@ -1302,7 +1302,7 @@ fhsm_rv_t fhsm_pki_issue(const fhsm_pki_signer_t *s,
         if (!ok) goto out;
     }
 
-    if (!X509_gmtime_adj(X509_getm_notBefore(x), 0)) goto out;
+    if (!X509_gmtime_adj(X509_getm_notBefore(x), -FHSM_PKI_BACKDATE_SECONDS)) goto out;
     if (!X509_gmtime_adj(X509_getm_notAfter(x), (long)days * 86400L)) goto out;
 
     /* Issuer is the CA's subject. Subject is the request's, unless the

@@ -3,23 +3,29 @@ SPDX-FileCopyrightText: 2026 Afchine Madjlessi <afchine.mad@gmail.com>
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# `fhsm-csr` — certification requests and roots with a post-quantum composite key
+# `fhsm-csr` — certification requests and roots with a key held in a PKCS#11 module
 
-`fhsm-csr` creates a composite ML-DSA key inside a PKCS#11 module and uses it to
-produce PKCS#10 certification requests and self-signed CA certificates. The
-private key is generated in the module and never leaves it; every signature is
-made by the module through `C_Sign`.
+`fhsm-csr` creates a key pair inside a PKCS#11 module and uses it to produce
+PKCS#10 certification requests and self-signed CA certificates. The private key
+is generated in the module and never leaves it; every signature is made by the
+module through `C_Sign`.
 
-**Read [Limitations](#limitations) before relying on this for anything.** The
-composite algorithm is not yet implemented by general-purpose tooling, which
-constrains what a request produced here can be used for today.
+The key is a post-quantum composite (ML-DSA-65 + Ed25519) by default, or any of
+ECDSA P-256 and P-384, RSA-PSS, RSA PKCS#1 v1.5, Ed25519 and ML-DSA-44/65/87.
+All but the composite are approved in the default `nist-approved-only` profile,
+and everything made with them can be checked by OpenSSL and the rest of the
+ordinary tooling.
+
+**For a composite key, read [Limitations](#limitations) before relying on it.**
+The composite algorithm is not yet implemented by general-purpose tooling,
+which constrains what a request produced with one can be used for today.
 
 ---
 
 ## Synopsis
 
 ```
-fhsm-csr keygen --label NAME [--module PATH] [--slot N]
+fhsm-csr keygen --label NAME [--alg ALG] [--module PATH] [--slot N]
 fhsm-csr csr    --label NAME --subject DN [--out FILE] [--pem] [--module PATH] [--slot N]
 fhsm-csr root   --label NAME --subject DN [--days N] [--serial N] [--out FILE] [--pem] ...
 
@@ -34,18 +40,39 @@ The PIN is read from the `FHSM_PIN` environment variable.
 
 ## Commands
 
-### `keygen` — create a composite key pair
+### `keygen` — create a key pair
 
-Generates an `id-MLDSA65-Ed25519-SHA512` key pair as two token objects sharing
-one label: a public key and a private key. Both components (ML-DSA-65 and
-Ed25519) are generated together inside the module.
+Generates a key pair as two token objects sharing one label: a public key and a
+private key, the private one sensitive and for signing only. `--alg` chooses
+the algorithm, once: every other command — here, in `fhsm-ca` and in
+`fhsm-sign` — reads it off the key and signs with the mechanism that goes with
+it, so none of them takes an `--alg` of its own.
+
+| `--alg` | Key | Signs with | In X.509 |
+|---|---|---|---|
+| `composite` (default) | ML-DSA-65 + Ed25519 | `CKM_COMPOSITE_MLDSA65_ED25519` | id-MLDSA65-Ed25519-SHA512 |
+| `ecdsa-p256` | EC P-256 | `CKM_ECDSA_SHA256` | ecdsa-with-SHA256 |
+| `ecdsa-p384` | EC P-384 | `CKM_ECDSA_SHA384` | ecdsa-with-SHA384 |
+| `rsa-pss` | RSA 3072 | `CKM_SHA256_RSA_PKCS_PSS` | RSASSA-PSS, SHA-256, MGF1-SHA-256, salt 32 |
+| `rsa-pkcs1` | RSA 3072 | `CKM_SHA256_RSA_PKCS` | sha256WithRSAEncryption |
+| `ed25519` | Ed25519 | `CKM_EDDSA` | id-Ed25519 |
+| `ml-dsa-44`, `-65`, `-87` | ML-DSA | `CKM_ML_DSA` | id-ml-dsa-44/65/87 |
 
 ```bash
 export FHSM_PIN=…
-fhsm-csr keygen --label ca
+fhsm-csr keygen --label ca                       # composite
+fhsm-csr keygen --label web --alg ecdsa-p256
 ```
 
-The key pair cannot be assembled from two existing keys — there is no option to
+An RSA key alone does not say which padding it is for, so keygen sets the key's
+`CKA_ALLOWED_MECHANISMS` to the one signing mechanism chosen: the tools read it
+back, and the module refuses any other. An RSA key made elsewhere, without that
+attribute, is used with PSS. The public key is read from the standard
+attributes (`CKA_EC_PARAMS` and `CKA_EC_POINT`, `CKA_MODULUS` and
+`CKA_PUBLIC_EXPONENT`, an ML-DSA key's `CKA_VALUE`), so keys made by another
+module, or by another tool, can be used as long as their type is one of these.
+
+A composite key pair cannot be assembled from two existing keys — there is no option to
 do so, and that is deliberate. `draft-ietf-lamps-pq-composite-sigs` §3.1
 forbids reusing component key material between a composite and a non-composite,
 or between two composites; the prohibition is met by making the situation
@@ -156,7 +183,11 @@ openssl req  -in web01.csr   -text -noout
 
 ## Limitations
 
-**The signature cannot be verified by generally available tooling.**
+Everything below is about the composite. Requests and certificates made with the
+other algorithms are ordinary PKIX, and `tests/pki_tools_algs.sh` has the
+`openssl` command line check each of them.
+
+**A composite signature cannot be verified by generally available tooling.**
 `openssl req -text` and `openssl x509 -text` will print
 `Unable to load Public Key` and, for a certificate, a self-signature warning.
 This is not a defect in the output. OpenSSL 3.5 has no implementation of

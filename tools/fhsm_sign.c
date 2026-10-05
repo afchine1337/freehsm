@@ -52,13 +52,14 @@ static void fail(const struct p11_err *e) {
 
 static void usage(void) {
     fprintf(stderr,
-      "fhsm-sign --- detached signatures with a composite PQ key via PKCS#11\n\n"
+      "fhsm-sign --- detached signatures with a key held in a PKCS#11 module\n\n"
       "  fhsm-sign sign       --label NAME [--in FILE] [--out FILE]\n"
       "  fhsm-sign verify     --label NAME --sig FILE [--in FILE]\n"
       "  fhsm-sign cms        --label NAME --cert FILE [--in FILE] [--out FILE]\n"
       "  fhsm-sign cms-verify --cms FILE [--in FILE]\n\n"
       "  --label NAME    label of the key inside the module. sign uses the\n"
-      "                  private key of that label, verify the public one.\n"
+      "                  private key of that label, verify the public one, each\n"
+      "                  with the algorithm the key was generated for.\n"
       "  --in FILE       data to sign or check (default: standard input)\n"
       "  --out FILE      where to write the signature (default: standard output)\n"
       "  --sig FILE      the signature to check\n"
@@ -70,8 +71,12 @@ static void usage(void) {
       "  is visible in ps to every user on the machine.\n\n"
       "  The signature is raw and detached -- the bytes, nothing around them.\n"
       "  It does not record which key or algorithm made it, so a verifier has\n"
-      "  to be told. That is what CMS would carry, and CMS is not this tool.\n\n"
-      "  Input is streamed, so size is not bounded by memory.\n\n"
+      "  to be told. That is what cms, below, carries.\n"
+      "  An ECDSA signature is written as DER, which openssl dgst -verify reads.\n\n"
+      "  Input is streamed: this tool never holds it. The module may -- FreeHSM\n"
+      "  hashes a composite signature's input as it arrives, and holds the\n"
+      "  input of the other algorithms until the end. cms is never bounded:\n"
+      "  only a digest reaches the module.\n\n"
       "  cms produces a detached RFC 5652 SignedData with signed attributes,\n"
       "  carrying the signer's certificate. Unlike the raw form it records\n"
       "  which key and which algorithm made it -- so cms-verify needs neither\n"
@@ -249,23 +254,38 @@ static uint8_t *slurp_der(const char *path, size_t *n) {
     return buf;
 }
 
-/* SHA-512 of a stream. The only thing that has to see the data: with signed
- * attributes the signature covers the attributes, so a file of any size costs
- * exactly one pass and nothing is held. */
-static void digest_stream(FILE *in, uint8_t out[64]) {
+/* The digests of a stream: SHA-256, SHA-384 and SHA-512, all three in the one
+ * pass. The only thing that has to see the data: with signed attributes the
+ * signature covers the attributes, so a file of any size costs exactly one
+ * pass and nothing is held. Three, because which one a CMS uses depends on
+ * the key that signs it or on the structure being checked, and the data is
+ * read -- possibly from a pipe -- before either is known. */
+static const char *const DIGESTS[3] = { "SHA256", "SHA384", "SHA512" };
+struct digests { uint8_t d[3][64]; size_t len[3]; };
+
+static void digest_stream(FILE *in, struct digests *out) {
     struct p11_err e;
-    struct pkiops_sha512 *h = pkiops_sha512_begin(&e);
-    if (!h) fail(&e);
+    struct pkiops_hash *h[3];
+    for (int k = 0; k < 3; k++)
+        if (!(h[k] = pkiops_hash_begin(DIGESTS[k], &e))) fail(&e);
     static uint8_t buf[CHUNK];
     for (;;) {
         size_t n = fread(buf, 1, sizeof buf, in);
-        if (n && pkiops_sha512_update(h, buf, n, &e)) fail(&e);
+        for (int k = 0; n && k < 3; k++)
+            if (pkiops_hash_update(h[k], buf, n, &e)) fail(&e);
         if (n < sizeof buf) {
             if (ferror(in)) { fprintf(stderr, "fhsm-sign: read failed: %s\n", strerror(errno)); exit(2); }
             break;
         }
     }
-    if (pkiops_sha512_end(h, out, &e)) fail(&e);
+    for (int k = 0; k < 3; k++)
+        if (pkiops_hash_end(h[k], out->d[k], &out->len[k], &e)) fail(&e);
+}
+
+/* The one of the three that `name` names; SHA-512 for anything else. */
+static int pick(const char *name) {
+    for (int k = 0; k < 3; k++) if (name && !strcmp(name, DIGESTS[k])) return k;
+    return 2;
 }
 
 static int cmd_cms(int argc, char **argv) {
@@ -279,13 +299,17 @@ static int cmd_cms(int argc, char **argv) {
     memcpy(cert, certbuf, certlen);
 
     FILE *in = open_in(o.in);
-    uint8_t dg[64];
-    digest_stream(in, dg);
+    struct digests dg;
+    digest_stream(in, &dg);
     if (in != stdin) fclose(in);
 
     pkiops_handle s = open_session(o.module, o.slot);
+    /* The digest the key's algorithm signs with. */
+    enum pkiops_alg alg;
+    if (pkiops_key_alg(s, o.label, &alg, &e)) fail(&e);
+    int k = pick(pkiops_alg_digest(alg));
     static uint8_t der[262144]; size_t n = sizeof der;
-    if (pkiops_cms_sign(s, o.label, cert, certlen, dg, 64, der, &n, &e)) fail(&e);
+    if (pkiops_cms_sign(s, o.label, cert, certlen, dg.d[k], dg.len[k], der, &n, &e)) fail(&e);
 
     FILE *out = o.out ? fopen(o.out, "wb") : stdout;
     if (!out) { fprintf(stderr, "fhsm-sign: cannot write %s: %s\n", o.out, strerror(errno)); return 2; }
@@ -309,20 +333,24 @@ static int cmd_cms_verify(int argc, char **argv) {
     memcpy(cms, cmsbuf, cmslen);
 
     FILE *in = open_in(o.in);
-    uint8_t dg[64];
-    digest_stream(in, dg);
+    struct digests dg;
+    digest_stream(in, &dg);
     if (in != stdin) fclose(in);
 
     /* No module, no token, no PIN. The signer's certificate travels inside
-     * the structure, which is what CMS is for. */
+     * the structure, which is what CMS is for -- and the structure names the
+     * digest. One it cannot name falls through to the verdict below. */
+    const char *dname = NULL;
+    if (pkiops_cms_digest(cms, cmslen, &dname)) dname = NULL;
+    int k = pick(dname);
     int verdict = 0;
-    if (pkiops_cms_verify(cms, cmslen, dg, 64, &verdict, &e)) fail(&e);
+    if (pkiops_cms_verify(cms, cmslen, dg.d[k], dg.len[k], &verdict, &e)) fail(&e);
     if (verdict == 0) {
         fprintf(stderr, "fhsm-sign: the CMS does not match this data.\n");
         return 4;
     }
     if (verdict < 0) {
-        fprintf(stderr, "fhsm-sign: %s is not a composite CMS this tool can read.\n"
+        fprintf(stderr, "fhsm-sign: %s is not a CMS this tool can read.\n"
                         "  That is a different problem from a signature that does\n"
                         "  not match, and exits 2 rather than 4.\n", o.cms);
         return 2;

@@ -8,6 +8,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **Certificates were not valid until the second they were made.** Roots from
+  `fhsm-csr root` and certificates from `fhsm-ca issue` began their validity at
+  the exact moment of issuance, so a verifier whose clock was behind the CA's
+  by even a second refused them as not yet valid. Found by
+  `tests/pki_tools_algs.sh` when a VM's clock stepped back between making a
+  root and checking a chain. `notBefore` is now an hour before issuance, as
+  Let's Encrypt backdates; `notAfter` is unchanged, issuance plus the days
+  asked for.
+
 * **A signed `all-mechanisms` module offered MD5 and brainpool, which the FIPS
   provider does not serve.** `CKM_MD5` was advertised and `C_DigestInit`
   accepted, then `C_Digest` failed; brainpool curves passed the curve check,
@@ -201,6 +210,22 @@ project adheres to [Semantic Versioning](https://semver.org/).
   an integrity check.
 
 ### Added
+* **The PKI tools sign with classical and pure ML-DSA keys, not only the
+  composite.** `fhsm-csr keygen --alg` makes an ECDSA P-256 or P-384, RSA-PSS
+  or PKCS#1 v1.5 (3072 bits), Ed25519 or ML-DSA-44/65/87 key pair beside the
+  composite, which stays the default. Every other command of `fhsm-csr`,
+  `fhsm-ca` and `fhsm-sign` reads the algorithm off the key; none takes it as
+  an option. All of these are approved in `nist-approved-only`, so the tools
+  now work with the default profile, and everything they make with them is
+  ordinary PKIX: `tests/pki_tools_algs.sh` has the `openssl` command line check
+  each request, chain, CRL, OCSP answer, raw signature and CMS. Hierarchies
+  may mix: a CA of one algorithm certifies a key of another, the request's
+  proof of possession checked by its own. An ECDSA raw signature is written as
+  DER. The builders in `include/fhsm_pki.h` take any signer; the composite
+  functions are now that with a composite signer, and
+  `tests/pki_tools_characterize.sh` shows the composite output unchanged.
+  See `docs/classic-algorithms-plan.md`.
+
 * **`fhsm-gui`, a desktop interface over the PKI tools** (GTK 4, `make gui`,
   not part of `make all`). Everything `fhsm-token`, `fhsm-csr`, `fhsm-ca` and
   `fhsm-sign` do, through the same functions — the tools were first moved onto

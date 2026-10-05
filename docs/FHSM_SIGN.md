@@ -3,11 +3,14 @@ Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# `fhsm-sign` — detached signatures with a post-quantum composite key
+# `fhsm-sign` — detached signatures with a key held in a PKCS#11 module
 
-Signs arbitrary data with a Composite ML-DSA key held inside a PKCS#11 module,
-and checks such signatures back. The data is streamed, so its size is not
-bounded by memory.
+Signs arbitrary data with a key held inside a PKCS#11 module, and checks such
+signatures back. The key's algorithm is the one it was generated for
+(`fhsm-csr keygen --alg`, see [`FHSM_CSR.md`](FHSM_CSR.md)): the composite
+ML-DSA-65 + Ed25519, ECDSA, RSA-PSS or PKCS#1 v1.5, Ed25519 or ML-DSA.
+`fhsm-sign` takes no algorithm option; it reads the key. The data is streamed
+through the tool, which never holds it.
 
 Separate from `fhsm-csr` and `fhsm-ca` on purpose. Those two build PKI objects
 — requests, certificates, revocation lists — where the structure is dictated by
@@ -67,11 +70,25 @@ record which key or which algorithm produced it**, so whoever verifies has to
 be told, out of band. If you publish one, publish alongside it the key it was
 made with.
 
-That is a deliberate first step, not an oversight. Carrying the metadata is
-what CMS/PKCS#7 is for, and CMS with a composite algorithm needs its
-`SignedData` assembled by hand — OpenSSL cannot build a structure for an
-algorithm it does not implement, the same obstacle the revocation lists ran
-into. It is worth its own change rather than a rushed addition here.
+Carrying that metadata is what CMS is for — see [below](#cms--pkcs7-cms-cms-verify).
+
+### What the bytes are, by algorithm
+
+| Key | The signature file | Checked elsewhere with |
+|---|---|---|
+| composite | 3 373 bytes: ML-DSA-65 then Ed25519 | `fhsm-sign verify` only |
+| ECDSA P-256 / P-384 | DER `Ecdsa-Sig-Value` | `openssl dgst -sha256` / `-sha384 -verify KEY -signature SIG DATA` |
+| RSA-PSS | 384 bytes | `openssl dgst -sha256 -verify KEY -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:32 -sigopt rsa_mgf1_md:sha256 -signature SIG DATA` |
+| RSA PKCS#1 v1.5 | 384 bytes | `openssl dgst -sha256 -verify KEY -signature SIG DATA` |
+| Ed25519 | 64 bytes | `openssl pkeyutl -verify -pubin -inkey KEY -rawin -in DATA -sigfile SIG` |
+| ML-DSA-44 / 65 / 87 | 2 420 / 3 309 / 4 627 bytes | the same `openssl pkeyutl` line |
+
+ECDSA is written as **DER**, though PKCS#11 returns `r || s`: DER is what
+`openssl dgst -verify` and every other verifier read, and a signature only its
+own tool can check is half a signature. `verify` takes DER back and converts
+it for the module. `KEY` above is the public key in PEM, which
+`openssl x509 -in CERT -pubkey -noout` extracts from the key's certificate.
+`tests/pki_tools_algs.sh` runs each of these lines.
 
 ---
 
@@ -102,6 +119,16 @@ proves the update calls are actually feeding the digest.
 Measured on a 40 MiB file: 0.63 s, **8.9 MiB peak resident memory**. The file
 is never held.
 
+**For the other algorithms, FreeHSM holds the input.** It accepts their
+`C_SignUpdate` calls by accumulating the parts and signing at `C_SignFinal`,
+with the same code as the one-shot path — one copy of every rule (PSS
+parameters, the ML-DSA context, ECDSA's encoding) rather than a second
+streaming path for each; the trade is recorded in `src/fhsm_pkcs11.c`. So the
+module's memory bounds the file it can sign raw with those keys. Ed25519 and
+pure ML-DSA are one-shot algorithms by construction, and another module may
+refuse `C_SignUpdate` for them outright. `cms` has neither limit: only a
+digest reaches the module.
+
 ---
 
 ## CMS / PKCS#7 (`cms`, `cms-verify`)
@@ -130,15 +157,26 @@ The output is a **detached** `SignedData` with **signed attributes** —
 
 With `signedAttrs`, the signature covers the attributes — about a hundred
 bytes — rather than the content. The content is only hashed. So a file of any
-size costs one SHA-512 pass and one composite signature, and nothing is held
-in memory. Measured on 20 MiB: 0.31 s, 11.5 MiB peak resident.
+size costs one digest pass and one signature, and nothing is held in memory.
+Measured on 20 MiB with a composite key: 0.31 s, 11.5 MiB peak resident.
+
+The digest is the signature algorithm's own hash where it has one, because a
+verifier hashes the signed attributes with the CMS `digestAlgorithm`: SHA-256
+for ECDSA P-256 and RSA, SHA-384 for P-384, SHA-512 for Ed25519 (RFC 8419),
+ML-DSA and the composite. The data is read before the key or the structure is
+looked at — it may come from a pipe — so `fhsm-sign` computes all three in the
+same pass and keeps the one it needs.
 
 ### What a verifier checks, and in what order
 
 `cms-verify` refuses early and for a stated reason:
 
-1. the `signatureAlgorithm` is the composite OID with parameters absent;
-2. the `messageDigest` attribute equals SHA-512 of the data you supplied;
+1. the `signatureAlgorithm` is one this tool knows, with the parameters that
+   algorithm requires — absent for the composite, ECDSA, Ed25519 and ML-DSA;
+   for RSASSA-PSS exactly the block `fhsm-sign cms` writes; and a key of the
+   matching type in the certificate;
+2. the `messageDigest` attribute equals the digest, under the structure's own
+   `digestAlgorithm`, of the data you supplied;
 3. the signature verifies over the signed attributes **as they appear when
    the structure is re-encoded**.
 
@@ -159,11 +197,21 @@ substitution a guess.
 
 ### Third-party tooling
 
-`openssl cms -cmsout -inform DER -in file.p7s -print` reads the whole
-structure, showing the composite OID as `undefined (1.3.6.1.5.5.7.6.48)` —
-it has no name for an algorithm it does not implement. It cannot verify the
-signature, for the same reason. That is the limitation stated below, not a
-defect in the output.
+For every key but the composite, OpenSSL verifies the structure against the
+data:
+
+```bash
+openssl cms -verify -binary -inform DER -in file.p7s -content file -noverify -out /dev/null
+```
+
+(`-noverify` skips the signer certificate's own chain, which is a separate
+question; drop it and give `-CAfile` to ask that too.)
+
+For a composite one, `openssl cms -cmsout -inform DER -in file.p7s -print`
+reads the whole structure, showing the composite OID as
+`undefined (1.3.6.1.5.5.7.6.48)` — it has no name for an algorithm it does not
+implement. It cannot verify the signature, for the same reason. That is the
+limitation stated below, not a defect in the output.
 
 ---
 

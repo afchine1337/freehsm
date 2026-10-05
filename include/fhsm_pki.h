@@ -37,6 +37,14 @@ extern "C" {
  * is the longest; a 4096-bit RSA key makes 512. */
 #define FHSM_PKI_SIG_MAX 8192u
 
+/* How far before its issuance a certificate's validity begins, in seconds.
+ * A notBefore of exactly now is refused by every verifier whose clock is
+ * behind the CA's, by even a second -- "certificate is not yet valid". Found
+ * 2026-10-05 by tests/pki_tools_algs.sh, which saw a root rejected seconds
+ * after it was made when the VM's clock stepped back. One hour, as Let's
+ * Encrypt backdates; notAfter is still issuance plus the days asked for. */
+#define FHSM_PKI_BACKDATE_SECONDS 3600L
+
 typedef struct {
     const uint8_t *algid; size_t algid_len;   /* signatureAlgorithm, DER        */
     const uint8_t *spki;  size_t spki_len;    /* the signer's own public key,

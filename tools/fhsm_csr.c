@@ -6,7 +6,7 @@
  * fhsm-csr --- certification requests and self-signed roots, with a composite
  *              post-quantum key held in a PKCS#11 module (#112).
  *  Usage :
- *    fhsm-csr keygen --label NAME [--module PATH] [--slot N]
+ *    fhsm-csr keygen --label NAME [--alg ALG] [--module PATH] [--slot N]
  *    fhsm-csr csr    --label NAME --subject DN [--out FILE] [--pem]
  *    fhsm-csr root   --label NAME --subject DN [--days N] [--serial N] ...
  *  The PIN comes from the FHSM_PIN environment variable and from nowhere else.
@@ -54,10 +54,14 @@ static void emit(const uint8_t *der, size_t n, const char *path,
 
 static void usage(void) {
     fprintf(stderr,
-      "fhsm-csr --- composite PQ certification requests and roots via PKCS#11\n\n"
-      "  fhsm-csr keygen --label NAME [--module PATH] [--slot N]\n"
+      "fhsm-csr --- certification requests and roots, with a key held in a PKCS#11 module\n\n"
+      "  fhsm-csr keygen --label NAME [--alg ALG] [--module PATH] [--slot N]\n"
       "  fhsm-csr csr    --label NAME --subject DN [--out FILE] [--pem] ...\n"
       "  fhsm-csr root   --label NAME --subject DN [--days N] [--serial N] ...\n\n"
+      "  --alg ALG       keygen only: composite (the default), ecdsa-p256,\n"
+      "                  ecdsa-p384, rsa-pss, rsa-pkcs1, ed25519, ml-dsa-44,\n"
+      "                  ml-dsa-65, ml-dsa-87. csr and root take no algorithm:\n"
+      "                  they sign with the key's own.\n"
       "  --module PATH   PKCS#11 module (default ./libfreehsm.so)\n"
       "  --slot N        slot to address. Default: the one slot holding a token.\n"
       "  --subject DN    e.g. \"/C=FR/O=Simorgh Labs/CN=example\"\n"
@@ -78,13 +82,14 @@ int main(int argc, char **argv) {
     if (argc < 2) usage();
     const char *cmd = argv[1];
     const char *module = "./libfreehsm.so", *label = NULL, *subject = NULL;
-    const char *out = NULL;
+    const char *out = NULL, *alg_name = NULL;
     int pem = 0, days = 3650; long serial = 1, slot = -1;
 
     for (int i = 2; i < argc; ++i) {
         if      (!strcmp(argv[i],"--module")  && i+1<argc) module  = argv[++i];
         else if (!strcmp(argv[i],"--label")   && i+1<argc) label   = argv[++i];
         else if (!strcmp(argv[i],"--subject") && i+1<argc) subject = argv[++i];
+        else if (!strcmp(argv[i],"--alg")     && i+1<argc) alg_name = argv[++i];
         else if (!strcmp(argv[i],"--out")     && i+1<argc) out     = argv[++i];
         else if (!strcmp(argv[i],"--slot")    && i+1<argc) {
             if (pkiops_parse_slot(argv[++i], &slot, &e)) fail(&e);
@@ -102,6 +107,18 @@ int main(int argc, char **argv) {
     if (!label) usage();
     if ((!strcmp(cmd,"csr") || !strcmp(cmd,"root")) && !subject) usage();
 
+    /* The algorithm is chosen once, with the key, and read off it afterwards:
+     * an --alg on csr or root could only agree with the key or contradict it. */
+    enum pkiops_alg alg = PKIOPS_ALG_COMPOSITE;
+    if (alg_name) {
+        if (strcmp(cmd, "keygen") != 0) {
+            fprintf(stderr, "fhsm-csr: --alg belongs to keygen. %s signs with the key's own\n"
+                            "  algorithm, chosen when the key was generated.\n", cmd);
+            return 1;
+        }
+        if (pkiops_alg_parse(alg_name, &alg, &e)) fail(&e);
+    }
+
     const char *pin = getenv("FHSM_PIN");
     if (!pin || !*pin) {
         fprintf(stderr, "fhsm-csr: FHSM_PIN is not set.\n"); return 1;
@@ -113,10 +130,10 @@ int main(int argc, char **argv) {
 
     if (!strcmp(cmd, "keygen")) {
         pkiops_handle hp = 0, hk = 0;
-        if (pkiops_keygen(s, label, &hp, &hk, &e)) fail(&e);
-        fprintf(stderr, "fhsm-csr: composite key pair \"%s\" created "
+        if (pkiops_keygen_alg(s, label, alg, &hp, &hk, &e)) fail(&e);
+        fprintf(stderr, "fhsm-csr: %s key pair \"%s\" created "
                         "(public %lu, private %lu)\n",
-                label, (unsigned long)hp, (unsigned long)hk);
+                pkiops_alg_name(alg), label, (unsigned long)hp, (unsigned long)hk);
         goto done;
     }
 
