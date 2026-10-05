@@ -121,6 +121,40 @@ int  pkiops_session_user(pkiops_handle slot, const uint8_t *pin, size_t pin_len,
                          pkiops_handle *session, struct p11_err *e);
 void pkiops_session_close(pkiops_handle session);
 
+/* --- algorithms ------------------------------------------------------------
+ *
+ * Chosen once, when a key pair is generated, and read off the key
+ * afterwards: every operation below that signs finds the algorithm itself,
+ * from the key's type, curve or parameter set -- and, for RSA, from the
+ * CKA_ALLOWED_MECHANISMS keygen set, which says PSS or PKCS#1 v1.5. An RSA
+ * key made elsewhere without that attribute signs with PSS. */
+enum pkiops_alg {
+    PKIOPS_ALG_COMPOSITE = 0,       /* ML-DSA-65 + Ed25519, as before      */
+    PKIOPS_ALG_ECDSA_P256,
+    PKIOPS_ALG_ECDSA_P384,
+    PKIOPS_ALG_RSA_PSS,             /* RSA 3072, RSASSA-PSS with SHA-256    */
+    PKIOPS_ALG_RSA_PKCS1,           /* RSA 3072, PKCS#1 v1.5 with SHA-256   */
+    PKIOPS_ALG_ED25519,
+    PKIOPS_ALG_MLDSA44,
+    PKIOPS_ALG_MLDSA65,
+    PKIOPS_ALG_MLDSA87,
+    PKIOPS_ALG_COUNT
+};
+
+/* "ecdsa-p256" and the rest, as the tools take them; NULL out of range. */
+const char *pkiops_alg_name(enum pkiops_alg a);
+/* Every name, comma-separated, for a help text. */
+const char *pkiops_alg_list(void);
+/* The name as typed, or 1 (usage) naming the accepted ones. */
+int pkiops_alg_parse(const char *name, enum pkiops_alg *out, struct p11_err *e);
+/* The digest a CMS made with this algorithm uses: "SHA256", "SHA384" or
+ * "SHA512" -- the signature's own hash where it has one. */
+const char *pkiops_alg_digest(enum pkiops_alg a);
+
+/* The algorithm of the key labelled `label`, from its public half. */
+int pkiops_key_alg(pkiops_handle session, const char *label, enum pkiops_alg *out,
+                   struct p11_err *e);
+
 /* --- keys and requests ---------------------------------------------------- */
 
 /* The key objects a session can see -- public ones always, private ones once
@@ -138,9 +172,17 @@ int pkiops_keys(pkiops_handle session, struct pkiops_key **out, size_t *n,
 int pkiops_keygen(pkiops_handle session, const char *label,
                   pkiops_handle *pub, pkiops_handle *priv, struct p11_err *e);
 
-/* A PKCS#10 request, or a self-signed root, signed by the key `label`. DER
- * goes into `der`; `*der_len` is its capacity on entry and the length on
- * return. */
+/* A key pair for `alg`, both halves on the token, the private one sensitive
+ * and for signing only. RSA keys are 3072 bits. */
+int pkiops_keygen_alg(pkiops_handle session, const char *label, enum pkiops_alg alg,
+                      pkiops_handle *pub, pkiops_handle *priv, struct p11_err *e);
+
+/* A PKCS#10 request, or a self-signed root, signed by the key `label` with
+ * its own algorithm. DER goes into `der`; `*der_len` is its capacity on entry
+ * and the length on return. The public key is built from the standard
+ * attributes -- CKA_EC_PARAMS and CKA_EC_POINT, CKA_MODULUS and
+ * CKA_PUBLIC_EXPONENT, an ML-DSA key's CKA_VALUE -- so any module that
+ * answers them will do. */
 int pkiops_csr(pkiops_handle session, const char *label, const char *subject,
                uint8_t *der, size_t *der_len, struct p11_err *e);
 int pkiops_root(pkiops_handle session, const char *label, const char *subject,
@@ -149,10 +191,17 @@ int pkiops_root(pkiops_handle session, const char *label, const char *subject,
 
 /* --- signing ---------------------------------------------------------------
  *
- * Raw, detached composite signatures over data of any size: begin, feed the
- * data in as many pieces as it takes, end. Reading the data is the caller's
- * business -- a file, a pipe, a buffer -- so nothing here holds the message
- * whole, and the module sees the same bytes however they arrive.
+ * Raw, detached signatures over data of any size, with the key's own
+ * algorithm: begin, feed the data in as many pieces as it takes, end.
+ * Reading the data is the caller's business -- a file, a pipe, a buffer -- so
+ * nothing here holds the message whole, and the module sees the same bytes
+ * however they arrive. (Ed25519 and pure ML-DSA are one-shot algorithms: a
+ * module streams them only by holding the parts, as FreeHSM does.)
+ *
+ * An ECDSA signature is returned, and expected back, as DER -- what OpenSSL
+ * and every other verifier reads -- though the module deals in r || s.
+ *
+ * One operation at a time per process.
  *
  * A verification that runs and finds the signature does not match is not an
  * error: pkiops_verify_end returns 0 and sets *valid to 0. Only a failure to
@@ -173,23 +222,42 @@ int pkiops_verify_end(pkiops_handle session, const uint8_t *sig, size_t sig_len,
 
 /* --- CMS -------------------------------------------------------------------
  *
- * A detached RFC 5652 SignedData over the SHA-512 of the data, carrying the
- * signer's certificate. The data is hashed by the caller -- pkiops_sha512_*
- * stream it -- so a file of any size costs one pass. */
+ * A detached RFC 5652 SignedData over a digest of the data, carrying the
+ * signer's certificate. The data is hashed by the caller -- pkiops_hash_*
+ * stream it -- so a file of any size costs one pass. Which digest: to sign,
+ * pkiops_alg_digest of the key's algorithm; to check, pkiops_cms_digest of
+ * the structure. pkiops_sha512_* remain, for SHA-512 alone. */
 struct pkiops_sha512;                    /* opaque */
 struct pkiops_sha512 *pkiops_sha512_begin(struct p11_err *e);
 int  pkiops_sha512_update(struct pkiops_sha512 *h, const uint8_t *data, size_t len,
                           struct p11_err *e);
 int  pkiops_sha512_end(struct pkiops_sha512 *h, uint8_t out[64], struct p11_err *e);
 
+struct pkiops_hash;                      /* opaque */
+/* `name` is "SHA256", "SHA384" or "SHA512". */
+struct pkiops_hash *pkiops_hash_begin(const char *name, struct p11_err *e);
+int  pkiops_hash_update(struct pkiops_hash *h, const uint8_t *data, size_t len,
+                        struct p11_err *e);
+/* Frees `h` whatever happens. */
+int  pkiops_hash_end(struct pkiops_hash *h, uint8_t out[64], size_t *out_len,
+                     struct p11_err *e);
+
+/* Signed with the key `label`'s algorithm; `digest` must be its
+ * pkiops_alg_digest. */
 int pkiops_cms_sign(pkiops_handle session, const char *label,
-                    const uint8_t *cert, size_t cert_len, const uint8_t digest[64],
+                    const uint8_t *cert, size_t cert_len,
+                    const uint8_t *digest, size_t digest_len,
                     uint8_t *der, size_t *der_len, struct p11_err *e);
+
+/* The digest to compute over the data before checking `cms`, in static
+ * storage: 0, or -1 when the structure is not one this code can read. */
+int pkiops_cms_digest(const uint8_t *cms, size_t cms_len, const char **name);
 
 /* Needs no module and no PIN: the signer's certificate is inside. *verdict is
  * 1 when it verifies, 0 when it does not match the data, and -1 when the
- * structure is not a composite CMS this code can read. */
-int pkiops_cms_verify(const uint8_t *cms, size_t cms_len, const uint8_t digest[64],
+ * structure is not a CMS this code can read. */
+int pkiops_cms_verify(const uint8_t *cms, size_t cms_len,
+                      const uint8_t *digest, size_t digest_len,
                       int *verdict, struct p11_err *e);
 
 /* --- the certification authority -------------------------------------------

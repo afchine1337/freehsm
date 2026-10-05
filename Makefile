@@ -341,6 +341,11 @@ tools/fhsm-token: tools/fhsm_token.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.
 tests/test_pkiops: tests/test_pkiops.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
 	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
+# Every algorithm through the token, each artefact checked by OpenSSL
+# (docs/classic-algorithms-plan.md, stage 2).
+tests/test_pkiops_algs: tests/test_pkiops_algs.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+
 # fhsm-gui --- the desktop interface over pkiops (docs/fhsm-gui-plan.md).
 # Not part of `all`: building the module, the tools and the tests must not
 # need GTK, and neither must CI. The GTK flags go in as -isystem so that
@@ -1077,6 +1082,7 @@ TEST_BINS = \
 	tests/test_kw_iv \
 	tests/test_login_conflicts \
 	tests/test_pkiops \
+	tests/test_pkiops_algs \
 	tests/test_secure_heap_shared
 
 .PHONY: test-bins
@@ -1206,6 +1212,8 @@ tests: $(TEST_BINS) tools/fhsm-token
 		$(TEST_LD) ./tests/test_fork_child
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_pkiops
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_pkiops_algs
 # A copy under another name, so the loader maps a second instance -- as it
 # would a second build.
 	d=$$(mktemp -d) && cp $(LIB) $$d/libfreehsm-copy.so && \

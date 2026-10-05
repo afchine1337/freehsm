@@ -612,7 +612,7 @@ static void run_cms_sign(struct job *j) {
     if ((j->rc = read_der(j->cert_path, &cert, &cert_len, &j->e)) != 0) return;
     if ((j->rc = hash_file(j->data_path, dg, &j->e)) == 0) {
         uint8_t *der = g_malloc(n);
-        j->rc = pkiops_cms_sign(j->session, j->label, cert, cert_len, dg, der, &n, &j->e);
+        j->rc = pkiops_cms_sign(j->session, j->label, cert, cert_len, dg, 64, der, &n, &j->e);
         if (!j->rc) j->rc = write_out(j->out_path, der, n, 0, NULL, &j->e);
         j->out_len = n;
         g_free(der);
@@ -626,7 +626,7 @@ static void run_cms_verify(struct job *j) {
     uint8_t dg[64];
     if ((j->rc = read_der(j->in_path, &cms, &cms_len, &j->e)) != 0) return;
     if ((j->rc = hash_file(j->data_path, dg, &j->e)) == 0)
-        j->rc = pkiops_cms_verify(cms, cms_len, dg, &j->verdict, &j->e);
+        j->rc = pkiops_cms_verify(cms, cms_len, dg, 64, &j->verdict, &j->e);
     g_free(cms);
 }
 
@@ -2618,9 +2618,26 @@ static void activate(GtkApplication *app, gpointer ud) {
     gtk_window_present(GTK_WINDOW(A.win));
 }
 
+/* app.quit: Ctrl+Q, and how tests/gui_smoke.sh ends the program from outside
+ * (`gapplication action com.chaharsou.FhsmGui quit`). It closes the window
+ * the way its close button does, so it goes through on_close: refused while
+ * a call is running, and the session and module closed otherwise. */
+static void on_quit(GSimpleAction *a, GVariant *p, gpointer app) {
+    (void)a; (void)p;
+    if (A.win) gtk_window_close(GTK_WINDOW(A.win));
+    else       g_application_quit(G_APPLICATION(app));   /* asked before the window exists */
+}
+
 int main(int argc, char **argv) {
     GtkApplication *app = gtk_application_new("com.chaharsou.FhsmGui",
                                               G_APPLICATION_DEFAULT_FLAGS);
+    static const GActionEntry actions[] = {
+        { .name = "quit", .activate = on_quit },
+    };
+    g_action_map_add_action_entries(G_ACTION_MAP(app), actions,
+                                    G_N_ELEMENTS(actions), app);
+    const char *const quit_accels[] = { "<Control>q", NULL };
+    gtk_application_set_accels_for_action(app, "app.quit", quit_accels);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
     int rc = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);

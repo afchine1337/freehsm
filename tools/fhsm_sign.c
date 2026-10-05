@@ -285,7 +285,7 @@ static int cmd_cms(int argc, char **argv) {
 
     pkiops_handle s = open_session(o.module, o.slot);
     static uint8_t der[262144]; size_t n = sizeof der;
-    if (pkiops_cms_sign(s, o.label, cert, certlen, dg, der, &n, &e)) fail(&e);
+    if (pkiops_cms_sign(s, o.label, cert, certlen, dg, 64, der, &n, &e)) fail(&e);
 
     FILE *out = o.out ? fopen(o.out, "wb") : stdout;
     if (!out) { fprintf(stderr, "fhsm-sign: cannot write %s: %s\n", o.out, strerror(errno)); return 2; }
@@ -316,7 +316,7 @@ static int cmd_cms_verify(int argc, char **argv) {
     /* No module, no token, no PIN. The signer's certificate travels inside
      * the structure, which is what CMS is for. */
     int verdict = 0;
-    if (pkiops_cms_verify(cms, cmslen, dg, &verdict, &e)) fail(&e);
+    if (pkiops_cms_verify(cms, cmslen, dg, 64, &verdict, &e)) fail(&e);
     if (verdict == 0) {
         fprintf(stderr, "fhsm-sign: the CMS does not match this data.\n");
         return 4;
