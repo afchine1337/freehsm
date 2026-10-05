@@ -30,6 +30,7 @@
 #include <openssl/core_names.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
+#include <openssl/cms.h>
 #include <openssl/ocsp.h>
 #include <openssl/rand.h>
 #include <openssl/rsa.h>
@@ -321,6 +322,48 @@ int main(void) {
            == FHSM_RV_SIGNATURE_INVALID);
     }
 
+    printf("\n[CMS: each root signs data, fhsm_pki checks it, so does OpenSSL]\n");
+    for (size_t i = 0; i < N_ALGS; i++) {
+        if (!rx[i]) { ck("precondition", 0); continue; }
+        static const char data[] = "the data, which only the digest reaches";
+        /* The CMS digest is the signature's own hash where it has one, and
+         * SHA-512 for Ed25519 (RFC 8419) and ML-DSA. */
+        const char *dname = ALGS[i].md ? ALGS[i].md : "SHA512";
+        uint8_t dg[64]; unsigned int dl = 0;
+        EVP_MD *md = EVP_MD_fetch(NULL, dname, NULL);
+        int ok = md && EVP_Digest(data, sizeof data - 1, dg, &dl, md, NULL) == 1;
+        EVP_MD_free(md);
+        static uint8_t cms[32768]; size_t cl = sizeof cms;
+        ok = ok && fhsm_pki_cms(&s[i], dname, root[i], root_len[i], dg, dl, cms, &cl)
+                   == FHSM_RV_OK;
+        char what[96];
+        snprintf(what, sizeof what, "%s: CMS built", ALGS[i].name);
+        ck(what, ok);
+        if (!ok) continue;
+
+        const char *found = NULL;
+        ck("  and fhsm_pki_cms_digest names the digest it was made with",
+           fhsm_pki_cms_digest(cms, cl, &found) == FHSM_RV_OK
+           && found && !strcmp(found, dname));
+        ck("  fhsm_pki_cms_verify accepts it",
+           fhsm_pki_cms_verify(cms, cl, dg, dl) == FHSM_RV_OK);
+        dg[0] ^= 1;
+        ck("  and refuses it for other data (CKR_SIGNATURE_INVALID)",
+           fhsm_pki_cms_verify(cms, cl, dg, dl) == FHSM_RV_SIGNATURE_INVALID);
+        dg[0] ^= 1;
+
+        /* OpenSSL's CMS_verify, with the data itself. The signer certificate's
+         * own chain is not the question here -- a root's keyUsage does not
+         * include digitalSignature -- only the signature and the content. */
+        const uint8_t *q = cms;
+        CMS_ContentInfo *ci = d2i_CMS_ContentInfo(NULL, &q, (long)cl);
+        BIO *dc = BIO_new_mem_buf(data, (int)(sizeof data - 1));
+        int v = ci && dc && CMS_verify(ci, NULL, NULL, dc, NULL,
+                                       CMS_BINARY | CMS_NO_SIGNER_CERT_VERIFY) == 1;
+        BIO_free(dc); CMS_ContentInfo_free(ci);
+        ck("  OpenSSL's CMS_verify accepts it, against the data", v);
+    }
+
     printf("\n[mixed hierarchies, with the composite]\n");
     {
         static uint8_t cpriv[FHSM_COMPOSITE_PRIV_MAX], cpub[FHSM_COMPOSITE_PUB_MAX];
@@ -366,6 +409,19 @@ int main(void) {
             X509_free(x);
         }
         ck("a composite CA certifies an ECDSA key, its proof checked by OpenSSL", ok);
+
+        /* A composite CMS through the generic check: it must reach the
+         * composite verifier and pass, as fhsm_composite_cms_verify would. */
+        uint8_t dg[64]; unsigned int dl = 0;
+        static const char data[] = "composite";
+        EVP_MD *md = EVP_MD_fetch(NULL, "SHA512", NULL);
+        ok = md && EVP_Digest(data, sizeof data - 1, dg, &dl, md, NULL) == 1;
+        EVP_MD_free(md);
+        static uint8_t cms[32768]; size_t cml = sizeof cms;
+        ok = ok && fhsm_composite_cms(C, croot, crl, dg, dl, csign, &cs, cms, &cml)
+                   == FHSM_RV_OK
+                && fhsm_pki_cms_verify(cms, cml, dg, dl) == FHSM_RV_OK;
+        ck("a composite CMS passes fhsm_pki_cms_verify", ok);
     }
 
     for (size_t i = 0; i < N_ALGS; i++) { X509_free(rx[i]); EVP_PKEY_free(k[i]); }

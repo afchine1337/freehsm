@@ -117,6 +117,39 @@ fhsm_rv_t fhsm_pki_ocsp(const fhsm_pki_signer_t *s,
                          const uint8_t *exts, size_t exts_len,
                          uint8_t *out, size_t *out_len);
 
+/* --- CMS ------------------------------------------------------------------
+ *
+ * A detached RFC 5652 SignedData over a digest the caller computed, carrying
+ * the signer's certificate, as fhsm_composite_cms makes for the composite.
+ *
+ * `digest_name` names the digest -- "SHA256", "SHA384" or "SHA512" -- and it
+ * must be the hash the signature algorithm itself uses, where it uses one: a
+ * verifier hashes the signed attributes with the CMS digestAlgorithm, so
+ * ecdsa-with-SHA256 needs SHA256. SHA-256 for P-256 and RSA, SHA-384 for
+ * P-384, SHA-512 for Ed25519 (RFC 8419), ML-DSA and the composite. */
+fhsm_rv_t fhsm_pki_cms(const fhsm_pki_signer_t *s, const char *digest_name,
+                        const uint8_t *cert, size_t cert_len,
+                        const uint8_t *digest, size_t digest_len,
+                        uint8_t *out, size_t *out_len);
+
+/* Which digest to compute over the data before checking `cms`: the name of
+ * its digestAlgorithm, in static storage. So a caller can hash the data in
+ * one pass without knowing in advance what signed it. */
+fhsm_rv_t fhsm_pki_cms_digest(const uint8_t *cms, size_t cms_len, const char **name);
+
+/* Check a detached CMS against the digest the caller computed with the
+ * function fhsm_pki_cms_digest named. Needs no token and no key: the
+ * signer's certificate is inside. A composite CMS goes to
+ * fhsm_composite_cms_verify, unchanged; the others are checked here, over the
+ * signed attributes as they appear when the structure is re-encoded.
+ *
+ * FHSM_RV_OK, FHSM_RV_SIGNATURE_INVALID for a signature or a digest that does
+ * not match, FHSM_RV_ARGUMENTS_BAD for a structure this cannot read -- kept
+ * apart as fhsm_composite_cms_verify keeps them: one means the data changed,
+ * the other that the file is not what was expected. */
+fhsm_rv_t fhsm_pki_cms_verify(const uint8_t *cms, size_t cms_len,
+                               const uint8_t *digest, size_t digest_len);
+
 #ifdef __cplusplus
 }
 #endif

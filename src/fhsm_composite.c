@@ -2358,19 +2358,25 @@ out:
     return rv;
 }
 
-fhsm_rv_t fhsm_composite_cms(fhsm_composite_alg_t alg,
-                              const uint8_t *cert, size_t cert_len,
-                              const uint8_t *digest, size_t digest_len,
-                              fhsm_composite_sign_cb sign, void *sign_ctx,
-                              uint8_t *out, size_t *out_len)
+fhsm_rv_t fhsm_pki_cms(const fhsm_pki_signer_t *s, const char *digest_name,
+                        const uint8_t *cert, size_t cert_len,
+                        const uint8_t *digest, size_t digest_len,
+                        uint8_t *out, size_t *out_len)
 {
-    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
-        || !cert || !digest || !sign || !out || !out_len)
+    if (!signer_ok(s) || !digest_name || !cert || !digest || !out || !out_len)
         return FHSM_RV_ARGUMENTS_BAD;
-    /* The digest must be the algorithm's pre-hash length. A shorter one is a
+    /* The digest must be the named function's length. A shorter one is a
      * caller who hashed with something else, and the messageDigest attribute
      * would then attest to a digest no verifier recomputes. */
-    if (digest_len != fhsm_composite_ph_len(alg)) return FHSM_RV_ARGUMENTS_BAD;
+    int dnid = NID_undef;
+    {
+        EVP_MD *md = EVP_MD_fetch(NULL, digest_name, NULL);
+        int size = md ? EVP_MD_get_size(md) : -1;
+        dnid = md ? EVP_MD_get_type(md) : NID_undef;
+        EVP_MD_free(md);
+        if (size <= 0 || (size_t)size != digest_len || dnid == NID_undef)
+            return FHSM_RV_ARGUMENTS_BAD;
+    }
 
     fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
     X509 *x = NULL;
@@ -2388,12 +2394,12 @@ fhsm_rv_t fhsm_composite_cms(fhsm_composite_alg_t alg,
     /* The signature covers the attributes, not the content -- which is why a
      * file of any size costs one digest pass. RFC 5652 §5.4: the SET OF
      * encoding is what is signed, and that is exactly what
-     * i2d_ASN1_SET_OF_X509_ATTRIBUTE just produced. */
-    sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
+     * cms_signed_attrs just produced. */
+    sig = OPENSSL_malloc(FHSM_PKI_SIG_MAX);
     if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
-    size_t slen = FHSM_COMPOSITE_SIG_MAX;
+    size_t slen = FHSM_PKI_SIG_MAX;
     /* cppcheck-suppress redundantAssignment ; error default set before each step, overwritten by the step: the pattern this file uses throughout */
-    rv = sign(sign_ctx, attrs, (size_t)n_attrs, sig, &slen);
+    rv = s->sign(s->sign_ctx, attrs, (size_t)n_attrs, sig, &slen);
     if (rv != FHSM_RV_OK) goto out;
     rv = FHSM_RV_FUNCTION_FAILED;
 
@@ -2402,14 +2408,17 @@ fhsm_rv_t fhsm_composite_cms(fhsm_composite_alg_t alg,
     n_cert = i2d_X509(x, &d_cert);
     if (n_iss <= 0 || n_ser <= 0 || n_cert <= 0) goto out;
 
-    /* SHA-512 as the digestAlgorithm, which is the composite pre-hash: a
-     * verifier recomputing the messageDigest has to use the same function,
-     * and this field is where it learns which. */
+    /* The digestAlgorithm: a verifier recomputing the messageDigest has to use
+     * the same function, and this field is where it learns which. It is also
+     * the hash a verifier applies to the signed attributes for a signature
+     * algorithm that hashes -- so for ECDSA and RSA it must be the hash the
+     * signature algorithm names, which the caller is responsible for.
+     * Parameters absent (RFC 5754 2), as they always were for SHA-512. */
     uint8_t digalg[16];
     {
         X509_ALGOR *a = X509_ALGOR_new();
         if (!a) { rv = FHSM_RV_HOST_MEMORY; goto out; }
-        int okalg = X509_ALGOR_set0(a, OBJ_nid2obj(NID_sha512), V_ASN1_UNDEF, NULL);
+        int okalg = X509_ALGOR_set0(a, OBJ_nid2obj(dnid), V_ASN1_UNDEF, NULL);
         uint8_t *d = NULL; int n = okalg ? i2d_X509_ALGOR(a, &d) : -1;
         if (n > 0 && (size_t)n <= sizeof digalg) memcpy(digalg, d, (size_t)n);
         OPENSSL_free(d); X509_ALGOR_free(a);
@@ -2431,8 +2440,7 @@ fhsm_rv_t fhsm_composite_cms(fhsm_composite_alg_t alg,
                                             d_ser, (size_t)n_ser,
                                             digalg, (size_t)n,
                                             attrs, (size_t)n_attrs,
-                                            ALGID_MLDSA65_ED25519,
-                                            sizeof ALGID_MLDSA65_ED25519,
+                                            s->algid, s->algid_len,
                                             sig, slen, si, &si_len);
         if (rv == FHSM_RV_OK)
             rv = fhsm_composite_cms_wrap(digalg, (size_t)n, certs, cs_total,
@@ -2442,10 +2450,28 @@ fhsm_rv_t fhsm_composite_cms(fhsm_composite_alg_t alg,
 out:
     OPENSSL_free(attrs); OPENSSL_free(d_iss); OPENSSL_free(d_ser);
     OPENSSL_free(d_cert); OPENSSL_free(si);
-    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
+    if (sig) { OPENSSL_cleanse(sig, FHSM_PKI_SIG_MAX); OPENSSL_free(sig); }
     X509_free(x);
     return rv;
 }
+
+fhsm_rv_t fhsm_composite_cms(fhsm_composite_alg_t alg,
+                              const uint8_t *cert, size_t cert_len,
+                              const uint8_t *digest, size_t digest_len,
+                              fhsm_composite_sign_cb sign, void *sign_ctx,
+                              uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+        || !cert || !digest || !sign || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (digest_len != fhsm_composite_ph_len(alg)) return FHSM_RV_ARGUMENTS_BAD;
+    /* SHA-512: the composite pre-hash. */
+    fhsm_pki_signer_t s = { ALGID_MLDSA65_ED25519, sizeof ALGID_MLDSA65_ED25519,
+                            NULL, 0, sign, sign_ctx };
+    return fhsm_pki_cms(&s, "SHA512", cert, cert_len, digest, digest_len,
+                        out, out_len);
+}
+
 
 /* ---------------------------------------------------------------------------
  * A minimal DER reader, for reaching the signed attributes inside a CMS.
@@ -2692,5 +2718,198 @@ fhsm_rv_t fhsm_pki_ecdsa_raw_to_der(const uint8_t *rs, size_t rs_len,
     }
 out:
     BN_free(r); BN_free(s); ECDSA_SIG_free(sig);
+    return rv;
+}
+
+/* ===========================================================================
+ * CMS for any signer: which digest to compute, and the check (fhsm_pki.h).
+ * ========================================================================= */
+#include <openssl/rsa.h>
+
+/* One SignerInfo, from a structure parsed whole and exactly. */
+static CMS_ContentInfo *cms_one_signer(const uint8_t *cms, size_t cms_len,
+                                       CMS_SignerInfo **si)
+{
+    const uint8_t *p = cms;
+    CMS_ContentInfo *ci = d2i_CMS_ContentInfo(NULL, &p, (long)cms_len);
+    if (!ci || (size_t)(p - cms) != cms_len) { CMS_ContentInfo_free(ci); return NULL; }
+    STACK_OF(CMS_SignerInfo) *sis = CMS_get0_SignerInfos(ci);
+    if (sk_CMS_SignerInfo_num(sis) != 1) { CMS_ContentInfo_free(ci); return NULL; }
+    *si = sk_CMS_SignerInfo_value(sis, 0);
+    return ci;
+}
+
+static const char *cms_digest_name(CMS_SignerInfo *si)
+{
+    X509_ALGOR *da = NULL;
+    CMS_SignerInfo_get0_algs(si, NULL, NULL, &da, NULL);
+    const ASN1_OBJECT *o = NULL; int pt = 0; const void *pv = NULL;
+    if (!da) return NULL;
+    X509_ALGOR_get0(&o, &pt, &pv, da);
+    switch (OBJ_obj2nid(o)) {
+    case NID_sha256: return "SHA256";
+    case NID_sha384: return "SHA384";
+    case NID_sha512: return "SHA512";
+    default:         return NULL;
+    }
+}
+
+fhsm_rv_t fhsm_pki_cms_digest(const uint8_t *cms, size_t cms_len, const char **name)
+{
+    if (!cms || !name) return FHSM_RV_ARGUMENTS_BAD;
+    CMS_SignerInfo *si = NULL;
+    CMS_ContentInfo *ci = cms_one_signer(cms, cms_len, &si);
+    if (!ci) return FHSM_RV_ARGUMENTS_BAD;
+    *name = cms_digest_name(si);
+    CMS_ContentInfo_free(ci);
+    return *name ? FHSM_RV_OK : FHSM_RV_ARGUMENTS_BAD;
+}
+
+/* The signature over the signed attributes, for the algorithms other than the
+ * composite. Each is told apart by its OID, with what it implies checked
+ * rather than assumed: the key's type, and the parameters -- absent for ECDSA,
+ * Ed25519 and ML-DSA; the exact block fhsm_pki writes for RSASSA-PSS, since a
+ * PSS signature under other parameters is not one this code made or can
+ * vouch for. FHSM_RV_ARGUMENTS_BAD for a combination it does not recognise,
+ * FHSM_RV_SIGNATURE_INVALID for one it does and that does not verify. */
+static fhsm_rv_t classic_verify(EVP_PKEY *k, const X509_ALGOR *sa, const char *digest_name,
+                                const uint8_t *msg, size_t n,
+                                const uint8_t *sig, size_t sl)
+{
+    const ASN1_OBJECT *o = NULL; int pt = 0; const void *pv = NULL;
+    X509_ALGOR_get0(&o, &pt, &pv, sa);
+    char oid[64] = ""; OBJ_obj2txt(oid, sizeof oid, o, 1);
+
+    const char *md = NULL, *keytype = NULL;
+    int pss = 0, params_absent = 1;
+    if      (!strcmp(oid, "1.2.840.10045.4.3.2"))   { md = "SHA256"; keytype = "EC"; }
+    else if (!strcmp(oid, "1.2.840.10045.4.3.3"))   { md = "SHA384"; keytype = "EC"; }
+    else if (!strcmp(oid, "1.2.840.113549.1.1.11")) { md = "SHA256"; keytype = "RSA"; params_absent = 0; }
+    else if (!strcmp(oid, "1.2.840.113549.1.1.1"))  { md = digest_name; keytype = "RSA"; params_absent = 0; }
+    else if (!strcmp(oid, "1.2.840.113549.1.1.10")) {
+        uint8_t *d = NULL; int dl = i2d_X509_ALGOR(sa, &d);
+        int same = dl == (int)sizeof ALGID_RSA_PSS_SHA256
+                && memcmp(d, ALGID_RSA_PSS_SHA256, (size_t)dl) == 0;
+        OPENSSL_free(d);
+        if (!same) return FHSM_RV_ARGUMENTS_BAD;
+        md = "SHA256"; keytype = "RSA"; pss = 1; params_absent = 0;
+    }
+    else if (!strcmp(oid, "1.3.101.112"))             keytype = "ED25519";
+    else if (!strcmp(oid, "2.16.840.1.101.3.4.3.17")) keytype = "ML-DSA-44";
+    else if (!strcmp(oid, "2.16.840.1.101.3.4.3.18")) keytype = "ML-DSA-65";
+    else if (!strcmp(oid, "2.16.840.1.101.3.4.3.19")) keytype = "ML-DSA-87";
+    else return FHSM_RV_ARGUMENTS_BAD;
+
+    if (params_absent && pt != V_ASN1_UNDEF) return FHSM_RV_ARGUMENTS_BAD;
+    if (!pss && !params_absent && pt != V_ASN1_NULL && pt != V_ASN1_UNDEF)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (!EVP_PKEY_is_a(k, keytype)) return FHSM_RV_ARGUMENTS_BAD;
+    /* A hashing algorithm whose hash is not the CMS digestAlgorithm would be
+     * verified by one party with one function and by another with the other. */
+    if (md && digest_name && strcmp(md, digest_name) != 0) return FHSM_RV_ARGUMENTS_BAD;
+
+    ERR_set_mark();
+    EVP_MD_CTX *m = EVP_MD_CTX_new();
+    EVP_PKEY_CTX *pc = NULL;
+    int ok = m && EVP_DigestVerifyInit_ex(m, &pc, md, NULL, NULL, k, NULL) == 1;
+    if (ok && pss)
+        ok = EVP_PKEY_CTX_set_rsa_padding(pc, RSA_PKCS1_PSS_PADDING) == 1
+          && EVP_PKEY_CTX_set_rsa_pss_saltlen(pc, 32) == 1
+          && EVP_PKEY_CTX_set_rsa_mgf1_md_name(pc, "SHA256", NULL) == 1;
+    int r = ok ? EVP_DigestVerify(m, sig, sl, msg, n) : -1;
+    EVP_MD_CTX_free(m);
+    ERR_pop_to_mark();
+    if (!ok) return FHSM_RV_FUNCTION_FAILED;
+    return r == 1 ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
+}
+
+fhsm_rv_t fhsm_pki_cms_verify(const uint8_t *cms, size_t cms_len,
+                               const uint8_t *digest, size_t digest_len)
+{
+    if (!cms || !digest) return FHSM_RV_ARGUMENTS_BAD;
+    CMS_SignerInfo *si = NULL;
+    CMS_ContentInfo *ci = cms_one_signer(cms, cms_len, &si);
+    if (!ci) return FHSM_RV_ARGUMENTS_BAD;
+
+    fhsm_rv_t rv = FHSM_RV_ARGUMENTS_BAD;
+    STACK_OF(X509) *certs = NULL;
+    uint8_t *re = NULL, *attrs = NULL;
+    X509_ALGOR *sa = NULL;
+    const char *dn = NULL;
+    CMS_SignerInfo_get0_algs(si, NULL, NULL, NULL, &sa);
+    if (!sa) goto out;
+    {
+        const ASN1_OBJECT *o = NULL; int pt = 0; const void *pv = NULL;
+        X509_ALGOR_get0(&o, &pt, &pv, sa);
+        char b[128] = ""; OBJ_obj2txt(b, sizeof b, o, 1);
+        if (strcmp(b, FHSM_COMPOSITE_OID_MLDSA65_ED25519) == 0) {
+            /* The composite keeps its own verifier, unchanged. */
+            CMS_ContentInfo_free(ci);
+            return fhsm_composite_cms_verify(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                             cms, cms_len, digest, digest_len);
+        }
+    }
+
+    /* The digest the caller computed must be the one the structure names. */
+    dn = cms_digest_name(si);
+    {
+        EVP_MD *md = dn ? EVP_MD_fetch(NULL, dn, NULL) : NULL;
+        int size = md ? EVP_MD_get_size(md) : -1;
+        EVP_MD_free(md);
+        if (size <= 0 || (size_t)size != digest_len) goto out;
+    }
+
+    /* The messageDigest must agree with the content the caller hashed: the
+     * signature itself covers only the attributes. */
+    {
+        int loc = CMS_signed_get_attr_by_NID(si, NID_pkcs9_messageDigest, -1);
+        if (loc < 0) goto out;
+        X509_ATTRIBUTE *at = CMS_signed_get_attr(si, loc);
+        ASN1_TYPE *v = at ? X509_ATTRIBUTE_get0_type(at, 0) : NULL;
+        if (!v || v->type != V_ASN1_OCTET_STRING) goto out;
+        if ((size_t)ASN1_STRING_length(v->value.octet_string) != digest_len
+            || memcmp(ASN1_STRING_get0_data(v->value.octet_string), digest, digest_len) != 0) {
+            rv = FHSM_RV_SIGNATURE_INVALID; goto out;
+        }
+    }
+
+    /* The signer's key, from the one certificate the structure carries, and
+     * that certificate must be the one the SignerInfo names. */
+    {
+        certs = CMS_get1_certs(ci);
+        if (!certs || sk_X509_num(certs) != 1) goto out;
+        X509 *x = sk_X509_value(certs, 0);
+        if (CMS_SignerInfo_cert_cmp(si, x) != 0) goto out;
+        ERR_set_mark();
+        EVP_PKEY *k = X509_get0_pubkey(x);
+        ERR_pop_to_mark();
+        if (!k) goto out;
+
+        /* Over the attributes as they appear when the structure is
+         * re-encoded -- verifying over the bytes we were given would only
+         * prove we agree with ourselves. */
+        int re_n = i2d_CMS_ContentInfo(ci, &re);
+        if (re_n <= 0) goto out;
+        fhsm_tlv_t s2, at;
+        int found = 0;
+        if (cms_find_signerinfo(re, (size_t)re_n, &s2))
+            for (size_t i = 0; tlv_child(&s2, i, &at); i++)
+                if (at.tag == 0xA0) { found = 1; break; }
+        if (!found) goto out;
+        attrs = OPENSSL_malloc(at.len);
+        if (!attrs) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+        memcpy(attrs, at.p, at.len);
+        attrs[0] = 0x31;                     /* [0] IMPLICIT -> SET OF */
+
+        ASN1_OCTET_STRING *sg = CMS_SignerInfo_get0_signature(si);
+        if (!sg) goto out;
+        rv = classic_verify(k, sa, dn, attrs, at.len,
+                            ASN1_STRING_get0_data((const ASN1_STRING *)sg),
+                            (size_t)ASN1_STRING_length((const ASN1_STRING *)sg));
+    }
+out:
+    OPENSSL_free(re); OPENSSL_free(attrs);
+    sk_X509_pop_free(certs, X509_free);
+    CMS_ContentInfo_free(ci);
     return rv;
 }
