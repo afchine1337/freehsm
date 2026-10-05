@@ -81,7 +81,7 @@ static struct {
     GtkWidget *slots_box;
     GtkWidget *pin_entry, *login_btn, *logout_btn;
     GtkWidget *init_box, *init_label, *init_so, *init_so2, *init_user, *init_user2;
-    GtkWidget *keys_box, *label_entry, *keygen_btn;
+    GtkWidget *keys_box, *label_entry, *keygen_btn, *keygen_alg;
     GtkWidget *log_view, *status;
 
     /* The Certificates tab. */
@@ -110,7 +110,7 @@ static struct {
     GtkWidget *page_certs, *page_revocation, *page_op_ca, *page_op_issue, *page_op_revoke;
     GtkWidget *op_key_drop, *op_ca_btn, *op_db_btn, *op_crl_btn, *op_urls_view;
     GtkWidget *op_crl_status, *op_issue_banner, *op_ca_signing_box;
-    GtkWidget *op_new_label, *op_new_subject, *op_new_days;
+    GtkWidget *op_new_label, *op_new_subject, *op_new_days, *op_new_alg;
     GtkWidget *op_csr_btn, *op_subject, *op_san, *op_profile, *op_days;
     GtkWidget *op_serial, *op_reason, *op_crl_days;
     char *op_ca_path, *op_db_path, *op_crl_path, *op_csr_path;
@@ -274,6 +274,7 @@ struct job {
     /* signing: the data, and the signature, CMS or certificate read with it */
     char *data_path, *in_path, *cert_path;
     int operator_mode;              /* apply operator mode's refusals */
+    int alg;                        /* enum pkiops_alg, for a key pair */
     /* results */
     int rc;
     struct p11_err e;
@@ -525,13 +526,13 @@ static void run_token_init(struct job *j) {
 
 #define CHUNK (1u << 20)        /* fhsm-sign's block: 1 MiB */
 
-enum feed { FEED_SIGN, FEED_VERIFY, FEED_SHA512 };
+enum feed { FEED_SIGN, FEED_VERIFY, FEED_HASH };
 
 /* The whole file, in blocks, to the module or to the hash -- one function for
  * all three, as in fhsm-sign, so signing and verifying cannot disagree about
  * what they consumed. Nothing holds the file whole. */
 static int feed_file(const char *path, enum feed how, pkiops_handle s,
-                     struct pkiops_sha512 *h, struct p11_err *e) {
+                     struct pkiops_hash *h, struct p11_err *e) {
     FILE *f = fopen(path, "rb");
     if (!f) return err_set(e, 2, "cannot read %s: %s\n", path, g_strerror(errno));
     uint8_t *buf = g_malloc(CHUNK);
@@ -541,7 +542,7 @@ static int feed_file(const char *path, enum feed how, pkiops_handle s,
         if (n) {
             rc = how == FEED_SIGN   ? pkiops_sign_update(s, buf, n, e)
                : how == FEED_VERIFY ? pkiops_verify_update(s, buf, n, e)
-               :                      pkiops_sha512_update(h, buf, n, e);
+               :                      pkiops_hash_update(h, buf, n, e);
             if (rc) break;
         }
         if (n < CHUNK) {
@@ -554,14 +555,15 @@ static int feed_file(const char *path, enum feed how, pkiops_handle s,
     return rc;
 }
 
-/* The SHA-512 of a file, for CMS. */
-static int hash_file(const char *path, uint8_t out[64], struct p11_err *e) {
-    struct pkiops_sha512 *h = pkiops_sha512_begin(e);
+/* A file's digest under `name` -- SHA256, SHA384 or SHA512 -- for CMS. */
+static int hash_file(const char *path, const char *name, uint8_t out[64], size_t *out_len,
+                     struct p11_err *e) {
+    struct pkiops_hash *h = pkiops_hash_begin(name, e);
     if (!h) return e->code ? e->code : 2;
-    int rc = feed_file(path, FEED_SHA512, 0, h, e);
+    int rc = feed_file(path, FEED_HASH, 0, h, e);
     /* Ended either way: the context is freed by the end call. */
     struct p11_err ignored;
-    int end = pkiops_sha512_end(h, out, rc ? &ignored : e);
+    int end = pkiops_hash_end(h, out, out_len, rc ? &ignored : e);
     return rc ? rc : end;
 }
 
@@ -608,11 +610,14 @@ static void run_verify(struct job *j) {
 
 static void run_cms_sign(struct job *j) {
     uint8_t *cert = NULL; size_t cert_len = 0, n = 262144;
-    uint8_t dg[64];
+    uint8_t dg[64]; size_t dl = 0;
+    /* The digest is the key's: its algorithm's own hash where it has one. */
+    enum pkiops_alg a;
+    if ((j->rc = pkiops_key_alg(j->session, j->label, &a, &j->e)) != 0) return;
     if ((j->rc = read_der(j->cert_path, &cert, &cert_len, &j->e)) != 0) return;
-    if ((j->rc = hash_file(j->data_path, dg, &j->e)) == 0) {
+    if ((j->rc = hash_file(j->data_path, pkiops_alg_digest(a), dg, &dl, &j->e)) == 0) {
         uint8_t *der = g_malloc(n);
-        j->rc = pkiops_cms_sign(j->session, j->label, cert, cert_len, dg, 64, der, &n, &j->e);
+        j->rc = pkiops_cms_sign(j->session, j->label, cert, cert_len, dg, dl, der, &n, &j->e);
         if (!j->rc) j->rc = write_out(j->out_path, der, n, 0, NULL, &j->e);
         j->out_len = n;
         g_free(der);
@@ -623,10 +628,14 @@ static void run_cms_sign(struct job *j) {
 /* No module, no PIN: the signer's certificate is inside the CMS. */
 static void run_cms_verify(struct job *j) {
     uint8_t *cms = NULL; size_t cms_len = 0;
-    uint8_t dg[64];
+    uint8_t dg[64]; size_t dl = 0;
     if ((j->rc = read_der(j->in_path, &cms, &cms_len, &j->e)) != 0) return;
-    if ((j->rc = hash_file(j->data_path, dg, &j->e)) == 0)
-        j->rc = pkiops_cms_verify(cms, cms_len, dg, 64, &j->verdict, &j->e);
+    /* The structure names its digest. One it cannot name is hashed with
+     * SHA-512 and reaches the verdict "not a CMS this can read". */
+    const char *dn = NULL;
+    if (pkiops_cms_digest(cms, cms_len, &dn)) dn = "SHA512";
+    if ((j->rc = hash_file(j->data_path, dn, dg, &dl, &j->e)) == 0)
+        j->rc = pkiops_cms_verify(cms, cms_len, dg, dl, &j->verdict, &j->e);
     g_free(cms);
 }
 
@@ -695,7 +704,8 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
     case J_KEYGEN: {
         pkiops_handle hp = 0, hk = 0;
         if (j->operator_mode) j->rc = label_in_use(j->session, j->label, &j->e);
-        if (!j->rc) j->rc = pkiops_keygen(j->session, j->label, &hp, &hk, &j->e);
+        if (!j->rc) j->rc = pkiops_keygen_alg(j->session, j->label,
+                                              (enum pkiops_alg)j->alg, &hp, &hk, &j->e);
         if (!j->rc) j->rc = pkiops_keys(j->session, &j->keys, &j->n_keys, &j->e);
         break;
     }
@@ -704,7 +714,8 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
          * pair, and the self-signed root, in that order. */
         pkiops_handle hp = 0, hk = 0;
         j->rc = label_in_use(j->session, j->label, &j->e);
-        if (!j->rc) j->rc = pkiops_keygen(j->session, j->label, &hp, &hk, &j->e);
+        if (!j->rc) j->rc = pkiops_keygen_alg(j->session, j->label,
+                                              (enum pkiops_alg)j->alg, &hp, &hk, &j->e);
         if (!j->rc) {
             size_t n = DER_MAX;
             uint8_t *der = g_malloc(n);
@@ -943,10 +954,10 @@ static void show_keys(struct job *j) {
             gtk_string_list_append(A.key_labels, j->keys[i].label);
     clear_list(A.keys_box);
     for (size_t i = 0; i < j->n_keys; i++) {
-        char t[128];
-        snprintf(t, sizeof t, "%-7s  object %lu   \"%s\"",
+        char t[160];
+        snprintf(t, sizeof t, "%-7s  object %lu   \"%s\"   %s",
                  j->keys[i].is_private ? "private" : "public",
-                 j->keys[i].handle, j->keys[i].label);
+                 j->keys[i].handle, j->keys[i].label, j->keys[i].alg);
         list_add(A.keys_box, t);
     }
     if (j->n_keys == 0) list_add(A.keys_box, "(no key on this token)");
@@ -1003,10 +1014,16 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
     case J_KEYGEN:
         if (j->rc) {
             status_err("Generating the key pair", &j->e);
-            if (strstr(j->e.msg, "0x70"))
-                status("Generating the key pair: this module does not offer the composite "
-                       "mechanism (CKR_MECHANISM_INVALID). It exists only in builds made "
-                       "with PROFILE=all-mechanisms.");
+            if (strstr(j->e.msg, "0x70")) {
+                char msg[400];
+                snprintf(msg, sizeof msg, "Generating the key pair: this module does not "
+                         "offer %s (CKR_MECHANISM_INVALID).%s",
+                         pkiops_alg_name((enum pkiops_alg)j->alg),
+                         j->alg == PKIOPS_ALG_COMPOSITE
+                             ? " The composite exists only in builds made with "
+                               "PROFILE=all-mechanisms." : "");
+                status(msg);
+            }
         } else {
             show_keys(j);
             status("Key pair generated.");
@@ -1351,7 +1368,11 @@ static void on_keygen(GtkWidget *w, gpointer ud) {
     j->session = A.session;
     j->label = g_strdup(label);
     j->operator_mode = A.operator_mode;
-    status("Generating a composite key pair...");
+    j->alg = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(A.keygen_alg));
+    char msg[96];
+    snprintf(msg, sizeof msg, "Generating a %s key pair...",
+             pkiops_alg_name((enum pkiops_alg)j->alg));
+    status(msg);
     start(j);
 }
 
@@ -1914,6 +1935,7 @@ static void on_op_new_ca(GtkButton *b, gpointer ud) {
     j->label = g_strdup(label);
     j->subject = g_strdup(subject);
     j->days = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(A.op_new_days));
+    j->alg = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(A.op_new_alg));
     j->pem = 1;
     char *name = g_strconcat(label, "-root.pem", NULL);
     ask_where_named(j, name);
@@ -2057,11 +2079,57 @@ static void form_row(GtkWidget *grid, int r, const char *label, GtkWidget *w) {
     gtk_grid_attach(GTK_GRID(grid), w, 1, r, 1, 1);
 }
 
+/* A row whose field is taller than one line: the label at the top, level
+ * with the field's first line, not centred on the whole height -- where it
+ * read as belonging to the line below. */
+static void form_row_top(GtkWidget *grid, int r, const char *label, GtkWidget *w) {
+    GtkWidget *l = gtk_label_new(label);
+    gtk_label_set_xalign(GTK_LABEL(l), 1.0f);
+    gtk_widget_set_valign(l, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(l, 6);
+    gtk_grid_attach(GTK_GRID(grid), l, 0, r, 1, 1);
+    gtk_widget_set_hexpand(w, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), w, 1, r, 1, 1);
+}
+
+/* A few lines of text to type, in a visible box: a GtkTextView has no border
+ * of its own, and without one there is nothing to show where to click. */
+static GtkWidget *text_box(GtkWidget **view, int lines, const char *tooltip) {
+    *view = gtk_text_view_new();
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(*view), TRUE);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(*view), 6);
+    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(*view), 6);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(*view), 4);
+    gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(*view), 4);
+    GtkWidget *s = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(s), *view);
+    gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(s), TRUE);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(s), GTK_POLICY_AUTOMATIC,
+                                   GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(s), 22 * lines);
+    gtk_widget_set_vexpand(s, FALSE);
+    gtk_widget_set_tooltip_text(s, tooltip);
+    return s;
+}
+
 static GtkWidget *form(void) {
     GtkWidget *g = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(g), 6);
     gtk_grid_set_column_spacing(GTK_GRID(g), 8);
     return g;
+}
+
+/* Every algorithm the tools offer, by the name they take, the composite
+ * first: what a key pair is generated for. */
+static GtkWidget *alg_drop(void) {
+    GtkStringList *l = gtk_string_list_new(NULL);
+    for (int i = 0; i < PKIOPS_ALG_COUNT; i++)
+        gtk_string_list_append(l, pkiops_alg_name((enum pkiops_alg)i));
+    GtkWidget *d = gtk_drop_down_new(G_LIST_MODEL(l), NULL);
+    gtk_widget_set_tooltip_text(d,
+        "Chosen once: everything signed with the key afterwards uses its algorithm. "
+        "The composite exists only in PROFILE=all-mechanisms builds.");
+    return d;
 }
 
 static GtkWidget *entry_with(const char *placeholder) {
@@ -2142,14 +2210,10 @@ static GtkWidget *cert_tab(void) {
     form_row(g, 2, "Subject", A.issue_subject_entry);
     A.san_entry = entry_with("DNS:example.org,IP:192.0.2.1");
     form_row(g, 3, "SAN", A.san_entry);
-    A.crl_view = gtk_text_view_new();
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(A.crl_view), TRUE);
-    GtkWidget *crl_scroll = scrolled(A.crl_view, 52);
-    gtk_widget_set_vexpand(crl_scroll, FALSE);
-    gtk_widget_set_tooltip_text(crl_scroll,
+    GtkWidget *crl_box = text_box(&A.crl_view, 3,
         "Where this certificate's revocation list is published, one URL per line, "
         "at most 8. http://... or ldap://...?attribute; https is refused.");
-    form_row(g, 4, "CRL URLs", crl_scroll);
+    form_row_top(g, 4, "CRL URLs", crl_box);
     const char *const profiles[] = { "end-entity", "ocsp-responder (delegated)", NULL };
     A.profile_drop = gtk_drop_down_new_from_strings(profiles);
     form_row(g, 5, "Profile", A.profile_drop);
@@ -2364,14 +2428,10 @@ static GtkWidget *op_ca_tab(void) {
     gtk_widget_set_tooltip_text(A.op_crl_btn,
         "The file a web server serves at the CRL URLs. Publishing replaces it.");
     form_row(g, 3, "Published CRL", A.op_crl_btn);
-    A.op_urls_view = gtk_text_view_new();
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(A.op_urls_view), TRUE);
-    GtkWidget *urls = scrolled(A.op_urls_view, 52);
-    gtk_widget_set_vexpand(urls, FALSE);
-    gtk_widget_set_tooltip_text(urls,
+    GtkWidget *urls = text_box(&A.op_urls_view, 3,
         "Where that file is served, one URL per line, at most 8. Every certificate "
         "this CA issues carries them. http://... or ldap://...?attribute.");
-    form_row(g, 4, "CRL URLs", urls);
+    form_row_top(g, 4, "CRL URLs", urls);
     gtk_box_append(GTK_BOX(page), g);
     A.op_crl_status = note_label("No CRL location chosen.");
     gtk_widget_remove_css_class(A.op_crl_status, "dim-label");
@@ -2387,6 +2447,8 @@ static GtkWidget *op_ca_tab(void) {
     A.op_new_days = gtk_spin_button_new_with_range(1, 36500, 1);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(A.op_new_days), 3650);
     form_row(g, 2, "Days", A.op_new_days);
+    A.op_new_alg = alg_drop();
+    form_row(g, 3, "Algorithm", A.op_new_alg);
     gtk_box_append(GTK_BOX(A.op_ca_signing_box), g);
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_box_append(GTK_BOX(row), button_to("Create CA\xe2\x80\xa6", G_CALLBACK(on_op_new_ca), NULL));
@@ -2554,7 +2616,9 @@ static void activate(GtkApplication *app, gpointer ud) {
     gtk_widget_set_hexpand(A.label_entry, TRUE);
     g_signal_connect(A.label_entry, "activate", G_CALLBACK(on_keygen), NULL);
     gtk_box_append(GTK_BOX(row), A.label_entry);
-    A.keygen_btn = gtk_button_new_with_label("Generate composite key pair");
+    A.keygen_alg = alg_drop();
+    gtk_box_append(GTK_BOX(row), A.keygen_alg);
+    A.keygen_btn = gtk_button_new_with_label("Generate key pair");
     g_signal_connect(A.keygen_btn, "clicked", G_CALLBACK(on_keygen), NULL);
     gtk_box_append(GTK_BOX(row), A.keygen_btn);
     gtk_box_append(GTK_BOX(left), row);
