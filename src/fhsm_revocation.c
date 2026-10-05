@@ -11,6 +11,7 @@
  * eight-megabyte allocation per load).
  * ========================================================================= */
 #include "fhsm_revocation.h"
+#include "fhsm_pki.h"
 
 #include <openssl/ocsp.h>
 #include <openssl/x509.h>
@@ -389,6 +390,25 @@ int fhsm_ocsp_answer(const uint8_t *reqder, size_t req_len,
                      fhsm_ocsp_stats_t *stats,
                      char *err, size_t cap)
 {
+    const uint8_t *ad = NULL; size_t adl = 0;
+    if (fhsm_pki_algid(FHSM_PKI_SIG_COMPOSITE_MLDSA65_ED25519, &ad, &adl) != FHSM_RV_OK)
+        return fail(err, cap, FHSM_REV_EIO, "no composite AlgorithmIdentifier\n");
+    return fhsm_ocsp_answer_ex(reqder, req_len, ca_der, ca_len, responder_der,
+                               responder_len, db, days, req_label, ad, adl,
+                               sign, sign_ctx, out, out_len, stats, err, cap);
+}
+
+int fhsm_ocsp_answer_ex(const uint8_t *reqder, size_t req_len,
+                        const uint8_t *ca_der, size_t ca_len,
+                        const uint8_t *responder_der, size_t responder_len,
+                        const fhsm_rev_db_t *db, int days,
+                        const char *req_label,
+                        const uint8_t *algid, size_t algid_len,
+                        fhsm_composite_sign_cb sign, void *sign_ctx,
+                        uint8_t **out, size_t *out_len,
+                        fhsm_ocsp_stats_t *stats,
+                        char *err, size_t cap)
+{
     int rc = FHSM_REV_EIO;
     X509 *ca = NULL;
     OCSP_REQUEST *req = NULL;
@@ -514,11 +534,11 @@ int fhsm_ocsp_answer(const uint8_t *reqder, size_t req_len,
     basic = malloc(bcap);
     if (!basic) { rc = fail(err, cap, FHSM_REV_EIO, "out of memory\n"); goto done; }
     size_t bn = bcap;
-    fhsm_rv_t r = fhsm_composite_ocsp(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
-                                       responder_der, responder_len,
-                                       d_now, (size_t)n_now,
-                                       singles, (size_t)nreq, exts, exts_len,
-                                       sign, sign_ctx, basic, &bn);
+    fhsm_pki_signer_t signer = { algid, algid_len, NULL, 0, sign, sign_ctx };
+    fhsm_rv_t r = fhsm_pki_ocsp(&signer, responder_der, responder_len,
+                                d_now, (size_t)n_now,
+                                singles, (size_t)nreq, exts, exts_len,
+                                basic, &bn);
     if (r != FHSM_RV_OK) {
         rc = fail(err, cap, FHSM_REV_EIO,
                   "building the OCSP response failed (0x%lX).\n", (unsigned long)r);

@@ -349,8 +349,15 @@ tests/test_pkiops: tests/test_pkiops.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composit
 GTK_CFLAGS = $(shell pkg-config --cflags gtk4 2>/dev/null | sed 's/-I/-isystem /g')
 GTK_LIBS   = $(shell pkg-config --libs gtk4 2>/dev/null)
 
-.PHONY: gui
+.PHONY: gui gui-smoke
 gui: tools/fhsm-gui
+
+# The window started under a virtual display and closed over the session bus,
+# failing on any GTK or GLib CRITICAL or WARNING (tests/gui_smoke.sh). Not
+# part of `make tests`: it needs a display server and GTK, and the module
+# needs neither.
+gui-smoke: tools/fhsm-gui
+	sh tests/gui_smoke.sh
 
 tools/fhsm-gui: tools/fhsm_gui.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
 	@pkg-config --exists gtk4 || { echo "fhsm-gui needs GTK 4: sudo apt install libgtk-4-dev" >&2; exit 2; }
@@ -614,6 +621,11 @@ tests/test_composite_csr: tests/test_composite_csr.c $(LIB_OBJ)
 
 tests/test_composite_issue: tests/test_composite_issue.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
+# Requests, roots and issuance for every signer of include/fhsm_pki.h, each
+# artefact checked by OpenSSL (docs/classic-algorithms-plan.md, stage 1a).
+tests/test_pki_classic: tests/test_pki_classic.c $(LIB_OBJ) $(REVOCATION_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(REVOCATION_OBJ) $(LDFLAGS)
 
 tests/test_composite_crl: tests/test_composite_crl.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
@@ -1010,6 +1022,7 @@ TEST_BINS = \
 	tests/test_composite_x509 \
 	tests/test_composite_csr \
 	tests/test_composite_issue \
+	tests/test_pki_classic \
 	tests/test_composite_crl \
 	tests/test_composite_prehash \
 	tests/test_composite_cms \
@@ -1096,6 +1109,7 @@ tests: $(TEST_BINS) tools/fhsm-token
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_x509
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_csr
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_issue
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_pki_classic
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_crl
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_prehash
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_composite_cms

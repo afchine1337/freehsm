@@ -235,6 +235,20 @@ int fhsm_ocsp_answer(const uint8_t *req, size_t req_len,
                      fhsm_ocsp_stats_t *stats,
                      char *err, size_t err_cap);
 
+/* The same, signed with any algorithm: `algid` is the DER
+ * AlgorithmIdentifier of the signature `sign` produces (fhsm_pki_algid in
+ * fhsm_pki.h). fhsm_ocsp_answer is this with the composite's. */
+int fhsm_ocsp_answer_ex(const uint8_t *req, size_t req_len,
+                        const uint8_t *ca_der, size_t ca_len,
+                        const uint8_t *responder_der, size_t responder_len,
+                        const fhsm_rev_db_t *db, int days,
+                        const char *req_label,
+                        const uint8_t *algid, size_t algid_len,
+                        fhsm_composite_sign_cb sign, void *sign_ctx,
+                        uint8_t **out, size_t *out_len,
+                        fhsm_ocsp_stats_t *stats,
+                        char *err, size_t err_cap);
+
 /* ---------------------------------------------------------------------------
  * The answers that are not answers.
  *

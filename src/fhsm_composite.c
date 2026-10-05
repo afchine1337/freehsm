@@ -14,6 +14,7 @@
  * ========================================================================= */
 
 #include "fhsm_composite.h"
+#include "fhsm_pki.h"
 #include "fhsm_pkcs11_mechanisms.h"
 
 /* src/fhsm_pkcs11.c redefines mechanism constants locally -- the file's
@@ -27,6 +28,7 @@ _Static_assert(FHSM_LOCAL_CKM_COMPOSITE_MLDSA65_ED25519
                "the mechanism constant copied into src/fhsm_pkcs11.c has "
                "drifted from the generated table");
 
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <string.h>
 
@@ -641,14 +643,93 @@ bad:
     return NULL;
 }
 
-fhsm_rv_t fhsm_composite_csr(fhsm_composite_alg_t alg,
-                              const char *subject,
-                              const uint8_t *pub, size_t pub_len,
-                              fhsm_composite_sign_cb sign, void *sign_ctx,
-                              uint8_t *out, size_t *out_len)
+/* ---------------------------------------------------------------------------
+ * What every builder below needs from a signer, whatever its algorithm.
+ * ------------------------------------------------------------------------- */
+
+/* Copy a SubjectPublicKeyInfo into an X509_PUBKEY slot, whatever its
+ * algorithm. X509_REQ_set_pubkey and X509_set_pubkey want an EVP_PKEY, and a
+ * composite key is not one -- that is why this path exists -- so the slot is
+ * filled in place with X509_PUBKEY_set0_param, the documented way to carry an
+ * algorithm OpenSSL may have no provider for. The parameters are copied as
+ * they came: absent for the composite, Ed25519 and ML-DSA, a NULL for RSA,
+ * the curve's OID for EC. Emitting a NULL where the parameters are absent is
+ * a different encoding, accepted by some parsers and refused by others. */
+static fhsm_rv_t spki_into_slot(X509_PUBKEY *slot, const X509_PUBKEY *from)
 {
-    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
-        || !subject || !pub || !sign || !out || !out_len)
+    ASN1_OBJECT *kalg = NULL; const unsigned char *pk = NULL; int pkl = 0;
+    X509_ALGOR *a = NULL;
+    if (!slot || !from
+        || X509_PUBKEY_get0_param(&kalg, &pk, &pkl, &a, from) != 1 || pkl <= 0)
+        return FHSM_RV_ARGUMENTS_BAD;
+    const ASN1_OBJECT *o = NULL; int ptype = V_ASN1_UNDEF; const void *pval = NULL;
+    X509_ALGOR_get0(&o, &ptype, &pval, a);
+
+    void *pdup = NULL;
+    if (ptype == V_ASN1_OBJECT)
+        pdup = OBJ_dup((const ASN1_OBJECT *)pval);
+    else if (ptype != V_ASN1_UNDEF && ptype != V_ASN1_NULL)
+        pdup = ASN1_STRING_dup((const ASN1_STRING *)pval);
+    ASN1_OBJECT *odup = OBJ_dup(o);
+    uint8_t *penc = OPENSSL_memdup(pk, (size_t)pkl);
+    int need_param = ptype != V_ASN1_UNDEF && ptype != V_ASN1_NULL;
+    if (!odup || !penc || (need_param && !pdup)) goto fail;
+    /* Takes ownership of all three on success. */
+    if (X509_PUBKEY_set0_param(slot, odup, ptype, pdup, penc, pkl) != 1) goto fail;
+    return FHSM_RV_OK;
+fail:
+    ASN1_OBJECT_free(odup); OPENSSL_free(penc);
+    if (ptype == V_ASN1_OBJECT) ASN1_OBJECT_free(pdup);
+    else ASN1_STRING_free(pdup);
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+/* The same, from DER. A key type OpenSSL cannot load -- the composite --
+ * still parses as a SubjectPublicKeyInfo; the attempt to load it leaves
+ * errors behind, which are not ours to report, so they are popped. */
+static fhsm_rv_t spki_der_into_slot(X509_PUBKEY *slot, const uint8_t *spki, size_t len)
+{
+    if (!spki || len == 0) return FHSM_RV_ARGUMENTS_BAD;
+    const uint8_t *p = spki;
+    ERR_set_mark();
+    X509_PUBKEY *xp = d2i_X509_PUBKEY(NULL, &p, (long)len);
+    ERR_pop_to_mark();
+    if (!xp || p != spki + len) { X509_PUBKEY_free(xp); return FHSM_RV_ARGUMENTS_BAD; }
+    fhsm_rv_t rv = spki_into_slot(slot, xp);
+    X509_PUBKEY_free(xp);
+    return rv;
+}
+
+/* Set an AlgorithmIdentifier from its DER, all of it and nothing more. */
+static int algor_from_der(X509_ALGOR *dst, const uint8_t *der, size_t len)
+{
+    if (!dst || !der || len == 0) return 0;
+    const uint8_t *p = der;
+    X509_ALGOR *a = d2i_X509_ALGOR(NULL, &p, (long)len);
+    int ok = a && p == der + len && X509_ALGOR_copy(dst, a) == 1;
+    X509_ALGOR_free(a);
+    return ok;
+}
+
+/* A signature is an integral number of octets: no unused bits, and the DER
+ * encoder must not try to strip trailing zeros. */
+static int set_sig_bits(ASN1_BIT_STRING *bs, const uint8_t *sig, size_t n)
+{
+    if (ASN1_BIT_STRING_set(bs, (unsigned char *)(uintptr_t)sig, (int)n) != 1) return 0;
+    bs->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
+    bs->flags |= ASN1_STRING_FLAG_BITS_LEFT;
+    return 1;
+}
+
+static int signer_ok(const fhsm_pki_signer_t *s)
+{
+    return s && s->algid && s->algid_len && s->sign;
+}
+
+fhsm_rv_t fhsm_pki_csr(const fhsm_pki_signer_t *s, const char *subject,
+                        uint8_t *out, size_t *out_len)
+{
+    if (!signer_ok(s) || !s->spki || !subject || !out || !out_len)
         return FHSM_RV_ARGUMENTS_BAD;
 
     fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
@@ -657,58 +738,20 @@ fhsm_rv_t fhsm_composite_csr(fhsm_composite_alg_t alg,
     X509_ALGOR *sa  = NULL;
     ASN1_BIT_STRING *bs = NULL;
     uint8_t *tbs = NULL, *sig = NULL;
-    uint8_t spki[8192];
 
     if (!req || !name) { rv = FHSM_RV_ARGUMENTS_BAD; goto out; }
     if (X509_REQ_set_version(req, 0) != 1) goto out;      /* v1 == INTEGER 0 */
     if (X509_REQ_set_subject_name(req, name) != 1) goto out;
 
-    /* Public key. X509_REQ_set_pubkey wants an EVP_PKEY and a composite key is
-     * not one -- that is the whole reason this path exists -- and there is no
-     * X509_REQ_set_X509_PUBKEY. So the request's own X509_PUBKEY is filled in
-     * place with X509_PUBKEY_set0_param, which is the documented way to carry
-     * an algorithm OpenSSL has no provider for.
-     *
-     * ptype is V_ASN1_UNDEF: parameters absent, per the ASN.1 module. Passing
-     * V_ASN1_NULL here would compile, encode, and interoperate with roughly
-     * half of everything. */
-    size_t sl = sizeof spki;
-    rv = fhsm_composite_spki(alg, pub, pub_len, spki, &sl);
+    /* There is no X509_REQ_set_X509_PUBKEY: the request's own slot is filled. */
+    rv = spki_der_into_slot(X509_REQ_get_X509_PUBKEY(req), s->spki, s->spki_len);
     if (rv != FHSM_RV_OK) goto out;
-    {
-        uint8_t raw[FHSM_COMPOSITE_RAW_PUB];
-        size_t rl = sizeof raw;
-        rv = fhsm_composite_raw_pub(alg, pub, pub_len, raw, &rl);
-        if (rv != FHSM_RV_OK) goto out;
+    rv = FHSM_RV_FUNCTION_FAILED;
 
-        X509_PUBKEY *slot = X509_REQ_get_X509_PUBKEY(req);
-        if (!slot) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
-
-        ASN1_OBJECT *oid = OBJ_txt2obj(FHSM_COMPOSITE_OID_MLDSA65_ED25519, 1);
-        uint8_t *penc = OPENSSL_memdup(raw, rl);
-        if (!oid || !penc) {
-            ASN1_OBJECT_free(oid); OPENSSL_free(penc);
-            rv = FHSM_RV_HOST_MEMORY; goto out;
-        }
-        /* Takes ownership of oid and penc on success. */
-        if (X509_PUBKEY_set0_param(slot, oid, V_ASN1_UNDEF, NULL,
-                                    penc, (int)rl) != 1) {
-            ASN1_OBJECT_free(oid); OPENSSL_free(penc);
-            rv = FHSM_RV_FUNCTION_FAILED; goto out;
-        }
-    }
-
-    /* signatureAlgorithm: same OID as the key, parameters absent. §6 registers
-     * a single OID that serves both roles. */
-    {
-        const uint8_t *ad; size_t adl;
-        rv = fhsm_composite_algid(alg, &ad, &adl);
-        if (rv != FHSM_RV_OK) goto out;
-        const uint8_t *p = ad;
-        sa = d2i_X509_ALGOR(NULL, &p, (long)adl);
-        if (!sa) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
-        if (X509_REQ_set1_signature_algo(req, sa) != 1) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
-    }
+    sa = X509_ALGOR_new();
+    if (!sa) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    if (!algor_from_der(sa, s->algid, s->algid_len)) { rv = FHSM_RV_ARGUMENTS_BAD; goto out; }
+    if (X509_REQ_set1_signature_algo(req, sa) != 1) goto out;
 
     /* The signature covers the DER of CertificationRequestInfo, and nothing
      * else. i2d_re_X509_REQ_tbs re-encodes it rather than returning a cached
@@ -716,19 +759,15 @@ fhsm_rv_t fhsm_composite_csr(fhsm_composite_alg_t alg,
     int tbs_len = i2d_re_X509_REQ_tbs(req, &tbs);
     if (tbs_len <= 0) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
 
-    sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
+    sig = OPENSSL_malloc(FHSM_PKI_SIG_MAX);
     if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
-    size_t sig_len = FHSM_COMPOSITE_SIG_MAX;
-    rv = sign(sign_ctx, tbs, (size_t)tbs_len, sig, &sig_len);
+    size_t sig_len = FHSM_PKI_SIG_MAX;
+    rv = s->sign(s->sign_ctx, tbs, (size_t)tbs_len, sig, &sig_len);
     if (rv != FHSM_RV_OK) goto out;
 
     bs = ASN1_BIT_STRING_new();
     if (!bs) { rv = FHSM_RV_HOST_MEMORY; goto out; }
-    if (ASN1_BIT_STRING_set(bs, sig, (int)sig_len) != 1) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
-    /* A signature is an integral number of octets: no unused bits, and the
-     * DER encoder must not try to strip trailing zeros. */
-    bs->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
-    bs->flags |= ASN1_STRING_FLAG_BITS_LEFT;
+    if (!set_sig_bits(bs, sig, sig_len)) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
     X509_REQ_set0_signature(req, bs);
     bs = NULL;                              /* owned by req now */
 
@@ -745,12 +784,50 @@ fhsm_rv_t fhsm_composite_csr(fhsm_composite_alg_t alg,
     }
 out:
     if (tbs) OPENSSL_free(tbs);
-    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
+    if (sig) { OPENSSL_cleanse(sig, FHSM_PKI_SIG_MAX); OPENSSL_free(sig); }
     ASN1_BIT_STRING_free(bs);
     X509_ALGOR_free(sa);
     X509_NAME_free(name);
     X509_REQ_free(req);
     return rv;
+}
+
+/* The composite as a signer: its AlgorithmIdentifier and its
+ * SubjectPublicKeyInfo, from the module's public-key blob. `spki` is the
+ * caller's buffer, which must outlive the signer. */
+static fhsm_rv_t composite_signer(fhsm_composite_alg_t alg,
+                                  const uint8_t *pub, size_t pub_len,
+                                  fhsm_composite_sign_cb sign, void *sign_ctx,
+                                  uint8_t *spki, size_t spki_cap,
+                                  fhsm_pki_signer_t *s)
+{
+    size_t sl = spki_cap;
+    fhsm_rv_t rv = fhsm_composite_spki(alg, pub, pub_len, spki, &sl);
+    if (rv != FHSM_RV_OK) return rv;
+    const uint8_t *ad = NULL; size_t adl = 0;
+    rv = fhsm_composite_algid(alg, &ad, &adl);
+    if (rv != FHSM_RV_OK) return rv;
+    s->algid = ad;   s->algid_len = adl;
+    s->spki  = spki; s->spki_len  = sl;
+    s->sign  = sign; s->sign_ctx  = sign_ctx;
+    return FHSM_RV_OK;
+}
+
+fhsm_rv_t fhsm_composite_csr(fhsm_composite_alg_t alg,
+                              const char *subject,
+                              const uint8_t *pub, size_t pub_len,
+                              fhsm_composite_sign_cb sign, void *sign_ctx,
+                              uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+        || !subject || !pub || !sign || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    uint8_t spki[8192];
+    fhsm_pki_signer_t s;
+    fhsm_rv_t rv = composite_signer(alg, pub, pub_len, sign, sign_ctx,
+                                    spki, sizeof spki, &s);
+    if (rv != FHSM_RV_OK) return rv;
+    return fhsm_pki_csr(&s, subject, out, out_len);
 }
 
 /* ===========================================================================
@@ -760,50 +837,99 @@ out:
 #include <openssl/x509v3.h>
 #include <openssl/cms.h>
 
-/* Put the composite SubjectPublicKeyInfo into an X509_PUBKEY slot. Shared by
- * the CSR and the certificate: one place that knows the trick, so a change to
- * it cannot apply to one and not the other. */
-static fhsm_rv_t fill_pubkey_slot(fhsm_composite_alg_t alg,
-                                   X509_PUBKEY *slot,
-                                   const uint8_t *pub, size_t pub_len)
-{
-    if (!slot) return FHSM_RV_ARGUMENTS_BAD;
-    uint8_t raw[FHSM_COMPOSITE_RAW_PUB]; size_t rl = sizeof raw;
-    fhsm_rv_t rv = fhsm_composite_raw_pub(alg, pub, pub_len, raw, &rl);
-    if (rv != FHSM_RV_OK) return rv;
-
-    ASN1_OBJECT *oid = OBJ_txt2obj(FHSM_COMPOSITE_OID_MLDSA65_ED25519, 1);
-    uint8_t *penc = OPENSSL_memdup(raw, rl);
-    if (!oid || !penc) { ASN1_OBJECT_free(oid); OPENSSL_free(penc);
-                          return FHSM_RV_HOST_MEMORY; }
-    /* ptype V_ASN1_UNDEF: parameters absent, per the ASN.1 module. */
-    if (X509_PUBKEY_set0_param(slot, oid, V_ASN1_UNDEF, NULL,
-                                penc, (int)rl) != 1) {
-        ASN1_OBJECT_free(oid); OPENSSL_free(penc);
-        return FHSM_RV_FUNCTION_FAILED;
-    }
-    return FHSM_RV_OK;
+/* SHA-1 over the subjectPublicKey BIT STRING's value: RFC 5280 4.2.1.2
+ * method (1). For the composite that is the raw composite key, as it always
+ * was; for the others, the same rule over their own key. */
+static int key_id(const uint8_t *raw, size_t n, uint8_t md[20]) {
+    unsigned int l = 0;
+    EVP_MD *h = EVP_MD_fetch(NULL, "SHA1", NULL);
+    EVP_MD_CTX *c = EVP_MD_CTX_new();
+    int ok = h && c && EVP_DigestInit_ex(c, h, NULL) == 1
+          && EVP_DigestUpdate(c, raw, n) == 1
+          && EVP_DigestFinal_ex(c, md, &l) == 1 && l == 20;
+    EVP_MD_CTX_free(c); EVP_MD_free(h);
+    return ok;
 }
 
-/* Set an X509_ALGOR to the composite OID with absent parameters. */
-static int set_composite_algor(X509_ALGOR *a) {
-    ASN1_OBJECT *o = OBJ_txt2obj(FHSM_COMPOSITE_OID_MLDSA65_ED25519, 1);
-    if (!o) return 0;
-    if (X509_ALGOR_set0(a, o, V_ASN1_UNDEF, NULL) != 1) {
-        ASN1_OBJECT_free(o); return 0;
-    }
-    return 1;
+/* subjectKeyIdentifier for the key in `slot`. X509V3_EXT_conf_nid with
+ * "hash" would ask OpenSSL to digest a public key it may not be able to load,
+ * so it is computed here. */
+static int add_ski(X509 *x, const X509_PUBKEY *slot) {
+    const unsigned char *pk = NULL; int pkl = 0;
+    if (X509_PUBKEY_get0_param(NULL, &pk, &pkl, NULL, slot) != 1 || pkl <= 0) return 0;
+    uint8_t md[20];
+    if (!key_id(pk, (size_t)pkl, md)) return 0;
+    ASN1_OCTET_STRING *os = ASN1_OCTET_STRING_new();
+    if (!os) return 0;
+    int ok = ASN1_OCTET_STRING_set(os, md, 20) == 1;
+    /* X509V3_EXT_i2d, not X509_EXTENSION_create_by_NID. The extension
+     * VALUE is the DER encoding of the extension's own ASN.1 type, so a
+     * subjectKeyIdentifier must be `04 14 <20 bytes>` and not the 20 bytes
+     * on their own. create_by_NID takes the octet-string object and stores
+     * its content verbatim, which produced a 20-byte value here and a
+     * malformed extension.
+     *
+     * The failure mode is worth remembering: OpenSSL flagged the whole
+     * certificate invalid and abandoned its extension cache, so keyUsage
+     * -- correctly encoded as 03 02 01 06 -- also read back as absent. One
+     * malformed extension hid a sound one, and only dumping the raw
+     * extension bytes showed which was which. */
+    X509_EXTENSION *e = ok ? X509V3_EXT_i2d(NID_subject_key_identifier, 0, os) : NULL;
+    ok = e && X509_add_ext(x, e, -1) == 1;
+    X509_EXTENSION_free(e); ASN1_OCTET_STRING_free(os);
+    return ok;
 }
 
-fhsm_rv_t fhsm_composite_selfsigned(fhsm_composite_alg_t alg,
-                                     const char *subject,
-                                     long serial, int days,
-                                     const uint8_t *pub, size_t pub_len,
-                                     fhsm_composite_sign_cb sign, void *sign_ctx,
-                                     uint8_t *out, size_t *out_len)
+/* Both AlgorithmIdentifiers of a certificate, then its signature. RFC 5280
+ * 4.1.1.2: the outer signatureAlgorithm MUST equal the signature field inside
+ * the TBS. They are two separate fields and are set separately, from the same
+ * DER, so the tests check they agree rather than trusting that this did. */
+static fhsm_rv_t sign_certificate(X509 *x, const fhsm_pki_signer_t *s)
 {
-    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
-        || !subject || !pub || !sign || !out || !out_len)
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    uint8_t *tbs = NULL, *sig = NULL;
+    const ASN1_BIT_STRING *cs = NULL; const X509_ALGOR *ca = NULL;
+    if (!algor_from_der((X509_ALGOR *)X509_get0_tbs_sigalg(x), s->algid, s->algid_len))
+        return FHSM_RV_ARGUMENTS_BAD;
+    X509_get0_signature(&cs, &ca, x);
+    if (!cs || !ca) return FHSM_RV_FUNCTION_FAILED;
+    if (!algor_from_der((X509_ALGOR *)ca, s->algid, s->algid_len))
+        return FHSM_RV_ARGUMENTS_BAD;
+
+    int tbs_len = i2d_re_X509_tbs(x, &tbs);
+    if (tbs_len <= 0) goto out;
+    sig = OPENSSL_malloc(FHSM_PKI_SIG_MAX);
+    if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
+    size_t sig_len = FHSM_PKI_SIG_MAX;
+    rv = s->sign(s->sign_ctx, tbs, (size_t)tbs_len, sig, &sig_len);
+    if (rv != FHSM_RV_OK) goto out;
+    rv = set_sig_bits((ASN1_BIT_STRING *)cs, sig, sig_len)
+       ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+out:
+    OPENSSL_free(tbs);
+    if (sig) { OPENSSL_cleanse(sig, FHSM_PKI_SIG_MAX); OPENSSL_free(sig); }
+    return rv;
+}
+
+/* The finished certificate into the caller's buffer. */
+static fhsm_rv_t emit_certificate(X509 *x, uint8_t *out, size_t *out_len)
+{
+    uint8_t *der = NULL;
+    int n = i2d_X509(x, &der);
+    if (n <= 0) return FHSM_RV_FUNCTION_FAILED;
+    fhsm_rv_t rv = FHSM_RV_OK;
+    if (*out_len < (size_t)n) rv = FHSM_RV_BUFFER_TOO_SMALL;
+    else memcpy(out, der, (size_t)n);
+    *out_len = (size_t)n;
+    OPENSSL_free(der);
+    return rv;
+}
+
+fhsm_rv_t fhsm_pki_selfsigned(const fhsm_pki_signer_t *s, const char *subject,
+                               long serial, int days,
+                               uint8_t *out, size_t *out_len)
+{
+    if (!signer_ok(s) || !s->spki || !subject || !out || !out_len)
         return FHSM_RV_ARGUMENTS_BAD;
     /* Serial 0 is malformed and serial < 0 encodes as negative, which RFC 5280
      * §4.1.2.2 forbids. Refuse rather than silently correct: a caller that
@@ -814,8 +940,6 @@ fhsm_rv_t fhsm_composite_selfsigned(fhsm_composite_alg_t alg,
     fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
     X509      *x    = X509_new();
     X509_NAME *name = name_from_oneline(subject);
-    ASN1_BIT_STRING *sigbs = NULL;
-    uint8_t *tbs = NULL, *sig = NULL, *der = NULL;
 
     if (!x || !name) { rv = FHSM_RV_ARGUMENTS_BAD; goto out; }
     if (X509_set_version(x, 2) != 1) goto out;          /* v3 == INTEGER 2 */
@@ -826,7 +950,7 @@ fhsm_rv_t fhsm_composite_selfsigned(fhsm_composite_alg_t alg,
     if (X509_set_subject_name(x, name) != 1) goto out;
     if (X509_set_issuer_name(x, name) != 1) goto out;
 
-    rv = fill_pubkey_slot(alg, X509_get_X509_PUBKEY(x), pub, pub_len);
+    rv = spki_der_into_slot(X509_get_X509_PUBKEY(x), s->spki, s->spki_len);
     if (rv != FHSM_RV_OK) goto out;
     rv = FHSM_RV_FUNCTION_FAILED;
 
@@ -844,86 +968,34 @@ fhsm_rv_t fhsm_composite_selfsigned(fhsm_composite_alg_t alg,
         X509_EXTENSION_free(bc); X509_EXTENSION_free(ku);
         if (!ok) goto out;
     }
-    /* subjectKeyIdentifier. X509V3_EXT_conf_nid with "hash" would ask OpenSSL
-     * to digest a public key it cannot load, so it is computed here: SHA-1 of
-     * the raw composite key, which is the RFC 5280 §4.2.1.2 method (1). */
-    {
-        uint8_t raw[FHSM_COMPOSITE_RAW_PUB]; size_t rl = sizeof raw;
-        if (fhsm_composite_raw_pub(alg, pub, pub_len, raw, &rl) != FHSM_RV_OK) goto out;
-        uint8_t md[20]; unsigned int mdlen = 0;
-        EVP_MD *sha1 = EVP_MD_fetch(NULL, "SHA1", NULL);
-        EVP_MD_CTX *c = EVP_MD_CTX_new();
-        int ok = sha1 && c && EVP_DigestInit_ex(c, sha1, NULL) == 1
-              && EVP_DigestUpdate(c, raw, rl) == 1
-              && EVP_DigestFinal_ex(c, md, &mdlen) == 1 && mdlen == 20;
-        EVP_MD_CTX_free(c); EVP_MD_free(sha1);
-        if (!ok) goto out;
-        ASN1_OCTET_STRING *os = ASN1_OCTET_STRING_new();
-        if (!os) { rv = FHSM_RV_HOST_MEMORY; goto out; }
-        ok = ASN1_OCTET_STRING_set(os, md, (int)mdlen) == 1;
-        /* X509V3_EXT_i2d, not X509_EXTENSION_create_by_NID. The extension
-         * VALUE is the DER encoding of the extension's own ASN.1 type, so a
-         * subjectKeyIdentifier must be `04 14 <20 bytes>` and not the 20 bytes
-         * on their own. create_by_NID takes the octet-string object and stores
-         * its content verbatim, which produced a 20-byte value here and a
-         * malformed extension.
-         *
-         * The failure mode is worth remembering: OpenSSL flagged the whole
-         * certificate invalid and abandoned its extension cache, so keyUsage
-         * -- correctly encoded as 03 02 01 06 -- also read back as absent. One
-         * malformed extension hid a sound one, and only dumping the raw
-         * extension bytes showed which was which. */
-        X509_EXTENSION *ski = ok ? X509V3_EXT_i2d(NID_subject_key_identifier,
-                                                   0, os)
-                                 : NULL;
-        ok = ski && X509_add_ext(x, ski, -1) == 1;
-        X509_EXTENSION_free(ski); ASN1_OCTET_STRING_free(os);
-        if (!ok) goto out;
-    }
+    if (!add_ski(x, X509_get_X509_PUBKEY(x))) goto out;
 
-    /* Both AlgorithmIdentifiers. RFC 5280 §4.1.1.2: the outer
-     * signatureAlgorithm MUST equal the signature field inside the TBS. They
-     * are two separate fields and are set separately, so the test checks they
-     * agree rather than trusting that this code did. */
-    if (!set_composite_algor((X509_ALGOR *)X509_get0_tbs_sigalg(x))) goto out;
-    {
-        const ASN1_BIT_STRING *cs = NULL; const X509_ALGOR *ca = NULL;
-        X509_get0_signature(&cs, &ca, x);
-        if (!cs || !ca) goto out;
-        if (!set_composite_algor((X509_ALGOR *)ca)) goto out;
-        sigbs = (ASN1_BIT_STRING *)cs;      /* owned by x, not freed here */
-    }
-
-    {
-        int tbs_len = i2d_re_X509_tbs(x, &tbs);
-        if (tbs_len <= 0) goto out;
-        sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
-        if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
-        size_t sig_len = FHSM_COMPOSITE_SIG_MAX;
-        rv = sign(sign_ctx, tbs, (size_t)tbs_len, sig, &sig_len);
-        if (rv != FHSM_RV_OK) goto out;
-        rv = FHSM_RV_FUNCTION_FAILED;
-        if (ASN1_BIT_STRING_set(sigbs, sig, (int)sig_len) != 1) goto out;
-        sigbs->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
-        sigbs->flags |= ASN1_STRING_FLAG_BITS_LEFT;
-    }
-
-    {
-        int n = i2d_X509(x, &der);
-        if (n <= 0) goto out;
-        if (*out_len < (size_t)n) { *out_len = (size_t)n;
-                                     rv = FHSM_RV_BUFFER_TOO_SMALL; goto out; }
-        memcpy(out, der, (size_t)n);
-        *out_len = (size_t)n;
-        rv = FHSM_RV_OK;
-    }
+    rv = sign_certificate(x, s);
+    if (rv != FHSM_RV_OK) goto out;
+    rv = emit_certificate(x, out, out_len);
 out:
-    if (der) OPENSSL_free(der);
-    if (tbs) OPENSSL_free(tbs);
-    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
     X509_NAME_free(name);
     X509_free(x);
     return rv;
+}
+
+fhsm_rv_t fhsm_composite_selfsigned(fhsm_composite_alg_t alg,
+                                     const char *subject,
+                                     long serial, int days,
+                                     const uint8_t *pub, size_t pub_len,
+                                     fhsm_composite_sign_cb sign, void *sign_ctx,
+                                     uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+        || !subject || !pub || !sign || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (serial <= 0 || days <= 0) return FHSM_RV_ARGUMENTS_BAD;
+    uint8_t spki[8192];
+    fhsm_pki_signer_t s;
+    fhsm_rv_t rv = composite_signer(alg, pub, pub_len, sign, sign_ctx,
+                                    spki, sizeof spki, &s);
+    if (rv != FHSM_RV_OK) return rv;
+    return fhsm_pki_selfsigned(&s, subject, serial, days, out, out_len);
 }
 
 /* ===========================================================================
@@ -988,17 +1060,6 @@ static fhsm_rv_t pub_from_slot(fhsm_composite_alg_t alg, X509_PUBKEY *xp,
     return FHSM_RV_OK;
 }
 
-/* SHA-1 over the raw key: RFC 5280 §4.2.1.2 method (1). */
-static int key_id(const uint8_t *raw, size_t n, uint8_t md[20]) {
-    unsigned int l = 0;
-    EVP_MD *h = EVP_MD_fetch(NULL, "SHA1", NULL);
-    EVP_MD_CTX *c = EVP_MD_CTX_new();
-    int ok = h && c && EVP_DigestInit_ex(c, h, NULL) == 1
-          && EVP_DigestUpdate(c, raw, n) == 1
-          && EVP_DigestFinal_ex(c, md, &l) == 1 && l == 20;
-    EVP_MD_CTX_free(c); EVP_MD_free(h);
-    return ok;
-}
 
 /* Parse one "TYPE:value" item into a GENERAL_NAME. Returns NULL on anything
  * it does not recognise or cannot encode -- the caller turns that into a
@@ -1127,20 +1188,69 @@ out:
     return rv;
 }
 
-fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
-                                const uint8_t *ca_cert, size_t ca_cert_len,
-                                const uint8_t *csr, size_t csr_len,
-                                const char *subject_override,
-                                const char *san,
-                                const char *const *crl_urls, size_t n_crl_urls,
-                                fhsm_cert_profile_t profile,
-                                int days,
-                                fhsm_composite_sign_cb sign, void *sign_ctx,
-                                fhsm_composite_rng_cb rng, void *rng_ctx,
-                                uint8_t *out, size_t *out_len)
+/* ---- Proof of possession -----------------------------------------------
+ * The request's signature, checked against the key the request carries, by
+ * the request's own algorithm. Without this the CA certifies a key the
+ * applicant may not hold: anyone could lift a public key from an existing
+ * certificate and obtain a new one for it. This is the difference between a
+ * CA and a rubber stamp, and it is the reason issuance has a single entry
+ * point.
+ *
+ * Two verifiers. A composite request goes to the composite verifier, as it
+ * always did, and must carry a composite key. Anything else goes to OpenSSL,
+ * which knows ECDSA, RSA, Ed25519 and ML-DSA; a key it cannot load is an
+ * algorithm nobody here can check, and is refused as such. */
+static fhsm_rv_t csr_proof_of_possession(X509_REQ *req)
 {
-    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
-        || !ca_cert || !csr || !sign || !rng || !out || !out_len)
+    const ASN1_BIT_STRING *rsig = NULL; const X509_ALGOR *ralg = NULL;
+    X509_REQ_get0_signature(req, &rsig, &ralg);
+    if (!rsig || !ralg) return FHSM_RV_ARGUMENTS_BAD;
+    const ASN1_OBJECT *o = NULL; int pt = 0; const void *pv = NULL;
+    X509_ALGOR_get0(&o, &pt, &pv, ralg);
+    char b[128] = ""; OBJ_obj2txt(b, sizeof b, o, 1);
+
+    if (strcmp(b, FHSM_COMPOSITE_OID_MLDSA65_ED25519) == 0) {
+        static uint8_t reqpub[FHSM_COMPOSITE_PUB_MAX];
+        size_t rl = sizeof reqpub;
+        const uint8_t *raw = NULL; size_t rawl = 0;
+        fhsm_rv_t rv = pub_from_slot(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                     X509_REQ_get_X509_PUBKEY(req), reqpub, &rl,
+                                     &raw, &rawl);
+        if (rv != FHSM_RV_OK) return rv;
+        uint8_t *req_tbs = NULL;
+        int rtl = i2d_re_X509_REQ_tbs(req, &req_tbs);
+        if (rtl <= 0) return FHSM_RV_FUNCTION_FAILED;
+        rv = fhsm_composite_verify(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512,
+                                   reqpub, rl, req_tbs, (size_t)rtl, NULL, 0,
+                                   ASN1_STRING_get0_data((const ASN1_STRING *)rsig),
+                                   (size_t)ASN1_STRING_length((const ASN1_STRING *)rsig));
+        OPENSSL_free(req_tbs);
+        return rv == FHSM_RV_OK ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
+    }
+
+    /* OpenSSL's errors on the way are about the applicant's request, and the
+     * return value says everything the caller needs; they are not left on
+     * the queue for an unrelated operation to print. */
+    ERR_set_mark();
+    EVP_PKEY *k = X509_REQ_get0_pubkey(req);
+    int r = k ? X509_REQ_verify(req, k) : -1;
+    ERR_pop_to_mark();
+    if (!k) return FHSM_RV_MECHANISM_INVALID;
+    return r == 1 ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
+}
+
+fhsm_rv_t fhsm_pki_issue(const fhsm_pki_signer_t *s,
+                          const uint8_t *ca_cert, size_t ca_cert_len,
+                          const uint8_t *csr, size_t csr_len,
+                          const char *subject_override,
+                          const char *san,
+                          const char *const *crl_urls, size_t n_crl_urls,
+                          fhsm_cert_profile_t profile,
+                          int days,
+                          fhsm_composite_rng_cb rng, void *rng_ctx,
+                          uint8_t *out, size_t *out_len)
+{
+    if (!signer_ok(s) || !ca_cert || !csr || !rng || !out || !out_len)
         return FHSM_RV_ARGUMENTS_BAD;
     if (days <= 0) return FHSM_RV_ARGUMENTS_BAD;
 
@@ -1148,8 +1258,6 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
     X509     *ca  = NULL, *x = NULL;
     X509_REQ *req = NULL;
     X509_NAME *subj = NULL;
-    uint8_t *tbs = NULL, *sig = NULL, *der = NULL, *req_tbs = NULL;
-    static uint8_t reqpub[FHSM_COMPOSITE_PUB_MAX];
 
     {
         const uint8_t *p = ca_cert;  ca  = d2i_X509(NULL, &p, (long)ca_cert_len);
@@ -1157,34 +1265,10 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
     }
     if (!ca || !req) { rv = FHSM_RV_ARGUMENTS_BAD; goto out; }
 
-    /* ---- Proof of possession, before anything else -------------------
-     * The request's signature, checked against the key the request carries.
-     * Without this the CA certifies a key the applicant may not hold: anyone
-     * could lift a public key from an existing certificate and obtain a new
-     * one for it. This is the difference between a CA and a rubber stamp, and
-     * it is the reason issuance has a single entry point. */
-    {
-        size_t rl = sizeof reqpub;
-        const uint8_t *raw = NULL; size_t rawl = 0;
-        rv = pub_from_slot(alg, X509_REQ_get_X509_PUBKEY(req), reqpub, &rl,
-                            &raw, &rawl);
-        if (rv != FHSM_RV_OK) goto out;
-
-        const ASN1_BIT_STRING *rsig = NULL; const X509_ALGOR *ralg = NULL;
-        X509_REQ_get0_signature(req, &rsig, &ralg);
-        const ASN1_OBJECT *o = NULL; int pt = 0; const void *pv = NULL;
-        X509_ALGOR_get0(&o, &pt, &pv, ralg);
-        char b[128] = ""; OBJ_obj2txt(b, sizeof b, o, 1);
-        if (strcmp(b, FHSM_COMPOSITE_OID_MLDSA65_ED25519) != 0) {
-            rv = FHSM_RV_MECHANISM_INVALID; goto out;
-        }
-        int rtl = i2d_re_X509_REQ_tbs(req, &req_tbs);
-        if (rtl <= 0) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
-        rv = fhsm_composite_verify(alg, reqpub, rl, req_tbs, (size_t)rtl, NULL, 0,
-                                    ASN1_STRING_get0_data((const ASN1_STRING *)rsig),
-                                    (size_t)ASN1_STRING_length((const ASN1_STRING *)rsig));
-        if (rv != FHSM_RV_OK) { rv = FHSM_RV_SIGNATURE_INVALID; goto out; }
-    }
+    /* Before anything else. */
+    rv = csr_proof_of_possession(req);
+    if (rv != FHSM_RV_OK) goto out;
+    rv = FHSM_RV_FUNCTION_FAILED;
 
     x = X509_new();
     if (!x) { rv = FHSM_RV_HOST_MEMORY; goto out; }
@@ -1232,19 +1316,10 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
         if (X509_set_subject_name(x, X509_REQ_get_subject_name(req)) != 1) goto out;
     }
 
-    /* The requester's key, copied across verbatim. */
-    {
-        const unsigned char *pk = NULL; int pkl = 0;
-        X509_PUBKEY_get0_param(NULL, &pk, &pkl, NULL, X509_REQ_get_X509_PUBKEY(req));
-        ASN1_OBJECT *oid = OBJ_txt2obj(FHSM_COMPOSITE_OID_MLDSA65_ED25519, 1);
-        uint8_t *penc = OPENSSL_memdup(pk, (size_t)pkl);
-        if (!oid || !penc) { ASN1_OBJECT_free(oid); OPENSSL_free(penc);
-                              rv = FHSM_RV_HOST_MEMORY; goto out; }
-        if (X509_PUBKEY_set0_param(X509_get_X509_PUBKEY(x), oid, V_ASN1_UNDEF,
-                                    NULL, penc, pkl) != 1) {
-            ASN1_OBJECT_free(oid); OPENSSL_free(penc); goto out;
-        }
-    }
+    /* The requester's key, copied across verbatim, whatever its algorithm. */
+    rv = spki_into_slot(X509_get_X509_PUBKEY(x), X509_REQ_get_X509_PUBKEY(req));
+    if (rv != FHSM_RV_OK) goto out;
+    rv = FHSM_RV_FUNCTION_FAILED;
 
     /* ---- Extensions: the CA's, not the applicant's -------------------
      * Whatever the request asked for is not read. CA:FALSE is the one that
@@ -1293,18 +1368,7 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
     /* subjectKeyIdentifier over the applicant's key; authorityKeyIdentifier
      * from the CA's own, so a verifier can find the issuer without guessing. */
     {
-        const unsigned char *pk = NULL; int pkl = 0;
-        X509_PUBKEY_get0_param(NULL, &pk, &pkl, NULL, X509_REQ_get_X509_PUBKEY(req));
-        uint8_t md[20];
-        if (!key_id(pk, (size_t)pkl, md)) goto out;
-        ASN1_OCTET_STRING *os = ASN1_OCTET_STRING_new();
-        if (!os) { rv = FHSM_RV_HOST_MEMORY; goto out; }
-        int ok = ASN1_OCTET_STRING_set(os, md, 20) == 1;
-        X509_EXTENSION *e = ok ? X509V3_EXT_i2d(NID_subject_key_identifier, 0, os)
-                               : NULL;
-        ok = e && X509_add_ext(x, e, -1) == 1;
-        X509_EXTENSION_free(e); ASN1_OCTET_STRING_free(os);
-        if (!ok) goto out;
+        if (!add_ski(x, X509_get_X509_PUBKEY(x))) goto out;
 
         const ASN1_OCTET_STRING *caskid = X509_get0_subject_key_id(ca);
         if (caskid) {
@@ -1313,7 +1377,7 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
             akid->keyid = ASN1_OCTET_STRING_dup(caskid);
             X509_EXTENSION *ae = akid->keyid
                 ? X509V3_EXT_i2d(NID_authority_key_identifier, 0, akid) : NULL;
-            ok = ae && X509_add_ext(x, ae, -1) == 1;
+            int ok = ae && X509_add_ext(x, ae, -1) == 1;
             X509_EXTENSION_free(ae); AUTHORITY_KEYID_free(akid);
             if (!ok) goto out;
         }
@@ -1345,42 +1409,41 @@ fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
         rv = FHSM_RV_FUNCTION_FAILED;
     }
 
-    if (!set_composite_algor((X509_ALGOR *)X509_get0_tbs_sigalg(x))) goto out;
-    {
-        const ASN1_BIT_STRING *cs = NULL; const X509_ALGOR *cala = NULL;
-        X509_get0_signature(&cs, &cala, x);
-        if (!cs || !cala) goto out;
-        if (!set_composite_algor((X509_ALGOR *)cala)) goto out;
-
-        int tl = i2d_re_X509_tbs(x, &tbs);
-        if (tl <= 0) goto out;
-        sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
-        if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
-        size_t sl = FHSM_COMPOSITE_SIG_MAX;
-        rv = sign(sign_ctx, tbs, (size_t)tl, sig, &sl);
-        if (rv != FHSM_RV_OK) goto out;
-        rv = FHSM_RV_FUNCTION_FAILED;
-        ASN1_BIT_STRING *bs = (ASN1_BIT_STRING *)cs;
-        if (ASN1_BIT_STRING_set(bs, sig, (int)sl) != 1) goto out;
-        bs->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
-        bs->flags |= ASN1_STRING_FLAG_BITS_LEFT;
-    }
-
-    {
-        int n = i2d_X509(x, &der);
-        if (n <= 0) goto out;
-        if (*out_len < (size_t)n) { *out_len = (size_t)n;
-                                     rv = FHSM_RV_BUFFER_TOO_SMALL; goto out; }
-        memcpy(out, der, (size_t)n);
-        *out_len = (size_t)n;
-        rv = FHSM_RV_OK;
-    }
+    rv = sign_certificate(x, s);
+    if (rv != FHSM_RV_OK) goto out;
+    rv = emit_certificate(x, out, out_len);
 out:
-    OPENSSL_free(der); OPENSSL_free(tbs); OPENSSL_free(req_tbs);
-    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
     X509_NAME_free(subj);
     X509_free(x); X509_free(ca); X509_REQ_free(req);
     return rv;
+}
+
+fhsm_rv_t fhsm_composite_issue(fhsm_composite_alg_t alg,
+                                const uint8_t *ca_cert, size_t ca_cert_len,
+                                const uint8_t *csr, size_t csr_len,
+                                const char *subject_override,
+                                const char *san,
+                                const char *const *crl_urls, size_t n_crl_urls,
+                                fhsm_cert_profile_t profile,
+                                int days,
+                                fhsm_composite_sign_cb sign, void *sign_ctx,
+                                fhsm_composite_rng_cb rng, void *rng_ctx,
+                                uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+        || !ca_cert || !csr || !sign || !rng || !out || !out_len)
+        return FHSM_RV_ARGUMENTS_BAD;
+    if (days <= 0) return FHSM_RV_ARGUMENTS_BAD;
+    /* The CA's own key is not needed to sign -- the callback holds it -- and
+     * the issued certificate carries the requester's. So the signer here has
+     * no SubjectPublicKeyInfo, only the algorithm and the callback. */
+    const uint8_t *ad = NULL; size_t adl = 0;
+    fhsm_rv_t rv = fhsm_composite_algid(alg, &ad, &adl);
+    if (rv != FHSM_RV_OK) return rv;
+    fhsm_pki_signer_t s = { ad, adl, NULL, 0, sign, sign_ctx };
+    return fhsm_pki_issue(&s, ca_cert, ca_cert_len, csr, csr_len, subject_override,
+                          san, crl_urls, n_crl_urls, profile, days, rng, rng_ctx,
+                          out, out_len);
 }
 
 /* ===========================================================================
@@ -1535,17 +1598,15 @@ out:
     return rv;
 }
 
-fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
+fhsm_rv_t fhsm_pki_crl(const fhsm_pki_signer_t *s,
                               const uint8_t *ca_cert, size_t ca_cert_len,
                               const fhsm_composite_revoked_t *revoked,
                               size_t n_revoked,
                               uint64_t crl_number,
                               int days,
-                              fhsm_composite_sign_cb sign, void *sign_ctx,
                               uint8_t *out, size_t *out_len)
 {
-    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
-        || !ca_cert || !sign || !out || !out_len)
+    if (!signer_ok(s) || !ca_cert || !out || !out_len)
         return FHSM_RV_ARGUMENTS_BAD;
     if (days <= 0) return FHSM_RV_ARGUMENTS_BAD;
     if (n_revoked && !revoked) return FHSM_RV_ARGUMENTS_BAD;
@@ -1655,8 +1716,7 @@ fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
          * NULL there is a caller bug everywhere else -- so the probe is a
          * real buffer of length zero. */
         uint8_t probe[1]; size_t need = 0;
-        rv = fhsm_composite_crl_tbs(ALGID_MLDSA65_ED25519,
-                                     sizeof ALGID_MLDSA65_ED25519,
+        rv = fhsm_composite_crl_tbs(s->algid, s->algid_len,
                                      issuer, (size_t)issuer_n,
                                      this_u, (size_t)this_n,
                                      next_u, (size_t)next_n,
@@ -1669,8 +1729,7 @@ fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
         tbs = OPENSSL_malloc(need);
         if (!tbs) { rv = FHSM_RV_HOST_MEMORY; goto out; }
         tbs_n = need;
-        rv = fhsm_composite_crl_tbs(ALGID_MLDSA65_ED25519,
-                                     sizeof ALGID_MLDSA65_ED25519,
+        rv = fhsm_composite_crl_tbs(s->algid, s->algid_len,
                                      issuer, (size_t)issuer_n,
                                      this_u, (size_t)this_n,
                                      next_u, (size_t)next_n,
@@ -1682,16 +1741,17 @@ fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
 
     /* ---- sign, then the outer CertificateList --------------------------
      * Assembled here rather than through X509_CRL for the same reason the
-     * TBSCertList is: the outer AlgorithmIdentifier would have to be a
-     * composite one, and setting it through the API leaves the inner one
-     * empty. Both are the same twelve bytes, and they must match -- a
-     * verifier that finds them different is looking at a substituted
-     * algorithm. */
-    sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
+     * TBSCertList is: the outer AlgorithmIdentifier is set through the API,
+     * and that leaves the inner one empty. Both are the signer's same bytes,
+     * and they must match -- a verifier that finds them different is
+     * looking at a substituted algorithm. The path was written for the
+     * composite, which OpenSSL cannot sign with; it serves every signer, so
+     * one assembler is checked rather than two. */
+    sig = OPENSSL_malloc(FHSM_PKI_SIG_MAX);
     if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
     {
-        size_t sl = FHSM_COMPOSITE_SIG_MAX;
-        rv = sign(sign_ctx, tbs, tbs_n, sig, &sl);
+        size_t sl = FHSM_PKI_SIG_MAX;
+        rv = s->sign(s->sign_ctx, tbs, tbs_n, sig, &sl);
         if (rv != FHSM_RV_OK) goto out;
         rv = FHSM_RV_FUNCTION_FAILED;
 
@@ -1700,7 +1760,7 @@ fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
         size_t bs_hdr_n = der_len(bs_content, bs_hdr, sizeof bs_hdr);
         if (!bs_hdr_n) goto out;
 
-        const size_t content = tbs_n + sizeof ALGID_MLDSA65_ED25519
+        const size_t content = tbs_n + s->algid_len
                              + 1 + bs_hdr_n + bs_content;
         uint8_t sq[5]; size_t sq_n = der_len(content, sq, sizeof sq);
         if (!sq_n) goto out;
@@ -1711,8 +1771,8 @@ fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
         uint8_t *c = out;
         *c++ = 0x30; memcpy(c, sq, sq_n); c += sq_n;
         memcpy(c, tbs, tbs_n); c += tbs_n;
-        memcpy(c, ALGID_MLDSA65_ED25519, sizeof ALGID_MLDSA65_ED25519);
-        c += sizeof ALGID_MLDSA65_ED25519;
+        memcpy(c, s->algid, s->algid_len);
+        c += s->algid_len;
         *c++ = 0x03; memcpy(c, bs_hdr, bs_hdr_n); c += bs_hdr_n;
         *c++ = 0x00;
         memcpy(c, sig, sl); c += sl;
@@ -1724,10 +1784,27 @@ out:
     OPENSSL_free(issuer); OPENSSL_free(this_u); OPENSSL_free(next_u);
     OPENSSL_free(rev_buf); OPENSSL_free(rev_seq);
     OPENSSL_free(ext_seq); OPENSSL_free(tbs);
-    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
+    if (sig) { OPENSSL_cleanse(sig, FHSM_PKI_SIG_MAX); OPENSSL_free(sig); }
     ASN1_TIME_free(t1); ASN1_TIME_free(t2);
     X509_free(ca);
     return rv;
+}
+
+fhsm_rv_t fhsm_composite_crl(fhsm_composite_alg_t alg,
+                              const uint8_t *ca_cert, size_t ca_cert_len,
+                              const fhsm_composite_revoked_t *revoked,
+                              size_t n_revoked,
+                              uint64_t crl_number,
+                              int days,
+                              fhsm_composite_sign_cb sign, void *sign_ctx,
+                              uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512 || !sign)
+        return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_pki_signer_t s = { ALGID_MLDSA65_ED25519, sizeof ALGID_MLDSA65_ED25519,
+                            NULL, 0, sign, sign_ctx };
+    return fhsm_pki_crl(&s, ca_cert, ca_cert_len, revoked, n_revoked, crl_number,
+                        days, out, out_len);
 }
 
 /* ===========================================================================
@@ -1882,18 +1959,17 @@ fhsm_rv_t fhsm_composite_ocsp_tbs(const uint8_t *responder_id, size_t responder_
     return (*out_len == total) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
 
-fhsm_rv_t fhsm_composite_ocsp(fhsm_composite_alg_t alg,
+fhsm_rv_t fhsm_pki_ocsp(const fhsm_pki_signer_t *s,
                                const uint8_t *responder_cert, size_t responder_cert_len,
                                const uint8_t *produced_at, size_t produced_at_len,
                                const fhsm_composite_ocsp_single_t *singles, size_t n,
                                const uint8_t *exts, size_t exts_len,
-                               fhsm_composite_sign_cb sign, void *sign_ctx,
                                uint8_t *out, size_t *out_len)
 {
-    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512
+    if (!signer_ok(s)
         || !responder_cert || !responder_cert_len
         || !produced_at || !produced_at_len
-        || !singles || !n || !sign || !out || !out_len)
+        || !singles || !n || !out || !out_len)
         return FHSM_RV_ARGUMENTS_BAD;
     if ((exts == NULL) != (exts_len == 0)) return FHSM_RV_ARGUMENTS_BAD;
 
@@ -1976,11 +2052,11 @@ fhsm_rv_t fhsm_composite_ocsp(fhsm_composite_alg_t alg,
      * can only check that if the certificate travels with the response. For a
      * composite responder it matters twice over: nothing else on the client's
      * disk holds a key it can parse. */
-    sig = OPENSSL_malloc(FHSM_COMPOSITE_SIG_MAX);
+    sig = OPENSSL_malloc(FHSM_PKI_SIG_MAX);
     if (!sig) { rv = FHSM_RV_HOST_MEMORY; goto out; }
     {
-        size_t sl = FHSM_COMPOSITE_SIG_MAX;
-        rv = sign(sign_ctx, tbs, tbs_n, sig, &sl);
+        size_t sl = FHSM_PKI_SIG_MAX;
+        rv = s->sign(s->sign_ctx, tbs, tbs_n, sig, &sl);
         if (rv != FHSM_RV_OK) goto out;
         rv = FHSM_RV_FUNCTION_FAILED;
 
@@ -1999,7 +2075,7 @@ fhsm_rv_t fhsm_composite_ocsp(fhsm_composite_alg_t alg,
         if (!outer_hdr_n) goto out;
         size_t certs_total = 1 + outer_hdr_n + inner_total;
 
-        const size_t content = tbs_n + sizeof ALGID_MLDSA65_ED25519
+        const size_t content = tbs_n + s->algid_len
                              + 1 + bs_hdr_n + bs_content + certs_total;
         uint8_t sq[5]; size_t sq_n = der_len(content, sq, sizeof sq);
         if (!sq_n) goto out;
@@ -2010,8 +2086,8 @@ fhsm_rv_t fhsm_composite_ocsp(fhsm_composite_alg_t alg,
         uint8_t *c = out;
         *c++ = 0x30; memcpy(c, sq, sq_n); c += sq_n;
         memcpy(c, tbs, tbs_n); c += tbs_n;
-        memcpy(c, ALGID_MLDSA65_ED25519, sizeof ALGID_MLDSA65_ED25519);
-        c += sizeof ALGID_MLDSA65_ED25519;
+        memcpy(c, s->algid, s->algid_len);
+        c += s->algid_len;
         *c++ = 0x03; memcpy(c, bs_hdr, bs_hdr_n); c += bs_hdr_n;
         *c++ = 0x00; memcpy(c, sig, sl); c += sl;
         *c++ = 0xA0; memcpy(c, outer_hdr, outer_hdr_n); c += outer_hdr_n;
@@ -2026,9 +2102,26 @@ out:
     OPENSSL_free(nm); OPENSSL_free(rid);
     OPENSSL_free(sr); OPENSSL_free(sr_seq);
     OPENSSL_free(tbs);
-    if (sig) { OPENSSL_cleanse(sig, FHSM_COMPOSITE_SIG_MAX); OPENSSL_free(sig); }
+    if (sig) { OPENSSL_cleanse(sig, FHSM_PKI_SIG_MAX); OPENSSL_free(sig); }
     X509_free(rc);
     return rv;
+}
+
+fhsm_rv_t fhsm_composite_ocsp(fhsm_composite_alg_t alg,
+                               const uint8_t *responder_cert, size_t responder_cert_len,
+                               const uint8_t *produced_at, size_t produced_at_len,
+                               const fhsm_composite_ocsp_single_t *singles, size_t n,
+                               const uint8_t *exts, size_t exts_len,
+                               fhsm_composite_sign_cb sign, void *sign_ctx,
+                               uint8_t *out, size_t *out_len)
+{
+    if (alg != FHSM_COMPOSITE_MLDSA65_ED25519_SHA512 || !sign)
+        return FHSM_RV_ARGUMENTS_BAD;
+    fhsm_pki_signer_t s = { ALGID_MLDSA65_ED25519, sizeof ALGID_MLDSA65_ED25519,
+                            NULL, 0, sign, sign_ctx };
+    return fhsm_pki_ocsp(&s, responder_cert, responder_cert_len,
+                         produced_at, produced_at_len, singles, n, exts, exts_len,
+                         out, out_len);
 }
 
 /* ===========================================================================
@@ -2498,5 +2591,106 @@ out:
     OPENSSL_free(re); OPENSSL_free(attrs);
     sk_X509_pop_free(certs, X509_free);
     CMS_ContentInfo_free(ci);
+    return rv;
+}
+
+/* ===========================================================================
+ * Signature algorithms other than the composite (fhsm_pki.h).
+ *
+ * The AlgorithmIdentifiers are written out, as the composite's is, rather
+ * than built at run time: RSASSA-PSS carries a parameter block that OpenSSL
+ * only builds from a live key, and a constant is something a test can hold
+ * still. tests/test_pki_classic.c compares each one with the
+ * AlgorithmIdentifier OpenSSL itself writes when it signs with that
+ * algorithm, so a constant cannot drift from what it claims to be -- the
+ * lesson of ALGID_MLDSA65_ED25519's first, wrong, lengths.
+ * ========================================================================= */
+#include <openssl/ec.h>
+
+static const uint8_t ALGID_ECDSA_SHA256[] = {          /* 1.2.840.10045.4.3.2 */
+    0x30, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02
+};
+static const uint8_t ALGID_ECDSA_SHA384[] = {          /* 1.2.840.10045.4.3.3 */
+    0x30, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03
+};
+/* sha256WithRSAEncryption, parameters NULL: RFC 4055 5 says the NULL MUST be
+ * present for the PKCS#1 v1.5 algorithms -- the opposite of ECDSA, Ed25519,
+ * ML-DSA and the composite, where they MUST be absent. */
+static const uint8_t ALGID_RSA_PKCS1_SHA256[] = {      /* 1.2.840.113549.1.1.11 */
+    0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B,
+    0x05, 0x00
+};
+/* RSASSA-PSS (RFC 4055 3.1): hashAlgorithm SHA-256, maskGenAlgorithm
+ * MGF1 with SHA-256, saltLength 32; trailerField left at its default. */
+static const uint8_t ALGID_RSA_PSS_SHA256[] = {        /* 1.2.840.113549.1.1.10 */
+    0x30, 0x41,
+      0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A,
+      0x30, 0x34,
+        0xA0, 0x0F, 0x30, 0x0D, 0x06, 0x09,                 /* [0] SHA-256 */
+          0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00,
+        0xA1, 0x1C, 0x30, 0x1A, 0x06, 0x09,                 /* [1] MGF1 ... */
+          0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x08,
+          0x30, 0x0D, 0x06, 0x09,                           /* ... SHA-256 */
+          0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00,
+        0xA2, 0x03, 0x02, 0x01, 0x20                        /* [2] salt 32 */
+};
+static const uint8_t ALGID_ED25519[] = {               /* 1.3.101.112 */
+    0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70
+};
+static const uint8_t ALGID_MLDSA44[] = {               /* 2.16.840.1.101.3.4.3.17 */
+    0x30, 0x0B, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x11
+};
+static const uint8_t ALGID_MLDSA65[] = {               /* 2.16.840.1.101.3.4.3.18 */
+    0x30, 0x0B, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12
+};
+static const uint8_t ALGID_MLDSA87[] = {               /* 2.16.840.1.101.3.4.3.19 */
+    0x30, 0x0B, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13
+};
+
+fhsm_rv_t fhsm_pki_algid(fhsm_pki_sigalg_t a, const uint8_t **der, size_t *der_len)
+{
+    if (!der || !der_len) return FHSM_RV_ARGUMENTS_BAD;
+    #define ALG(t) do { *der = t; *der_len = sizeof t; return FHSM_RV_OK; } while (0)
+    switch (a) {
+    case FHSM_PKI_SIG_COMPOSITE_MLDSA65_ED25519:
+        return fhsm_composite_algid(FHSM_COMPOSITE_MLDSA65_ED25519_SHA512, der, der_len);
+    case FHSM_PKI_SIG_ECDSA_SHA256:     ALG(ALGID_ECDSA_SHA256);
+    case FHSM_PKI_SIG_ECDSA_SHA384:     ALG(ALGID_ECDSA_SHA384);
+    case FHSM_PKI_SIG_RSA_PSS_SHA256:   ALG(ALGID_RSA_PSS_SHA256);
+    case FHSM_PKI_SIG_RSA_PKCS1_SHA256: ALG(ALGID_RSA_PKCS1_SHA256);
+    case FHSM_PKI_SIG_ED25519:          ALG(ALGID_ED25519);
+    case FHSM_PKI_SIG_MLDSA44:          ALG(ALGID_MLDSA44);
+    case FHSM_PKI_SIG_MLDSA65:          ALG(ALGID_MLDSA65);
+    case FHSM_PKI_SIG_MLDSA87:          ALG(ALGID_MLDSA87);
+    }
+    #undef ALG
+    return FHSM_RV_ARGUMENTS_BAD;
+}
+
+fhsm_rv_t fhsm_pki_ecdsa_raw_to_der(const uint8_t *rs, size_t rs_len,
+                                     uint8_t *out, size_t *out_len)
+{
+    if (!rs || !out || !out_len || rs_len == 0 || rs_len % 2 || rs_len > 264)
+        return FHSM_RV_ARGUMENTS_BAD;
+    size_t h = rs_len / 2;
+    ECDSA_SIG *sig = ECDSA_SIG_new();
+    BIGNUM *r = BN_bin2bn(rs, (int)h, NULL);
+    BIGNUM *s = BN_bin2bn(rs + h, (int)h, NULL);
+    fhsm_rv_t rv = FHSM_RV_HOST_MEMORY;
+    if (!sig || !r || !s) goto out;
+    if (ECDSA_SIG_set0(sig, r, s) != 1) goto out;
+    r = s = NULL;                                   /* owned by sig now */
+    {
+        int n = i2d_ECDSA_SIG(sig, NULL);
+        rv = FHSM_RV_FUNCTION_FAILED;
+        if (n <= 0) goto out;
+        if (*out_len < (size_t)n) { *out_len = (size_t)n; rv = FHSM_RV_BUFFER_TOO_SMALL; goto out; }
+        uint8_t *p = out;
+        if (i2d_ECDSA_SIG(sig, &p) != n) goto out;
+        *out_len = (size_t)n;
+        rv = FHSM_RV_OK;
+    }
+out:
+    BN_free(r); BN_free(s); ECDSA_SIG_free(sig);
     return rv;
 }
