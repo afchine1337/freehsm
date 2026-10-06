@@ -221,6 +221,20 @@ if [ -z "${FHSM_ALLOW_STALE_MODULE:-}" ]; then
     fi
 fi
 
+# Run against a private copy, taken now. A build in the tree while the corpus
+# runs -- `make tests` in another terminal -- replaces ./libfreehsm.so with an
+# unsigned one, and every test after that point failed C_Initialize with
+# 0x80000002: one all-mechanisms run on 2026-10-06 lost its second half that
+# way. The copy is byte-identical, so a signed module stays signed, and
+# MODULE_SHA above is still the digest of what runs. The original path is kept
+# for the record.
+MODULE_ORIG="$MODULE"
+mkdir -p "$REPORTS"
+cp "$MODULE" "$REPORTS/module-under-test.so" \
+    || { echo "FATAL: cannot copy $MODULE into $REPORTS" >&2; exit 2; }
+MODULE="$(readlink -f "$REPORTS/module-under-test.so")"
+echo "NOTE: running against a copy of $MODULE_ORIG: $MODULE"
+
 # The build profile of the module under test, read out of the module itself.
 #
 # Not out of src/gen and not out of the stamp: those say what the TREE is,
