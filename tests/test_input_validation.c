@@ -67,6 +67,7 @@ _Static_assert(offsetof(CK_TOKEN_INFO, utcTime) + 16 == 204,
 #define CKR_MECHANISM_PARAM_INVALID  0x71UL
 #define CKR_ARGUMENTS_BAD            0x07UL
 #define CKR_PIN_LEN_RANGE            0xA2UL
+#define CKR_KEY_SIZE_RANGE           0x62UL
 
 static void *H;
 static CK_RV (*OS)(CK_SLOT_ID,CK_FLAGS,void*,void*,CK_SESSION_HANDLE*);
@@ -136,6 +137,17 @@ int main(void) {
     /* Boolean attribute overlong (CK_ULONG-sized CKA_ENCRYPT) */
     { CK_ULONG big=1; CK_ATTRIBUTE t[]={{0,&(CK_ULONG){4},8},{0x100,&(CK_ULONG){0x1F},8},{0x161,&(CK_ULONG){32},8},{0x104,&big,8}};
       CK_OBJECT_HANDLE k; expect(GK(s0,&(CK_MECHANISM){0x1080,0,0},t,4,&k), CKR_ATTRIBUTE_VALUE_INVALID, "GenerateKey overlong CKA_ENCRYPT"); }
+
+    /* CKA_VALUE_LEN with bits set above the low 32: refused whole, not cut
+     * down to what is left. 0x100000010 used to become 16 and make an AES-128
+     * key (pkcs11-check 0.2.3, TestGenerateKeyValueLenTruncation). And the
+     * attribute must be a CK_ULONG: a short one was read past its end. */
+    { CK_ULONG big = (CK_ULONG)0x100000010ULL;
+      CK_ATTRIBUTE t[]={{0,&(CK_ULONG){4},8},{0x100,&(CK_ULONG){0x1F},8},{0x161,&big,8}};
+      CK_OBJECT_HANDLE k; expect(GK(s0,&(CK_MECHANISM){0x1080,0,0},t,3,&k), CKR_KEY_SIZE_RANGE, "GenerateKey AES VALUE_LEN 2^32+16"); }
+    { CK_BYTE four[4] = { 16, 0, 0, 0 };
+      CK_ATTRIBUTE t[]={{0,&(CK_ULONG){4},8},{0x100,&(CK_ULONG){0x1F},8},{0x161,four,4}};
+      CK_OBJECT_HANDLE k; expect(GK(s0,&(CK_MECHANISM){0x1080,0,0},t,3,&k), CKR_ATTRIBUTE_VALUE_INVALID, "GenerateKey AES 4-byte VALUE_LEN"); }
 
     /* EC private key created without CKA_EC_PARAMS must be rejected. */
     { CK_RV (*CO)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);

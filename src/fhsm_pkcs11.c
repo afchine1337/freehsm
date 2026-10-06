@@ -2889,17 +2889,27 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         }
         long j = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
         if (j < 0) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-        key_len = (uint32_t)(*(CK_ULONG*)pTemplate[j].pValue);
+        /* Read whole, checked whole, narrowed last -- as the PBKDF2 and 3DES
+         * branches above do. This cast the CK_ULONG to 32 bits first and
+         * checked what was left: CKA_VALUE_LEN = 0x100000010 became 16,
+         * passed, and made a 16-byte AES key the caller had not asked for
+         * (pkcs11-check 0.2.3, TestGenerateKeyValueLenTruncation). It also
+         * read through the caller's pointer without looking at it. */
+        if (!pTemplate[j].pValue || pTemplate[j].ulValueLen != sizeof(CK_ULONG))
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        CK_ULONG req = 0;
+        memcpy(&req, pTemplate[j].pValue, sizeof(CK_ULONG));
         if (key_type == CKK_HKDF_KT) {
             /* HKDF input keying material has no block size to respect: RFC
              * 5869 takes an IKM of any length. The 16/24/32 below belongs to
              * the ciphers, and applying it here would refuse a perfectly
              * ordinary 20- or 64-byte secret. */
-            if (key_len == 0 || key_len > FHSM_PBKDF2_MAX_OUT)
+            if (req == 0 || req > FHSM_PBKDF2_MAX_OUT)
                 return FHSM_RV_KEY_SIZE_RANGE;
-        } else if (key_len != 16 && key_len != 24 && key_len != 32) {
+        } else if (req != 16 && req != 24 && req != 32) {
             return FHSM_RV_KEY_SIZE_RANGE;
         }
+        key_len = (uint32_t)req;
     }
     long i;
 
