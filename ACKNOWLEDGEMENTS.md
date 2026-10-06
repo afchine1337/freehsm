@@ -58,7 +58,11 @@ curves weaker than the module advertised; that 3DES ignored the key length it
 was asked for; and that X25519 and X448 were advertised where the FIPS provider
 could not serve them. Two questions raised from here — an implicit-rejection
 case (#37) and operations left active between tests sharing a session (#38) —
-are resolved in the harness's own 0.2.3.
+are resolved, #37 in most of its tests, in the harness's own 0.2.3. That
+release then found three more: a `CKA_VALUE_LEN` beyond 32 bits cut down to a
+valid AES length, an empty `CK_EDDSA_PARAMS` on Ed25519 answered with a pure
+Ed25519 signature, and `C_EncryptFinal` refusing to finish an operation that
+had received no data.
 
 ## Simon Josefsson (`jas4711`)
 

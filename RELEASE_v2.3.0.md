@@ -85,6 +85,17 @@ conforming application sees no difference.
   `CKR_ARGUMENTS_BAD`.
 - In `all-mechanisms` builds: EC curves below the advertised 256 bits, and
   3DES with a `CKA_VALUE_LEN` other than 24.
+- `CKA_VALUE_LEN` beyond 32 bits in `C_GenerateKey`: 2^32 + 16 was cut to 16
+  and made a 16-byte AES key. It is now `CKR_KEY_SIZE_RANGE`.
+- A `CK_EDDSA_PARAMS` block on an Ed25519 key, even an empty one. Its presence
+  asks for Ed25519ctx, which this module does not implement; it was answered
+  with a pure Ed25519 signature. Pure Ed25519, with no parameters, is
+  unchanged, and so is Ed448.
+
+Two calls that failed now work. `C_EncryptFinal` or `C_DecryptFinal` straight
+after its Init, with no Update, is empty input rather than
+`CKR_OPERATION_NOT_INITIALIZED`. And `CKM_ECDH1_DERIVE` no longer refuses the
+one peer point in 256 whose X coordinate made a bare point look DER-wrapped.
 
 Closing the last session now logs the token out, and `C_GetSessionInfo`
 reports the token's login state rather than the session's.
@@ -111,9 +122,25 @@ still refused.
 
 ## Measured
 
-<!-- TO FILL before tagging: the signed full-corpus runs of 2026-10-06, both
-     profiles, harness 0.2.1, and the comparison with 0.2.3. Do not tag with
-     this comment still here. -->
+Full corpus, signed module, FIPS provider loaded, no integrity bypass in the
+environment, 2026-10-06:
+
+| harness | profile | passed | failed |
+|---|---|---|---|
+| pkcs11-check 0.2.1 | nist-approved-only | 55 205 | 2 |
+| pkcs11-check 0.2.1 | all-mechanisms | 55 655 | 4 |
+| pkcs11-check 0.2.3 | nist-approved-only | 55 378 of 93 010 | 7 |
+| pkcs11-check 0.2.3 | all-mechanisms | 55 832 of 93 141 | 7 |
+
+Each run was diffed by node-id against the previous reference, and every
+moved failure was read. Under 0.2.3, three failures were the module's — the
+`CKA_VALUE_LEN` and Ed25519 items above — and were fixed the same day; a
+targeted run confirmed them, and the `C_EncryptFinal` fix with them. The rest
+are recorded in `tests/pkcs11_check_known_failures.txt`, each with its reason:
+two async probes that never reach the module and a question on Ed448 without
+parameters (mingulov/pkcs11-check#49), and RSA PKCS#1 v1.5 implicit rejection
+scored as an oracle by one test (#37). CI now runs 0.2.3 and gates on that
+list. `docs/PKCS11_CHECK_FINDINGS.md` has the detail.
 
 The composite signs under the FIPS provider: a signed `all-mechanisms` build
 passed `scripts/run_fips_tests.sh` 64 of 64 with the provider shown loaded,
@@ -141,8 +168,9 @@ No FIPS or Common Criteria certification is held, sought, or planned.
 
 The harness is Denis Mingulov's `pkcs11-check`. It found the login conflicts,
 the missing `CKF_SERIAL_SESSION` check, the EC curve bound and the 3DES key
-length, and its 0.2.3 release resolves two questions raised from here (#37,
-#38). `ACKNOWLEDGEMENTS.md` records who found what.
+length. Its 0.2.3 release resolves #38 and most of #37, and found the
+Ed25519, `CKA_VALUE_LEN` and `C_EncryptFinal` defects fixed here.
+`ACKNOWLEDGEMENTS.md` records who found what.
 
 ## Verifying this release
 
