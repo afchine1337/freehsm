@@ -92,6 +92,9 @@ static CK_RV (*C_CreateObject)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJEC
 static CK_RV (*C_DeriveKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
 /* For the other half of the SHA-1 split: the bare digest must stay refused. */
 static CK_RV (*C_DigestInit)(CK_SESSION_HANDLE,CK_MECHANISM*);
+/* Which profile: all-mechanisms advertises the SHA-1 digest, and runs it. */
+static CK_RV (*C_GetMechanismInfo)(CK_SLOT_ID,CK_ULONG,CK_ULONG*);
+static CK_RV (*C_Digest)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
 static CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
 
 /* The reference. Same primitive, driven directly. */
@@ -146,7 +149,7 @@ int main(void)
     #define SYM(n) *(void**)&n = dlsym(lib,#n)
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
     SYM(C_Login); SYM(C_InitPIN); SYM(C_CreateObject); SYM(C_DeriveKey); SYM(C_DigestInit);
-    SYM(C_GetAttributeValue);
+    SYM(C_GetAttributeValue); SYM(C_GetMechanismInfo); SYM(C_Digest);
     if (!C_DeriveKey || !C_CreateObject) { fprintf(stderr,"missing symbols\n"); return 2; }
 
     printf("HKDF (RFC 5869) through C_DeriveKey\n\n");
@@ -303,10 +306,27 @@ int main(void)
             ok(gotlen == 42 && memcmp(got, want, 42) == 0,
                "and its output matches the reference");
         }
-        /* The other half: the bare digest stays refused. */
+        /* The other half: the bare digest stays refused -- in this profile.
+         * all-mechanisms advertises CKM_SHA_1 and runs it, which is that
+         * profile's purpose; there the half to assert is that the module
+         * says so. Asserting refusal there failed a `make PROFILE=all-mechanisms
+         * tests` on 2026-10-02. */
+        CK_ULONG minfo[3];
+        int sha1_offered = C_GetMechanismInfo
+                        && C_GetMechanismInfo(0, CKM_SHA_1, minfo) == CKR_OK;
         CK_MECHANISM dm = { CKM_SHA_1, NULL, 0 };
-        ok(C_DigestInit(s, &dm) != CKR_OK,
-           "while a standalone SHA-1 digest is still refused");
+        CK_RV drv = C_DigestInit(s, &dm);
+        if (sha1_offered) {
+            /* Run it to the end, so no digest stays active on the session the
+             * later cases use. */
+            CK_BYTE abc[3] = { 'a', 'b', 'c' }, md[20];
+            CK_ULONG mdlen = sizeof md;
+            ok(drv == CKR_OK && C_Digest && C_Digest(s, abc, 3, md, &mdlen) == CKR_OK
+               && mdlen == 20,
+               "all-mechanisms: a standalone SHA-1 digest is offered and runs");
+        }
+        else
+            ok(drv != CKR_OK, "while a standalone SHA-1 digest is still refused");
     }
 
     /* (6) CKM_HKDF_DATA derives a data object, not a key. Same bytes, other

@@ -2488,7 +2488,11 @@ The moves that could be a regression were read one by one.
 
 - **AES `CKA_VALUE_LEN` read narrowed** (`TestGenerateKeyValueLenTruncation`,
   approved profile). `C_GenerateKey` now reads the attribute whole, refuses
-  2^32 + 16 with `CKR_KEY_SIZE_RANGE`, and only then narrows it.
+  2^32 + 16 with `CKR_KEY_SIZE_RANGE`, and only then narrows it. The test
+  now reports xfail: it expects `CKR_ATTRIBUTE_VALUE_INVALID` or
+  `CKR_TEMPLATE_INCONSISTENT`. `CKR_KEY_SIZE_RANGE` is what every other
+  unsupported AES length, such as 17, already gets, and one code for "not a
+  size this key type has" is kept rather than a second for large values.
 - **Ed25519 answered a `CK_EDDSA_PARAMS` block with pure Ed25519**
   (`TestEdDSAParametrizedModes::test_edwards25519_ctx_{empty_bytes,null_pointer}_roundtrip`,
   both profiles). On Ed25519 the presence of the block selects Ed25519ctx,

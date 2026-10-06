@@ -20,7 +20,7 @@ print. The design and its stages are in [`fhsm-gui-plan.md`](fhsm-gui-plan.md).
 
 ```bash
 sudo apt install libgtk-4-dev            # once
-make PROFILE=all-mechanisms              # the composite exists only in this profile
+make PROFILE=all-mechanisms              # for the composite; the other algorithms need no profile
 make PROFILE=all-mechanisms gui
 FHSM_TOKENS_DIR=~/fhsm-tokens ./tools/fhsm-gui
 ```
@@ -57,11 +57,20 @@ command line leaves to its user (see below).
 
 | Tab | What it does | Command line |
 |---|---|---|
-| Token | slots, initialise a token, log in and out, keys, generate a composite key pair | `fhsm-token init`, `fhsm-csr keygen` |
+| Token | slots, initialise a token, log in and out, keys and their algorithms, generate a key pair | `fhsm-token init`, `fhsm-csr keygen --alg` |
 | Certificates | request, self-signed root, issue from a request | `fhsm-csr csr`, `fhsm-csr root`, `fhsm-ca issue` |
 | Revocation | the revocation database, revoke, publish a CRL, answer an OCSP request | `fhsm-ca revoke`, `crl`, `ocsp-respond` |
 | Signing | raw detached signatures and CMS, signed and checked | `fhsm-sign sign`, `verify`, `cms`, `cms-verify` |
 | CA, Issue, Revoke | operator mode: the same operations, for one CA | (the same) |
+
+**The algorithm is chosen where a key pair is generated** — the Token tab, and
+Create a new CA in operator mode — from the list `fhsm-csr keygen --alg` takes:
+the composite, ECDSA P-256 and P-384, RSA-PSS and PKCS#1 v1.5, Ed25519,
+ML-DSA-44/65/87. Nothing else asks: every other operation signs with the
+algorithm of the key it is given, and the key list shows each key's. The
+composite exists only in `all-mechanisms` builds; the others work with the
+default profile. CMS uses the key's own digest when it signs, and the one the
+structure names when it checks.
 
 The defaults are the tools': a root for 3650 days and serial 1, a certificate
 for 365 days or 30 for a delegated OCSP responder, a CRL for 30 days, an OCSP
@@ -166,5 +175,8 @@ PINs and fails if either appears in any record.
   command-line tools, nothing off the shelf validates the composite algorithm
   yet; `openssl crl -text` and `openssl x509 -text` read the structures, and
   stop at the signature.
-- **Run without a display.** It is a desktop tool; the operations are tested
-  through `tests/test_pkiops.c` and the command-line tools.
+- **Run without a display.** It is a desktop tool. The operations are tested
+  through `tests/test_pkiops.c` and the command-line tools; the window itself
+  by `make gui-smoke` (`tests/gui_smoke.sh`), which starts it under a virtual
+  display, closes it with `app.quit` — the action behind Ctrl+Q — and fails on
+  any GTK or GLib CRITICAL or WARNING. CI runs it in the `gui-smoke` job.

@@ -1276,6 +1276,17 @@ int pkiops_keys(pkiops_handle session, struct pkiops_key **out, size_t *n,
         free(v);
         return e->code;
     }
+    /* Each key's algorithm, once the search is over: reading it may need a
+     * search of its own -- the public half, for a curve or a parameter set --
+     * and a session holds one at a time. A key it cannot name is listed
+     * without one. */
+    for (size_t i = 0; i < cnt; i++) {
+        enum pkiops_alg a;
+        struct p11_err ignored;
+        if (v[i].label[0]
+            && alg_of(s, v[i].label, (CK_OBJECT_HANDLE)v[i].handle, &a, &ignored) == 0)
+            snprintf(v[i].alg, sizeof v[i].alg, "%s", ALG[a].name);
+    }
     *out = v;
     *n = cnt;
     return 0;

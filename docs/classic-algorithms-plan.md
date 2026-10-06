@@ -89,11 +89,27 @@ Each ends green and committed; the composite's output is unchanged throughout.
    Create a new CA); the key list shows each key's algorithm. Nothing else:
    every other operation already works from the key.
 
-## Open questions
+## Settled along the way
 
-- **The raw signature format for ECDSA.** `fhsm-sign sign` writes what the
-  module returns. For ECDSA that is `r || s`, which `openssl dgst -verify`
-  does not read; DER would. Proposed: DER, said in `FHSM_SIGN.md`, so that the
-  raw signature too can be checked by something else.
-- **RSA size.** 3072 by default, as SP 800-57 advises past 2030. `--bits`
-  for 4096, or not at all?
+- **The raw signature format for ECDSA: DER.** The module returns `r || s`,
+  which `openssl dgst -verify` does not read; `fhsm-sign` writes DER and
+  takes DER back, so the raw signature too can be checked by something else
+  (`FHSM_SIGN.md`).
+- **RSA size: 3072, with no option.** As SP 800-57 advises past 2030. A
+  `--bits` can come when someone needs 4096.
+- **Stage 4 was not a stage.** Each stage brought its own tests:
+  `tests/test_pki_classic.c` (library, software keys, checked by OpenSSL),
+  `tests/test_pkiops_algs.c` (through the module) and
+  `tests/pki_tools_algs.sh` (the tools, checked by the `openssl` command line).
+  The FIPS-provider CI job runs the first two against the signed module, in
+  both profiles.
+- **Certificates begin an hour before issuance.** `pki_tools_algs.sh` saw a
+  root refused as not yet valid seconds after it was made, when a VM's clock
+  stepped back; `FHSM_PKI_BACKDATE_SECONDS` in `fhsm_pki.h`.
+- **Where FreeHSM holds the input.** It streams the composite by pre-hashing,
+  and accumulates the parts of every other raw signature until `C_SignFinal`.
+  `cms` is unaffected: only a digest reaches the module.
+
+## Status
+
+Stages 0 to 5 done, 2026-10-05.

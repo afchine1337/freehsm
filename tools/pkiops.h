@@ -164,6 +164,9 @@ struct pkiops_key {
     int           is_private;
     unsigned long key_type;     /* CKA_KEY_TYPE */
     char          label[65];    /* truncated if longer */
+    char          alg[16];      /* pkiops_alg_name of its algorithm, or "" for
+                                 * a key these tools do not sign with or whose
+                                 * label is not unique */
 };
 int pkiops_keys(pkiops_handle session, struct pkiops_key **out, size_t *n,
                 struct p11_err *e);
