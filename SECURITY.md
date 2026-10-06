@@ -384,7 +384,8 @@ disclosure.
 
 | Version | Supported |
 |---|---|
-| `2.2.x` | ✅ — active development. First version carrying the `C_DecryptFinal` output bound described above |
+| `2.3.x` | ✅ — active development |
+| `2.2.x` | ✅ — supported. First version carrying the `C_DecryptFinal` output bound described above |
 | `2.1.x` | ⚠️ — **affected by the `C_DecryptFinal` out-of-bounds write**; upgrade to v2.2.0. Carries the `C_UnwrapKey` bound |
 | `2.0.x` | ⚠️ — affected by **both** the `C_DecryptFinal` write and the `C_UnwrapKey` stack overflow; upgrade to v2.2.0 |
 | `1.5.x` – `1.6.x` | ⚠️ — affected by both; no backports planned, upgrade |

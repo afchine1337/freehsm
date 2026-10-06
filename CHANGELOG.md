@@ -7,7 +7,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-*To become 2.3.0. Minor, as 2.1.0 and 2.2.0 were: the PKI tools gain
+## [2.3.0] --- 2026-10-07
+
+*Minor, as 2.1.0 and 2.2.0 were: the PKI tools gain
 algorithms and a window, and several calls answer differently, in the
 direction PKCS#11 v3.2 asks — `C_OpenSession` without `CKF_SERIAL_SESSION`,
 `C_Login` of one role over the other, `C_Logout` with nobody logged in. The

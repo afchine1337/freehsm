@@ -62,7 +62,7 @@ and `achieve_silver`, are computed by the site.
 | `sites_https` | Met | GitHub, GitLab and Codeberg serve the repository and releases over HTTPS only. |
 | `discussion` | Met | GitHub Issues: searchable, each issue and comment addressable by URL, open to anyone with an account. GitHub Discussions are *not* enabled; issues are the mechanism. https://github.com/afchine1337/freehsm/issues |
 | `english` | Met | All documentation is in English; the Common Criteria documents also have French versions. Issues are handled in English. |
-| `maintained` | Met | Commits most days; v2.2.0 released 2026-09-23. https://github.com/afchine1337/freehsm/commits/main |
+| `maintained` | Met | Commits most days; v2.3.0 released 2026-10-07. https://github.com/afchine1337/freehsm/commits/main |
 
 ## Change control
 
