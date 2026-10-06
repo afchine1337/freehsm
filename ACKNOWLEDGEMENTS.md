@@ -51,6 +51,15 @@ was unimplemented for every asymmetric mechanism while `C_SignInit` accepted
 them. A test that fails for a reason other than the one it was written for is
 worth more than a test that passes.
 
+In v2.3.0, the first full run of the `all-mechanisms` profile against a signed
+module found that an SO login could take over a token a user was logged into,
+with three neighbouring session rules missing; that EC keys could be made on
+curves weaker than the module advertised; that 3DES ignored the key length it
+was asked for; and that X25519 and X448 were advertised where the FIPS provider
+could not serve them. Two questions raised from here — an implicit-rejection
+case (#37) and operations left active between tests sharing a session (#38) —
+are resolved in the harness's own 0.2.3.
+
 ## Simon Josefsson (`jas4711`)
 
 Preparing Debian packages, and reporting what that exposed:

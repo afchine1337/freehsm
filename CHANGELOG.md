@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+*To become 2.3.0. Minor, as 2.1.0 and 2.2.0 were: the PKI tools gain
+algorithms and a window, and several calls answer differently, in the
+direction PKCS#11 v3.2 asks — `C_OpenSession` without `CKF_SERIAL_SESSION`,
+`C_Login` of one role over the other, `C_Logout` with nobody logged in. The
+two mechanisms withdrawn from the list never worked. No security advisory.
+`RELEASE_v2.3.0.md` has the release notes.*
+
 ### Fixed
 * **Certificates were not valid until the second they were made.** Roots from
   `fhsm-csr root` and certificates from `fhsm-ca issue` began their validity at
@@ -221,7 +228,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
   each request, chain, CRL, OCSP answer, raw signature and CMS. Hierarchies
   may mix: a CA of one algorithm certifies a key of another, the request's
   proof of possession checked by its own. An ECDSA raw signature is written as
-  DER. The builders in `include/fhsm_pki.h` take any signer; the composite
+  DER. `fhsm-gui` offers the same choice where a key pair is generated, and
+  lists each key's algorithm. The builders in `include/fhsm_pki.h` take any
+  signer; the composite
   functions are now that with a composite signer, and
   `tests/pki_tools_characterize.sh` shows the composite output unchanged.
   See `docs/classic-algorithms-plan.md`.
