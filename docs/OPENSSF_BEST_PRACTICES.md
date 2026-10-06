@@ -74,7 +74,7 @@ and `achieve_silver`, are computed by the site.
 | `repo_distributed` | Met | Git. |
 | `version_unique` | Met | Each release has a unique `vMAJOR.MINOR.PATCH` version. https://github.com/afchine1337/freehsm/releases |
 | `version_semver` | Met | Semantic Versioning. |
-| `version_tags` | Met | Each release is an annotated, GPG-signed git tag `vX.Y.Z` (GitHub verifies v2.0.0, v2.1.0, v2.2.0). https://github.com/afchine1337/freehsm/tags |
+| `version_tags` | Met | Each release is an annotated, GPG-signed git tag `vX.Y.Z` (GitHub verifies v2.0.0, v2.1.0, v2.2.0, v2.3.0). https://github.com/afchine1337/freehsm/tags |
 | `release_notes` | Met | Hand-written `RELEASE_vX.Y.Z.md` published as each GitHub release body (enforced by `release.yml` since v2.0.0), plus `CHANGELOG.md`. https://github.com/afchine1337/freehsm/releases |
 | `release_notes_vulns` | Met | Release notes name every advisory fixed; e.g. v2.2.0 carries GHSA-c634-gqj6-4p2f. https://github.com/afchine1337/freehsm/releases/tag/v2.2.0 |
 
