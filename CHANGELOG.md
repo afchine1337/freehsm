@@ -15,6 +15,18 @@ two mechanisms withdrawn from the list never worked. No security advisory.
 `RELEASE_v2.3.0.md` has the release notes.*
 
 ### Fixed
+* **An empty `CK_EDDSA_PARAMS` on an Ed25519 key was answered with pure
+  Ed25519.** PKCS#11 v3.2 makes the presence of the block the switch: none is
+  pure Ed25519, a block is Ed25519ctx (Ed25519ph with `phFlag`), whose
+  signature carries RFC 8032's dom2 prefix. A non-empty context and `phFlag`
+  were already refused; a block with neither was accepted and signed as the
+  other variant. On an Ed25519 key any parameter block is now
+  `CKR_MECHANISM_PARAM_INVALID` at `C_SignInit` and `C_VerifyInit`. Ed448 is
+  unchanged: there an empty block is pure Ed448. Ed25519ctx and Ed25519ph
+  remain unimplemented. pkcs11-check 0.2.3,
+  `TestEdDSAParametrizedModes::test_edwards25519_ctx_*_roundtrip`;
+  `tests/test_eddsa_params.c`.
+
 * **`C_EncryptFinal` straight after `C_EncryptInit` reported no operation.**
   The multipart cipher context was built by the first `C_EncryptUpdate`, so
   Init then Final — zero bytes of input — answered

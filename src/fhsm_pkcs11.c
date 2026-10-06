@@ -8832,6 +8832,32 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             return FHSM_RV_MECHANISM_PARAM_INVALID;
         if (ed.ulContextDataLen != 0 || ed.phFlag != 0)
             return FHSM_RV_MECHANISM_PARAM_INVALID;
+        /* On an Ed25519 key the block is refused even when it is empty.
+         * PKCS#11 v3.2 makes its presence the switch: no parameters is pure
+         * Ed25519, a parameter block is Ed25519ctx (or Ed25519ph with phFlag),
+         * whose signature carries the dom2 prefix -- an Ed25519ctx signature
+         * over an empty context is not an Ed25519 signature. This module
+         * signs pure Ed25519 only, so a block with phFlag clear and no context
+         * was answered with a signature from the other variant. pkcs11-check
+         * 0.2.3 TestEdDSAParametrizedModes::test_edwards25519_ctx_*_roundtrip
+         * ("provider ignores CK_EDDSA_PARAMS").
+         *
+         * Ed448 is unaffected: there the block with phFlag clear and an empty
+         * context is pure Ed448, which is what is produced. */
+        {
+            fhsm_token_t *tk = fhsm_session_token(hSession);
+            const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+            if (tk && fhsm_token_object_get(tk, (uint32_t)hKey, &kv, &kvl,
+                                            &cl, &kt) == FHSM_RV_OK) {
+                const uint8_t *p = kv;
+                EVP_PKEY *pk = NULL;
+                if (cl == CKO_PUBLIC_KEY)       pk = d2i_PUBKEY(NULL, &p, (long)kvl);
+                else if (cl == CKO_PRIVATE_KEY) pk = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+                int is_ed25519 = pk && EVP_PKEY_is_a(pk, "ED25519");
+                EVP_PKEY_free(pk);
+                if (is_ed25519) return FHSM_RV_MECHANISM_PARAM_INVALID;
+            }
+        }
     }
     /* Parameter validation (#125 input-validation) : reject wrong-size or
      * weak IVs at *Init with CKR_MECHANISM_PARAM_INVALID rather than

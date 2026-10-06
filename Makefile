@@ -774,6 +774,12 @@ tests/test_hmac_multipart: tests/test_hmac_multipart.c $(LIB)
 tests/test_cipher_final_no_update: tests/test_cipher_final_no_update.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# An empty CK_EDDSA_PARAMS on an Ed25519 key asks for Ed25519ctx, and was
+# answered with pure Ed25519. pkcs11-check 0.2.3,
+# TestEdDSAParametrizedModes::test_edwards25519_ctx_*_roundtrip.
+tests/test_eddsa_params: tests/test_eddsa_params.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # The advertised set and the implemented set are two structures with nothing
 # holding them equal: fhsm_mechanism_table[] carries a handler pointer that no
 # code dereferences, and the PKCS#11 entry points switch on mechanisms by hand.
@@ -1066,6 +1072,7 @@ TEST_BINS = \
 	tests/test_unwrap_len \
 	tests/test_hmac_multipart \
 	tests/test_cipher_final_no_update \
+	tests/test_eddsa_params \
 	tests/test_advertised_operational \
 	tests/test_derive_concat \
 	tests/test_ecdh_peer_point \
@@ -1157,6 +1164,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_hmac_multipart
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_cipher_final_no_update
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_eddsa_params
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_advertised_operational
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
