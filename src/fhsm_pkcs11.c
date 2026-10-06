@@ -4461,14 +4461,29 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     }
     if (!peer) peer = d2i_PUBKEY(NULL, &pdata, (long)p->ulPublicDataLen);
     if (!peer) {
-        /* Strip a DER OCTET STRING wrapper if present, then assume raw
-         * uncompressed point. */
+        /* A bare point, or one wrapped in a DER OCTET STRING -- told apart by
+         * the length the bare point must have on this curve: 1 + 2n bytes
+         * uncompressed, 1 + n compressed, n the field size.
+         *
+         * Not by its first bytes. An uncompressed point begins with 0x04, as
+         * an OCTET STRING does, and its second byte is the first byte of X:
+         * a P-256 point whose X began with 0x3F (63) read as a 63-byte OCTET
+         * STRING, lost its first two bytes, and was refused as
+         * CKR_ATTRIBUTE_VALUE_INVALID. One peer key in 256, so it came and
+         * went between runs: pkcs11-check's
+         * TestEcdhDeriveTemplateEnforcement passed on 2026-09-29 and failed
+         * on 2026-10-06 with the same module code on this path.
+         * tests/test_ecdh_peer_point.c now makes such a key on purpose. */
         const uint8_t *raw = p->pPublicData;
         size_t raw_len = p->ulPublicDataLen;
-        if (raw_len > 2 && raw[0] == 0x04 && raw[1] != 0x04
-            && (size_t)raw[1] + 2 == raw_len) {
+        int bits = EVP_PKEY_get_bits(priv);
+        size_t fb = bits > 0 ? ((size_t)bits + 7) / 8 : 0;
+        int bare = fb && (raw_len == 1 + 2 * fb || raw_len == 1 + fb);
+        if (!bare && raw_len > 2 && raw[0] == 0x04
+            && (size_t)raw[1] + 2 == raw_len
+            && ((size_t)raw[1] == 1 + 2 * fb || (size_t)raw[1] == 1 + fb)) {
             raw += 2; raw_len -= 2;            /* short form OCTET STRING */
-        } else if (raw_len > 3 && raw[0] == 0x04 && raw[1] == 0x81
+        } else if (!bare && raw_len > 3 && raw[0] == 0x04 && raw[1] == 0x81
                    && (size_t)raw[2] + 3 == raw_len) {
             raw += 3; raw_len -= 3;            /* long form OCTET STRING */
         }

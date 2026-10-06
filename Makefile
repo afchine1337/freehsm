@@ -783,6 +783,11 @@ tests/test_advertised_operational: tests/test_advertised_operational.c $(LIB)
 tests/test_derive_concat: tests/test_derive_concat.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# A bare ECDH peer point whose second byte reads as a DER length: one P-256
+# key in 256, met by chance by pkcs11-check, made on purpose here.
+tests/test_ecdh_peer_point: tests/test_ecdh_peer_point.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -ldl
+
 # HKDF through C_DeriveKey. Links libcrypto because each case computes its own
 # reference with EVP_KDF rather than carrying expected values written from
 # memory; the RFC 5869 A.1 vector is checked alongside so that a shared
@@ -1056,6 +1061,7 @@ TEST_BINS = \
 	tests/test_hmac_multipart \
 	tests/test_advertised_operational \
 	tests/test_derive_concat \
+	tests/test_ecdh_peer_point \
 	tests/test_derive_hkdf \
 	tests/probe_ecdh_curves \
 	tests/probe_hkdf_data \
@@ -1146,6 +1152,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_advertised_operational
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_derive_concat
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_ecdh_peer_point
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_derive_hkdf
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

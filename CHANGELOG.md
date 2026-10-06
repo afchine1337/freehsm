@@ -15,6 +15,17 @@ two mechanisms withdrawn from the list never worked. No security advisory.
 `RELEASE_v2.3.0.md` has the release notes.*
 
 ### Fixed
+* **ECDH refused one peer point in 256.** `CKM_ECDH1_DERIVE` takes the peer's
+  point bare or wrapped in a DER OCTET STRING, and told them apart by the
+  first two bytes. A bare uncompressed point begins with 0x04 too, and its
+  second byte is X's first: a P-256 point whose X began with 0x3F read as a
+  63-byte OCTET STRING, lost two bytes, and was refused as
+  `CKR_ATTRIBUTE_VALUE_INVALID` — P-384 likewise with 0x5F. The form is now
+  told by the length a bare point must have on the curve. pkcs11-check's
+  `TestEcdhDeriveTemplateEnforcement` met it by chance, passing on
+  2026-09-29 and failing on 2026-10-06; `tests/test_ecdh_peer_point.c` makes
+  such a key on purpose and checks the secret against OpenSSL's.
+
 * **Certificates were not valid until the second they were made.** Roots from
   `fhsm-csr root` and certificates from `fhsm-ca issue` began their validity at
   the exact moment of issuance, so a verifier whose clock was behind the CA's
