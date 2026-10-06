@@ -2467,3 +2467,72 @@ passes the curve check only if EC parameter generation on its group succeeds
 `CKR_ATTRIBUTE_VALUE_INVALID`. The two tests now ask the module instead of
 inferring from the profile, and still require MD5 and brainpool to work under
 the integrity bypass, where the default provider serves them.
+
+## 2026-10-06 — pkcs11-check 0.2.1 → 0.2.3, both profiles
+
+    pkcs11-check 0.2.3 · OpenSSL 3.5.7 · signed module, FIPS provider loaded
+    integrity bypass absent from the environment (checked in the run log)
+    reports/pkcs11-check-nist-0.2.3 · reports/pkcs11-check-all-0.2.3
+
+| profile | passed | failed | baseline (0.2.1) |
+|---|---|---|---|
+| nist-approved-only | 55 378 / 93 010 | 7 | 55 205, 2 failed |
+| all-mechanisms | 55 832 / 93 141 | 7 | 55 655, 4 failed |
+
+Diffed by node-id against the archived 0.2.1 runs, 668 tests moved in the
+approved profile and 672 in all-mechanisms. Nearly all are the harness:
+381 new tests landing in xfail, about 160 xfail → passed, 72 xfail → skipped.
+The moves that could be a regression were read one by one.
+
+### Failures that were the module's — fixed
+
+- **AES `CKA_VALUE_LEN` read narrowed** (`TestGenerateKeyValueLenTruncation`,
+  approved profile). `C_GenerateKey` now reads the attribute whole, refuses
+  2^32 + 16 with `CKR_KEY_SIZE_RANGE`, and only then narrows it.
+- **Ed25519 answered a `CK_EDDSA_PARAMS` block with pure Ed25519**
+  (`TestEdDSAParametrizedModes::test_edwards25519_ctx_{empty_bytes,null_pointer}_roundtrip`,
+  both profiles). On Ed25519 the presence of the block selects Ed25519ctx,
+  whose signature carries the dom2 prefix. Ed25519ctx and Ed25519ph are not
+  implemented, so any block on an Ed25519 key is now
+  `CKR_MECHANISM_PARAM_INVALID`, which the harness counts as a declined mode.
+- **`C_EncryptFinal` straight after `C_EncryptInit` reported no operation**
+  (`TestZeroDataFinal::test_encrypt_final_no_update`, passed → xfailed). The
+  cipher context was built by the first Update only; Final now builds it, and
+  `C_DecryptFinal` likewise.
+
+### Failures listed in `tests/pkcs11_check_known_failures.txt`
+
+- **`TestAsyncErrors::test_async_get_id_{no_operation,empty_selector}`.** The
+  child probe passes a `c_char` buffer where the harness declares
+  `CK_UTF8CHAR_PTR`; ctypes raises `ArgumentError` before the module is called
+  and the child exits without a result. Reproduced with the same prototype
+  and a stub. Under 0.2.1 both were skips on the module's
+  `CKR_FUNCTION_NOT_SUPPORTED`. Reported as mingulov/pkcs11-check#49.
+- **`TestEdDSAParameters::test_eddsa_edwards448_{sign,verify}_missing_required_param`.**
+  Ed448 with no parameter block is accepted as pure Ed448. The harness
+  requires the block; whether PKCS#11 v3.2 does is asked, with the clause, in
+  #49. If it does, the module refuses NULL and the entries go.
+- **`TestRSAPaddingOracle::test_pkcs1v15_bleichenbacher_structured_oracle`**
+  (all-mechanisms), unchanged since 2026-09-28: implicit rejection returns
+  `CKR_OK`. 0.2.3 now recognises it in `TestInvalidOperations::test_decrypt_garbage`,
+  failed → xfailed; this test does not yet. Noted in #49.
+
+### No longer failing
+
+The EDDSA pair of #23 (`TestBadParameters::test_registry_{sign,verify}_missing_required_param[EDDSA]`)
+now skips: 0.2.3 treats pure Ed25519 with NULL parameters as the default
+profile. With `test_decrypt_garbage`, their entries were removed from the
+known-failures list when the workflows moved to 0.2.3.
+
+### Moves read and left
+
+- `TestKeyTypeConfusionOnUnwrap::test_unwrap_aes_as_des3_rejected`, passed →
+  xfailed. An AES-KW blob unwrapped as `CKK_DES3` is still refused, with
+  `CKR_KEY_TYPE_INCONSISTENT`; 0.2.3 expects `CKR_WRAPPED_KEY_LEN_RANGE`.
+  Which code fits is open; the refusal is what matters and it stands.
+- `TestForkSafety::test_fork_after_initialize`, passed → skipped. The harness
+  now files it as a robustness observation without a verdict.
+
+The constant audit in `ci.yml` gives the same result under both references,
+322 conform, 30 not in the reference, 0 divergent, so its pin moved with the
+corpus workflows'.

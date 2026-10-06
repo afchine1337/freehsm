@@ -104,7 +104,15 @@ jobs:
           # 322/32 baseline was taken. Running the OLD reference against the
           # NEW tree separated the two explanations; comparing only the new
           # numbers to a five-day-old baseline could not have.
-          /tmp/p11spec/bin/pip install --quiet 'pkcs11-check==0.2.1'
+          #
+          # 0.2.1 -> 0.2.3 on 2026-10-06, with the corpus workflow, both
+          # references against the same tree:
+          #
+          #   --spec <0.2.3 types_std.py>   322 conform, 30 not in ref, 0 divergent
+          #   --spec <0.2.1 types_std.py>   322 conform, 30 not in ref, 0 divergent
+          #
+          # Identical, so a bump and not a change of reference.
+          /tmp/p11spec/bin/pip install --quiet 'pkcs11-check==0.2.3'
           # Locate types_std.py without importing it: the module uses
           # `from typing import Self` (3.11+) and importing it would tie this
           # step to the runner's Python version. We only need to read the file.
@@ -411,9 +419,22 @@ jobs:
   # embed the module. Only built, with `make test-bins`: running
   # that target would also run the ordinary suite under the bypass, which is
   # not this job's question.
+  #
+  # Both profiles. Until 2026-10-04 only the default one ran here, and the
+  # first run of all-mechanisms, by hand, found the module offering MD5 and
+  # brainpool, which the FIPS provider does not serve -- X25519 again, a week
+  # after it was fixed. PROFILE is set for the whole job: every make in it,
+  # the script's own included, must build the same profile, or make
+  # regenerates the dispatch table and relinks the signed module.
   test-fips-provider:
     runs-on: ubuntu-latest
     needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [nist-approved-only, all-mechanisms]
+    env:
+      PROFILE: ${{ matrix.profile }}
     container:
       image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
       options: --user root
@@ -441,9 +462,35 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fips-tests
+          name: fips-tests-${{ matrix.profile }}
           path: fips-tests.log
           retention-days: 30
+
+  # The desktop interface, opened and closed with no display (tests/gui_smoke.sh):
+  # a virtual X server, a private session bus, app.quit sent over it, and any
+  # GTK or GLib CRITICAL or WARNING a failure. Its logic is tested through
+  # tools/pkiops in the suite; what only this sees is the window's own
+  # lifecycle, where the close-time criticals of 2026-10-02 were.
+  #
+  # GTK is installed here rather than baked into the build image: the image
+  # changes deliberately and rarely, and the module needs none of it.
+  gui-smoke:
+    runs-on: ubuntu-latest
+    needs: lint
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      options: --user root
+    steps:
+      - uses: actions/checkout@v7
+      - name: GTK 4, a virtual display, a session bus
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              libgtk-4-dev xvfb xauth dbus libglib2.0-bin
+      - name: Build the interface
+        run: make gui
+      - name: Start and close it
+        run: make gui-smoke
 
   reproducibility:
     runs-on: ubuntu-latest

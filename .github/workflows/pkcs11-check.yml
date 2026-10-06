@@ -144,7 +144,22 @@ jobs:
           # which is the upstream improvement. It does not help here -- this
           # module advertises no KMAC at all, the mechanisms having been removed
           # for want of an assigned code point.
-          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.1'
+          #
+          # 0.2.1 -> 0.2.3 on 2026-10-06, both profiles, diffed by node-id
+          # against the archived 0.2.1 runs (668 moves nist, 672 all; nearly
+          # all new or reclassified tests). Signed module, before the fixes:
+          #
+          #   nist  passed 55378 · fail 7     all  passed 55832 · fail 7
+          #
+          # Four of the failures were the module's and are fixed: AES
+          # CKA_VALUE_LEN read narrowed, Ed25519 answering a CK_EDDSA_PARAMS
+          # block (x2) with pure Ed25519, and -- an xfail, not a failure --
+          # C_EncryptFinal straight after Init. The rest are listed in
+          # tests/pkcs11_check_known_failures.txt with their reasons: the async
+          # probes that never reach the module and the Ed448 NULL-params
+          # question (mingulov#49), and the v1.5 structured oracle (#37, #49).
+          # The EDDSA #23 pair and test_decrypt_garbage no longer fail.
+          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.3'
           ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
           ln -sf /opt/p11check/bin/pkcs11-check-report /usr/local/bin/pkcs11-check-report
           pkcs11-check version
@@ -162,7 +177,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /root/.local/share/pkcs11-check/data
-          key: p11check-data-0.2.1
+          key: p11check-data-0.2.3
 
       - name: Fetch third-party vectors
         if: env.FULL_CORPUS == '1'
@@ -299,7 +314,7 @@ jobs:
           apt-get install -y -qq opensc python3-pip python3-venv
           python3 -m venv /opt/p11check
           # Same pin as the job above; see the note there before changing it.
-          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.1'
+          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.3'
           ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
           ln -sf /opt/p11check/bin/pkcs11-check-report /usr/local/bin/pkcs11-check-report
           pkcs11-check version
@@ -309,7 +324,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /root/.local/share/pkcs11-check/data
-          key: p11check-data-0.2.1
+          key: p11check-data-0.2.3
 
       - name: Fetch third-party vectors
         if: env.FULL_CORPUS == '1'

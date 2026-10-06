@@ -306,6 +306,17 @@ two mechanisms withdrawn from the list never worked. No security advisory.
   tests passed" for a mechanism this module does not implement.
 
 ### Changed
+* **CI runs pkcs11-check 0.2.3** (was 0.2.1), in the corpus workflow's two
+  jobs, its vector cache key, the constant audit in `ci.yml`, and the pin
+  `scripts/run_pkcs11_check.sh` reports against. Both profiles were run under
+  it and diffed by node-id against archived 0.2.1 runs before the move. Three
+  of the new failures were the module's and are fixed above; the others are
+  in `tests/pkcs11_check_known_failures.txt` with their reasons and raised as
+  mingulov/pkcs11-check#49. The EDDSA entries of #23 and
+  `test_decrypt_garbage` no longer fail and were removed. The constant audit
+  gives 322 conform, 0 divergent under both references. Details in
+  `docs/PKCS11_CHECK_FINDINGS.md`, 2026-10-06.
+
 * **The internal uses of SHA-256 are enumerated** (#16). The integrity digest
   and the entropy conditioner moved to SHA-384 in 4b91308 and 5a7c254, and
   the posture stated then was "no SHA-256 anywhere". That was not true, and

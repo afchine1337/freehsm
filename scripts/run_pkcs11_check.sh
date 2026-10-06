@@ -158,7 +158,7 @@ HARNESS_VERSION="$(p11c_version || echo unknown)"
 # about 0.1.9 while 0.1.9 was the version nothing used any more.
 # What the workflows actually pin. Not overridable, because this is a fact
 # about the repository and not a preference of the run.
-WORKFLOW_PIN="0.2.1"
+WORKFLOW_PIN="0.2.3"
 
 # What this run compares against. FHSM_PKCS11CHECK_EXPECT exists so a run can
 # be made against an unpinned harness without the warning drowning the output.

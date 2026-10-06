@@ -15,21 +15,32 @@
 # module's to fix. Each carries its reason. Adding a line to make CI green
 # without one is how a finding stops being read.
 #
-# Measured on 2026-09-26 (nist-approved-only) and 2026-09-29 (all-mechanisms),
-# pkcs11-check 0.2.1, full corpus, signed module.
+# Measured on 2026-10-06 in both profiles, pkcs11-check 0.2.3, full corpus,
+# signed module (reports/pkcs11-check-nist-0.2.3, reports/pkcs11-check-all-0.2.3).
 # ===========================================================================
-
-# EdDSA C_SignInit / C_VerifyInit with no parameter block. PKCS#11 v3.2 lets
-# CK_EDDSA_PARAMS be omitted for pure Ed25519; the harness's registry marks it
-# required while its own _resolve_mech says only "some modules" need it.
-# Open upstream: mingulov/pkcs11-check#23 (see docs/PKCS11_CHECK_FINDINGS.md).
-*  pkcs11_check/testcases/test_mech_negative.py::TestBadParameters::test_registry_sign_missing_required_param[EDDSA]
-*  pkcs11_check/testcases/test_mech_negative.py::TestBadParameters::test_registry_verify_missing_required_param[EDDSA]
 
 # RSA PKCS#1 v1.5 decryption of a malformed ciphertext returns CKR_OK and
 # pseudo-random bytes. That is OpenSSL's implicit rejection, the Marvin-attack
 # countermeasure, and it is deliberate: an error return here is the oracle.
-# See docs/PKCS11_CHECK_FINDINGS.md. Open upstream: mingulov/pkcs11-check#37.
+# 0.2.3 recognises it in TestInvalidOperations::test_decrypt_garbage, now an
+# xfail; this structured-oracle test still records CKR_OK on its v1.5 samples
+# as accepted_invalid. See docs/PKCS11_CHECK_FINDINGS.md. Upstream:
+# mingulov/pkcs11-check#37, follow-up in #49.
 # CKM_RSA_PKCS decryption exists only in all-mechanisms builds.
 all-mechanisms  pkcs11_check/testcases/security/test_padding_oracle.py::TestRSAPaddingOracle::test_pkcs1v15_bleichenbacher_structured_oracle
-all-mechanisms  pkcs11_check/testcases/test_errors.py::TestInvalidOperations::test_decrypt_garbage
+
+# C_AsyncGetID probes that never call the module. The child passes a c_char
+# buffer where the harness declares the selector as CK_UTF8CHAR_PTR, ctypes
+# raises ArgumentError before the call, and the child exits without a RESULT
+# line ("missing_result"). The module answers CKR_FUNCTION_NOT_SUPPORTED, which
+# 0.2.1 reported as a skip. Open upstream: mingulov/pkcs11-check#49.
+*  pkcs11_check/testcases/ckr/test_ckr_v32_raw.py::TestAsyncErrors::test_async_get_id_no_operation
+*  pkcs11_check/testcases/ckr/test_ckr_v32_raw.py::TestAsyncErrors::test_async_get_id_empty_selector
+
+# Ed448 C_SignInit / C_VerifyInit with no parameter block: accepted as pure
+# Ed448, the same as a CK_EDDSA_PARAMS with phFlag clear and no context. The
+# harness requires the block for Ed448. Whether PKCS#11 v3.2 does is asked
+# upstream, with the clause, in mingulov/pkcs11-check#49; if it does, the
+# module will refuse NULL and these two lines go.
+*  pkcs11_check/testcases/test_mech_negative.py::TestEdDSAParameters::test_eddsa_edwards448_sign_missing_required_param
+*  pkcs11_check/testcases/test_mech_negative.py::TestEdDSAParameters::test_eddsa_edwards448_verify_missing_required_param
