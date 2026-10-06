@@ -11793,7 +11793,18 @@ CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
     size_t fmax = (fkind == 0) ? ftag : (fkind == 3) ? 16 : 0;
     if (pLast == NULL) { *pulLastLen = fmax; return FHSM_RV_OK; }
     if (*pulLastLen < fmax) { *pulLastLen = fmax; return 0x00000150UL; }
-    if (op->cipher_ctx == NULL) { op->active = 0; return FHSM_RV_OPERATION_NOT_INITIALIZED; }
+    /* Init then Final with no Update in between is zero bytes of input, not
+     * an operation that was never started: the context is built here exactly
+     * as the first Update would have built it. ECB/CBC/CTR then emit nothing,
+     * CBC-PAD one padding block, GCM the tag alone. Answering
+     * CKR_OPERATION_NOT_INITIALIZED after a successful C_EncryptInit was
+     * pkcs11-check 0.2.3 TestZeroDataFinal::test_encrypt_final_no_update. */
+    if (op->cipher_ctx == NULL) {
+        fhsm_token_t *t = fhsm_session_token(hSession);
+        if (!t) { op->active = 0; return FHSM_RV_SESSION_HANDLE_INVALID; }
+        fhsm_rv_t crv = ensure_cipher_ctx(op, t, 1);
+        if (crv != FHSM_RV_OK) { op->active = 0; return crv; }
+    }
     int out_len = 0;
     if (EVP_EncryptFinal_ex(op->cipher_ctx, pLast, &out_len) != 1) {
         EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
@@ -11966,15 +11977,20 @@ CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
     { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
     /* No multipart context : C_DecryptInit was called but no
-     * C_DecryptUpdate ever created the cipher context (e.g. the key
-     * handle was invalid, or Final was called directly). Guard against
-     * EVP_DecryptFinal_ex(NULL) which segfaults. Mirrors C_EncryptFinal.
-     * #125 (pkcs11-check crash : test_mech_flags decrypt_flag_callable).
+     * C_DecryptUpdate ever created the cipher context. EVP_DecryptFinal_ex
+     * on NULL segfaults (#125, pkcs11-check crash: test_mech_flags
+     * decrypt_flag_callable), so the context is built here as the first
+     * Update would have built it: zero bytes of ciphertext, which the mode
+     * then judges (nothing for ECB/CBC/CTR, a length error for CBC-PAD).
+     * A key that cannot be used is reported by ensure_cipher_ctx. Mirrors
+     * C_EncryptFinal.
      *
      * Before the size query, which needs the context to answer. */
     if (op->cipher_ctx == NULL) {
-        op->active = 0;
-        return FHSM_RV_OPERATION_NOT_INITIALIZED;
+        fhsm_token_t *t = fhsm_session_token(hSession);
+        if (!t) { op->active = 0; return FHSM_RV_SESSION_HANDLE_INVALID; }
+        fhsm_rv_t crv = ensure_cipher_ctx(op, t, 0);
+        if (crv != FHSM_RV_OK) { op->active = 0; return crv; }
     }
 
     /* How much can Final still emit?

@@ -15,6 +15,18 @@ two mechanisms withdrawn from the list never worked. No security advisory.
 `RELEASE_v2.3.0.md` has the release notes.*
 
 ### Fixed
+* **`C_EncryptFinal` straight after `C_EncryptInit` reported no operation.**
+  The multipart cipher context was built by the first `C_EncryptUpdate`, so
+  Init then Final — zero bytes of input — answered
+  `CKR_OPERATION_NOT_INITIALIZED` after an Init that had returned `CKR_OK`.
+  `C_DecryptFinal` did the same: its guard kept `EVP_DecryptFinal_ex` off a
+  NULL context (#125) by stopping the call rather than building the context.
+  Both now build it as the first Update would have: ECB and CBC give nothing,
+  CBC-PAD one padding block on encrypt and a refusal on decrypt, since an
+  empty input is not a padded ciphertext. pkcs11-check 0.2.3,
+  `TestZeroDataFinal::test_encrypt_final_no_update`;
+  `tests/test_cipher_final_no_update.c`.
+
 * **ECDH refused one peer point in 256.** `CKM_ECDH1_DERIVE` takes the peer's
   point bare or wrapped in a DER OCTET STRING, and told them apart by the
   first two bytes. A bare uncompressed point begins with 0x04 too, and its
