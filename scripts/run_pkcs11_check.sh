@@ -319,6 +319,24 @@ if [ "${FHSM_ALLOW_UNSIGNED:-0}" = "1" ]; then
     export OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}"
     echo "NOTE: unsigned module --- FHSM_INTEGRITY_ALLOW_UNSIGNED=1, OPENSSL_CONF=${OPENSSL_CONF}"
 else
+    # The signed path has to be made so, not assumed. An integrity bypass or
+    # an OPENSSL_CONF=/dev/null left in the shell by earlier work reaches the
+    # module all the same: the first makes it skip the FIPS provider, the
+    # second leaves the provider nothing to load from. Two full corpus runs
+    # on 2026-10-05 went through with both inherited, under a NOTE saying the
+    # FIPS provider would be loaded, and counted X25519 and brainpool -- which
+    # that provider does not have -- as passing. The module itself said
+    # "integrity bypass active", further down the log than anyone reads.
+    if [ -n "${FHSM_INTEGRITY_ALLOW_UNSIGNED:-}" ]; then
+        echo "NOTE: FHSM_INTEGRITY_ALLOW_UNSIGNED was set in the environment; unset for this run."
+        echo "      Set FHSM_ALLOW_UNSIGNED=1 instead to run an unsigned module on purpose."
+        unset FHSM_INTEGRITY_ALLOW_UNSIGNED
+    fi
+    if [ "${OPENSSL_CONF:-}" = "/dev/null" ]; then
+        echo "NOTE: OPENSSL_CONF=/dev/null was set; unset for this run -- a signed module"
+        echo "      loads the FIPS provider from the system configuration."
+        unset OPENSSL_CONF
+    fi
     echo "NOTE: signed module --- FIPS provider will be loaded, OPENSSL_CONF=${OPENSSL_CONF:-<system default>}"
 fi
 
