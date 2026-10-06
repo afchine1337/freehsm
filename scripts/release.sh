@@ -184,7 +184,19 @@ for t in tests/test_*; do
     # `make test-integrity` drives unsigned/signed/tampered without any bypass,
     # and the signed-module check reads .fhsm_digest back out of the shipped
     # .so. What this loop is for is the functional suite.
-    if FHSM_TOKENS_DIR="$D" FHSM_INTEGRITY_ALLOW_UNSIGNED=1 "./$t" >/dev/null 2>&1
+    #
+    # Arguments, as the Makefile passes them. test_secure_heap_shared takes the
+    # module and a copy of it under another name, so the loader maps it twice;
+    # run bare it has nothing to load and fails. scripts/run_fips_tests.sh
+    # learnt this when the test was added and this loop did not, so the first
+    # release after it reported one failure on a green tree (2026-10-07).
+    targs=""
+    case "$t" in
+        *test_secure_heap_shared)
+            cp ./libfreehsm.so "$D/libfreehsm-copy.so"
+            targs="./libfreehsm.so $D/libfreehsm-copy.so" ;;
+    esac
+    if FHSM_TOKENS_DIR="$D" FHSM_INTEGRITY_ALLOW_UNSIGNED=1 "./$t" $targs >/dev/null 2>&1
     then t_pass=$((t_pass+1))
     else t_fail=$((t_fail+1)); echo "        failing: $(basename "$t")"; fi
     rm -rf "$D"
