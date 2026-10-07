@@ -915,9 +915,20 @@ each attempt — with the output teed.
 What makes this worth an entry rather than a shrug: `service-guards` is in no
 automatic suite and in no CI job. A test that fails intermittently and that
 nothing re-runs is the worst of both — it will go red one day for somebody who
-has no way to know it is known. The `make tools-smoke` idea from the same day
-needs two halves, one per build profile, because half the tools cannot start
-under the default one.
+has no way to know it is known. Not to be added to CI before the cause is
+known: it asserts on throttle delays and burst counts, which a shared runner
+would make flaky for reasons of its own.
+
+The `make tools-smoke` idea from the same day is overtaken (2026-10-07).
+It was to have two halves because `fhsm-csr` and `fhsm-sign` did not start
+under the default profile. Since v2.3.0 they do: every tool signs with ECDSA,
+RSA, Ed25519 and ML-DSA, and `tests/pki_tools_algs.sh`, run by `make tests`,
+takes all four through the operator's path and has `openssl` check each file.
+What remains uncovered is the composite through the command line:
+`tests/pki_tools_characterize.sh` needs an `all-mechanisms` build and is in no
+suite. The same signer is exercised through `tools/pkiops` by
+`test_pkiops_algs` in CI's `all-mechanisms` jobs, so what is untested is the
+tools' own argument handling around it, not the composite.
 
 ### Verify that what is published is what was written (noted 2026-09-03)
 
