@@ -895,7 +895,7 @@ Only then is there a decision to make, and it is a scoping decision rather than
 a coverage one: which of the category-2 mechanisms are worth implementing for
 something other than a number.
 
-### service-guards failed twice, once, and nobody knows which assertions (noted 2026-09-27)
+### service-guards failed once, and nobody knows which assertions (noted 2026-09-27, not reproduced 2026-10-07)
 
 `make PROFILE=all-mechanisms service-guards` reported `FAIL : 2 failure(s)`
 on one run and passed on the five that followed. Which two assertions failed
@@ -909,15 +909,20 @@ is slower, and this script asserts on throttle delays and burst counts across
 sixteen concurrent requests. The machine also reports clock skew, the shared
 folder's clock running about a minute ahead.
 
-To settle it, run it cold — `make clean && make PROFILE=all-mechanisms` before
-each attempt — with the output teed.
+**2026-10-07: not reproduced.** Run cold three times as this entry asked —
+`make clean && make PROFILE=all-mechanisms` before each, output teed to
+`reports/service-guards-cold-{1,2,3}.log` — and passed all three, 0 failures.
+One thing differs from 2026-09-27: the VM clock had since been synchronised,
+and the release pre-flight that morning no longer reported skew. That makes
+the skew the likeliest reading, and it remains a reading: the original
+failure's output does not exist, so nothing ties it to the clock.
 
-What makes this worth an entry rather than a shrug: `service-guards` is in no
-automatic suite and in no CI job. A test that fails intermittently and that
-nothing re-runs is the worst of both — it will go red one day for somebody who
-has no way to know it is known. Not to be added to CI before the cause is
-known: it asserts on throttle delays and burst counts, which a shared runner
-would make flaky for reasons of its own.
+What stays true is that `service-guards` is in no automatic suite and in no
+CI job, so a recurrence would surface only by hand. If it does, the output is
+the thing to keep: run it through `tee`, as above, and note whether make
+reported clock skew on that build. Not to be added to CI on the strength of
+three local passes: it asserts on throttle delays and burst counts, which a
+shared runner would make flaky for reasons of its own.
 
 The `make tools-smoke` idea from the same day is overtaken (2026-10-07).
 It was to have two halves because `fhsm-csr` and `fhsm-sign` did not start
