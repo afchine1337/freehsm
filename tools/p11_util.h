@@ -57,8 +57,10 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKA_TOKEN   0x00000001UL
 #define CKA_LABEL   0x00000003UL
 #define CKA_VALUE   0x00000011UL
+#define CKO_CERTIFICATE 1UL
 #define CKO_PUBLIC_KEY  2UL
 #define CKO_PRIVATE_KEY 3UL
+#define CKO_SECRET_KEY  4UL
 #define CKM_COMPOSITE_MLDSA65_ED25519 0x80004202UL
 
 static struct {
@@ -91,6 +93,11 @@ static struct {
     CK_RV (*GetSlotList)(unsigned char,CK_SLOT_ID*,CK_ULONG*);
     CK_RV (*GetMechanismList)(CK_SLOT_ID,CK_ULONG*,CK_ULONG*);
     CK_RV (*GetMechanismInfo)(CK_SLOT_ID,CK_ULONG,void*);
+    /* Optional: fetched when the module has it, left NULL when it does not,
+     * and refused by the one operation that needs it. A module that cannot
+     * delete objects still signs, and the tools that only sign should not
+     * stop loading it (docs/fhsm-crypt-plan.md). */
+    CK_RV (*DestroyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE);
 } p11;
 
 /* Set by each tool before anything can fail. Extracting this header from
@@ -187,6 +194,7 @@ enum {                          /* PKCS#11 v2.40 §C.6 slot numbers */
     P11_SLOT_CloseSession      = 13,
     P11_SLOT_GetTokenInfo      = 6,
     P11_SLOT_Login             = 18,
+    P11_SLOT_DestroyObject     = 22,
     P11_SLOT_GetAttributeValue = 24,
     P11_SLOT_FindObjectsInit   = 26,
     P11_SLOT_FindObjects       = 27,
@@ -247,6 +255,7 @@ P11_MAYBE_UNUSED static int p11_load_module_e(const char *path, struct p11_err *
         T(GetMechanismList, P11_SLOT_GetMechanismList);
         T(GetMechanismInfo, P11_SLOT_GetMechanismInfo);
         #undef T
+        *(void**)&p11.DestroyObject = fl->pfn[P11_SLOT_DestroyObject];
         return 0;
     }
 
@@ -271,6 +280,7 @@ P11_MAYBE_UNUSED static int p11_load_module_e(const char *path, struct p11_err *
     S(GenerateRandom,"C_GenerateRandom");
     S(GetSlotList,"C_GetSlotList");
     #undef S
+    *(void**)&p11.DestroyObject = dlsym(p11.h, "C_DestroyObject");
     return 0;
 }
 

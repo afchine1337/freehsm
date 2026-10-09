@@ -89,6 +89,7 @@ static void attr_types(char *out, size_t cap, const CK_ATTRIBUTE *t, CK_ULONG n)
                        : t[i].type == CKA_LABEL ? "CKA_LABEL"
                        : t[i].type == CKA_VALUE ? "CKA_VALUE"
                        : t[i].type == 0x100UL   ? "CKA_KEY_TYPE"
+                       : t[i].type == 0x102UL   ? "CKA_ID"
                        : t[i].type == 0x103UL   ? "CKA_SENSITIVE"
                        : t[i].type == 0x108UL   ? "CKA_SIGN"
                        : t[i].type == 0x10AUL   ? "CKA_VERIFY"
@@ -134,6 +135,7 @@ static struct {
     CK_RV (*GetSlotList)(unsigned char,CK_SLOT_ID*,CK_ULONG*);
     CK_RV (*GetMechanismList)(CK_SLOT_ID,CK_ULONG*,CK_ULONG*);
     CK_RV (*GetMechanismInfo)(CK_SLOT_ID,CK_ULONG,void*);
+    CK_RV (*DestroyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE);
 } real;
 
 static CK_RV w_Initialize(void *a) {
@@ -195,6 +197,11 @@ static CK_RV w_GetAttributeValue(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o, CK_ATT
     char ty[120]; attr_types(ty, sizeof ty, tp, n);
     logcall("C_GetAttributeValue", rv, t, "session %lu, object %lu, %s, values not shown",
             (unsigned long)s, (unsigned long)o, ty);
+    return rv;
+}
+static CK_RV w_DestroyObject(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o) {
+    double t = now_ms(); CK_RV rv = real.DestroyObject(s, o);
+    logcall("C_DestroyObject", rv, t, "session %lu, object %lu", (unsigned long)s, (unsigned long)o);
     return rv;
 }
 static CK_RV w_DigestInit(CK_SESSION_HANDLE s, CK_MECHANISM *m) {
@@ -294,7 +301,7 @@ static void install_wrappers(void) {
     W(GetAttributeValue); W(DigestInit); W(SignInit); W(Sign); W(SignUpdate);
     W(SignFinal); W(VerifyInit); W(VerifyUpdate); W(VerifyFinal); W(InitToken);
     W(InitPIN); W(GetTokenInfo); W(GenerateRandom); W(GetSlotList);
-    W(GetMechanismList); W(GetMechanismInfo);
+    W(GetMechanismList); W(GetMechanismInfo); W(DestroyObject);
     #undef W
 }
 
@@ -1289,5 +1296,116 @@ int pkiops_keys(pkiops_handle session, struct pkiops_key **out, size_t *n,
     }
     *out = v;
     *n = cnt;
+    return 0;
+}
+
+/* --- objects: listing and deletion ------------------------------------------
+ *
+ * docs/fhsm-crypt-plan.md stage 0. pkiops_keys lists what can sign, for the
+ * tabs that sign; this lists everything an operator may want to remove --
+ * certificates and the three kinds of key -- with the CKA_ID that ties a
+ * certificate to its key when the labels do not.
+ * ------------------------------------------------------------------------- */
+#define CKA_ID_ 0x00000102UL
+
+static const CK_ULONG OBJ_CKO[PKIOPS_OBJ_COUNT] = {
+    [PKIOPS_OBJ_CERT]    = CKO_CERTIFICATE,
+    [PKIOPS_OBJ_PUBLIC]  = CKO_PUBLIC_KEY,
+    [PKIOPS_OBJ_PRIVATE] = CKO_PRIVATE_KEY,
+    [PKIOPS_OBJ_SECRET]  = CKO_SECRET_KEY,
+};
+
+const char *pkiops_obj_class_name(enum pkiops_obj_class c) {
+    switch (c) {
+    case PKIOPS_OBJ_CERT:    return "certificate";
+    case PKIOPS_OBJ_PUBLIC:  return "public key";
+    case PKIOPS_OBJ_PRIVATE: return "private key";
+    case PKIOPS_OBJ_SECRET:  return "secret key";
+    default:                 return NULL;
+    }
+}
+
+static int objects_of_class(CK_SESSION_HANDLE s, enum pkiops_obj_class oc,
+                            struct pkiops_object **v, size_t *n, size_t *cap,
+                            struct p11_err *e) {
+    CK_ULONG c = OBJ_CKO[oc];
+    CK_ATTRIBUTE t = { CKA_CLASS, &c, sizeof c };
+    CK_RV rv = p11.FindObjectsInit(s, &t, 1);
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_FindObjectsInit failed (0x%lx)\n", (unsigned long)rv);
+    for (;;) {
+        CK_OBJECT_HANDLE h[16]; CK_ULONG got = 0;
+        rv = p11.FindObjects(s, h, 16, &got);
+        if (rv != CKR_OK) {
+            p11.FindObjectsFinal(s);
+            return p11_fail(e, 2, "C_FindObjects failed (0x%lx)\n", (unsigned long)rv);
+        }
+        for (CK_ULONG i = 0; i < got; i++) {
+            if (*n == *cap) {
+                size_t nc = *cap ? *cap * 2 : 16;
+                struct pkiops_object *nv = realloc(*v, nc * sizeof *nv);
+                if (!nv) { p11.FindObjectsFinal(s); return p11_fail(e, 2, "out of memory\n"); }
+                *v = nv; *cap = nc;
+            }
+            struct pkiops_object *o = &(*v)[(*n)++];
+            memset(o, 0, sizeof *o);
+            o->handle = (pkiops_handle)h[i];
+            o->cls = oc;
+            /* One attribute per call. A module that does not keep CKA_ID, or
+             * keeps no CKA_KEY_TYPE on a certificate, fails the whole call
+             * that asks for it, and the label asked beside it would be lost
+             * with it. Each may be absent or too long, and the object still
+             * lists: the handle identifies it, the rest only describes it. */
+            char lbl[256];
+            CK_ATTRIBUTE al = { CKA_LABEL, lbl, sizeof lbl };
+            if (p11.GetAttributeValue(s, h[i], &al, 1) == CKR_OK) {
+                size_t ln = al.ulValueLen < sizeof o->label - 1 ? (size_t)al.ulValueLen
+                                                               : sizeof o->label - 1;
+                memcpy(o->label, lbl, ln);
+                o->label[ln] = '\0';
+            }
+            uint8_t id[64];
+            CK_ATTRIBUTE ai = { CKA_ID_, id, sizeof id };
+            if (p11.GetAttributeValue(s, h[i], &ai, 1) == CKR_OK) {
+                size_t il = ai.ulValueLen < (sizeof o->id - 1) / 2 ? (size_t)ai.ulValueLen
+                                                                  : (sizeof o->id - 1) / 2;
+                for (size_t k = 0; k < il; k++)
+                    snprintf(o->id + 2 * k, 3, "%02x", id[k]);
+            }
+            if (oc != PKIOPS_OBJ_CERT) {
+                CK_ULONG kt = 0;
+                CK_ATTRIBUTE k = { CKA_KEY_TYPE_, &kt, sizeof kt };
+                if (p11.GetAttributeValue(s, h[i], &k, 1) == CKR_OK)
+                    o->key_type = (unsigned long)kt;
+            }
+        }
+        if (got < 16) break;
+    }
+    p11.FindObjectsFinal(s);
+    return 0;
+}
+
+int pkiops_objects(pkiops_handle session, unsigned classes,
+                   struct pkiops_object **out, size_t *n, struct p11_err *e) {
+    struct pkiops_object *v = NULL;
+    size_t cnt = 0, cap = 0;
+    for (int c = 0; c < PKIOPS_OBJ_COUNT; c++) {
+        if (!(classes & (1u << c))) continue;
+        if (objects_of_class((CK_SESSION_HANDLE)session, (enum pkiops_obj_class)c,
+                             &v, &cnt, &cap, e)) {
+            free(v);
+            return e->code;
+        }
+    }
+    *out = v;
+    *n = cnt;
+    return 0;
+}
+
+int pkiops_destroy(pkiops_handle session, pkiops_handle object, struct p11_err *e) {
+    if (!p11.DestroyObject)
+        return p11_fail(e, 2, "the module does not implement C_DestroyObject\n");
+    CK_RV rv = p11.DestroyObject((CK_SESSION_HANDLE)session, (CK_OBJECT_HANDLE)object);
+    if (rv != CKR_OK)
+        return p11_fail(e, 2, "C_DestroyObject failed (0x%lx)\n", (unsigned long)rv);
     return 0;
 }

@@ -81,8 +81,12 @@ static struct {
     GtkWidget *slots_box;
     GtkWidget *pin_entry, *login_btn, *logout_btn;
     GtkWidget *init_box, *init_label, *init_so, *init_so2, *init_user, *init_user2;
-    GtkWidget *keys_box, *label_entry, *keygen_btn, *keygen_alg;
+    GtkWidget *keys_box, *label_entry, *keygen_btn, *keygen_alg, *delete_btn;
     GtkWidget *log_view, *status;
+    /* What the object list shows, row for row: a row's index is its object's.
+     * docs/fhsm-crypt-plan.md stage 0. */
+    struct pkiops_object *objs;
+    size_t n_objs;
 
     /* The Certificates tab. */
     GtkWidget *cert_page, *key_drop, *pem_check;
@@ -223,6 +227,12 @@ static void update_sensitivity(void) {
     gtk_widget_set_sensitive(A.logout_btn,   !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.label_entry,  !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.keygen_btn,   !A.busy && A.logged_in);
+    {
+        GtkListBoxRow *r = gtk_list_box_get_selected_row(GTK_LIST_BOX(A.keys_box));
+        int idx = r ? gtk_list_box_row_get_index(r) : -1;
+        gtk_widget_set_sensitive(A.delete_btn, !A.busy && A.logged_in
+                                               && idx >= 0 && (size_t)idx < A.n_objs);
+    }
     gtk_widget_set_sensitive(A.cert_page,    !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.rv_db_box,     !A.busy);
     gtk_widget_set_sensitive(A.rv_revoke_box, !A.busy && A.db_path);
@@ -255,7 +265,7 @@ static void list_add(GtkWidget *box, const char *text) {
 enum job_kind { J_LOAD, J_UNLOAD, J_SLOTS, J_LOGIN, J_KEYS, J_KEYGEN, J_LOGOUT,
                 J_CSR, J_ROOT, J_ISSUE, J_DB_LOAD, J_REVOKE, J_CRL, J_OCSP,
                 J_SIGN, J_VERIFY, J_CMS_SIGN, J_CMS_VERIFY,
-                J_NEW_CA, J_REVOKE_PUBLISH, J_TOKEN_INIT };
+                J_NEW_CA, J_REVOKE_PUBLISH, J_TOKEN_INIT, J_DELETE };
 
 struct job {
     enum job_kind kind;
@@ -280,6 +290,9 @@ struct job {
     struct p11_err e;
     struct pkiops_slot *slots; size_t n_slots;
     struct pkiops_key  *keys;  size_t n_keys;
+    struct pkiops_object *objs; size_t n_objs;
+    pkiops_handle *del; size_t n_del;   /* J_DELETE: what was ticked */
+    size_t n_deleted;                   /* J_DELETE: how many went */
     int pop_valid;
     size_t out_len;
     fhsm_rev_db_t db; int have_db;  /* the database as the job left it */
@@ -311,6 +324,8 @@ static void job_free(gpointer p) {
     if (j->have_db) fhsm_rev_db_free(&j->db);
     free(j->slots);
     free(j->keys);
+    free(j->objs);
+    g_free(j->del);
     g_free(j);
 }
 
@@ -677,6 +692,15 @@ static void run_ocsp(struct job *j) {
     g_free(req);
 }
 
+/* The keys, for the drop-downs that sign and their algorithms, and every
+ * object, for the list on the Token tab. Read together wherever either was,
+ * so the two cannot describe different moments of the token. */
+static int list_objects(struct job *j, struct p11_err *e) {
+    int rc = pkiops_keys(j->session, &j->keys, &j->n_keys, e);
+    if (!rc) rc = pkiops_objects(j->session, PKIOPS_OBJS_ALL, &j->objs, &j->n_objs, e);
+    return rc;
+}
+
 static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
     (void)task; (void)src; (void)c;
     struct job *j = data;
@@ -696,17 +720,28 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
         j->rc = pkiops_session_user(j->slot, j->pin, j->pin_len, &j->session, &j->e);
         /* Wiped as soon as the module has answered, not when the job is freed. */
         OPENSSL_cleanse(j->pin, j->pin_len);
-        if (!j->rc) j->rc = pkiops_keys(j->session, &j->keys, &j->n_keys, &j->e);
+        if (!j->rc) j->rc = list_objects(j, &j->e);
         break;
     case J_KEYS:
-        j->rc = pkiops_keys(j->session, &j->keys, &j->n_keys, &j->e);
+        j->rc = list_objects(j, &j->e);
         break;
+    case J_DELETE: {
+        /* Stop at the first refusal: the rest was ticked together with it,
+         * and the list read afterwards shows exactly what is left. */
+        for (size_t i = 0; i < j->n_del; i++) {
+            if ((j->rc = pkiops_destroy(j->session, j->del[i], &j->e)) != 0) break;
+            j->n_deleted++;
+        }
+        struct p11_err ignored;
+        if (list_objects(j, j->rc ? &ignored : &j->e) && !j->rc) j->rc = j->e.code;
+        break;
+    }
     case J_KEYGEN: {
         pkiops_handle hp = 0, hk = 0;
         if (j->operator_mode) j->rc = label_in_use(j->session, j->label, &j->e);
         if (!j->rc) j->rc = pkiops_keygen_alg(j->session, j->label,
                                               (enum pkiops_alg)j->alg, &hp, &hk, &j->e);
-        if (!j->rc) j->rc = pkiops_keys(j->session, &j->keys, &j->n_keys, &j->e);
+        if (!j->rc) j->rc = list_objects(j, &j->e);
         break;
     }
     case J_NEW_CA: {
@@ -724,7 +759,7 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
             g_free(der);
         }
         struct p11_err ignored;
-        if (pkiops_keys(j->session, &j->keys, &j->n_keys, j->rc ? &ignored : &j->e) && !j->rc)
+        if (list_objects(j, j->rc ? &ignored : &j->e) && !j->rc)
             j->rc = j->e.code;
         break;
     }
@@ -946,21 +981,41 @@ static void clear_key_labels(void) {
                            g_list_model_get_n_items(G_LIST_MODEL(A.key_labels)), NULL);
 }
 
+/* The object list and what it shows, emptied together. */
+static void clear_objects(void) {
+    clear_list(A.keys_box);
+    free(A.objs);
+    A.objs = NULL;
+    A.n_objs = 0;
+}
+
 static void show_keys(struct job *j) {
     /* The Certificates tab signs with a private key, named by its label. */
     clear_key_labels();
     for (size_t i = 0; i < j->n_keys; i++)
         if (j->keys[i].is_private && j->keys[i].label[0])
             gtk_string_list_append(A.key_labels, j->keys[i].label);
-    clear_list(A.keys_box);
-    for (size_t i = 0; i < j->n_keys; i++) {
-        char t[160];
-        snprintf(t, sizeof t, "%-7s  object %lu   \"%s\"   %s",
-                 j->keys[i].is_private ? "private" : "public",
-                 j->keys[i].handle, j->keys[i].label, j->keys[i].alg);
+    /* Every object, certificates first, each with the algorithm the signing
+     * tabs know it by when it has one. The rows are the objects, in order, so
+     * a selected row's index is the object to delete. */
+    clear_objects();
+    A.objs = j->objs; A.n_objs = j->n_objs;
+    j->objs = NULL; j->n_objs = 0;
+    for (size_t i = 0; i < A.n_objs; i++) {
+        const struct pkiops_object *o = &A.objs[i];
+        const char *alg = "";
+        for (size_t k = 0; k < j->n_keys; k++)
+            if (j->keys[k].handle == o->handle) alg = j->keys[k].alg;
+        char t[200];
+        snprintf(t, sizeof t, "%-11s  object %lu   \"%s\"   %s",
+                 pkiops_obj_class_name(o->cls), o->handle, o->label, alg);
         list_add(A.keys_box, t);
     }
-    if (j->n_keys == 0) list_add(A.keys_box, "(no key on this token)");
+    if (A.n_objs == 0) {
+        list_add(A.keys_box, "(nothing on this token)");
+        GtkListBoxRow *r = gtk_list_box_get_row_at_index(GTK_LIST_BOX(A.keys_box), 0);
+        if (r) gtk_list_box_row_set_selectable(r, FALSE);
+    }
 }
 
 static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
@@ -993,7 +1048,7 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
         A.slots = NULL; A.n_slots = 0;
         A.selected = -1;
         clear_list(A.slots_box);
-        clear_list(A.keys_box);
+        clear_objects();
         clear_key_labels();
         status("Module unloaded. Load the same one or another.");
         break;
@@ -1029,10 +1084,28 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
             status("Key pair generated.");
         }
         break;
+    case J_DELETE: {
+        char msg[4400];
+        if (j->rc) {
+            char head[96];
+            snprintf(head, sizeof head, "Deleting (%zu of %zu deleted before the refusal)",
+                     j->n_deleted, j->n_del);
+            snprintf(msg, sizeof msg, "%s: %s", head, j->e.msg);
+            size_t n = strlen(msg);
+            if (n && msg[n-1] == '\n') msg[n-1] = '\0';
+            status(msg);
+        } else {
+            snprintf(msg, sizeof msg, "Deleted %zu object%s from the token.",
+                     j->n_deleted, j->n_deleted == 1 ? "" : "s");
+            status(msg);
+        }
+        if (j->keys || j->objs) show_keys(j);
+        break;
+    }
     case J_LOGOUT:
         A.logged_in = 0;
         A.session = 0;
-        clear_list(A.keys_box);
+        clear_objects();
         clear_key_labels();
         if (!j->rc) show_slots(j);
         status("Logged out: the session is closed.");
@@ -1217,6 +1290,7 @@ static const char *running_text(enum job_kind k) {
     case J_CMS_VERIFY: return "Hashing the data, then checking the CMS...";
     case J_NEW_CA:     return "Creating the CA: key pair, then the root...";
     case J_TOKEN_INIT: return "Initialising the token: both PINs are derived, which takes a moment...";
+    case J_DELETE:     return "Deleting from the token...";
     default:           return "Working...";
     }
 }
@@ -1381,6 +1455,149 @@ static void on_keygen(GtkWidget *w, gpointer ud) {
 static const char *chosen_key(GtkWidget *drop) {
     GtkStringObject *o = gtk_drop_down_get_selected_item(GTK_DROP_DOWN(drop));
     return o ? gtk_string_object_get_string(o) : NULL;
+}
+
+/* --- deleting objects (docs/fhsm-crypt-plan.md stage 0) ------------------ */
+
+static void on_object_selected(GtkListBox *box, GtkListBoxRow *row, gpointer ud) {
+    (void)box; (void)row; (void)ud;
+    if (A.closing) return;          /* the list empties itself as it is destroyed */
+    update_sensitivity();
+}
+
+/* The confirmation: one tick box per object sharing the label, the clicked
+ * one ticked, the others not. A private key, its public half and a
+ * certificate usually go together, but which of them goes is the operator's
+ * to say, and the window will not guess. */
+struct del_ask {
+    GtkWidget *win;
+    GtkWidget **checks;
+    pkiops_handle *handles;
+    size_t n;
+};
+
+static void del_ask_free(gpointer p) {
+    struct del_ask *d = p;
+    g_free(d->checks);
+    g_free(d->handles);
+    g_free(d);
+}
+
+static void on_del_cancel(GtkButton *b, gpointer data) {
+    (void)b;
+    struct del_ask *d = data;
+    gtk_window_destroy(GTK_WINDOW(d->win));
+}
+
+static void on_del_confirm(GtkButton *b, gpointer data) {
+    (void)b;
+    struct del_ask *d = data;
+    pkiops_handle *pick = g_new(pkiops_handle, d->n ? d->n : 1);
+    size_t n = 0;
+    for (size_t i = 0; i < d->n; i++)
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(d->checks[i]))) pick[n++] = d->handles[i];
+    gtk_window_destroy(GTK_WINDOW(d->win));      /* frees d */
+    if (n == 0) { g_free(pick); status("Nothing ticked; nothing deleted."); return; }
+    if (A.busy || !A.logged_in || A.closing) { g_free(pick); return; }
+    struct job *j = g_new0(struct job, 1);
+    j->kind = J_DELETE;
+    j->session = A.session;
+    j->operator_mode = A.operator_mode;
+    j->del = pick;
+    j->n_del = n;
+    status(running_text(J_DELETE));
+    start(j);
+}
+
+static void on_delete(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (A.busy || !A.logged_in) return;
+    GtkListBoxRow *r = gtk_list_box_get_selected_row(GTK_LIST_BOX(A.keys_box));
+    int idx = r ? gtk_list_box_row_get_index(r) : -1;
+    if (idx < 0 || (size_t)idx >= A.n_objs) return;
+    const struct pkiops_object *o = &A.objs[idx];
+
+    /* Operator mode keeps the CA it works for: its key pair, and any
+     * certificate on the token under the same label. No "delete anyway" --
+     * exploration mode and fhsm-crypt remain for the exception, as for every
+     * other refusal of this mode. */
+    if (A.operator_mode && o->label[0]) {
+        const char *ca = chosen_key(A.op_key_drop);
+        if (ca && !strcmp(ca, o->label)) {
+            char msg[200];
+            snprintf(msg, sizeof msg, "Refused in operator mode: \"%s\" is the CA's key. "
+                     "Leave operator mode to delete it.", o->label);
+            status(msg);
+            return;
+        }
+    }
+
+    struct del_ask *d = g_new0(struct del_ask, 1);
+    size_t cap = 0;
+    for (size_t i = 0; i < A.n_objs; i++)
+        if ((size_t)idx == i || (o->label[0] && !strcmp(A.objs[i].label, o->label))) cap++;
+    d->checks = g_new0(GtkWidget *, cap);
+    d->handles = g_new0(pkiops_handle, cap);
+
+    d->win = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(d->win), "Delete from the token");
+    gtk_window_set_transient_for(GTK_WINDOW(d->win), GTK_WINDOW(A.win));
+    gtk_window_set_modal(GTK_WINDOW(d->win), TRUE);
+    gtk_window_set_resizable(GTK_WINDOW(d->win), FALSE);
+    g_object_set_data_full(G_OBJECT(d->win), "del-ask", d, del_ask_free);
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(box, 16);
+    gtk_widget_set_margin_end(box, 16);
+    gtk_widget_set_margin_top(box, 16);
+    gtk_widget_set_margin_bottom(box, 16);
+
+    /* Escaped: a label is whatever its creator typed, markup included. */
+    char *head = o->label[0]
+        ? g_markup_printf_escaped("<b>Delete objects labelled \xe2\x80\x9c%s\xe2\x80\x9d?</b>", o->label)
+        : g_markup_printf_escaped("<b>Delete object %lu?</b>", o->handle);
+    GtkWidget *h = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(h), head);
+    g_free(head);
+    gtk_label_set_xalign(GTK_LABEL(h), 0.0f);
+    gtk_box_append(GTK_BOX(box), h);
+    GtkWidget *note = gtk_label_new(
+        "Nothing deleted from a token comes back. Tick what to delete: the object "
+        "you selected is ticked, the others sharing its label are not.");
+    gtk_label_set_wrap(GTK_LABEL(note), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(note), 56);
+    gtk_label_set_xalign(GTK_LABEL(note), 0.0f);
+    gtk_box_append(GTK_BOX(box), note);
+
+    for (size_t i = 0; i < A.n_objs; i++) {
+        if (!((size_t)idx == i || (o->label[0] && !strcmp(A.objs[i].label, o->label)))) continue;
+        char t[160];
+        snprintf(t, sizeof t, "%s, object %lu%s%s", pkiops_obj_class_name(A.objs[i].cls),
+                 A.objs[i].handle, A.objs[i].id[0] ? ", CKA_ID " : "", A.objs[i].id);
+        GtkWidget *c = gtk_check_button_new_with_label(t);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(c), (size_t)idx == i);
+        gtk_box_append(GTK_BOX(box), c);
+        d->checks[d->n] = c;
+        d->handles[d->n] = A.objs[i].handle;
+        d->n++;
+    }
+
+    GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign(buttons, GTK_ALIGN_END);
+    gtk_widget_set_margin_top(buttons, 8);
+    GtkWidget *cancel = gtk_button_new_with_label("Cancel");
+    g_signal_connect(cancel, "clicked", G_CALLBACK(on_del_cancel), d);
+    GtkWidget *go = gtk_button_new_with_label("Delete");
+    gtk_widget_add_css_class(go, "destructive-action");
+    g_signal_connect(go, "clicked", G_CALLBACK(on_del_confirm), d);
+    gtk_box_append(GTK_BOX(buttons), cancel);
+    gtk_box_append(GTK_BOX(buttons), go);
+    gtk_box_append(GTK_BOX(box), buttons);
+
+    gtk_window_set_child(GTK_WINDOW(d->win), box);
+    gtk_window_set_default_widget(GTK_WINDOW(d->win), cancel);
+    gtk_window_present(GTK_WINDOW(d->win));
+    gtk_widget_grab_focus(cancel);
 }
 
 /* An entry's text, or NULL when it is empty: an optional field left blank. */
@@ -2606,10 +2823,21 @@ static void activate(GtkApplication *app, gpointer ud) {
     gtk_box_append(GTK_BOX(row), A.logout_btn);
     gtk_box_append(GTK_BOX(left), row);
 
-    gtk_box_append(GTK_BOX(left), heading("Keys"));
+    gtk_box_append(GTK_BOX(left), heading("Keys and certificates"));
     A.keys_box = gtk_list_box_new();
-    gtk_list_box_set_selection_mode(GTK_LIST_BOX(A.keys_box), GTK_SELECTION_NONE);
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(A.keys_box), GTK_SELECTION_SINGLE);
+    g_signal_connect(A.keys_box, "row-selected", G_CALLBACK(on_object_selected), NULL);
     gtk_box_append(GTK_BOX(left), scrolled(A.keys_box, 160));
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    A.delete_btn = gtk_button_new_with_label("Delete\xe2\x80\xa6");
+    gtk_widget_set_tooltip_text(A.delete_btn,
+        "Delete the selected object, and any others sharing its label that you tick. "
+        "Nothing deleted from a token comes back.");
+    g_signal_connect(A.delete_btn, "clicked", G_CALLBACK(on_delete), NULL);
+    gtk_widget_set_halign(A.delete_btn, GTK_ALIGN_END);
+    gtk_widget_set_hexpand(A.delete_btn, TRUE);
+    gtk_box_append(GTK_BOX(row), A.delete_btn);
+    gtk_box_append(GTK_BOX(left), row);
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     A.label_entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(A.label_entry), "label for a new key pair");

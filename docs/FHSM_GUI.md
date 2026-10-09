@@ -57,7 +57,7 @@ command line leaves to its user (see below).
 
 | Tab | What it does | Command line |
 |---|---|---|
-| Token | slots, initialise a token, log in and out, keys and their algorithms, generate a key pair | `fhsm-token init`, `fhsm-csr keygen --alg` |
+| Token | slots, initialise a token, log in and out, keys and certificates on the token, generate a key pair, delete | `fhsm-token init`, `fhsm-csr keygen --alg`, `fhsm-crypt list`, `delete` |
 | Certificates | request, self-signed root, issue from a request | `fhsm-csr csr`, `fhsm-csr root`, `fhsm-ca issue` |
 | Revocation | the revocation database, revoke, publish a CRL, answer an OCSP request | `fhsm-ca revoke`, `crl`, `ocsp-respond` |
 | Signing | raw detached signatures and CMS, signed and checked | `fhsm-sign sign`, `verify`, `cms`, `cms-verify` |
@@ -79,6 +79,13 @@ written as either where the tools offer both. An issued certificate's serial is
 shown with the result — it is 160 random bits, and the number a revocation will
 ask for — and **From certificate…** reads it off the file instead of having it
 copied by hand.
+
+**Deleting** starts from a row of the Token tab's list. **Delete…** shows every
+object sharing that row's label — a private key, its public half, a
+certificate — each with a tick box, and ticks only the one selected: what goes
+is the operator's to say. Nothing deleted from a token comes back. Operator
+mode refuses to delete the CA's key; `fhsm-crypt delete` does the same work
+from the command line, and destroys nothing without `--yes`.
 
 Recording a revocation needs no login, as with `fhsm-ca revoke`. Checking a CMS
 needs neither the token nor a login: the signer's certificate is inside it.

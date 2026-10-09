@@ -40,6 +40,18 @@ notes.*
   PKI builders were made generic, and went unread while attention was on
   pkcs11-check; the released binary is unaffected.
 
+### Added
+* **Deleting keys and certificates from the token** (`docs/fhsm-crypt-plan.md`,
+  stage 0). A new tool, `fhsm-crypt`, lists what a session sees --
+  certificates and public, private and secret keys, with their `CKA_ID` --
+  and deletes by label: `fhsm-crypt delete --label L` names what it would
+  destroy and stops, and only `--yes` destroys. In `fhsm-gui` the Token tab
+  lists certificates beside the keys, and **Delete…** asks once, with a tick
+  box per object sharing the label and only the selected one ticked. Operator
+  mode refuses to delete the CA's key. `C_DestroyObject` is optional in the
+  tools' loader: a module without it still loads, and deletion alone is
+  refused. `tests/test_pkiops_objects.c`, `tests/fhsm_crypt_cli.sh`.
+
 ## [2.3.0] --- 2026-10-07
 
 *Minor, as 2.1.0 and 2.2.0 were: the PKI tools gain

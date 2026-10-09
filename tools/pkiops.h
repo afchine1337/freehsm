@@ -175,6 +175,41 @@ int pkiops_keys(pkiops_handle session, struct pkiops_key **out, size_t *n,
 int pkiops_keygen(pkiops_handle session, const char *label,
                   pkiops_handle *pub, pkiops_handle *priv, struct p11_err *e);
 
+/* --- objects: listing and deletion (docs/fhsm-crypt-plan.md stage 0) ------- */
+
+enum pkiops_obj_class {
+    PKIOPS_OBJ_CERT = 0,
+    PKIOPS_OBJ_PUBLIC,
+    PKIOPS_OBJ_PRIVATE,
+    PKIOPS_OBJ_SECRET,
+    PKIOPS_OBJ_COUNT
+};
+/* Masks for pkiops_objects. */
+#define PKIOPS_OBJS_CERTS (1u << PKIOPS_OBJ_CERT)
+#define PKIOPS_OBJS_KEYS  ((1u << PKIOPS_OBJ_PUBLIC) | (1u << PKIOPS_OBJ_PRIVATE) | \
+                           (1u << PKIOPS_OBJ_SECRET))
+#define PKIOPS_OBJS_ALL   (PKIOPS_OBJS_CERTS | PKIOPS_OBJS_KEYS)
+
+/* "certificate", "public key", "private key", "secret key"; NULL out of range. */
+const char *pkiops_obj_class_name(enum pkiops_obj_class c);
+
+struct pkiops_object {
+    pkiops_handle         handle;
+    enum pkiops_obj_class cls;
+    unsigned long         key_type;   /* CKA_KEY_TYPE; 0 for a certificate */
+    char                  label[65];  /* truncated if longer; "" if none */
+    char                  id[41];     /* CKA_ID in hex, first 20 bytes; "" if none */
+};
+/* The objects of the classes in `classes` a session can see -- private and
+ * secret keys only once logged in -- certificates first, in a malloc'd array
+ * the caller frees. */
+int pkiops_objects(pkiops_handle session, unsigned classes,
+                   struct pkiops_object **out, size_t *n, struct p11_err *e);
+
+/* Destroy one object. Cannot be undone: the caller asks first. Refused with a
+ * message, not a crash, when the module has no C_DestroyObject. */
+int pkiops_destroy(pkiops_handle session, pkiops_handle object, struct p11_err *e);
+
 /* A key pair for `alg`, both halves on the token, the private one sensitive
  * and for signing only. RSA keys are 3072 bits. */
 int pkiops_keygen_alg(pkiops_handle session, const char *label, enum pkiops_alg alg,
