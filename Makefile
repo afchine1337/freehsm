@@ -73,9 +73,14 @@ WARN_FLAGS = \
 # claiming a distribution's flags is a claim, and this one was checked.
 FORTIFY_FLAG := $(if $(findstring _FORTIFY_SOURCE,$(LOCAL_CFLAGS)),,-D_FORTIFY_SOURCE=2)
 
+# -fcf-protection=full (Intel CET) only exists on x86; GCC rejects it as
+# "not supported for this target" everywhere else. Only use it when the
+# compiler accepts it.
+CF_PROTECTION_FLAG := $(shell $(CC) -Werror -fcf-protection=full -x c -c /dev/null -o /dev/null >/dev/null 2>&1 && echo -fcf-protection=full)
+
 HARDEN_FLAGS = \
     -fstack-protector-strong $(FORTIFY_FLAG) -fPIC \
-    -fstack-clash-protection -fcf-protection=full \
+    -fstack-clash-protection $(CF_PROTECTION_FLAG) \
     -fvisibility=hidden -fno-strict-aliasing \
     -fno-omit-frame-pointer \
     -DOPENSSL_API_COMPAT=0x30000000L
