@@ -3514,9 +3514,33 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * into a SubjectPublicKeyInfo. The builder remains inline because
      * it is intrinsically tied to the OpenSSL EVP API. =================== */
 
+    /* CKA_SENSITIVE and CKA_EXTRACTABLE, as the template states them. Neither
+     * was read on import: a secret key came in neither sensitive nor
+     * extractable whatever was asked, a private key sensitive and never
+     * extractable. The first meant a secret key imported with
+     * CKA_SENSITIVE=TRUE kept a readable value; once C_GetAttributeValue
+     * withheld every non-extractable key's value, the second meant an
+     * imported key could never be read back or wrapped at all, though the
+     * template asked for exactly that. A private key stays sensitive
+     * whatever is asked, as before -- this only ever adds protection or the
+     * extractability the caller requested. Both default to FALSE, as they
+     * did. */
+    int tmpl_sensitive = 0, tmpl_extractable = 0;
+    {
+        long ti = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
+        tmpl_sensitive = ti >= 0 && pTemplate[ti].pValue && pTemplate[ti].ulValueLen >= 1
+                         && ((unsigned char *)pTemplate[ti].pValue)[0] != 0;
+        ti = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
+        tmpl_extractable = ti >= 0 && pTemplate[ti].pValue && pTemplate[ti].ulValueLen >= 1
+                           && ((unsigned char *)pTemplate[ti].pValue)[0] != 0;
+    }
+
     /* --- Verbatim path (CKO_SECRET_KEY / CKO_PRIVATE_KEY / ML-DSA pub). */
     if (a.path == FHSM_CREATE_PATH_VERBATIM) {
         uint8_t flags = (a.cko == CKO_PRIVATE_KEY) ? FHSM_OBJF_SENSITIVE : 0;
+        if (a.cko == CKO_SECRET_KEY && tmpl_sensitive) flags |= FHSM_OBJF_SENSITIVE;
+        if ((a.cko == CKO_SECRET_KEY || a.cko == CKO_PRIVATE_KEY) && tmpl_extractable)
+            flags |= FHSM_OBJF_EXTRACTABLE;
         flags |= trusted_flag;   /* CKA_LOCAL stays 0: imported, not generated */
         /* The attribute is defined for private keys only (§4.9), so it is
          * applied where it means something and ignored elsewhere rather than
@@ -3925,6 +3949,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * FALSE: imported, not generated. */
     uint8_t import_flags = trusted_flag;
     if (is_priv) import_flags |= (uint8_t)(FHSM_OBJF_SENSITIVE | always_auth_flag);
+    if (is_priv && tmpl_extractable) import_flags |= FHSM_OBJF_EXTRACTABLE;
 
     uint32_t handle = 0;
     fhsm_rv_t rv = fhsm_token_object_add(t, (uint32_t)a.cko, (uint32_t)a.ckk,
@@ -6679,6 +6704,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
         return FHSM_RV_OBJECT_HANDLE_INVALID;
     int fhsm_buf_too_small = 0;
     int fhsm_type_invalid  = 0;   /* an unknown attribute type was requested */
+    int fhsm_sensitive     = 0;   /* a value that may not be revealed was requested */
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         const void *src = NULL; size_t src_len = 0;
         unsigned char bval = 0;
@@ -6711,14 +6737,35 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 }
                 src = &tmp_type;  src_len = sizeof(CK_ULONG); break;
             case CKA_VALUE: {
-                /* Enforce CKA_SENSITIVE : a sensitive object's CKA_VALUE
-                 * must NEVER be returned. PKCS#11 v3.2 §C.6.7.2 :
-                 * "C_GetAttributeValue shall not reveal the value of a
-                 * sensitive attribute". */
+                /* A private or secret key's value is not revealed when the
+                 * key is sensitive, or when it is not extractable: the
+                 * attribute tables' footnote 7, "cannot be revealed if object
+                 * has its CKA_SENSITIVE attribute set to CK_TRUE or its
+                 * CKA_EXTRACTABLE attribute set to CK_FALSE". A key that may
+                 * not leave the token wrapped may not leave it in clear
+                 * either. This read CKA_SENSITIVE alone, so a key derived or
+                 * imported with CKA_SENSITIVE=FALSE and no CKA_EXTRACTABLE --
+                 * not extractable, the default here -- handed its value to
+                 * C_GetAttributeValue though C_WrapKey refused it.
+                 *
+                 * And the call says so. The value was withheld, but it
+                 * returned CKR_OK, so a caller checking only the return code
+                 * took CK_UNAVAILABLE_INFORMATION for a length; PKCS#11 v3.2
+                 * C_GetAttributeValue returns CKR_ATTRIBUTE_SENSITIVE here.
+                 *
+                 * Flags that cannot be read are taken as the strict answer for
+                 * a private or secret key. Public keys and certificates are
+                 * public: their values are always given. Both found
+                 * 2026-10-09, the first by tests/test_pkiops_secret.c on the
+                 * fhsm-crypt branch, the first test to ask for a secret key's
+                 * value and look at the return code. */
                 uint8_t of = 0;
-                if (fhsm_token_object_get_flags(t, (uint32_t)hObject, &of) == FHSM_RV_OK
-                    && (of & FHSM_OBJF_SENSITIVE)) {
+                int have = fhsm_token_object_get_flags(t, (uint32_t)hObject, &of) == FHSM_RV_OK;
+                int secret = cko_class == CKO_PRIVATE_KEY || cko_class == CKO_SECRET_KEY;
+                if ((have && (of & FHSM_OBJF_SENSITIVE))
+                    || (secret && (!have || !(of & FHSM_OBJF_EXTRACTABLE)))) {
                     pTemplate[i].ulValueLen = (CK_ULONG)-1;
+                    fhsm_sensitive = 1;
                     continue;
                 }
                 /* PKCS#11 v3.2 defines CKA_VALUE of an ML-KEM or ML-DSA
@@ -7096,7 +7143,10 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     }
     /* PKCS#11 v3.2 C_GetAttributeValue : if any requested attribute did
      * not fit the supplied buffer, return CKR_BUFFER_TOO_SMALL (#125). */
+    /* When several apply, the specification lets any one be returned; every
+     * entry concerned carries CK_UNAVAILABLE_INFORMATION either way. */
     if (fhsm_buf_too_small) return 0x00000150UL;   /* CKR_BUFFER_TOO_SMALL */
+    if (fhsm_sensitive)     return CKR_ATTRIBUTE_SENSITIVE;
     if (fhsm_type_invalid)  return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
     return FHSM_RV_OK;
 }
