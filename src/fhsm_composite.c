@@ -1393,7 +1393,6 @@ fhsm_rv_t fhsm_pki_issue(const fhsm_pki_signer_t *s,
         int ok = X509_add_ext(x, e, -1) == 1;
         X509_EXTENSION_free(e);
         if (!ok) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
-        rv = FHSM_RV_FUNCTION_FAILED;
     }
 
     /* cRLDistributionPoints, from the operator's list. Non-critical: RFC 5280
@@ -1406,9 +1405,12 @@ fhsm_rv_t fhsm_pki_issue(const fhsm_pki_signer_t *s,
         int ok = X509_add_ext(x, e, -1) == 1;
         X509_EXTENSION_free(e);
         if (!ok) { rv = FHSM_RV_FUNCTION_FAILED; goto out; }
-        rv = FHSM_RV_FUNCTION_FAILED;
     }
 
+    /* Every exit above sets rv on its own way out, so nothing here needs to
+     * restore FHSM_RV_FUNCTION_FAILED after an extension succeeds. It used
+     * to, twice, and the CI's cppcheck flagged both as redundant assignments
+     * -- static-analysis red from 2026-10-05 to 2026-10-09. */
     rv = sign_certificate(x, s);
     if (rv != FHSM_RV_OK) goto out;
     rv = emit_certificate(x, out, out_len);

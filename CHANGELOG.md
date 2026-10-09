@@ -7,6 +7,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+* **`make lint` was red from 2026-10-05.** cppcheck flagged two redundant
+  assignments in `fhsm_pki_issue`, where `rv` was reset to failure after each
+  optional extension although every later exit sets it. No behaviour change.
+  The static-analysis job failed on every commit of the 2.3.0 cycle after the
+  PKI builders were made generic, and went unread while attention was on
+  pkcs11-check; the released binary is unaffected.
+
 ## [2.3.0] --- 2026-10-07
 
 *Minor, as 2.1.0 and 2.2.0 were: the PKI tools gain
