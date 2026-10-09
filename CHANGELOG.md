@@ -7,6 +7,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+*To become 2.3.1, on or after 2026-10-14, a week after 2.3.0. Patch: one
+defect corrected, nothing added, no call answered differently except where
+it failed before. No security advisory. `RELEASE_v2.3.1.md` has the release
+notes.*
+
 ### Fixed
 * **Multipart digest worked for three of the eleven digests it accepts.**
   `C_DigestUpdate` and `C_DigestKey` looked the EVP digest up in a private
