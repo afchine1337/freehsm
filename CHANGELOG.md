@@ -8,6 +8,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **Multipart digest worked for three of the eleven digests it accepts.**
+  `C_DigestUpdate` and `C_DigestKey` looked the EVP digest up in a private
+  table holding SHA-256, SHA-384 and SHA-512, while `C_DigestInit` accepts
+  SHA-224, SHA-512/224, SHA-512/256, the four SHA-3 and, in `all-mechanisms`
+  builds, SHA-1 and MD5. For those the first Update answered
+  `CKR_MECHANISM_INVALID`. One-shot `C_Digest` was never affected. Both now
+  use the table `C_DigestInit` checks availability against.
+
+  Two error-path defects came with it. An Update error did not end the
+  operation, so the next `C_DigestInit` answered `CKR_OPERATION_ACTIVE`; it
+  now does, as PKCS#11 requires. And an operation that ended on an error after
+  a successful Update kept its EVP context, which the next operation's Update
+  would have hashed into; `C_DigestInit` now releases it.
+
+  Found from pkcs11-check 0.2.3's `TestMultipartDigest` xfails, which
+  alternated with the refused digests and were first read as session
+  cross-talk in the harness (mingulov/pkcs11-check#38). Checking that
+  reading against the reports is what turned it up.
+  `tests/test_digest_multipart.c`.
+
 * **`make lint` was red from 2026-10-05.** cppcheck flagged two redundant
   assignments in `fhsm_pki_issue`, where `rv` was reset to failure after each
   optional extension although every later exit sets it. No behaviour change.

@@ -780,6 +780,12 @@ tests/test_cipher_final_no_update: tests/test_cipher_final_no_update.c $(LIB)
 tests/test_eddsa_params: tests/test_eddsa_params.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Multipart digest knew three of the eleven digests C_DigestInit accepts,
+# and an Update error left the operation active. pkcs11-check 0.2.3,
+# TestMultipartDigest.
+tests/test_digest_multipart: tests/test_digest_multipart.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # The advertised set and the implemented set are two structures with nothing
 # holding them equal: fhsm_mechanism_table[] carries a handler pointer that no
 # code dereferences, and the PKCS#11 entry points switch on mechanisms by hand.
@@ -1073,6 +1079,7 @@ TEST_BINS = \
 	tests/test_hmac_multipart \
 	tests/test_cipher_final_no_update \
 	tests/test_eddsa_params \
+	tests/test_digest_multipart \
 	tests/test_advertised_operational \
 	tests/test_derive_concat \
 	tests/test_ecdh_peer_point \
@@ -1166,6 +1173,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_cipher_final_no_update
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_eddsa_params
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_digest_multipart
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_advertised_operational
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

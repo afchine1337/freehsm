@@ -2640,6 +2640,12 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
        * C_Digest (fhsm_md_available). */
       if (!fhsm_md_available(fhsm_hash_openssl_name(op->hash)))
           return FHSM_RV_MECHANISM_INVALID; }
+    /* A digest that ended on an error after its first C_DigestUpdate kept its
+     * EVP context: the error paths clear op->active and nothing else. The
+     * next Update would have carried on hashing into it -- the previous
+     * operation's data, under the previous operation's algorithm. Released
+     * here, the one place every new digest operation passes through. */
+    if (op->md_ctx) { EVP_MD_CTX_free(op->md_ctx); op->md_ctx = NULL; }
     op->active = 1;
     op->mechanism = (uint32_t)pMechanism->mechanism;
     return FHSM_RV_OK;
@@ -11058,13 +11064,24 @@ vcleanup:
  * =========================================================================== */
 /* openssl/evp.h is already included at the top of this TU. */
 
-static const char *hash_evp_name(fhsm_hash_t h) {
-    switch (h) {
-        case FHSM_HASH_SHA256: return "SHA256";
-        case FHSM_HASH_SHA384: return "SHA384";
-        case FHSM_HASH_SHA512: return "SHA512";
-        default: return NULL;
-    }
+/* The digest's EVP name comes from fhsm_hash_openssl_name, the table
+ * C_DigestInit checks availability against. This file had its own, which
+ * knew SHA-256, SHA-384 and SHA-512 and nothing else, so multipart digest
+ * failed with CKR_MECHANISM_INVALID at the first C_DigestUpdate for the eight
+ * other digests C_DigestInit accepts -- SHA-224, SHA-512/224, SHA-512/256,
+ * the SHA-3 family and, in all-mechanisms builds, SHA-1 and MD5. One-shot
+ * C_Digest goes through fhsm_hash_oneshot and was never affected. Found
+ * 2026-10-09 from pkcs11-check 0.2.3's TestMultipartDigest xfails, which
+ * read as session cross-talk until the skip reasons were laid side by side.
+ *
+ * Any error here ends the operation and releases its context (PKCS#11,
+ * C_DigestUpdate: a call that results in an error terminates the digest
+ * operation). This path did neither, so the refused digest stayed active
+ * and the caller's next C_DigestInit answered CKR_OPERATION_ACTIVE. */
+static CK_RV digest_update_fail(fhsm_op_t *op, CK_RV rv) {
+    if (op->md_ctx) { EVP_MD_CTX_free(op->md_ctx); op->md_ctx = NULL; }
+    op->active = 0;
+    return rv;
 }
 
 CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
@@ -11082,24 +11099,22 @@ CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
      * wrong answer but a denial of service, and one any caller can trigger
      * with a miscomputed length. No real buffer is 8 exabytes, so this
      * detects a nonsensical argument rather than inventing a policy. */
-    if (ulPartLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
+    if (ulPartLen > 0x7FFFFFFFUL) return digest_update_fail(op, FHSM_RV_DATA_LEN_RANGE);
     /* NULL part + non-zero length would deref NULL in the EVP update
      * (pkcs11-check security/test_ffi_null_pointer, #125). */
-    if (pPart == NULL && ulPartLen != 0) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+    if (pPart == NULL && ulPartLen != 0) return digest_update_fail(op, FHSM_RV_ARGUMENTS_BAD);
     if (!op->md_ctx) {
         EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-        if (!ctx) return FHSM_RV_HOST_MEMORY;
-        const EVP_MD *md = EVP_MD_fetch(NULL, hash_evp_name(op->hash), NULL);
-        if (!md) { EVP_MD_CTX_free(ctx); return FHSM_RV_MECHANISM_INVALID; }
-        if (EVP_DigestInit_ex(ctx, md, NULL) != 1) {
-            EVP_MD_free((EVP_MD*)md); EVP_MD_CTX_free(ctx);
-            return FHSM_RV_FUNCTION_FAILED;
-        }
-        EVP_MD_free((EVP_MD*)md);
+        if (!ctx) return digest_update_fail(op, FHSM_RV_HOST_MEMORY);
+        EVP_MD *md = EVP_MD_fetch(NULL, fhsm_hash_openssl_name(op->hash), NULL);
+        if (!md) { EVP_MD_CTX_free(ctx); return digest_update_fail(op, FHSM_RV_FUNCTION_FAILED); }
+        int ok = EVP_DigestInit_ex(ctx, md, NULL) == 1;
+        EVP_MD_free(md);
+        if (!ok) { EVP_MD_CTX_free(ctx); return digest_update_fail(op, FHSM_RV_FUNCTION_FAILED); }
         op->md_ctx = ctx;
     }
     if (EVP_DigestUpdate(op->md_ctx, pPart, ulPartLen) != 1)
-        return FHSM_RV_FUNCTION_FAILED;
+        return digest_update_fail(op, FHSM_RV_FUNCTION_FAILED);
     return FHSM_RV_OK;
 }
 
@@ -11156,14 +11171,15 @@ CK_RV C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey) {
      * C_DigestFinal). */
     if (!op->md_ctx) {
         EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-        if (!ctx) return FHSM_RV_HOST_MEMORY;
-        const EVP_MD *md = EVP_MD_fetch(NULL, hash_evp_name(op->hash), NULL);
-        if (!md) { EVP_MD_CTX_free(ctx); return FHSM_RV_MECHANISM_INVALID; }
-        if (EVP_DigestInit_ex(ctx, md, NULL) != 1) {
-            EVP_MD_free((EVP_MD*)md); EVP_MD_CTX_free(ctx);
-            return FHSM_RV_FUNCTION_FAILED;
-        }
-        EVP_MD_free((EVP_MD*)md);
+        if (!ctx) return digest_update_fail(op, FHSM_RV_HOST_MEMORY);
+        /* Same table as C_DigestUpdate, for the same reason: this path had
+         * the three-entry copy too, so C_DigestKey under SHA-224 or SHA-3
+         * failed where C_DigestKey under SHA-256 worked. */
+        EVP_MD *md = EVP_MD_fetch(NULL, fhsm_hash_openssl_name(op->hash), NULL);
+        if (!md) { EVP_MD_CTX_free(ctx); return digest_update_fail(op, FHSM_RV_FUNCTION_FAILED); }
+        int ok = EVP_DigestInit_ex(ctx, md, NULL) == 1;
+        EVP_MD_free(md);
+        if (!ok) { EVP_MD_CTX_free(ctx); return digest_update_fail(op, FHSM_RV_FUNCTION_FAILED); }
         op->md_ctx = ctx;
     }
     if (EVP_DigestUpdate(op->md_ctx, kv, kvl) != 1) {
