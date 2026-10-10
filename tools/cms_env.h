@@ -34,6 +34,7 @@
  * recipients; a head that does not fit is refused, not truncated. */
 #define CMSENV_HEAD_MAX  65536u
 #define CMSENV_KEK_MAX   8u
+#define CMSENV_KTRI_MAX  8u
 
 /* A key-encryption-key recipient (KEKRecipientInfo, RFC 5652 §6.2.3). */
 struct cmsenv_kek {
@@ -42,9 +43,22 @@ struct cmsenv_kek {
     const uint8_t *ekey; size_t ekey_len;   /* the wrapped content key */
 };
 
+/* A key-transport recipient (KeyTransRecipientInfo, RFC 5652 §6.2.1). Only
+ * RSAES-OAEP with SHA-256 and MGF1-SHA-256 is opened; any other is listed
+ * with the reason in `refused`, so a caller can say why the file did not
+ * open rather than that it did not. */
+struct cmsenv_ktri {
+    const uint8_t *ski;  size_t ski_len;    /* [0] subjectKeyIdentifier, or */
+    const uint8_t *ias;  size_t ias_len;    /* issuerAndSerialNumber, whole TLV */
+    const char    *refused;                 /* NULL when this tool can open it */
+    const uint8_t *ekey; size_t ekey_len;
+};
+
 struct cmsenv_head {
     struct cmsenv_kek kek[CMSENV_KEK_MAX];
     size_t   n_kek;
+    struct cmsenv_ktri ktri[CMSENV_KTRI_MAX];
+    size_t   n_ktri;
     size_t   n_other;           /* recipients of other kinds, not read here */
     int      gcm_bits;          /* 128, 192 or 256 */
     uint8_t  nonce[16];
@@ -54,11 +68,21 @@ struct cmsenv_head {
     uint64_t content_len;
 };
 
-/* Write everything before the encrypted content, for one KEK recipient. The
+/* One RecipientInfo, DER, malloc'd; NULL on a bad argument or no memory.
+ * A key-encryption-key recipient, its key wrapped with AES key wrap: */
+uint8_t *cmsenv_kekri(const uint8_t *id, size_t id_len, int wrap_bits,
+                      const uint8_t *ekey, size_t ekey_len, size_t *out_len);
+/* A key-transport recipient, RSAES-OAEP with SHA-256 and MGF1-SHA-256,
+ * named by a subjectKeyIdentifier or by an issuerAndSerialNumber (its whole
+ * DER) -- exactly one of the two. */
+uint8_t *cmsenv_ktri_oaep(const uint8_t *ski, size_t ski_len,
+                          const uint8_t *ias, size_t ias_len,
+                          const uint8_t *ekey, size_t ekey_len, size_t *out_len);
+
+/* Write everything before the encrypted content, for the recipient `ri`. The
  * content that follows must be exactly `content_len` bytes, and the tail
  * then carries a tag of `tag_len` bytes. 0 on success. */
-int cmsenv_write_head(FILE *f, const uint8_t *kek_id, size_t kek_id_len, int wrap_bits,
-                      const uint8_t *ekey, size_t ekey_len, int gcm_bits,
+int cmsenv_write_head(FILE *f, const uint8_t *ri, size_t ri_len, int gcm_bits,
                       const uint8_t *nonce, size_t nonce_len,
                       uint64_t content_len, size_t tag_len);
 

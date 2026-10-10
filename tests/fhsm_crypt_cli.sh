@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ===========================================================================
 # fhsm_crypt_cli.sh --- fhsm-crypt list, keygen, delete, encrypt and decrypt,
-# as an operator types them (docs/fhsm-crypt-plan.md, stages 0 to 2).
+# as an operator types them (docs/fhsm-crypt-plan.md, stages 0 to 3).
 #
 # The property that matters is delete's: without --yes it names what it would
 # destroy and destroys nothing, and with --yes it destroys exactly the objects
@@ -145,6 +145,21 @@ ok "an altered file: exit 4, and no output" $?
 q "$CRYPT" encrypt --in "$W/plain" --out "$W/y.p7m" --module "$LIB"
 [ $? -eq 1 ]
 ok "encrypt without --key is a usage error" $?
+
+q "$CRYPT" keygen --label pair --alg rsa-oaep --module "$LIB" \
+  && grep -q "rsa-oaep key pair" "$W/out" \
+  && q "$CRYPT" encrypt --key pair --in "$W/plain" --out "$W/rsa.p7m" --module "$LIB" \
+  && q "$CRYPT" decrypt --in "$W/rsa.p7m" --out "$W/rsa.back" --module "$LIB" \
+  && grep -q 'with "pair"' "$W/out" && cmp -s "$W/plain" "$W/rsa.back"
+ok "an rsa-oaep pair: encrypt by label, decrypt with its private half" $?
+
+q "$CRYPT" list --class key --module "$LIB"
+[ "$(grep -c " pair .*rsa-oaep" "$W/out")" -eq 2 ]
+ok "list names both halves rsa-oaep" $?
+
+( unset FHSM_PIN; "$CRYPT" encrypt --cert "$W/plain" --in "$W/plain" --out "$W/c.p7m" >"$W/out" 2>&1 )
+[ $? -eq 1 ] && grep -q "not a certificate" "$W/out" && ! grep -q "FHSM_PIN" "$W/out"
+ok "--cert needs no PIN: it reached the certificate before asking" $?
 
 q "$CRYPT" list --class nonsense --module "$LIB"
 [ $? -eq 1 ] && grep -q "takes key, cert or all" "$W/out"

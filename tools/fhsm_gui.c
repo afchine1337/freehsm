@@ -1021,8 +1021,10 @@ static void show_keys(struct job *j) {
     j->objs = NULL; j->n_objs = 0;
     for (size_t i = 0; i < A.n_objs; i++) {
         const struct pkiops_object *o = &A.objs[i];
-        const char *alg = "";
-        for (size_t k = 0; k < j->n_keys; k++)
+        /* A secret key or an rsa-oaep key carries its own name; a signing
+         * key's comes from pkiops_keys. */
+        const char *alg = o->alg;
+        for (size_t k = 0; !alg[0] && k < j->n_keys; k++)
             if (j->keys[k].handle == o->handle) alg = j->keys[k].alg;
         char t[200];
         snprintf(t, sizeof t, "%-11s  object %lu   \"%s\"   %s",
@@ -1106,7 +1108,8 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
             }
         } else {
             show_keys(j);
-            status(j->skey >= 0 ? "Secret key generated." : "Key pair generated.");
+            status(j->skey == PKIOPS_SKEY_RSA_OAEP ? "Encryption key pair generated."
+                   : j->skey >= 0 ? "Secret key generated." : "Key pair generated.");
         }
         break;
     case J_DELETE: {
@@ -2441,8 +2444,9 @@ static GtkWidget *keygen_drop(void) {
     gtk_widget_set_tooltip_text(d,
         "Signature key pairs first; their algorithm is used for everything signed "
         "with them, and the composite exists only in PROFILE=all-mechanisms builds. "
-        "Then aes128 and aes256, which encrypt and wrap, and hmac, a 32-byte secret "
-        "for MACs: sensitive, and never leave the token.");
+        "Then aes128 and aes256, which encrypt and wrap, hmac, a 32-byte secret "
+        "for MACs, and rsa-oaep, an RSA 3072 pair that encrypts with OAEP and cannot "
+        "sign: sensitive, and never leave the token.");
     return d;
 }
 

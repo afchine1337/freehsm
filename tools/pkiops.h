@@ -230,6 +230,7 @@ enum pkiops_skey {
     PKIOPS_SKEY_AES128 = 0,
     PKIOPS_SKEY_AES256,
     PKIOPS_SKEY_HMAC,               /* a 32-byte generic secret */
+    PKIOPS_SKEY_RSA_OAEP,           /* an RSA 3072 pair, OAEP only */
     PKIOPS_SKEY_COUNT
 };
 /* "aes128", "aes256", "hmac"; NULL out of range. */
@@ -239,7 +240,9 @@ const char *pkiops_skey_list(void);
  * with the command that makes it; pkiops_alg_parse does the converse. */
 int pkiops_skey_parse(const char *name, enum pkiops_skey *out, struct p11_err *e);
 /* A secret key on the token: sensitive, not extractable, private. AES keys
- * encrypt, decrypt, wrap and unwrap; the HMAC key signs and verifies. */
+ * encrypt, decrypt, wrap and unwrap; the HMAC key signs and verifies. For
+ * rsa-oaep, an RSA 3072 key pair whose only allowed mechanism is RSA-OAEP,
+ * so it cannot sign; `*key` is then its private half. */
 int pkiops_keygen_secret(pkiops_handle session, const char *label, enum pkiops_skey k,
                          pkiops_handle *key, struct p11_err *e);
 
@@ -257,8 +260,22 @@ int pkiops_keygen_secret(pkiops_handle session, const char *label, enum pkiops_s
  * open with the key -- altered, or made for another. */
 int pkiops_encrypt_file(pkiops_handle session, const char *label, const char *in_path,
                         const char *out_path, struct p11_err *e);
-/* The key is found from the file: the first recipient naming an AES key on
- * the token. Its label goes into `used` (may be NULL). */
+/* For `label`: an AES key wraps the content key (a KEK recipient), an
+ * RSA-OAEP key pair's public half encrypts it (a key-transport recipient,
+ * RSAES-OAEP with SHA-256, named by subjectKeyIdentifier). */
+
+/* For the holder of the certificate in `cert_path` (PEM or DER), an RSA
+ * key. No token and no login: encrypting for someone needs only their
+ * public key. Named by the certificate's subjectKeyIdentifier, or by issuer
+ * and serial number when it has none. */
+int pkiops_encrypt_file_for_cert(const char *cert_path, const char *in_path,
+                                 const char *out_path, struct p11_err *e);
+
+/* The key is found from the file: the first recipient this token can open --
+ * a KEK recipient naming one of its AES keys, or an RSA-OAEP recipient one of
+ * its RSA keys opens. Its label goes into `used` (may be NULL). A recipient
+ * this does not open -- RSA PKCS#1 v1.5, OAEP with SHA-1 -- is named in the
+ * error when nothing else opens the file. */
 int pkiops_decrypt_file(pkiops_handle session, const char *in_path, const char *out_path,
                         char *used, size_t used_cap, struct p11_err *e);
 

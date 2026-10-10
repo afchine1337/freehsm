@@ -92,6 +92,20 @@ notes.*
   subject, issuer, serial and validity. A private or secret key's value is
   never asked for. `tests/test_pkiops_secret.c`.
 
+* **Files encrypted for an RSA key, with RSA-OAEP** (stage 3). `fhsm-crypt
+  keygen --alg rsa-oaep` makes an RSA 3072 pair whose only allowed mechanism
+  is RSA-OAEP -- it cannot sign, and is no longer taken for an RSA-PSS key.
+  `fhsm-crypt encrypt --key L` encrypts for such a pair, and `--cert C`
+  for the holder of a certificate with neither the module nor a PIN:
+  encrypting for someone is a public operation. The recipient is a
+  KeyTransRecipientInfo, RSAES-OAEP with SHA-256 and MGF1-SHA-256, named by
+  subjectKeyIdentifier -- computed as the CA and OpenSSL compute it -- or by
+  issuer and serial for a certificate without one; decryption finds the
+  token's RSA key by that identifier and opens with `C_Decrypt`. PKCS#1 v1.5
+  key transport, OpenSSL's default, and OAEP with SHA-1 are refused by name.
+  `tests/test_pkiops_envelope_rsa.c`: OpenSSL opens our files and we open
+  its, with an RSA key it generated and the token imported.
+
 * **Files encrypted for a key on the token** (stage 2). `fhsm-crypt encrypt
   --key L --in F --out F.p7m` writes CMS AuthEnvelopedData (RFC 5083),
   AES-256-GCM content (RFC 5084), with one key-encryption-key recipient whose

@@ -6,16 +6,18 @@
  * fhsm-crypt --- keys that do not sign, and the objects on the token.
  *  Usage :
  *    fhsm-crypt list   [--class key|cert|all] [--module PATH] [--slot N]
- *    fhsm-crypt keygen --label NAME --alg aes128|aes256|hmac
+ *    fhsm-crypt keygen --label NAME --alg aes128|aes256|hmac|rsa-oaep
  *    fhsm-crypt show   --label NAME [--class key|cert|all]
  *    fhsm-crypt encrypt --key LABEL --in FILE --out FILE.p7m
+ *    fhsm-crypt encrypt --cert CERT --in FILE --out FILE.p7m
  *    fhsm-crypt decrypt --in FILE.p7m --out FILE
  *    fhsm-crypt delete --label NAME [--class key|cert|all] [--yes]
  *  Files are encrypted as CMS AuthEnvelopedData (RFC 5083), AES-256-GCM,
- *  for an AES key on the token, and `openssl cms -decrypt` reads them given
- *  that key. Encryption for a public key comes in the later stages of
- *  docs/fhsm-crypt-plan.md; signature keys stay with fhsm-csr, and each tool
- *  names the other when given the other's algorithm.
+ *  for an AES key on the token or for an RSA key with RSA-OAEP -- an
+ *  rsa-oaep pair on the token, or anyone's certificate, for which neither
+ *  the module nor a PIN is needed. `openssl cms -decrypt` reads them. ML-KEM
+ *  comes later (docs/fhsm-crypt-plan.md); signature keys stay with fhsm-csr,
+ *  and each tool names the other when given the other's algorithm.
  *
  *  The PIN comes from the FHSM_PIN environment variable and from nowhere else,
  *  as for every tool here: an argument is visible in `ps` to every user.
@@ -46,18 +48,23 @@ static void usage(void) {
       "  fhsm-crypt keygen --label NAME --alg ALG ...\n"
       "  fhsm-crypt show   --label NAME [--class key|cert|all] ...\n"
       "  fhsm-crypt encrypt --key LABEL --in FILE --out FILE.p7m ...\n"
+      "  fhsm-crypt encrypt --cert CERT --in FILE --out FILE.p7m\n"
       "  fhsm-crypt decrypt --in FILE.p7m --out FILE ...\n"
       "  fhsm-crypt delete --label NAME [--class key|cert|all] [--yes] ...\n\n"
-      "  --alg ALG       keygen: aes128, aes256 (encrypt and wrap) or hmac (a\n"
-      "                  32-byte secret for HMAC). Sensitive, not extractable.\n"
+      "  --alg ALG       keygen: aes128, aes256 (encrypt and wrap), hmac (a\n"
+      "                  32-byte secret for HMAC), or rsa-oaep (an RSA 3072 pair\n"
+      "                  that encrypts with OAEP and cannot sign). Sensitive, not\n"
+      "                  extractable.\n"
       "                  Signature keys are made by fhsm-csr keygen.\n"
       "  --class C       which objects: key (public, private and secret keys),\n"
       "                  cert, or all (the default)\n"
       "  --label NAME    show, delete: every object of the class carrying this label\n"
       "  --yes           delete: destroy them. Without it, delete lists what it\n"
       "                  would destroy and stops.\n"
-      "  --key LABEL     encrypt: the AES key on the token. decrypt finds the key\n"
-      "                  itself, from the file.\n"
+      "  --key LABEL     encrypt: an AES key or an rsa-oaep pair on the token.\n"
+      "                  decrypt finds the key itself, from the file.\n"
+      "  --cert CERT     encrypt: for the holder of this certificate (PEM or DER,\n"
+      "                  an RSA key). Needs neither the module nor FHSM_PIN.\n"
       "  --in, --out     encrypt, decrypt: the file read and the file written.\n"
       "                  An existing --out is never written over, and a file\n"
       "                  that does not authenticate leaves nothing behind.\n"
@@ -91,7 +98,7 @@ int main(int argc, char **argv) {
     if (argc < 2) usage();
     const char *cmd = argv[1];
     const char *module = "./libfreehsm.so", *label = NULL, *cls_name = "all";
-    const char *alg_name = NULL, *key = NULL, *in = NULL, *out = NULL;
+    const char *alg_name = NULL, *key = NULL, *in = NULL, *out = NULL, *cert = NULL;
     long slot = -1;
     int yes = 0;
 
@@ -101,6 +108,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--class")  && i+1<argc) cls_name = argv[++i];
         else if (!strcmp(argv[i],"--alg")    && i+1<argc) alg_name = argv[++i];
         else if (!strcmp(argv[i],"--key")    && i+1<argc) key      = argv[++i];
+        else if (!strcmp(argv[i],"--cert")   && i+1<argc) cert     = argv[++i];
         else if (!strcmp(argv[i],"--in")     && i+1<argc) in       = argv[++i];
         else if (!strcmp(argv[i],"--out")    && i+1<argc) out      = argv[++i];
         else if (!strcmp(argv[i],"--slot")   && i+1<argc) {
@@ -129,8 +137,8 @@ int main(int argc, char **argv) {
     int is_enc = !strcmp(cmd, "encrypt"), is_dec = !strcmp(cmd, "decrypt");
     if (!is_list && !is_delete && !is_keygen && !is_show && !is_enc && !is_dec) usage();
     if ((is_enc || is_dec) && (!in || !out || label || yes)) usage();
-    if (is_enc && !key) usage();
-    if (!is_enc && key) usage();
+    if (is_enc && !key == !cert) usage();          /* --key or --cert, not both */
+    if (!is_enc && (key || cert)) usage();
     if (!is_enc && !is_dec && (in || out)) usage();
     if ((is_delete || is_keygen || is_show) && !label) usage();
     if (is_show && yes) usage();
@@ -145,6 +153,15 @@ int main(int argc, char **argv) {
             return 1;
         }
         if (pkiops_skey_parse(alg_name, &skey, &e)) fail(&e);
+    }
+
+    /* For a certificate: a public operation, before the module and the PIN
+     * are so much as looked at. */
+    if (is_enc && cert) {
+        int rc = pkiops_encrypt_file_for_cert(cert, in, out, &e);
+        if (rc) fprintf(stderr, "%s: %s", prog, e.msg);
+        else    fprintf(stderr, "fhsm-crypt: %s encrypted for the holder of %s into %s\n", in, cert, out);
+        return rc;
     }
 
     const char *pin = getenv("FHSM_PIN");
@@ -182,8 +199,9 @@ int main(int argc, char **argv) {
         free(v);
         pkiops_handle h = 0;
         if (pkiops_keygen_secret(s, label, skey, &h, &e)) fail(&e);
-        fprintf(stderr, "fhsm-crypt: %s key \"%s\" created (object %lu)\n",
-                pkiops_skey_name(skey), label, (unsigned long)h);
+        fprintf(stderr, "fhsm-crypt: %s %s \"%s\" created (object %lu)\n",
+                pkiops_skey_name(skey), skey == PKIOPS_SKEY_RSA_OAEP ? "key pair" : "key",
+                label, (unsigned long)h);
         pkiops_session_close(s);
         pkiops_close();
         return 0;

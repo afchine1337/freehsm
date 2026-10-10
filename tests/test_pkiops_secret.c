@@ -97,11 +97,13 @@ int main(void) {
         fprintf(stderr, "missing symbols\n"); return 2;
     }
 
-    static const char *LABEL[PKIOPS_SKEY_COUNT] = { "k-aes128", "k-aes256", "k-hmac" };
-    pkiops_handle key[PKIOPS_SKEY_COUNT] = { 0 };
+    /* The secret keys only: rsa-oaep is a pair, tested in test_pkiops_envelope_rsa.c. */
+    enum { N_SECRET = PKIOPS_SKEY_HMAC + 1 };
+    static const char *LABEL[N_SECRET] = { "k-aes128", "k-aes256", "k-hmac" };
+    pkiops_handle key[N_SECRET] = { 0 };
     char what[96];
 
-    for (int k = 0; k < PKIOPS_SKEY_COUNT; k++) {
+    for (int k = 0; k < N_SECRET; k++) {
         const char *nm = pkiops_skey_name((enum pkiops_skey)k);
         printf("%s\n", nm);
         snprintf(what, sizeof what, "(1) pkiops_keygen_secret %s", nm);
@@ -128,7 +130,7 @@ int main(void) {
     int named = n == 3;
     for (size_t i = 0; i < n; i++) {
         int k = -1;
-        for (int q = 0; q < PKIOPS_SKEY_COUNT; q++) if (!strcmp(v[i].label, LABEL[q])) k = q;
+        for (int q = 0; q < N_SECRET; q++) if (!strcmp(v[i].label, LABEL[q])) k = q;
         named &= k >= 0 && v[i].cls == PKIOPS_OBJ_SECRET
               && !strcmp(v[i].alg, pkiops_skey_name((enum pkiops_skey)k));
     }

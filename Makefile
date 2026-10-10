@@ -366,6 +366,11 @@ tests/test_pkiops_secret: tests/test_pkiops_secret.c $(PKIOPS_SRC) $(OBJDIR)/src
 tests/test_pkiops_envelope: tests/test_pkiops_envelope.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
 	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
+# Files encrypted for an RSA key with RSA-OAEP: a pair on the token, a
+# certificate, and OpenSSL both ways (docs/fhsm-crypt-plan.md, stage 3).
+tests/test_pkiops_envelope_rsa: tests/test_pkiops_envelope_rsa.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+
 # fhsm-gui --- the desktop interface over pkiops (docs/fhsm-gui-plan.md).
 # Not part of `all`: building the module, the tools and the tests must not
 # need GTK, and neither must CI. The GTK flags go in as -isystem so that
@@ -1140,6 +1145,7 @@ TEST_BINS = \
 	tests/test_pkiops_objects \
 	tests/test_pkiops_secret \
 	tests/test_pkiops_envelope \
+	tests/test_pkiops_envelope_rsa \
 	tests/test_secure_heap_shared
 
 .PHONY: test-bins
@@ -1287,6 +1293,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_pkiops_secret
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_pkiops_envelope
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_pkiops_envelope_rsa
 # fhsm-crypt list and delete, as an operator would type them; the script
 # sets up its own token, as pki_tools_algs.sh does.
 	$(TEST_LD) sh tests/fhsm_crypt_cli.sh

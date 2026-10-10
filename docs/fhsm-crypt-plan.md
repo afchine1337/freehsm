@@ -3,7 +3,11 @@
 Status: accepted 2026-10-09. Stages 0 and 1 built the same day; stage 1 also
 brought, at the user's request, an attribute view for every object and
 operator-mode re-initialisation of a token seen empty. Stage 2 built
-2026-10-10, command line and tests; its window comes with stage 5.
+2026-10-10, command line and tests; its window comes with stage 5. Stage 3
+built 2026-10-10 the same way, with every OpenSSL format choice measured
+against the `openssl cms` command first: it names a recipient by issuer
+and serial unless told otherwise, and uses PKCS#1 v1.5 unless asked for
+OAEP.
 
 ## What is being asked
 
