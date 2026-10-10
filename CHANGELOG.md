@@ -7,12 +7,41 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-*To become 2.3.1, on or after 2026-10-14, a week after 2.3.0. Patch: one
-defect corrected, nothing added, no call answered differently except where
-it failed before. No security advisory. `RELEASE_v2.3.1.md` has the release
+*To become 2.3.1, on or after 2026-10-14, a week after 2.3.0. Patch: two
+defects corrected, nothing added. Calls answer differently where they
+succeeded before: reading the value of a private or secret key that is not
+extractable, and an imported key's CKA_SENSITIVE and CKA_EXTRACTABLE, which
+now read back as the template set them. No security advisory. `RELEASE_v2.3.1.md` has the release
 notes.*
 
 ### Fixed
+* **A key's value was given when it should have been withheld, and withheld
+  without saying so.** PKCS#11 v3.2 does not reveal a private or secret key's
+  `CKA_VALUE` when the key is sensitive *or* not extractable (the attribute
+  tables' footnote 7), and `C_GetAttributeValue` then returns
+  `CKR_ATTRIBUTE_SENSITIVE`. The module checked `CKA_SENSITIVE` alone, so a
+  key derived or imported with `CKA_SENSITIVE=FALSE` and nothing said about
+  `CKA_EXTRACTABLE` -- whose default here is FALSE -- gave its value in
+  clear, though `C_WrapKey` refused to let it out wrapped. And where it did
+  withhold a value, it returned `CKR_OK`, so a caller checking only the
+  return code read `CK_UNAVAILABLE_INFORMATION` as a length. Both are
+  corrected: a key that may not leave the token wrapped does not leave it in
+  clear, and the call says `CKR_ATTRIBUTE_SENSITIVE`. Public keys and
+  certificates are unchanged.
+
+  Correcting it exposed a third: `C_CreateObject` read neither attribute. A
+  secret key was imported neither sensitive nor extractable whatever the
+  template said -- so one imported with `CKA_SENSITIVE=TRUE` kept a readable
+  value, and one imported with `CKA_EXTRACTABLE=TRUE` could not be wrapped --
+  and a private key sensitive and never extractable. Import now keeps both as
+  the template states them; a private key stays sensitive whatever is asked,
+  as before, and both still default to FALSE.
+
+  An application that reads back a key it imported or derived as
+  non-sensitive now has to ask for `CKA_EXTRACTABLE=TRUE` as well. Found by a
+  test on the `fhsm-crypt` branch, the first here to ask for a secret key's
+  value and check the return code. `tests/test_sensitive_value.c`.
+
 * **Multipart digest worked for three of the eleven digests it accepts.**
   `C_DigestUpdate` and `C_DigestKey` looked the EVP digest up in a private
   table holding SHA-256, SHA-384 and SHA-512, while `C_DigestInit` accepts
