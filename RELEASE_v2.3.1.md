@@ -106,6 +106,14 @@ key's value and check the return code.
 
 ## Measured
 
+pkcs11-check 0.2.3, full corpus, signed module, 2026-10-10: 55 396 passed
+in `nist-approved-only` and 55 851 in `all-mechanisms`, with 4 and 5
+failures, all of them the known ones listed in
+`tests/pkcs11_check_known_failures.txt`. Against the 2026-10-06 runs, 25
+tests moved in each profile, all attributed in `docs/PKCS11_CHECK_FINDINGS.md`;
+the two that went from passed to xfailed are the new rules applying to the
+harness's own keys.
+
 `tests/test_digest_multipart.c`, new: for every digest the build accepts,
 multipart equals one-shot; an Update error ends the operation; and the next
 operation carries nothing of the failed one. pkcs11-check 0.2.3, every

@@ -2540,3 +2540,45 @@ known-failures list when the workflows moved to 0.2.3.
 The constant audit in `ci.yml` gives the same result under both references,
 322 conform, 30 not in the reference, 0 divergent, so its pin moved with the
 corpus workflows'.
+
+
+## 2026-10-10 — the 2.3.1 candidate, both profiles
+
+    pkcs11-check 0.2.3 · signed module, FIPS provider loaded · main at the
+    key-value commit · reports/pkcs11-check-{nist,all}-2.3.1
+
+| profile | passed | failed | v2.3.0 + 2026-10-06 fixes (0.2.3) |
+|---|---|---|---|
+| nist-approved-only | 55 396 / 93 010 | 4, all known | 55 378, 7 failed |
+| all-mechanisms | 55 851 / 93 141 | 5, all known | 55 832, 7 failed |
+
+Diffed by node-id against the 2026-10-06 runs: 25 moves in each profile, every
+one attributed.
+
+- **xfailed → passed, 20 (nist) and 21 (all).** The multipart digests, 16 and
+  18 — SHA-1 exists only in all-mechanisms; `TestZeroDataFinal::test_encrypt_final_no_update`;
+  and three `TestSensitiveKeyValue` tests that now see `CKR_ATTRIBUTE_SENSITIVE`
+  where the module returned `CKR_OK` with the value withheld.
+- **failed → xfailed.** Ed25519ctx ×2, both profiles, and the AES
+  `CKA_VALUE_LEN` truncation in nist — the 2026-10-06 fixes.
+- **passed → xfailed, 2, both profiles — consequences of the new rules, and
+  meant.**
+  - `TestDigestKey::test_digest_key_sensitive_non_extractable_imported_key`
+    imports an AES key with `CKA_SENSITIVE=TRUE`. Import ignored that flag,
+    so `C_DigestKey` used to accept the key; it now refuses a sensitive key
+    with `CKR_KEY_INDIGESTIBLE`, as it always meant to, so that a digest
+    cannot stand in for the value.
+  - `TestHKDFDataKAT::test_rfc5869_sha256` imports its base key with
+    `CKA_SENSITIVE=FALSE` and no `CKA_EXTRACTABLE`, then reads the value. Not
+    extractable by default here, so not revealed — the attribute tables'
+    footnote 7. The test relies on a default that is the module's to choose.
+
+The failures are the known ones: the async probes and the Ed448 question
+(mingulov/pkcs11-check#49; the async fix is upstream PR #50), and in
+all-mechanisms the v1.5 structured oracle (#37). The gate passes in both.
+
+The all-mechanisms run had to be made twice. `make integrity` depends on the
+library, so run after `make PROFILE=all-mechanisms` without repeating the
+profile it rebuilt the library in the default one and signed that — the first
+"all" run measured a nist-approved-only module, caught by its provenance line.
+Every command in a profile build has to carry the profile.
