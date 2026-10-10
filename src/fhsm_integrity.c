@@ -174,24 +174,33 @@ static int find_section_offset(const uint8_t *map, size_t map_len,
                                  const char *name,
                                  size_t *out_off, size_t *out_len)
 {
+    /* Copy the headers out with memcpy instead of casting into the
+     * buffer: casting a uint8_t pointer to Elf64_Ehdr / Elf64_Shdr is
+     * rejected by -Wcast-align on strict-alignment targets (riscv64),
+     * and the section table offset comes from the file. */
+    Elf64_Ehdr eh;
+    Elf64_Shdr shstr, sh;
     if (map_len < sizeof(Elf64_Ehdr)) return -1;
-    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)map;
-    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0) return -1;
-    if (eh->e_ident[EI_CLASS] != ELFCLASS64) return -1;
-    if (eh->e_shoff == 0 || eh->e_shnum == 0)  return -1;
-    if (eh->e_shoff + (size_t)eh->e_shnum * eh->e_shentsize > map_len) return -1;
+    memcpy(&eh, map, sizeof eh);
+    if (memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0) return -1;
+    if (eh.e_ident[EI_CLASS] != ELFCLASS64) return -1;
+    if (eh.e_shoff == 0 || eh.e_shnum == 0)  return -1;
+    if (eh.e_shentsize != sizeof(Elf64_Shdr)) return -1;
+    if (eh.e_shoff + (size_t)eh.e_shnum * eh.e_shentsize > map_len) return -1;
 
-    const Elf64_Shdr *sh = (const Elf64_Shdr *)(map + eh->e_shoff);
-    if (eh->e_shstrndx >= eh->e_shnum) return -1;
-    const Elf64_Shdr *shstr = &sh[eh->e_shstrndx];
-    if (shstr->sh_offset + shstr->sh_size > map_len) return -1;
-    const char *strtab = (const char *)(map + shstr->sh_offset);
+    const uint8_t *shtab = map + eh.e_shoff;
+    if (eh.e_shstrndx >= eh.e_shnum) return -1;
+    memcpy(&shstr, shtab + (size_t)eh.e_shstrndx * sizeof(Elf64_Shdr), sizeof shstr);
+    if (shstr.sh_offset + shstr.sh_size > map_len) return -1;
+    const char *strtab = (const char *)(map + shstr.sh_offset);
 
-    for (uint16_t i = 0; i < eh->e_shnum; ++i) {
-        const char *n = strtab + sh[i].sh_name;
+    for (uint16_t i = 0; i < eh.e_shnum; ++i) {
+        memcpy(&sh, shtab + (size_t)i * sizeof(Elf64_Shdr), sizeof sh);
+        if (sh.sh_name >= shstr.sh_size) return -1;
+        const char *n = strtab + sh.sh_name;
         if (strcmp(n, name) == 0) {
-            *out_off = sh[i].sh_offset;
-            *out_len = sh[i].sh_size;
+            *out_off = sh.sh_offset;
+            *out_len = sh.sh_size;
             return 0;
         }
     }
