@@ -7,7 +7,9 @@ operator-mode re-initialisation of a token seen empty. Stage 2 built
 built 2026-10-10 the same way, with every OpenSSL format choice measured
 against the `openssl cms` command first: it names a recipient by issuer
 and serial unless told otherwise, and uses PKCS#1 v1.5 unless asked for
-OAEP.
+OAEP. Stage 4 deferred 2026-10-10 (see the open question on
+`KEMRecipientInfo`); stage 5 built the same day: the Encryption tab,
+`FHSM_CRYPT.md`.
 
 ## What is being asked
 
@@ -131,10 +133,14 @@ line.
   no authenticated attributes, which is also what OpenSSL writes for this
   case -- and OpenSSL does the AES-GCM. The test checks the result against
   OpenSSL in both directions.
-- **`KEMRecipientInfo` in OpenSSL 3.5.** RFC 9629 support, and ML-KEM in it,
-  are to be measured on the Debian 13 build, not assumed. If it is absent,
-  stage 4 is either assembled here or left until it arrives -- a decision to
-  take with the measurement in hand.
+- **`KEMRecipientInfo` in OpenSSL 3.5.** Measured 2026-10-10 on Debian 13,
+  OpenSSL 3.5.7: ML-KEM-512/768/1024 are there as KEMs (`openssl list
+  -kem-algorithms`), but `cms.h` has no KEM recipient -- no `kemri` function,
+  no recipient type for it -- so `openssl cms` neither writes nor reads one.
+  Decided the same day: stage 4 waits. Written here, an encoding would have
+  nothing on the machine to check it against, and stages 2 and 3 each turned
+  up a mistake only because OpenSSL read or wrote the other side. It comes
+  back when an implementation that can check it is at hand.
 - **HMAC.** Keys are generated; no MAC operation is in scope. Whether
   `fhsm-crypt` should compute and check an HMAC over a file is left open.
 - **Profiles.** AES, HMAC, RSA-OAEP and ML-KEM are all in

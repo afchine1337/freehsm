@@ -61,6 +61,7 @@ command line leaves to its user (see below).
 | Certificates | request, self-signed root, issue from a request | `fhsm-csr csr`, `fhsm-csr root`, `fhsm-ca issue` |
 | Revocation | the revocation database, revoke, publish a CRL, answer an OCSP request | `fhsm-ca revoke`, `crl`, `ocsp-respond` |
 | Signing | raw detached signatures and CMS, signed and checked | `fhsm-sign sign`, `verify`, `cms`, `cms-verify` |
+| Encryption | encrypt a file for a key on the token or for a certificate; decrypt one | `fhsm-crypt encrypt`, `decrypt` |
 | CA, Issue, Revoke | operator mode: the same operations, for one CA | (the same) |
 
 **The algorithm is chosen where a key pair is generated** — the Token tab, and
@@ -94,6 +95,13 @@ certificate — each with a tick box, and ticks only the one selected: what goes
 is the operator's to say. Nothing deleted from a token comes back. Operator
 mode refuses to delete the CA's key; `fhsm-crypt delete` does the same work
 from the command line, and destroys nothing without `--yes`.
+
+**Encrypting** for an AES key or an `rsa-oaep` pair on the token needs a login;
+encrypting for the holder of a certificate does not — it uses only their
+public key. Decrypting finds the key from the file and says which one opened
+it. The format is CMS AuthEnvelopedData with AES-256-GCM, which `openssl cms`
+reads; an existing file is never written over, and a file that does not
+authenticate leaves nothing behind ([`FHSM_CRYPT.md`](FHSM_CRYPT.md)).
 
 Recording a revocation needs no login, as with `fhsm-ca revoke`. Checking a CMS
 needs neither the token nor a login: the signer's certificate is inside it.

@@ -108,6 +108,11 @@ static struct {
     GtkWidget *req_btn, *responder_btn, *ocsp_days_spin;
     char *db_path, *rv_ca_path, *req_path, *responder_path;
 
+    /* The Encryption tab (docs/fhsm-crypt-plan.md stage 5). */
+    GtkWidget *en_key_box, *en_key_drop, *en_cert_btn, *en_dec_btn;
+    GtkStringList *enc_labels;      /* AES keys and rsa-oaep pairs, by label */
+    char *en_data_path, *en_cert_path;
+
     /* The Signing tab. */
     GtkWidget *sg_data_box, *sg_key_box, *sg_cmsv_btn;
     GtkWidget *sg_key_drop;
@@ -244,6 +249,9 @@ static void update_sensitivity(void) {
     gtk_widget_set_sensitive(A.sg_data_box,   !A.busy);
     gtk_widget_set_sensitive(A.sg_key_box,    !A.busy && A.sg_data_path && A.logged_in);
     gtk_widget_set_sensitive(A.sg_cmsv_btn,   !A.busy && A.sg_data_path);
+    gtk_widget_set_sensitive(A.en_key_box,    !A.busy && A.en_data_path && A.logged_in);
+    gtk_widget_set_sensitive(A.en_cert_btn,   !A.busy && A.en_data_path && A.en_cert_path);
+    gtk_widget_set_sensitive(A.en_dec_btn,    !A.busy && A.en_data_path && A.logged_in);
     gtk_widget_set_sensitive(A.page_op_ca,    !A.busy);
     gtk_widget_set_sensitive(A.op_ca_signing_box, !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.page_op_issue, !A.busy && A.logged_in);
@@ -269,7 +277,8 @@ static void list_add(GtkWidget *box, const char *text) {
 enum job_kind { J_LOAD, J_UNLOAD, J_SLOTS, J_LOGIN, J_KEYS, J_KEYGEN, J_LOGOUT,
                 J_CSR, J_ROOT, J_ISSUE, J_DB_LOAD, J_REVOKE, J_CRL, J_OCSP,
                 J_SIGN, J_VERIFY, J_CMS_SIGN, J_CMS_VERIFY,
-                J_NEW_CA, J_REVOKE_PUBLISH, J_TOKEN_INIT, J_DELETE, J_ATTRS };
+                J_NEW_CA, J_REVOKE_PUBLISH, J_TOKEN_INIT, J_DELETE, J_ATTRS,
+                J_ENCRYPT, J_ENC_CERT, J_DECRYPT };
 
 struct job {
     enum job_kind kind;
@@ -299,6 +308,7 @@ struct job {
     pkiops_handle *del; size_t n_del;   /* J_DELETE: what was ticked */
     size_t n_deleted;                   /* J_DELETE: how many went */
     pkiops_handle object;               /* J_ATTRS: the object described */
+    char used[65];                      /* J_DECRYPT: the key that opened it */
     struct pkiops_attr *attrs; size_t n_attrs;
     int pop_valid;
     size_t out_len;
@@ -738,6 +748,16 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
     case J_ATTRS:
         j->rc = pkiops_object_attrs(j->session, j->object, &j->attrs, &j->n_attrs, &j->e);
         break;
+    case J_ENCRYPT:
+        j->rc = pkiops_encrypt_file(j->session, j->label, j->data_path, j->out_path, &j->e);
+        break;
+    case J_ENC_CERT:
+        j->rc = pkiops_encrypt_file_for_cert(j->cert_path, j->data_path, j->out_path, &j->e);
+        break;
+    case J_DECRYPT:
+        j->rc = pkiops_decrypt_file(j->session, j->data_path, j->out_path,
+                                    j->used, sizeof j->used, &j->e);
+        break;
     case J_DELETE: {
         /* Stop at the first refusal: the rest was ticked together with it,
          * and the list read afterwards shows exactly what is left. */
@@ -1000,6 +1020,8 @@ static void clear_key_labels(void) {
 
 /* The object list and what it shows, emptied together. */
 static void clear_objects(void) {
+    gtk_string_list_splice(A.enc_labels, 0,
+                           g_list_model_get_n_items(G_LIST_MODEL(A.enc_labels)), NULL);
     clear_list(A.keys_box);
     gtk_label_set_text(GTK_LABEL(A.attr_view), "");
     free(A.objs);
@@ -1019,6 +1041,14 @@ static void show_keys(struct job *j) {
     clear_objects();
     A.objs = j->objs; A.n_objs = j->n_objs;
     j->objs = NULL; j->n_objs = 0;
+    /* What the Encryption tab can encrypt for: an AES key, or the public half
+     * of an rsa-oaep pair -- one entry per label. */
+    for (size_t i = 0; i < A.n_objs; i++) {
+        const struct pkiops_object *o = &A.objs[i];
+        int aes = o->cls == PKIOPS_OBJ_SECRET && !strncmp(o->alg, "aes", 3);
+        int oaep = o->cls == PKIOPS_OBJ_PUBLIC && !strcmp(o->alg, "rsa-oaep");
+        if ((aes || oaep) && o->label[0]) gtk_string_list_append(A.enc_labels, o->label);
+    }
     for (size_t i = 0; i < A.n_objs; i++) {
         const struct pkiops_object *o = &A.objs[i];
         /* A secret key or an rsa-oaep key carries its own name; a signing
@@ -1131,6 +1161,23 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
                                    : "");
             status(msg);
         }
+        break;
+    }
+    case J_ENCRYPT:
+    case J_ENC_CERT:
+    case J_DECRYPT: {
+        const char *what = j->kind == J_DECRYPT ? "Decrypting" : "Encrypting";
+        if (j->rc) { status_err(what, &j->e); break; }
+        char *base = g_path_get_basename(j->out_path);
+        char msg[400];
+        if (j->kind == J_DECRYPT)
+            snprintf(msg, sizeof msg, "Decrypted with \"%s\" into %s.", j->used, base);
+        else if (j->kind == J_ENCRYPT)
+            snprintf(msg, sizeof msg, "Encrypted for \"%s\" into %s.", j->label, base);
+        else
+            snprintf(msg, sizeof msg, "Encrypted for the certificate's holder into %s.", base);
+        g_free(base);
+        status(msg);
         break;
     }
     case J_ATTRS: {
@@ -1337,6 +1384,9 @@ static const char *running_text(enum job_kind k) {
     case J_NEW_CA:     return "Creating the CA: key pair, then the root...";
     case J_TOKEN_INIT: return "Initialising the token: both PINs are derived, which takes a moment...";
     case J_DELETE:     return "Deleting from the token...";
+    case J_ENCRYPT:
+    case J_ENC_CERT:   return "Encrypting: the file is streamed, not held...";
+    case J_DECRYPT:    return "Decrypting: nothing is kept unless it authenticates...";
     default:           return "Working...";
     }
 }
@@ -2657,6 +2707,144 @@ static GtkWidget *revocation_tab(void) {
 }
 
 /* Stage 4: detached signatures over files, raw and CMS. */
+/* --- the Encryption tab (docs/fhsm-crypt-plan.md stage 5) ----------------- */
+
+/* The save dialog answered for an encryption job. Encrypting for a
+ * certificate needs no login, so this does not ask for one where on_saved
+ * would; the other two do. */
+static void on_env_saved(GObject *src, GAsyncResult *res, gpointer data) {
+    struct job *j = data;
+    GFile *f = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(src), res, NULL);
+    char *path = f ? g_file_get_path(f) : NULL;
+    if (f) g_object_unref(f);
+    if (!path || A.closing || A.busy || (j->kind != J_ENC_CERT && !A.logged_in)) {
+        g_free(path); job_free(j); return;
+    }
+    j->out_path = path;
+    j->session = A.session;
+    status(running_text(j->kind));
+    start(j);
+}
+
+static void env_ask(struct job *j, const char *name) {
+    GtkFileDialog *d = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(d, j->kind == J_DECRYPT ? "Decrypt into" : "Encrypt into");
+    gtk_file_dialog_set_initial_name(d, name);
+    gtk_file_dialog_save(d, GTK_WINDOW(A.win), NULL, on_env_saved, j);
+    g_object_unref(d);
+}
+
+static struct job *env_job(enum job_kind kind) {
+    if (A.busy || !A.en_data_path) return NULL;
+    struct job *j = g_new0(struct job, 1);
+    j->kind = kind;
+    j->data_path = g_strdup(A.en_data_path);
+    return j;
+}
+
+static void on_encrypt_key(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.logged_in) return;
+    const char *key = chosen_key(A.en_key_drop);
+    if (!key) {
+        status("No key on this token to encrypt for: generate an aes128, aes256 or "
+               "rsa-oaep key on the Token tab, or encrypt for a certificate.");
+        return;
+    }
+    struct job *j = env_job(J_ENCRYPT);
+    if (!j) return;
+    j->label = g_strdup(key);
+    char *base = g_path_get_basename(A.en_data_path);
+    char *name = g_strconcat(base, ".p7m", NULL);
+    env_ask(j, name);
+    g_free(name); g_free(base);
+}
+
+static void on_encrypt_cert(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.en_cert_path) { status("Choose the recipient's certificate."); return; }
+    struct job *j = env_job(J_ENC_CERT);
+    if (!j) return;
+    j->cert_path = g_strdup(A.en_cert_path);
+    char *base = g_path_get_basename(A.en_data_path);
+    char *name = g_strconcat(base, ".p7m", NULL);
+    env_ask(j, name);
+    g_free(name); g_free(base);
+}
+
+static void on_decrypt(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.logged_in) return;
+    struct job *j = env_job(J_DECRYPT);
+    if (!j) return;
+    /* "x.p7m" suggests "x"; anything else, "x.decrypted". */
+    char *base = g_path_get_basename(A.en_data_path);
+    size_t n = strlen(base);
+    char *name = n > 4 && !strcmp(base + n - 4, ".p7m") ? g_strndup(base, n - 4)
+                                                        : g_strconcat(base, ".decrypted", NULL);
+    env_ask(j, name);
+    g_free(name); g_free(base);
+}
+
+static GtkWidget *encryption_tab(void) {
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_margin_start(page, 4);
+    gtk_widget_set_margin_end(page, 8);
+
+    GtkWidget *g = form();
+    form_row(g, 0, "File", file_button("The file to encrypt or decrypt", &A.en_data_path));
+    gtk_box_append(GTK_BOX(page), g);
+    gtk_box_append(GTK_BOX(page), note_label(
+        "CMS AuthEnvelopedData, AES-256-GCM (RFC 5083, 5084), which openssl cms reads. "
+        "The file is streamed, not held. An existing file is never written over: choose "
+        "a new name. A file that does not authenticate when decrypted leaves nothing "
+        "behind."));
+
+    gtk_box_append(GTK_BOX(page), heading("For a key on the token"));
+    A.en_key_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    g = form();
+    A.enc_labels = gtk_string_list_new(NULL);
+    A.en_key_drop = gtk_drop_down_new(G_LIST_MODEL(A.enc_labels), NULL);
+    form_row(g, 0, "Key", A.en_key_drop);
+    gtk_box_append(GTK_BOX(A.en_key_box), g);
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(row), button_to("Encrypt for this key\xe2\x80\xa6",
+                                           G_CALLBACK(on_encrypt_key), NULL));
+    gtk_box_append(GTK_BOX(A.en_key_box), row);
+    gtk_box_append(GTK_BOX(A.en_key_box), note_label(
+        "An AES key wraps the file's content key itself; an rsa-oaep pair's public half "
+        "encrypts it with RSA-OAEP. Either way the key that can open the file stays on "
+        "the token."));
+    gtk_box_append(GTK_BOX(page), A.en_key_box);
+
+    gtk_box_append(GTK_BOX(page), heading("For the holder of a certificate"));
+    g = form();
+    form_row(g, 0, "Certificate", file_button("The recipient's certificate", &A.en_cert_path));
+    gtk_box_append(GTK_BOX(page), g);
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    A.en_cert_btn = button_to("Encrypt for this certificate\xe2\x80\xa6",
+                              G_CALLBACK(on_encrypt_cert), NULL);
+    gtk_box_append(GTK_BOX(row), A.en_cert_btn);
+    gtk_box_append(GTK_BOX(page), row);
+    gtk_box_append(GTK_BOX(page), note_label(
+        "An RSA certificate, PEM or DER. Encrypting for someone needs only their public "
+        "key: no token and no login."));
+
+    gtk_box_append(GTK_BOX(page), heading("Decrypt"));
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    A.en_dec_btn = button_to("Decrypt\xe2\x80\xa6", G_CALLBACK(on_decrypt), NULL);
+    gtk_box_append(GTK_BOX(row), A.en_dec_btn);
+    gtk_box_append(GTK_BOX(page), row);
+    gtk_box_append(GTK_BOX(page), note_label(
+        "The file names its recipients; the key on this token that opens it is found "
+        "from there, and the status line says which one it was."));
+
+    GtkWidget *sw = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), page);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    return sw;
+}
+
 static GtkWidget *signing_tab(void) {
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_set_margin_start(page, 4);
@@ -2929,24 +3117,9 @@ static void activate(GtkApplication *app, gpointer ud) {
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(A.keys_box), GTK_SELECTION_SINGLE);
     g_signal_connect(A.keys_box, "row-selected", G_CALLBACK(on_object_selected), NULL);
     gtk_box_append(GTK_BOX(left), scrolled(A.keys_box, 160));
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    A.delete_btn = gtk_button_new_with_label("Delete\xe2\x80\xa6");
-    gtk_widget_set_tooltip_text(A.delete_btn,
-        "Delete the selected object, and any others sharing its label that you tick. "
-        "Nothing deleted from a token comes back.");
-    g_signal_connect(A.delete_btn, "clicked", G_CALLBACK(on_delete), NULL);
-    gtk_widget_set_halign(A.delete_btn, GTK_ALIGN_END);
-    gtk_widget_set_hexpand(A.delete_btn, TRUE);
-    gtk_box_append(GTK_BOX(row), A.delete_btn);
-    gtk_box_append(GTK_BOX(left), row);
-    gtk_box_append(GTK_BOX(left), heading("Attributes of the selected object"));
-    A.attr_view = gtk_label_new("");
-    gtk_label_set_selectable(GTK_LABEL(A.attr_view), TRUE);
-    gtk_label_set_xalign(GTK_LABEL(A.attr_view), 0.0f);
-    gtk_label_set_yalign(GTK_LABEL(A.attr_view), 0.0f);
-    gtk_widget_add_css_class(A.attr_view, "monospace");
-    gtk_widget_set_margin_start(A.attr_view, 6);
-    gtk_box_append(GTK_BOX(left), scrolled(A.attr_view, 140));
+    /* Generating and deleting, on one row right under the list they change.
+     * Generation sat below the attribute pane, and with two panes that grow
+     * it was pushed out of the window on an ordinary screen (2026-10-10). */
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     A.label_entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(A.label_entry), "label for a new key");
@@ -2958,10 +3131,30 @@ static void activate(GtkApplication *app, gpointer ud) {
     A.keygen_btn = gtk_button_new_with_label("Generate key");
     g_signal_connect(A.keygen_btn, "clicked", G_CALLBACK(on_keygen), NULL);
     gtk_box_append(GTK_BOX(row), A.keygen_btn);
+    A.delete_btn = gtk_button_new_with_label("Delete\xe2\x80\xa6");
+    gtk_widget_set_tooltip_text(A.delete_btn,
+        "Delete the selected object, and any others sharing its label that you tick. "
+        "Nothing deleted from a token comes back.");
+    g_signal_connect(A.delete_btn, "clicked", G_CALLBACK(on_delete), NULL);
+    gtk_widget_set_margin_start(A.delete_btn, 18);
+    gtk_box_append(GTK_BOX(row), A.delete_btn);
     gtk_box_append(GTK_BOX(left), row);
+    gtk_box_append(GTK_BOX(left), heading("Attributes of the selected object"));
+    A.attr_view = gtk_label_new("");
+    gtk_label_set_selectable(GTK_LABEL(A.attr_view), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(A.attr_view), 0.0f);
+    gtk_label_set_yalign(GTK_LABEL(A.attr_view), 0.0f);
+    gtk_widget_add_css_class(A.attr_view, "monospace");
+    gtk_widget_set_margin_start(A.attr_view, 6);
+    gtk_box_append(GTK_BOX(left), scrolled(A.attr_view, 140));
 
     GtkWidget *tabs = gtk_notebook_new();
-    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), left, gtk_label_new("Token"));
+    /* Scrolled, as the other tabs are, so a low screen scrolls rather than
+     * cuts the tab off. */
+    GtkWidget *token_page = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(token_page), left);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(token_page), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), token_page, gtk_label_new("Token"));
     A.page_certs = cert_tab();       /* first: it creates the key list the others share */
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), A.page_certs, gtk_label_new("Certificates"));
     A.page_revocation = revocation_tab();
@@ -2973,6 +3166,7 @@ static void activate(GtkApplication *app, gpointer ud) {
     A.page_op_revoke = op_revoke_tab();
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), A.page_op_revoke, gtk_label_new("Revoke"));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), signing_tab(), gtk_label_new("Signing"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), encryption_tab(), gtk_label_new("Encryption"));
     /* Exploration first; the switch swaps the middle tabs. */
     gtk_widget_set_visible(A.page_op_ca, FALSE);
     gtk_widget_set_visible(A.page_op_issue, FALSE);

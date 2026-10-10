@@ -30,6 +30,7 @@
 | `fhsm-ca` — issuance, profiles, revocation, CRLs, OCSP and the delegated responder (#112) | [`FHSM_CA.md`](FHSM_CA.md) | --- | AGD_OPE.1 |
 | `fhsm-token` tool — provisioning a token | [`FHSM_TOKEN.md`](FHSM_TOKEN.md) | --- | AGD_OPE.1 |
 | `fhsm-sign` tool — detached signatures over arbitrary data (#123) | [`FHSM_SIGN.md`](FHSM_SIGN.md) | --- | AGD_OPE.1 |
+| `fhsm-crypt` tool — keys that do not sign, object listing and deletion, files encrypted as CMS AuthEnvelopedData | [`FHSM_CRYPT.md`](FHSM_CRYPT.md) | --- | AGD_OPE.1 |
 | `fhsm-gui` — a desktop interface over the PKI tools: exploration and operator modes, the call log | [`FHSM_GUI.md`](FHSM_GUI.md) | --- | AGD_OPE.1 |
 | Composite ML-DSA — spec gap, measurements, target OID (#112) | [`COMPOSITE_SIGS_GAP.md`](COMPOSITE_SIGS_GAP.md) | --- | ADV_FSP.4 |
 

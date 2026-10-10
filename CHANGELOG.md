@@ -92,6 +92,13 @@ notes.*
   subject, issuer, serial and validity. A private or secret key's value is
   never asked for. `tests/test_pkiops_secret.c`.
 
+* **An Encryption tab in `fhsm-gui`, and `docs/FHSM_CRYPT.md`** (stage 5).
+  Encrypt a file for an AES key or an `rsa-oaep` pair on the token, or for a
+  certificate's holder without logging in; decrypt one, the status line
+  naming the key that opened it. ML-KEM recipients (stage 4) wait:
+  OpenSSL 3.5 has ML-KEM but no CMS `KEMRecipientInfo`, so nothing could
+  check an encoding written here.
+
 * **Files encrypted for an RSA key, with RSA-OAEP** (stage 3). `fhsm-crypt
   keygen --alg rsa-oaep` makes an RSA 3072 pair whose only allowed mechanism
   is RSA-OAEP -- it cannot sign, and is no longer taken for an RSA-PSS key.
