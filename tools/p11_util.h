@@ -98,6 +98,8 @@ static struct {
      * delete objects still signs, and the tools that only sign should not
      * stop loading it (docs/fhsm-crypt-plan.md). */
     CK_RV (*DestroyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE);
+    CK_RV (*GenerateKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_ATTRIBUTE*,CK_ULONG,
+                         CK_OBJECT_HANDLE*);
 } p11;
 
 /* Set by each tool before anything can fail. Extracting this header from
@@ -195,6 +197,7 @@ enum {                          /* PKCS#11 v2.40 §C.6 slot numbers */
     P11_SLOT_GetTokenInfo      = 6,
     P11_SLOT_Login             = 18,
     P11_SLOT_DestroyObject     = 22,
+    P11_SLOT_GenerateKey       = 58,
     P11_SLOT_GetAttributeValue = 24,
     P11_SLOT_FindObjectsInit   = 26,
     P11_SLOT_FindObjects       = 27,
@@ -256,6 +259,7 @@ P11_MAYBE_UNUSED static int p11_load_module_e(const char *path, struct p11_err *
         T(GetMechanismInfo, P11_SLOT_GetMechanismInfo);
         #undef T
         *(void**)&p11.DestroyObject = fl->pfn[P11_SLOT_DestroyObject];
+        *(void**)&p11.GenerateKey   = fl->pfn[P11_SLOT_GenerateKey];
         return 0;
     }
 
@@ -281,6 +285,7 @@ P11_MAYBE_UNUSED static int p11_load_module_e(const char *path, struct p11_err *
     S(GetSlotList,"C_GetSlotList");
     #undef S
     *(void**)&p11.DestroyObject = dlsym(p11.h, "C_DestroyObject");
+    *(void**)&p11.GenerateKey   = dlsym(p11.h, "C_GenerateKey");
     return 0;
 }
 

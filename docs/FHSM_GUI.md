@@ -57,7 +57,7 @@ command line leaves to its user (see below).
 
 | Tab | What it does | Command line |
 |---|---|---|
-| Token | slots, initialise a token, log in and out, keys and certificates on the token, generate a key pair, delete | `fhsm-token init`, `fhsm-csr keygen --alg`, `fhsm-crypt list`, `delete` |
+| Token | slots, initialise a token, log in and out, keys and certificates on the token and their attributes, generate a key pair or a secret key, delete | `fhsm-token init`, `fhsm-csr keygen --alg`, `fhsm-crypt keygen`, `list`, `show`, `delete` |
 | Certificates | request, self-signed root, issue from a request | `fhsm-csr csr`, `fhsm-csr root`, `fhsm-ca issue` |
 | Revocation | the revocation database, revoke, publish a CRL, answer an OCSP request | `fhsm-ca revoke`, `crl`, `ocsp-respond` |
 | Signing | raw detached signatures and CMS, signed and checked | `fhsm-sign sign`, `verify`, `cms`, `cms-verify` |
@@ -79,6 +79,14 @@ written as either where the tools offer both. An issued certificate's serial is
 shown with the result — it is 160 random bits, and the number a revocation will
 ask for — and **From certificate…** reads it off the file instead of having it
 copied by hand.
+
+**Secret keys** are generated from the same list as key pairs: after the
+signature algorithms come `aes128` and `aes256`, which encrypt and wrap, and
+`hmac`, a 32-byte secret for MACs — all sensitive and never extractable.
+Selecting a row shows the object's **attributes** below the list: class,
+label and `CKA_ID`, usage, size or curve, allowed mechanisms, whether it is
+sensitive or extractable and was generated on the token; for a certificate,
+its subject, issuer, serial and validity. A key's value is never read.
 
 **Deleting** starts from a row of the Token tab's list. **Delete…** shows every
 object sharing that row's label — a private key, its public half, a
@@ -102,7 +110,10 @@ and makes them the CA.
 Refused, with no "continue anyway" — whoever needs the exception has
 exploration mode and the command-line tools, which are unchanged:
 
-- **Re-initialising a token that holds one.** It destroys every key on it.
+- **Re-initialising a token this window has not seen empty.** It destroys
+  every key on it. A token is seen empty when it is listed, logged in, with
+  nothing on it: delete what it holds, log out, and re-initialise — the
+  confirmation then says the token was empty when last listed.
 - **A key label already on the token.** Two objects under one label make every
   later use of the label ambiguous, and the tools refuse to sign with an
   ambiguous label — after the second key exists. Checked on the token at the
@@ -157,7 +168,8 @@ PINs and fails if either appears in any record.
 - **Revoking asks for confirmation.** The command line trusts its user; a
   window asks once, because the revocation is not undone from there.
 - **Re-initialising a token asks for confirmation** where `fhsm-token init`
-  wants `--force`, and operator mode refuses it. Each PIN is typed twice, and
+  wants `--force`, and operator mode allows it only for a token it has seen
+  empty. Each PIN is typed twice, and
   all four fields are cleared as soon as they are read. The PIN lengths are
   checked against the token's own bounds, as the tool checks them.
 - **A new revocation database is never written over an existing file**, even

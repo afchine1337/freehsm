@@ -1,6 +1,8 @@
 # Key management and file encryption — plan
 
-Status: accepted 2026-10-09. Stage 0 built the same day.
+Status: accepted 2026-10-09. Stages 0 and 1 built the same day; stage 1 also
+brought, at the user's request, an attribute view for every object and
+operator-mode re-initialisation of a token seen empty.
 
 ## What is being asked
 

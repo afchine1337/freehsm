@@ -18,6 +18,8 @@
  *       is a refusal with a message, not a crash
  *   (5) the call log names C_DestroyObject and the object, as it does every
  *       other call
+ *   (6) pkiops_object_attrs reads the certificate's subject and issuer, and
+ *       a key pair's curve and usage
  * ========================================================================= */
 #include "pkiops.h"
 
@@ -50,6 +52,13 @@ static size_t count(const struct pkiops_object *v, size_t n, enum pkiops_obj_cla
         if (v[i].cls == c && (!label || !strcmp(v[i].label, label))) k++;
     return k;
 }
+
+/* The value of the line called `name`, or NULL. */
+static const char *attr(const struct pkiops_attr *a, size_t n, const char *name) {
+    for (size_t i = 0; i < n; i++) if (!strcmp(a[i].name, name)) return a[i].value;
+    return NULL;
+}
+static int is(const char *v, const char *want) { return v && !strcmp(v, want); }
 
 typedef unsigned long ULONG;
 typedef struct { ULONG type; void *pValue; ULONG ulValueLen; } ATTR;
@@ -140,6 +149,32 @@ int main(void) {
     ok(pkiops_objects(s, PKIOPS_OBJS_KEYS, &v, &n, &e) == 0 && n == 4
        && count(v, n, PKIOPS_OBJ_CERT, NULL) == 0, "(1) the key mask selects the four keys");
     free(v);
+
+    {
+        struct pkiops_attr *a = NULL; size_t na = 0;
+        ok(pkiops_object_attrs(s, (pkiops_handle)cert, &a, &na, &e) == 0
+           && is(attr(a, na, "class"), "certificate")
+           && is(attr(a, na, "certificate type"), "X.509")
+           && is(attr(a, na, "subject"), "CN = objects test")
+           && is(attr(a, na, "issuer"), "CN = objects test")
+           && is(attr(a, na, "CKA_ID"), "a1b2c3") && attr(a, na, "valid until"),
+           "(6) the certificate: type, subject, issuer, CKA_ID, validity");
+        free(a);
+        a = NULL; na = 0;
+        ok(pkiops_object_attrs(s, ak, &a, &na, &e) == 0
+           && is(attr(a, na, "key type"), "EC") && is(attr(a, na, "curve"), "P-256")
+           && attr(a, na, "usage") && strstr(attr(a, na, "usage"), "sign")
+           && is(attr(a, na, "sensitive"), "yes"),
+           "(6) pair-a's private key: EC, P-256, signs, sensitive");
+        free(a);
+        a = NULL; na = 0;
+        ok(pkiops_object_attrs(s, bp, &a, &na, &e) == 0
+           && is(attr(a, na, "class"), "public key") && is(attr(a, na, "curve"), "Ed25519")
+           && attr(a, na, "usage") && strstr(attr(a, na, "usage"), "verify")
+           && !attr(a, na, "sensitive"),
+           "(6) pair-b's public key: Ed25519, verifies, no protection lines");
+        free(a);
+    }
 
     g_n = 0;
     ok(pkiops_destroy(s, ak, &e) == 0, "(3) pkiops_destroy removes pair-a's private key");

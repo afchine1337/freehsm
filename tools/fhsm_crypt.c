@@ -6,9 +6,12 @@
  * fhsm-crypt --- keys that do not sign, and the objects on the token.
  *  Usage :
  *    fhsm-crypt list   [--class key|cert|all] [--module PATH] [--slot N]
+ *    fhsm-crypt keygen --label NAME --alg aes128|aes256|hmac
+ *    fhsm-crypt show   --label NAME [--class key|cert|all]
  *    fhsm-crypt delete --label NAME [--class key|cert|all] [--yes]
- *  Key generation for encryption, and file encryption, come in the later
- *  stages of docs/fhsm-crypt-plan.md; signature keys stay with fhsm-csr.
+ *  Encryption key pairs, and file encryption, come in the later stages of
+ *  docs/fhsm-crypt-plan.md; signature keys stay with fhsm-csr, and each tool
+ *  names the other when given the other's algorithm.
  *
  *  The PIN comes from the FHSM_PIN environment variable and from nowhere else,
  *  as for every tool here: an argument is visible in `ps` to every user.
@@ -36,10 +39,15 @@ static void usage(void) {
     fprintf(stderr,
       "fhsm-crypt --- keys that do not sign, and the objects on the token\n\n"
       "  fhsm-crypt list   [--class key|cert|all] [--module PATH] [--slot N]\n"
+      "  fhsm-crypt keygen --label NAME --alg ALG ...\n"
+      "  fhsm-crypt show   --label NAME [--class key|cert|all] ...\n"
       "  fhsm-crypt delete --label NAME [--class key|cert|all] [--yes] ...\n\n"
+      "  --alg ALG       keygen: aes128, aes256 (encrypt and wrap) or hmac (a\n"
+      "                  32-byte secret for HMAC). Sensitive, not extractable.\n"
+      "                  Signature keys are made by fhsm-csr keygen.\n"
       "  --class C       which objects: key (public, private and secret keys),\n"
       "                  cert, or all (the default)\n"
-      "  --label NAME    delete: every object of the class carrying this label\n"
+      "  --label NAME    show, delete: every object of the class carrying this label\n"
       "  --yes           delete: destroy them. Without it, delete lists what it\n"
       "                  would destroy and stops.\n"
       "  --module PATH   PKCS#11 module (default ./libfreehsm.so)\n"
@@ -49,10 +57,20 @@ static void usage(void) {
     exit(1);
 }
 
-static void print_object(const struct pkiops_object *o) {
-    printf("  %-11s  %6lu  %-32s  %s\n", pkiops_obj_class_name(o->cls),
+/* A key pair's algorithm comes from pkiops_keys, a secret key's from the
+ * object itself; a certificate has none to show. */
+static const char *alg_of_object(const struct pkiops_object *o,
+                                 const struct pkiops_key *k, size_t nk) {
+    if (o->alg[0]) return o->alg;
+    for (size_t i = 0; i < nk; i++)
+        if (k[i].handle == o->handle && k[i].alg[0]) return k[i].alg;
+    return "-";
+}
+
+static void print_object(const struct pkiops_object *o, const char *alg) {
+    printf("  %-11s  %6lu  %-32s  %-11s  %s\n", pkiops_obj_class_name(o->cls),
            (unsigned long)o->handle, o->label[0] ? o->label : "(no label)",
-           o->id[0] ? o->id : "-");
+           alg, o->id[0] ? o->id : "-");
 }
 
 int main(int argc, char **argv) {
@@ -60,6 +78,7 @@ int main(int argc, char **argv) {
     if (argc < 2) usage();
     const char *cmd = argv[1];
     const char *module = "./libfreehsm.so", *label = NULL, *cls_name = "all";
+    const char *alg_name = NULL;
     long slot = -1;
     int yes = 0;
 
@@ -67,6 +86,7 @@ int main(int argc, char **argv) {
         if      (!strcmp(argv[i],"--module") && i+1<argc) module   = argv[++i];
         else if (!strcmp(argv[i],"--label")  && i+1<argc) label    = argv[++i];
         else if (!strcmp(argv[i],"--class")  && i+1<argc) cls_name = argv[++i];
+        else if (!strcmp(argv[i],"--alg")    && i+1<argc) alg_name = argv[++i];
         else if (!strcmp(argv[i],"--slot")   && i+1<argc) {
             if (pkiops_parse_slot(argv[++i], &slot, &e)) fail(&e);
         }
@@ -89,9 +109,22 @@ int main(int argc, char **argv) {
     }
 
     int is_list = !strcmp(cmd, "list"), is_delete = !strcmp(cmd, "delete");
-    if (!is_list && !is_delete) usage();
-    if (is_delete && !label) usage();
+    int is_keygen = !strcmp(cmd, "keygen"), is_show = !strcmp(cmd, "show");
+    if (!is_list && !is_delete && !is_keygen && !is_show) usage();
+    if ((is_delete || is_keygen || is_show) && !label) usage();
+    if (is_show && yes) usage();
     if (is_list && (label || yes)) usage();
+    if (alg_name && !is_keygen) {
+        fprintf(stderr, "fhsm-crypt: --alg belongs to keygen.\n"); return 1;
+    }
+    enum pkiops_skey skey = PKIOPS_SKEY_AES256;
+    if (is_keygen) {
+        if (!alg_name) {
+            fprintf(stderr, "fhsm-crypt: keygen needs --alg: %s\n", pkiops_skey_list());
+            return 1;
+        }
+        if (pkiops_skey_parse(alg_name, &skey, &e)) fail(&e);
+    }
 
     const char *pin = getenv("FHSM_PIN");
     if (!pin || !*pin) {
@@ -102,13 +135,56 @@ int main(int argc, char **argv) {
     if (pkiops_open(module, slot, PKIOPS_SLOT_WITH_TOKEN, &sid, &e)) fail(&e);
     if (pkiops_session_user(sid, (const uint8_t *)pin, strlen(pin), &s, &e)) fail(&e);
 
+    if (is_keygen) {
+        /* One label, one key: a second key under a label already in use is
+         * the ambiguity every other operation then refuses to resolve. */
+        struct pkiops_object *v = NULL; size_t n = 0;
+        if (pkiops_objects(s, PKIOPS_OBJS_KEYS, &v, &n, &e)) fail(&e);
+        for (size_t i = 0; i < n; i++)
+            if (!strcmp(v[i].label, label)) {
+                fprintf(stderr, "fhsm-crypt: a key labelled \"%s\" is already on the token\n", label);
+                free(v);
+                return 3;
+            }
+        free(v);
+        pkiops_handle h = 0;
+        if (pkiops_keygen_secret(s, label, skey, &h, &e)) fail(&e);
+        fprintf(stderr, "fhsm-crypt: %s key \"%s\" created (object %lu)\n",
+                pkiops_skey_name(skey), label, (unsigned long)h);
+        pkiops_session_close(s);
+        pkiops_close();
+        return 0;
+    }
+
     struct pkiops_object *v = NULL; size_t n = 0;
     if (pkiops_objects(s, classes, &v, &n, &e)) fail(&e);
+    struct pkiops_key *k = NULL; size_t nk = 0;
+    if (pkiops_keys(s, &k, &nk, &e)) fail(&e);
 
     int rc = 0;
-    if (is_list) {
-        printf("  %-11s  %6s  %-32s  %s\n", "class", "handle", "label", "CKA_ID");
-        for (size_t i = 0; i < n; i++) print_object(&v[i]);
+    if (is_show) {
+        size_t shown = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (strcmp(v[i].label, label) != 0) continue;
+            struct pkiops_attr *a = NULL; size_t na = 0;
+            if (pkiops_object_attrs(s, v[i].handle, &a, &na, &e)) {
+                fprintf(stderr, "%s: %s", prog, e.msg);
+                rc = e.code;
+                continue;
+            }
+            printf("%s%s %lu\n", shown ? "\n" : "", pkiops_obj_class_name(v[i].cls),
+                   (unsigned long)v[i].handle);
+            for (size_t q = 0; q < na; q++) printf("  %-24s %s\n", a[q].name, a[q].value);
+            free(a);
+            shown++;
+        }
+        if (shown == 0 && rc == 0) {
+            fprintf(stderr, "fhsm-crypt: nothing labelled \"%s\"\n", label);
+            rc = 3;
+        }
+    } else if (is_list) {
+        printf("  %-11s  %6s  %-32s  %-11s  %s\n", "class", "handle", "label", "algorithm", "CKA_ID");
+        for (size_t i = 0; i < n; i++) print_object(&v[i], alg_of_object(&v[i], k, nk));
         printf("%zu object%s\n", n, n == 1 ? "" : "s");
     } else {
         size_t match = 0;
@@ -123,7 +199,7 @@ int main(int argc, char **argv) {
             printf("would destroy %zu object%s labelled \"%s\":\n",
                    match, match == 1 ? "" : "s", label);
             for (size_t i = 0; i < n; i++)
-                if (!strcmp(v[i].label, label)) print_object(&v[i]);
+                if (!strcmp(v[i].label, label)) print_object(&v[i], alg_of_object(&v[i], k, nk));
             fprintf(stderr, "fhsm-crypt: nothing destroyed. Add --yes to destroy %s;"
                             " it cannot be undone.\n", match == 1 ? "it" : "them");
             rc = 1;
@@ -144,6 +220,7 @@ int main(int argc, char **argv) {
         }
     }
     free(v);
+    free(k);
     pkiops_session_close(s);
     pkiops_close();
     return rc;

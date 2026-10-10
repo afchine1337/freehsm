@@ -3,8 +3,8 @@
 # Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 # ===========================================================================
-# fhsm_crypt_cli.sh --- fhsm-crypt list and delete, as an operator types them
-# (docs/fhsm-crypt-plan.md, stage 0).
+# fhsm_crypt_cli.sh --- fhsm-crypt list, keygen and delete, as an operator
+# types them (docs/fhsm-crypt-plan.md, stages 0 and 1).
 #
 # The property that matters is delete's: without --yes it names what it would
 # destroy and destroys nothing, and with --yes it destroys exactly the objects
@@ -81,6 +81,45 @@ ok "deleting it again: nothing labelled gone (exit 3)" $?
 q "$CRYPT" delete --label keep --class cert --yes --module "$LIB"
 [ $? -eq 3 ] && grep -q 'no certificate labelled "keep"' "$W/out"
 ok "--class cert does not reach keep's keys (exit 3)" $?
+
+echo "fhsm-crypt: keygen"
+q "$CRYPT" keygen --label sym --alg aes256 --module "$LIB" \
+  && q "$CRYPT" keygen --label mac --alg hmac --module "$LIB"
+ok "keygen aes256 and hmac" $?
+
+q "$CRYPT" list --class key --module "$LIB"
+grep -q "secret key.* sym .*aes256" "$W/out" && grep -q "secret key.* mac .*hmac" "$W/out" \
+  && grep -q "public key.* keep .*ecdsa-p256" "$W/out"
+ok "list names each key's algorithm, secret or pair" $?
+
+q "$CRYPT" show --label sym --module "$LIB"
+[ $? -eq 0 ] && grep -q "secret key" "$W/out" && grep -q "size  *256 bits" "$W/out" \
+  && grep -q "sensitive  *yes" "$W/out" && grep -q "extractable  *no" "$W/out"
+ok "show describes the aes256 key" $?
+
+q "$CRYPT" show --label nothing-here --module "$LIB"
+[ $? -eq 3 ]
+ok "show of an unknown label: exit 3" $?
+
+q "$CRYPT" keygen --label sym --alg aes128 --module "$LIB"
+[ $? -eq 3 ] && grep -q "already on the token" "$W/out"
+ok "a second key under a label in use is refused (exit 3)" $?
+
+q "$CRYPT" keygen --label x --alg ecdsa-p256 --module "$LIB"
+[ $? -eq 1 ] && grep -q "fhsm-csr keygen --alg ecdsa-p256" "$W/out"
+ok "a signature algorithm is sent to fhsm-csr" $?
+
+q "$CSR" keygen --label x --alg aes256 --module "$LIB"
+[ $? -eq 1 ] && grep -q "fhsm-crypt keygen --alg aes256" "$W/out"
+ok "and fhsm-csr sends a secret key to fhsm-crypt" $?
+
+q "$CRYPT" keygen --label x --module "$LIB"
+[ $? -eq 1 ] && grep -q "needs --alg" "$W/out"
+ok "keygen without --alg is refused" $?
+
+q "$CRYPT" delete --label sym --yes --module "$LIB"
+[ $? -eq 0 ] && grep -q "destroyed secret key" "$W/out"
+ok "a secret key is deleted like any other" $?
 
 q "$CRYPT" list --class nonsense --module "$LIB"
 [ $? -eq 1 ] && grep -q "takes key, cert or all" "$W/out"

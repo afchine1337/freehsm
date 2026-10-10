@@ -68,6 +68,8 @@ static const char *mech_name(CK_ULONG m, char buf[32]) {
     case 0x1045UL: return "CKM_ECDSA_SHA384";
     case 0x1055UL: return "CKM_EC_EDWARDS_KEY_PAIR_GEN";
     case 0x1057UL: return "CKM_EDDSA";
+    case 0x0350UL: return "CKM_GENERIC_SECRET_KEY_GEN";
+    case 0x1080UL: return "CKM_AES_KEY_GEN";
     default: break;
     }
     snprintf(buf, 32, "mechanism 0x%lx", (unsigned long)m);
@@ -90,6 +92,13 @@ static void attr_types(char *out, size_t cap, const CK_ATTRIBUTE *t, CK_ULONG n)
                        : t[i].type == CKA_VALUE ? "CKA_VALUE"
                        : t[i].type == 0x100UL   ? "CKA_KEY_TYPE"
                        : t[i].type == 0x102UL   ? "CKA_ID"
+                       : t[i].type == 0x002UL   ? "CKA_PRIVATE"
+                       : t[i].type == 0x104UL   ? "CKA_ENCRYPT"
+                       : t[i].type == 0x105UL   ? "CKA_DECRYPT"
+                       : t[i].type == 0x106UL   ? "CKA_WRAP"
+                       : t[i].type == 0x107UL   ? "CKA_UNWRAP"
+                       : t[i].type == 0x161UL   ? "CKA_VALUE_LEN"
+                       : t[i].type == 0x162UL   ? "CKA_EXTRACTABLE"
                        : t[i].type == 0x103UL   ? "CKA_SENSITIVE"
                        : t[i].type == 0x108UL   ? "CKA_SIGN"
                        : t[i].type == 0x10AUL   ? "CKA_VERIFY"
@@ -136,6 +145,8 @@ static struct {
     CK_RV (*GetMechanismList)(CK_SLOT_ID,CK_ULONG*,CK_ULONG*);
     CK_RV (*GetMechanismInfo)(CK_SLOT_ID,CK_ULONG,void*);
     CK_RV (*DestroyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE);
+    CK_RV (*GenerateKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_ATTRIBUTE*,CK_ULONG,
+                         CK_OBJECT_HANDLE*);
 } real;
 
 static CK_RV w_Initialize(void *a) {
@@ -202,6 +213,15 @@ static CK_RV w_GetAttributeValue(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o, CK_ATT
 static CK_RV w_DestroyObject(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o) {
     double t = now_ms(); CK_RV rv = real.DestroyObject(s, o);
     logcall("C_DestroyObject", rv, t, "session %lu, object %lu", (unsigned long)s, (unsigned long)o);
+    return rv;
+}
+static CK_RV w_GenerateKey(CK_SESSION_HANDLE s, CK_MECHANISM *m, CK_ATTRIBUTE *t,
+                           CK_ULONG n, CK_OBJECT_HANDLE *k) {
+    double t0 = now_ms(); CK_RV rv = real.GenerateKey(s, m, t, n, k);
+    char mb[32], ty[200]; attr_types(ty, sizeof ty, t, n);
+    logcall("C_GenerateKey", rv, t0, "session %lu, %s, template %s -> key %lu",
+            (unsigned long)s, m ? mech_name(m->mechanism, mb) : "no mechanism", ty,
+            rv == CKR_OK && k ? (unsigned long)*k : 0UL);
     return rv;
 }
 static CK_RV w_DigestInit(CK_SESSION_HANDLE s, CK_MECHANISM *m) {
@@ -301,7 +321,7 @@ static void install_wrappers(void) {
     W(GetAttributeValue); W(DigestInit); W(SignInit); W(Sign); W(SignUpdate);
     W(SignFinal); W(VerifyInit); W(VerifyUpdate); W(VerifyFinal); W(InitToken);
     W(InitPIN); W(GetTokenInfo); W(GenerateRandom); W(GetSlotList);
-    W(GetMechanismList); W(GetMechanismInfo); W(DestroyObject);
+    W(GetMechanismList); W(GetMechanismInfo); W(DestroyObject); W(GenerateKey);
     #undef W
 }
 
@@ -538,6 +558,95 @@ const char *pkiops_alg_digest(enum pkiops_alg a) {
     return (unsigned)a < PKIOPS_ALG_COUNT ? ALG[a].digest : NULL;
 }
 
+/* --- keys that do not sign (docs/fhsm-crypt-plan.md stage 1) ---------------
+ *
+ * Secret keys, made on the token and kept there: sensitive, not extractable,
+ * private to the logged-in user. What each is for is set at generation and
+ * nothing else: an AES key encrypts and wraps, an HMAC key signs and verifies
+ * a MAC. HMAC keys are 32 bytes, the strength of HMAC-SHA-256 and enough for
+ * the longer hashes too -- SP 800-107 bounds an HMAC's strength by its key
+ * and by the hash, and 256 bits is not the smaller of the two for any SHA-2.
+ * ------------------------------------------------------------------------- */
+#define CKA_PRIVATE_      0x00000002UL
+#define CKA_ENCRYPT_      0x00000104UL
+#define CKA_DECRYPT_      0x00000105UL
+#define CKA_WRAP_         0x00000106UL
+#define CKA_UNWRAP_       0x00000107UL
+#define CKA_VALUE_LEN_    0x00000161UL
+#define CKA_EXTRACTABLE_  0x00000162UL
+#define CKK_GENERIC_SECRET_ 0x00000010UL
+#define CKK_AES_          0x0000001FUL
+
+static const struct skeyinfo {
+    const char *name;
+    CK_ULONG    keytype, keygen, len;
+    int         cipher;             /* 1: encrypt and wrap; 0: MAC */
+} SKEY[PKIOPS_SKEY_COUNT] = {
+    [PKIOPS_SKEY_AES128] = { "aes128", CKK_AES_,            0x1080UL, 16, 1 },
+    [PKIOPS_SKEY_AES256] = { "aes256", CKK_AES_,            0x1080UL, 32, 1 },
+    [PKIOPS_SKEY_HMAC]   = { "hmac",   CKK_GENERIC_SECRET_, 0x0350UL, 32, 0 },
+};
+
+static int skey_index(const char *name, enum pkiops_skey *out) {
+    for (unsigned i = 0; name && i < PKIOPS_SKEY_COUNT; i++)
+        if (!strcmp(name, SKEY[i].name)) { *out = (enum pkiops_skey)i; return 1; }
+    return 0;
+}
+
+const char *pkiops_skey_name(enum pkiops_skey k) {
+    return (unsigned)k < PKIOPS_SKEY_COUNT ? SKEY[k].name : NULL;
+}
+
+const char *pkiops_skey_list(void) { return "aes128, aes256, hmac"; }
+
+int pkiops_skey_parse(const char *name, enum pkiops_skey *out, struct p11_err *e) {
+    if (skey_index(name, out)) return 0;
+    for (unsigned i = 0; name && i < PKIOPS_ALG_COUNT; i++)
+        if (!strcmp(name, ALG[i].name))
+            return p11_fail(e, 1, "\"%s\" is a signature algorithm: "
+                                  "fhsm-csr keygen --alg %s makes it.\n", name, name);
+    return p11_fail(e, 1, "\"%s\" is not a key fhsm-crypt makes.\n"
+                          "  One of: %s\n", name ? name : "", pkiops_skey_list());
+}
+
+int pkiops_keygen_secret(pkiops_handle session, const char *label, enum pkiops_skey k,
+                         pkiops_handle *key, struct p11_err *e) {
+    if ((unsigned)k >= PKIOPS_SKEY_COUNT) return p11_fail(e, 1, "no such key type\n");
+    if (!p11.GenerateKey)
+        return p11_fail(e, 2, "the module does not implement C_GenerateKey\n");
+    const struct skeyinfo *ki = &SKEY[k];
+    CK_ULONG cls = CKO_SECRET_KEY, kt = ki->keytype, len = ki->len;
+    CK_BYTE yes = 1, no = 0;
+    CK_MECHANISM m = { ki->keygen, NULL, 0 };
+    CK_ATTRIBUTE t[16] = {
+        { CKA_CLASS,        &cls, sizeof cls },
+        { CKA_KEY_TYPE_,    &kt,  sizeof kt },
+        { CKA_VALUE_LEN_,   &len, sizeof len },
+        { CKA_LABEL,        (void *)(uintptr_t)label, (CK_ULONG)strlen(label) },
+        { CKA_TOKEN,        &yes, 1 },
+        { CKA_PRIVATE_,     &yes, 1 },
+        { CKA_SENSITIVE_,   &yes, 1 },
+        { CKA_EXTRACTABLE_, &no,  1 },
+    };
+    CK_ULONG n = 8;
+    /* Every usage is stated, the ones the key does not have as false: what a
+     * template leaves out takes the module's default, and the promise above
+     * should not depend on which module this is. */
+    CK_BYTE *c = ki->cipher ? &yes : &no, *mac = ki->cipher ? &no : &yes;
+    t[n++] = (CK_ATTRIBUTE){ CKA_ENCRYPT_, c, 1 };
+    t[n++] = (CK_ATTRIBUTE){ CKA_DECRYPT_, c, 1 };
+    t[n++] = (CK_ATTRIBUTE){ CKA_WRAP_,    c, 1 };
+    t[n++] = (CK_ATTRIBUTE){ CKA_UNWRAP_,  c, 1 };
+    t[n++] = (CK_ATTRIBUTE){ CKA_SIGN_,    mac, 1 };
+    t[n++] = (CK_ATTRIBUTE){ CKA_VERIFY_,  mac, 1 };
+    t[n++] = (CK_ATTRIBUTE){ 0x10CUL /* CKA_DERIVE */, &no, 1 };
+    CK_OBJECT_HANDLE h = 0;
+    CK_RV rv = p11.GenerateKey((CK_SESSION_HANDLE)session, &m, t, n, &h);
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_GenerateKey failed (0x%lx)\n", (unsigned long)rv);
+    *key = (pkiops_handle)h;
+    return 0;
+}
+
 const char *pkiops_alg_list(void) {
     return "composite, ecdsa-p256, ecdsa-p384, rsa-pss, rsa-pkcs1, ed25519, "
            "ml-dsa-44, ml-dsa-65, ml-dsa-87";
@@ -546,6 +655,10 @@ const char *pkiops_alg_list(void) {
 int pkiops_alg_parse(const char *name, enum pkiops_alg *out, struct p11_err *e) {
     for (unsigned i = 0; name && i < PKIOPS_ALG_COUNT; i++)
         if (!strcmp(name, ALG[i].name)) { *out = (enum pkiops_alg)i; return 0; }
+    enum pkiops_skey k;
+    if (name && skey_index(name, &k))
+        return p11_fail(e, 1, "\"%s\" is a key that does not sign: "
+                              "fhsm-crypt keygen --alg %s makes it.\n", name, name);
     return p11_fail(e, 1, "\"%s\" is not an algorithm these tools offer.\n"
                           "  One of: %s\n", name ? name : "", pkiops_alg_list());
 }
@@ -1377,6 +1490,22 @@ static int objects_of_class(CK_SESSION_HANDLE s, enum pkiops_obj_class oc,
                 if (p11.GetAttributeValue(s, h[i], &k, 1) == CKR_OK)
                     o->key_type = (unsigned long)kt;
             }
+            /* A secret key is named by its type and CKA_VALUE_LEN, which a
+             * sensitive key still answers: the length is not the value. */
+            if (oc == PKIOPS_OBJ_SECRET) {
+                CK_ULONG vl = 0;
+                CK_ATTRIBUTE k = { CKA_VALUE_LEN_, &vl, sizeof vl };
+                if (p11.GetAttributeValue(s, h[i], &k, 1) == CKR_OK) {
+                    const char *nm = NULL;
+                    for (unsigned q = 0; q < PKIOPS_SKEY_COUNT; q++)
+                        if (SKEY[q].keytype == o->key_type && SKEY[q].len == vl) nm = SKEY[q].name;
+                    if (nm) snprintf(o->alg, sizeof o->alg, "%s", nm);
+                    else if (o->key_type == CKK_AES_)
+                        snprintf(o->alg, sizeof o->alg, "aes%lu", (unsigned long)vl * 8);
+                    else
+                        snprintf(o->alg, sizeof o->alg, "secret-%lu", (unsigned long)vl);
+                }
+            }
         }
         if (got < 16) break;
     }
@@ -1407,5 +1536,268 @@ int pkiops_destroy(pkiops_handle session, pkiops_handle object, struct p11_err *
     CK_RV rv = p11.DestroyObject((CK_SESSION_HANDLE)session, (CK_OBJECT_HANDLE)object);
     if (rv != CKR_OK)
         return p11_fail(e, 2, "C_DestroyObject failed (0x%lx)\n", (unsigned long)rv);
+    return 0;
+}
+
+/* --- an object's attributes, as a person reads them -------------------------
+ *
+ * For the Token tab's detail pane and `fhsm-crypt show`. Each attribute is
+ * asked on its own, so a module that does not keep one -- CKA_COPYABLE is
+ * v2.40, CKA_ENCAPSULATE v3.2 -- loses that line and nothing else. Values are
+ * never read where the specification makes them secret: a private or secret
+ * key's CKA_VALUE is not asked for at all, sensitive or not.
+ * ------------------------------------------------------------------------- */
+#define ATTRS_MAX 40
+
+struct attr_out { struct pkiops_attr *v; size_t n; };
+
+P11_PRINTF(3, 4)
+static void attr_add(struct attr_out *o, const char *name, const char *fmt, ...) {
+    if (o->n >= ATTRS_MAX) return;
+    struct pkiops_attr *a = &o->v[o->n++];
+    snprintf(a->name, sizeof a->name, "%s", name);
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(a->value, sizeof a->value, fmt, ap);
+    va_end(ap);
+}
+
+/* A CK_BBOOL: 1, 0, or -1 when the module does not answer it. */
+static int attr_bool(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE h, CK_ULONG type) {
+    CK_BYTE b = 0;
+    CK_ATTRIBUTE a = { type, &b, 1 };
+    if (p11.GetAttributeValue(s, h, &a, 1) != CKR_OK || a.ulValueLen != 1) return -1;
+    return b != 0;
+}
+
+static int attr_ul(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE h, CK_ULONG type, CK_ULONG *v) {
+    struct p11_err ignored;
+    return get_ulong(s, h, type, v, &ignored) == 0;
+}
+
+static void yes_no(struct attr_out *o, CK_SESSION_HANDLE s, CK_OBJECT_HANDLE h,
+                   const char *name, CK_ULONG type) {
+    int b = attr_bool(s, h, type);
+    if (b >= 0) attr_add(o, name, "%s", b ? "yes" : "no");
+}
+
+static const char *key_type_name(CK_ULONG kt) {
+    switch (kt) {
+    case 0x00UL: return "RSA";
+    case 0x03UL: return "EC";
+    case 0x10UL: return "generic secret";
+    case 0x1FUL: return "AES";
+    case 0x40UL: return "EC Edwards";
+    case 0x41UL: return "EC Montgomery";
+    case 0x49UL: return "ML-KEM";
+    case 0x4AUL: return "ML-DSA";
+    case 0x80004202UL: return "composite ML-DSA-65 + Ed25519";
+    default:     return NULL;
+    }
+}
+
+/* CKA_EC_PARAMS, named when it is one of the curves this project meets. */
+static const char *curve_name(const uint8_t *p, size_t n) {
+    static const uint8_t P521[] = { 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x23 };
+    static const uint8_t ED448[] = { 0x06, 0x03, 0x2B, 0x65, 0x71 };
+    static const uint8_t X25519[] = { 0x06, 0x03, 0x2B, 0x65, 0x6E };
+    static const uint8_t X448[] = { 0x06, 0x03, 0x2B, 0x65, 0x6F };
+    static const struct { const uint8_t *oid; size_t len; const char *name; } C[] = {
+        { OID_P256, sizeof OID_P256, "P-256" }, { OID_P384, sizeof OID_P384, "P-384" },
+        { P521, sizeof P521, "P-521" }, { OID_ED25519, sizeof OID_ED25519, "Ed25519" },
+        { ED448, sizeof ED448, "Ed448" }, { X25519, sizeof X25519, "X25519" },
+        { X448, sizeof X448, "X448" },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++)
+        if (n == C[i].len && !memcmp(p, C[i].oid, n)) return C[i].name;
+    /* PKCS#11 v3 also allows a PrintableString curve name for Edwards keys. */
+    if (n > 2 && p[0] == 0x13 && (size_t)p[1] + 2 == n) {
+        if (n - 2 == 12 && !memcmp(p + 2, "edwards25519", 12)) return "Ed25519";
+        if (n - 2 == 10 && !memcmp(p + 2, "edwards448", 10)) return "Ed448";
+    }
+    return NULL;
+}
+
+/* A BIO's text into a fixed buffer, terminated whatever it held. */
+static void bio_text(BIO *b, char *buf, size_t cap) {
+    int r = BIO_read(b, buf, (int)cap - 1);
+    buf[r > 0 ? (size_t)r : 0] = '\0';
+}
+
+static void x509_line(struct attr_out *o, const char *name, const X509_NAME *xn) {
+    BIO *b = BIO_new(BIO_s_mem());
+    if (!b) return;
+    X509_NAME_print_ex(b, xn, 0, XN_FLAG_ONELINE & ~ASN1_STRFLGS_ESC_MSB);
+    char buf[256];
+    bio_text(b, buf, sizeof buf);
+    BIO_free(b);
+    attr_add(o, name, "%s", buf);
+}
+
+static void time_line(struct attr_out *o, const char *name, const ASN1_TIME *t) {
+    BIO *b = BIO_new(BIO_s_mem());
+    if (!b) return;
+    ASN1_TIME_print(b, t);
+    char buf[64];
+    bio_text(b, buf, sizeof buf);
+    BIO_free(b);
+    attr_add(o, name, "%s", buf);
+}
+
+static void cert_attrs(struct attr_out *o, CK_SESSION_HANDLE s, CK_OBJECT_HANDLE h) {
+    CK_ULONG ct = 0;
+    if (attr_ul(s, h, 0x80UL /* CKA_CERTIFICATE_TYPE */, &ct))
+        attr_add(o, "certificate type", "%s", ct == 0 ? "X.509" : "other");
+    yes_no(o, s, h, "trusted", 0x86UL);
+    uint8_t *der = NULL; size_t n = 0; struct p11_err ignored;
+    if (get_attr(s, h, CKA_VALUE, &der, &n, &ignored)) return;
+    const unsigned char *p = der;
+    X509 *x = d2i_X509(NULL, &p, (long)n);
+    if (x) {
+        x509_line(o, "subject", X509_get_subject_name(x));
+        x509_line(o, "issuer", X509_get_issuer_name(x));
+        BIGNUM *bn = ASN1_INTEGER_to_BN(X509_get0_serialNumber(x), NULL);
+        char *hex = bn ? BN_bn2hex(bn) : NULL;
+        if (hex) attr_add(o, "serial", "%s", hex);
+        OPENSSL_free(hex);
+        BN_free(bn);
+        time_line(o, "valid from", X509_get0_notBefore(x));
+        time_line(o, "valid until", X509_get0_notAfter(x));
+        X509_free(x);
+    } else {
+        attr_add(o, "value", "%lu bytes, not a DER certificate", (unsigned long)n);
+    }
+    free(der);
+}
+
+static void key_attrs(struct attr_out *o, CK_SESSION_HANDLE s, CK_OBJECT_HANDLE h,
+                      enum pkiops_obj_class oc) {
+    CK_ULONG kt = 0;
+    int have_kt = attr_ul(s, h, CKA_KEY_TYPE_, &kt);
+    if (have_kt) {
+        const char *nm = key_type_name(kt);
+        if (nm) attr_add(o, "key type", "%s", nm);
+        else    attr_add(o, "key type", "0x%lx", (unsigned long)kt);
+    }
+
+    /* Size, the way each family states it. */
+    CK_ULONG v = 0;
+    uint8_t *b = NULL; size_t bl = 0; struct p11_err ignored;
+    if (have_kt && kt == 0x00UL) {
+        if (attr_ul(s, h, CKA_MODULUS_BITS_, &v)) {
+            attr_add(o, "size", "%lu bits", (unsigned long)v);
+        } else if (!get_attr(s, h, CKA_MODULUS_, &b, &bl, &ignored)) {
+            size_t z = 0;
+            while (z < bl && b[z] == 0) z++;
+            attr_add(o, "size", "%lu bits", (unsigned long)((bl - z) * 8));
+            free(b); b = NULL;
+        }
+    } else if (have_kt && (kt == 0x03UL || kt == 0x40UL || kt == 0x41UL)) {
+        if (!get_attr(s, h, CKA_EC_PARAMS_, &b, &bl, &ignored)) {
+            const char *c = curve_name(b, bl);
+            if (c) attr_add(o, "curve", "%s", c);
+            else   attr_add(o, "curve", "%lu-byte parameters, not one named here", (unsigned long)bl);
+            free(b); b = NULL;
+        }
+    } else if (have_kt && (kt == 0x49UL || kt == 0x4AUL)) {
+        if (attr_ul(s, h, CKA_PARAMETER_SET_, &v)) {
+            static const char *const dsa[] = { "?", "ML-DSA-44", "ML-DSA-65", "ML-DSA-87" };
+            static const char *const kem[] = { "?", "ML-KEM-512", "ML-KEM-768", "ML-KEM-1024" };
+            attr_add(o, "parameter set", "%s", v <= 3 ? (kt == 0x4AUL ? dsa : kem)[v] : "?");
+        }
+    } else if (oc == PKIOPS_OBJ_SECRET && attr_ul(s, h, CKA_VALUE_LEN_, &v)) {
+        attr_add(o, "size", "%lu bits", (unsigned long)v * 8);
+    }
+
+    /* What it may be used for: the usage attributes that are set. */
+    static const struct { CK_ULONG type; const char *name; } USE[] = {
+        { 0x104UL, "encrypt" }, { 0x105UL, "decrypt" }, { 0x106UL, "wrap" },
+        { 0x107UL, "unwrap" }, { 0x108UL, "sign" }, { 0x109UL, "sign-recover" },
+        { 0x10AUL, "verify" }, { 0x10BUL, "verify-recover" }, { 0x10CUL, "derive" },
+        { 0x633UL, "encapsulate" }, { 0x634UL, "decapsulate" },
+    };
+    char use[200] = ""; size_t ul = 0;
+    for (size_t i = 0; i < sizeof USE / sizeof USE[0]; i++)
+        if (attr_bool(s, h, USE[i].type) == 1) {
+            int w = snprintf(use + ul, sizeof use - ul, "%s%s", ul ? ", " : "", USE[i].name);
+            if (w > 0 && (size_t)w < sizeof use - ul) ul += (size_t)w;
+        }
+    attr_add(o, "usage", "%s", ul ? use : "none");
+
+    /* CKA_ALLOWED_MECHANISMS: absent or empty means any the key type allows. */
+    if (!get_attr(s, h, CKA_ALLOWED_MECHANISMS_, &b, &bl, &ignored)) {
+        char m[200] = ""; size_t ml = 0;
+        for (size_t i = 0; i + sizeof(CK_ULONG) <= bl; i += sizeof(CK_ULONG)) {
+            CK_ULONG mech;
+            memcpy(&mech, b + i, sizeof mech);
+            char mb[32];
+            int w = snprintf(m + ml, sizeof m - ml, "%s%s", ml ? ", " : "", mech_name(mech, mb));
+            if (w > 0 && (size_t)w < sizeof m - ml) ml += (size_t)w;
+        }
+        attr_add(o, "allowed mechanisms", "%s", ml ? m : "any");
+        free(b); b = NULL;
+    }
+
+    if (oc != PKIOPS_OBJ_PUBLIC) {
+        yes_no(o, s, h, "sensitive", CKA_SENSITIVE_);
+        yes_no(o, s, h, "always sensitive", 0x165UL);
+        yes_no(o, s, h, "extractable", CKA_EXTRACTABLE_);
+        yes_no(o, s, h, "never extractable", 0x164UL);
+        yes_no(o, s, h, "always authenticate", 0x202UL);
+        yes_no(o, s, h, "wrap with trusted only", 0x210UL);
+    }
+    yes_no(o, s, h, "generated on the token", 0x163UL);
+    if (attr_ul(s, h, 0x166UL /* CKA_KEY_GEN_MECHANISM */, &v) && v != (CK_ULONG)-1) {
+        char mb[32];
+        attr_add(o, "generated with", "%s", mech_name(v, mb));
+    }
+}
+
+int pkiops_object_attrs(pkiops_handle session, pkiops_handle object,
+                        struct pkiops_attr **out, size_t *n, struct p11_err *e) {
+    CK_SESSION_HANDLE s = (CK_SESSION_HANDLE)session;
+    CK_OBJECT_HANDLE h = (CK_OBJECT_HANDLE)object;
+    struct attr_out o = { calloc(ATTRS_MAX, sizeof(struct pkiops_attr)), 0 };
+    if (!o.v) return p11_fail(e, 2, "out of memory\n");
+
+    /* The class is asked, not taken from the list: a handle that went stale
+     * since the list was read answers nothing, and says so here. */
+    CK_ULONG c = 0;
+    if (!attr_ul(s, h, CKA_CLASS, &c)) {
+        free(o.v);
+        return p11_fail(e, 2, "object %lu does not answer (it may have been deleted)\n",
+                        (unsigned long)object);
+    }
+    enum pkiops_obj_class oc = c == CKO_CERTIFICATE ? PKIOPS_OBJ_CERT
+                             : c == CKO_PUBLIC_KEY  ? PKIOPS_OBJ_PUBLIC
+                             : c == CKO_PRIVATE_KEY ? PKIOPS_OBJ_PRIVATE
+                             :                        PKIOPS_OBJ_SECRET;
+    attr_add(&o, "class", "%s", pkiops_obj_class_name(oc));
+
+    char lbl[256];
+    CK_ATTRIBUTE al = { CKA_LABEL, lbl, sizeof lbl - 1 };
+    if (p11.GetAttributeValue(s, h, &al, 1) == CKR_OK) {
+        lbl[al.ulValueLen < sizeof lbl ? al.ulValueLen : sizeof lbl - 1] = '\0';
+        attr_add(&o, "label", "%s", lbl);
+    }
+    uint8_t id[64];
+    CK_ATTRIBUTE ai = { CKA_ID_, id, sizeof id };
+    if (p11.GetAttributeValue(s, h, &ai, 1) == CKR_OK && ai.ulValueLen > 0
+        && ai.ulValueLen <= sizeof id) {
+        char hex[2 * sizeof id + 1];
+        for (CK_ULONG k = 0; k < ai.ulValueLen; k++)
+            snprintf(hex + 2 * k, 3, "%02x", id[k]);
+        attr_add(&o, "CKA_ID", "%s", hex);
+    }
+    yes_no(&o, s, h, "on the token", CKA_TOKEN);
+    yes_no(&o, s, h, "private", CKA_PRIVATE_);
+    yes_no(&o, s, h, "modifiable", 0x170UL);
+    yes_no(&o, s, h, "destroyable", 0x172UL);
+
+    if (oc == PKIOPS_OBJ_CERT) cert_attrs(&o, s, h);
+    else                       key_attrs(&o, s, h, oc);
+
+    *out = o.v;
+    *n = o.n;
     return 0;
 }

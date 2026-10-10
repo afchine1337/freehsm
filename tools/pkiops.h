@@ -199,6 +199,7 @@ struct pkiops_object {
     unsigned long         key_type;   /* CKA_KEY_TYPE; 0 for a certificate */
     char                  label[65];  /* truncated if longer; "" if none */
     char                  id[41];     /* CKA_ID in hex, first 20 bytes; "" if none */
+    char                  alg[16];    /* a secret key's kind: "aes256", "hmac"; else "" */
 };
 /* The objects of the classes in `classes` a session can see -- private and
  * secret keys only once logged in -- certificates first, in a malloc'd array
@@ -206,9 +207,41 @@ struct pkiops_object {
 int pkiops_objects(pkiops_handle session, unsigned classes,
                    struct pkiops_object **out, size_t *n, struct p11_err *e);
 
+/* One object's attributes as name/value lines a person reads: class, label,
+ * CKA_ID, storage and protection flags, usage, size or curve, allowed
+ * mechanisms, origin -- and for a certificate its subject, issuer, serial and
+ * validity. A private or secret key's value is never asked for. Each
+ * attribute is read on its own, and one the module does not keep is left
+ * out. A malloc'd array the caller frees. */
+struct pkiops_attr {
+    char name[28];
+    char value[220];
+};
+int pkiops_object_attrs(pkiops_handle session, pkiops_handle object,
+                        struct pkiops_attr **out, size_t *n, struct p11_err *e);
+
 /* Destroy one object. Cannot be undone: the caller asks first. Refused with a
  * message, not a crash, when the module has no C_DestroyObject. */
 int pkiops_destroy(pkiops_handle session, pkiops_handle object, struct p11_err *e);
+
+/* --- keys that do not sign (docs/fhsm-crypt-plan.md stage 1) ------------- */
+
+enum pkiops_skey {
+    PKIOPS_SKEY_AES128 = 0,
+    PKIOPS_SKEY_AES256,
+    PKIOPS_SKEY_HMAC,               /* a 32-byte generic secret */
+    PKIOPS_SKEY_COUNT
+};
+/* "aes128", "aes256", "hmac"; NULL out of range. */
+const char *pkiops_skey_name(enum pkiops_skey k);
+const char *pkiops_skey_list(void);
+/* The name as typed, or 1 (usage). A signature algorithm's name is refused
+ * with the command that makes it; pkiops_alg_parse does the converse. */
+int pkiops_skey_parse(const char *name, enum pkiops_skey *out, struct p11_err *e);
+/* A secret key on the token: sensitive, not extractable, private. AES keys
+ * encrypt, decrypt, wrap and unwrap; the HMAC key signs and verifies. */
+int pkiops_keygen_secret(pkiops_handle session, const char *label, enum pkiops_skey k,
+                         pkiops_handle *key, struct p11_err *e);
 
 /* A key pair for `alg`, both halves on the token, the private one sensitive
  * and for signing only. RSA keys are 3072 bits. */

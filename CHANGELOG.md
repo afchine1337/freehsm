@@ -81,6 +81,23 @@ notes.*
   tools' loader: a module without it still loads, and deletion alone is
   refused. `tests/test_pkiops_objects.c`, `tests/fhsm_crypt_cli.sh`.
 
+* **Secret keys, and what any key is** (stage 1). `fhsm-crypt keygen --alg
+  aes128|aes256|hmac` makes a sensitive, non-extractable secret key with every
+  usage stated -- an AES key encrypts and wraps and cannot sign, the 32-byte
+  HMAC secret signs and cannot encrypt -- and the Token tab offers the three
+  after the signature algorithms. Each tool names the other when given the
+  other's algorithm. `fhsm-crypt show --label L`, and a pane under the
+  Token tab's list, give an object's attributes as a person reads them: usage,
+  size or curve, allowed mechanisms, protection, origin; a certificate's
+  subject, issuer, serial and validity. A private or secret key's value is
+  never asked for. `tests/test_pkiops_secret.c`.
+
+* **Operator mode re-initialises a token it has seen empty.** It refused any
+  initialised token, so a CA's operator who had deleted everything still had
+  to leave the mode. A token listed while logged in with nothing on it may now
+  be re-initialised there, with a confirmation that says so; one that may
+  hold keys is still refused.
+
 ## [2.3.0] --- 2026-10-07
 
 *Minor, as 2.1.0 and 2.2.0 were: the PKI tools gain

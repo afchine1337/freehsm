@@ -87,6 +87,10 @@ static struct {
      * docs/fhsm-crypt-plan.md stage 0. */
     struct pkiops_object *objs;
     size_t n_objs;
+    GtkWidget *attr_view;           /* the selected object's attributes */
+    /* The slot whose token this window last listed, logged in, and found
+     * empty -- or -1. Operator mode re-initialises only such a token. */
+    long empty_slot;
 
     /* The Certificates tab. */
     GtkWidget *cert_page, *key_drop, *pem_check;
@@ -125,7 +129,7 @@ static struct {
     size_t n_slots;
     long selected;                  /* index into slots, or -1 */
     pkiops_handle session;
-} A = { .selected = -1 };
+} A = { .selected = -1, .empty_slot = -1 };
 
 /* --- the call log ------------------------------------------------------- */
 
@@ -265,7 +269,7 @@ static void list_add(GtkWidget *box, const char *text) {
 enum job_kind { J_LOAD, J_UNLOAD, J_SLOTS, J_LOGIN, J_KEYS, J_KEYGEN, J_LOGOUT,
                 J_CSR, J_ROOT, J_ISSUE, J_DB_LOAD, J_REVOKE, J_CRL, J_OCSP,
                 J_SIGN, J_VERIFY, J_CMS_SIGN, J_CMS_VERIFY,
-                J_NEW_CA, J_REVOKE_PUBLISH, J_TOKEN_INIT, J_DELETE };
+                J_NEW_CA, J_REVOKE_PUBLISH, J_TOKEN_INIT, J_DELETE, J_ATTRS };
 
 struct job {
     enum job_kind kind;
@@ -285,6 +289,7 @@ struct job {
     char *data_path, *in_path, *cert_path;
     int operator_mode;              /* apply operator mode's refusals */
     int alg;                        /* enum pkiops_alg, for a key pair */
+    int skey;                       /* enum pkiops_skey for a secret key, or -1 */
     /* results */
     int rc;
     struct p11_err e;
@@ -293,6 +298,8 @@ struct job {
     struct pkiops_object *objs; size_t n_objs;
     pkiops_handle *del; size_t n_del;   /* J_DELETE: what was ticked */
     size_t n_deleted;                   /* J_DELETE: how many went */
+    pkiops_handle object;               /* J_ATTRS: the object described */
+    struct pkiops_attr *attrs; size_t n_attrs;
     int pop_valid;
     size_t out_len;
     fhsm_rev_db_t db; int have_db;  /* the database as the job left it */
@@ -326,6 +333,7 @@ static void job_free(gpointer p) {
     free(j->keys);
     free(j->objs);
     g_free(j->del);
+    free(j->attrs);
     g_free(j);
 }
 
@@ -411,8 +419,10 @@ static int write_out(const char *path, const uint8_t *der, size_t n, int pem,
  * to sign with an ambiguous label -- after the second key exists. Checked on
  * the token itself, not on the list the window last showed. */
 static int label_in_use(pkiops_handle s, const char *label, struct p11_err *e) {
-    struct pkiops_key *k = NULL; size_t n = 0;
-    int rc = pkiops_keys(s, &k, &n, e);
+    /* Every key, secret keys included: an AES key and a key pair under one
+     * label are as ambiguous as two key pairs. */
+    struct pkiops_object *k = NULL; size_t n = 0;
+    int rc = pkiops_objects(s, PKIOPS_OBJS_KEYS, &k, &n, e);
     if (rc) return rc;
     int used = 0;
     for (size_t i = 0; i < n; i++) if (!strcmp(k[i].label, label)) used = 1;
@@ -725,6 +735,9 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
     case J_KEYS:
         j->rc = list_objects(j, &j->e);
         break;
+    case J_ATTRS:
+        j->rc = pkiops_object_attrs(j->session, j->object, &j->attrs, &j->n_attrs, &j->e);
+        break;
     case J_DELETE: {
         /* Stop at the first refusal: the rest was ticked together with it,
          * and the list read afterwards shows exactly what is left. */
@@ -739,8 +752,12 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
     case J_KEYGEN: {
         pkiops_handle hp = 0, hk = 0;
         if (j->operator_mode) j->rc = label_in_use(j->session, j->label, &j->e);
-        if (!j->rc) j->rc = pkiops_keygen_alg(j->session, j->label,
-                                              (enum pkiops_alg)j->alg, &hp, &hk, &j->e);
+        if (!j->rc && j->skey >= 0)
+            j->rc = pkiops_keygen_secret(j->session, j->label,
+                                         (enum pkiops_skey)j->skey, &hk, &j->e);
+        else if (!j->rc)
+            j->rc = pkiops_keygen_alg(j->session, j->label,
+                                      (enum pkiops_alg)j->alg, &hp, &hk, &j->e);
         if (!j->rc) j->rc = list_objects(j, &j->e);
         break;
     }
@@ -984,6 +1001,7 @@ static void clear_key_labels(void) {
 /* The object list and what it shows, emptied together. */
 static void clear_objects(void) {
     clear_list(A.keys_box);
+    gtk_label_set_text(GTK_LABEL(A.attr_view), "");
     free(A.objs);
     A.objs = NULL;
     A.n_objs = 0;
@@ -1011,6 +1029,11 @@ static void show_keys(struct job *j) {
                  pkiops_obj_class_name(o->cls), o->handle, o->label, alg);
         list_add(A.keys_box, t);
     }
+    /* Logged in, so the list is everything the token holds for this user:
+     * an empty one is what operator mode needs to see before it will
+     * re-initialise the token. */
+    A.empty_slot = (A.n_objs == 0 && A.selected >= 0 && (size_t)A.selected < A.n_slots)
+                 ? (long)A.slots[A.selected].id : -1;
     if (A.n_objs == 0) {
         list_add(A.keys_box, "(nothing on this token)");
         GtkListBoxRow *r = gtk_list_box_get_row_at_index(GTK_LIST_BOX(A.keys_box), 0);
@@ -1050,6 +1073,7 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
         clear_list(A.slots_box);
         clear_objects();
         clear_key_labels();
+        A.empty_slot = -1;
         status("Module unloaded. Load the same one or another.");
         break;
     case J_SLOTS:
@@ -1068,20 +1092,21 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
         break;
     case J_KEYGEN:
         if (j->rc) {
-            status_err("Generating the key pair", &j->e);
+            status_err(j->skey >= 0 ? "Generating the key" : "Generating the key pair", &j->e);
             if (strstr(j->e.msg, "0x70")) {
                 char msg[400];
-                snprintf(msg, sizeof msg, "Generating the key pair: this module does not "
+                snprintf(msg, sizeof msg, "Generating the key: this module does not "
                          "offer %s (CKR_MECHANISM_INVALID).%s",
-                         pkiops_alg_name((enum pkiops_alg)j->alg),
-                         j->alg == PKIOPS_ALG_COMPOSITE
+                         j->skey >= 0 ? pkiops_skey_name((enum pkiops_skey)j->skey)
+                                      : pkiops_alg_name((enum pkiops_alg)j->alg),
+                         j->skey < 0 && j->alg == PKIOPS_ALG_COMPOSITE
                              ? " The composite exists only in builds made with "
                                "PROFILE=all-mechanisms." : "");
                 status(msg);
             }
         } else {
             show_keys(j);
-            status("Key pair generated.");
+            status(j->skey >= 0 ? "Secret key generated." : "Key pair generated.");
         }
         break;
     case J_DELETE: {
@@ -1094,12 +1119,30 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
             size_t n = strlen(msg);
             if (n && msg[n-1] == '\n') msg[n-1] = '\0';
             status(msg);
-        } else {
-            snprintf(msg, sizeof msg, "Deleted %zu object%s from the token.",
-                     j->n_deleted, j->n_deleted == 1 ? "" : "s");
-            status(msg);
         }
         if (j->keys || j->objs) show_keys(j);
+        if (!j->rc) {
+            snprintf(msg, sizeof msg, "Deleted %zu object%s from the token.%s",
+                     j->n_deleted, j->n_deleted == 1 ? "" : "s",
+                     A.n_objs == 0 ? " The token is now empty: log out to re-initialise it."
+                                   : "");
+            status(msg);
+        }
+        break;
+    }
+    case J_ATTRS: {
+        /* Shown only if that object is still the one selected: a click on
+         * another row while this ran has its own job coming. */
+        GtkListBoxRow *r = gtk_list_box_get_selected_row(GTK_LIST_BOX(A.keys_box));
+        int idx = r ? gtk_list_box_row_get_index(r) : -1;
+        if (idx < 0 || (size_t)idx >= A.n_objs || A.objs[idx].handle != j->object) break;
+        if (j->rc) { gtk_label_set_text(GTK_LABEL(A.attr_view), j->e.msg); break; }
+        GString *t = g_string_new(NULL);
+        for (size_t i = 0; i < j->n_attrs; i++)
+            g_string_append_printf(t, "%s%-24s %s", i ? "\n" : "",
+                                   j->attrs[i].name, j->attrs[i].value);
+        gtk_label_set_text(GTK_LABEL(A.attr_view), t->str);
+        g_string_free(t, TRUE);
         break;
     }
     case J_LOGOUT:
@@ -1385,11 +1428,15 @@ static void on_init(GtkButton *b, gpointer ud) {
         status("The token label is at most 32 characters (PKCS#11 pads it to exactly that).");
         return;
     }
-    if (A.operator_mode && sl->has_token) {
+    /* Operator mode re-initialises a token only once it has seen it empty:
+     * listed while logged in, with nothing on it. Anything else could hold a
+     * CA's key, and C_InitToken does not ask. */
+    int seen_empty = sl->has_token && A.empty_slot == (long)sl->id;
+    if (A.operator_mode && sl->has_token && !seen_empty) {
         clear_init_pins();
-        status("Refused in operator mode: this slot holds an initialised token, and "
-               "re-initialising it destroys every key on it. Exploration mode asks for "
-               "confirmation; fhsm-token init --force does it from the command line.");
+        status("Refused in operator mode: this token may hold keys, and re-initialising "
+               "destroys every one. Log in, delete what is on it until the list is empty, "
+               "log out, then re-initialise. Exploration mode asks instead of refusing.");
         return;
     }
     const char *so = gtk_editable_get_text(GTK_EDITABLE(A.init_so));
@@ -1421,9 +1468,11 @@ static void on_init(GtkButton *b, gpointer ud) {
     }
     GtkAlertDialog *d = gtk_alert_dialog_new("Re-initialise slot %lu (\"%s\")?",
                                              sl->id, sl->label);
-    gtk_alert_dialog_set_detail(d,
-        "C_InitToken destroys every object on the token: every key, a CA's included. "
-        "This is not undone.");
+    gtk_alert_dialog_set_detail(d, seen_empty
+        ? "This token was empty when this window last listed it. C_InitToken destroys "
+          "whatever another program has put on it since. This is not undone."
+        : "C_InitToken destroys every object on the token: every key, a CA's included. "
+          "This is not undone.");
     const char *const buttons[] = { "Cancel", "Destroy and re-initialise", NULL };
     gtk_alert_dialog_set_buttons(d, buttons);
     gtk_alert_dialog_set_cancel_button(d, 0);
@@ -1442,10 +1491,17 @@ static void on_keygen(GtkWidget *w, gpointer ud) {
     j->session = A.session;
     j->label = g_strdup(label);
     j->operator_mode = A.operator_mode;
-    j->alg = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(A.keygen_alg));
+    /* One list: the signature algorithms, then the secret keys. */
+    int sel = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(A.keygen_alg));
+    j->alg = sel < PKIOPS_ALG_COUNT ? sel : -1;
+    j->skey = sel < PKIOPS_ALG_COUNT ? -1 : sel - PKIOPS_ALG_COUNT;
     char msg[96];
-    snprintf(msg, sizeof msg, "Generating a %s key pair...",
-             pkiops_alg_name((enum pkiops_alg)j->alg));
+    if (j->skey >= 0)
+        snprintf(msg, sizeof msg, "Generating a %s secret key...",
+                 pkiops_skey_name((enum pkiops_skey)j->skey));
+    else
+        snprintf(msg, sizeof msg, "Generating a %s key pair...",
+                 pkiops_alg_name((enum pkiops_alg)j->alg));
     status(msg);
     start(j);
 }
@@ -1460,9 +1516,32 @@ static const char *chosen_key(GtkWidget *drop) {
 /* --- deleting objects (docs/fhsm-crypt-plan.md stage 0) ------------------ */
 
 static void on_object_selected(GtkListBox *box, GtkListBoxRow *row, gpointer ud) {
-    (void)box; (void)row; (void)ud;
+    (void)box; (void)ud;
     if (A.closing) return;          /* the list empties itself as it is destroyed */
     update_sensitivity();
+    int idx = row ? gtk_list_box_row_get_index(row) : -1;
+    if (idx < 0 || (size_t)idx >= A.n_objs || !A.logged_in) {
+        gtk_label_set_text(GTK_LABEL(A.attr_view), "");
+        return;
+    }
+    if (A.busy) {                   /* one call into the module at a time */
+        gtk_label_set_text(GTK_LABEL(A.attr_view), "Busy: select the row again in a moment.");
+        return;
+    }
+    struct job *j = g_new0(struct job, 1);
+    j->kind = J_ATTRS;
+    j->session = A.session;
+    j->object = A.objs[idx].handle;
+    gtk_label_set_text(GTK_LABEL(A.attr_view), "Reading the attributes...");
+    /* Not start(): that takes the focus off whatever has it, so that an entry
+     * turning insensitive gets its focus-out -- and here what has the focus is
+     * the list, whose arrow keys should keep moving through it. */
+    A.busy = 1;
+    update_sensitivity();
+    GTask *t = g_task_new(NULL, NULL, job_done, NULL);
+    g_task_set_task_data(t, j, job_free);
+    g_task_run_in_thread(t, run_job);
+    g_object_unref(t);
 }
 
 /* The confirmation: one tick box per object sharing the label, the clicked
@@ -2349,6 +2428,24 @@ static GtkWidget *alg_drop(void) {
     return d;
 }
 
+/* The Token tab's: every signature algorithm, then the secret keys
+ * fhsm-crypt makes. Operator mode's Create a new CA keeps alg_drop: a CA
+ * signs. */
+static GtkWidget *keygen_drop(void) {
+    GtkStringList *l = gtk_string_list_new(NULL);
+    for (int i = 0; i < PKIOPS_ALG_COUNT; i++)
+        gtk_string_list_append(l, pkiops_alg_name((enum pkiops_alg)i));
+    for (int i = 0; i < PKIOPS_SKEY_COUNT; i++)
+        gtk_string_list_append(l, pkiops_skey_name((enum pkiops_skey)i));
+    GtkWidget *d = gtk_drop_down_new(G_LIST_MODEL(l), NULL);
+    gtk_widget_set_tooltip_text(d,
+        "Signature key pairs first; their algorithm is used for everything signed "
+        "with them, and the composite exists only in PROFILE=all-mechanisms builds. "
+        "Then aes128 and aes256, which encrypt and wrap, and hmac, a 32-byte secret "
+        "for MACs: sensitive, and never leave the token.");
+    return d;
+}
+
 static GtkWidget *entry_with(const char *placeholder) {
     GtkWidget *e = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(e), placeholder);
@@ -2838,15 +2935,23 @@ static void activate(GtkApplication *app, gpointer ud) {
     gtk_widget_set_hexpand(A.delete_btn, TRUE);
     gtk_box_append(GTK_BOX(row), A.delete_btn);
     gtk_box_append(GTK_BOX(left), row);
+    gtk_box_append(GTK_BOX(left), heading("Attributes of the selected object"));
+    A.attr_view = gtk_label_new("");
+    gtk_label_set_selectable(GTK_LABEL(A.attr_view), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(A.attr_view), 0.0f);
+    gtk_label_set_yalign(GTK_LABEL(A.attr_view), 0.0f);
+    gtk_widget_add_css_class(A.attr_view, "monospace");
+    gtk_widget_set_margin_start(A.attr_view, 6);
+    gtk_box_append(GTK_BOX(left), scrolled(A.attr_view, 140));
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     A.label_entry = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(A.label_entry), "label for a new key pair");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(A.label_entry), "label for a new key");
     gtk_widget_set_hexpand(A.label_entry, TRUE);
     g_signal_connect(A.label_entry, "activate", G_CALLBACK(on_keygen), NULL);
     gtk_box_append(GTK_BOX(row), A.label_entry);
-    A.keygen_alg = alg_drop();
+    A.keygen_alg = keygen_drop();
     gtk_box_append(GTK_BOX(row), A.keygen_alg);
-    A.keygen_btn = gtk_button_new_with_label("Generate key pair");
+    A.keygen_btn = gtk_button_new_with_label("Generate key");
     g_signal_connect(A.keygen_btn, "clicked", G_CALLBACK(on_keygen), NULL);
     gtk_box_append(GTK_BOX(row), A.keygen_btn);
     gtk_box_append(GTK_BOX(left), row);
