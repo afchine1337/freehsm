@@ -3,8 +3,8 @@
 # Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 # ===========================================================================
-# fhsm_crypt_cli.sh --- fhsm-crypt list, keygen and delete, as an operator
-# types them (docs/fhsm-crypt-plan.md, stages 0 and 1).
+# fhsm_crypt_cli.sh --- fhsm-crypt list, keygen, delete, encrypt and decrypt,
+# as an operator types them (docs/fhsm-crypt-plan.md, stages 0 to 2).
 #
 # The property that matters is delete's: without --yes it names what it would
 # destroy and destroys nothing, and with --yes it destroys exactly the objects
@@ -120,6 +120,31 @@ ok "keygen without --alg is refused" $?
 q "$CRYPT" delete --label sym --yes --module "$LIB"
 [ $? -eq 0 ] && grep -q "destroyed secret key" "$W/out"
 ok "a secret key is deleted like any other" $?
+
+echo "fhsm-crypt: encrypt and decrypt"
+printf 'a file to keep to ourselves\n' > "$W/plain"
+q "$CRYPT" encrypt --key mac --in "$W/plain" --out "$W/x.p7m" --module "$LIB"
+[ $? -eq 3 ] && grep -q "not an AES key" "$W/out"
+ok "an HMAC key does not encrypt files (exit 3)" $?
+
+q "$CRYPT" keygen --label filekey --alg aes256 --module "$LIB" \
+  && q "$CRYPT" encrypt --key filekey --in "$W/plain" --out "$W/plain.p7m" --module "$LIB" \
+  && q "$CRYPT" decrypt --in "$W/plain.p7m" --out "$W/plain.back" --module "$LIB" \
+  && grep -q 'with "filekey"' "$W/out" && cmp -s "$W/plain" "$W/plain.back"
+ok "encrypt, then decrypt with the key the file names" $?
+
+q "$CRYPT" decrypt --in "$W/plain.p7m" --out "$W/plain.back" --module "$LIB"
+[ $? -eq 1 ] && grep -q "exists" "$W/out"
+ok "an existing output is not written over (exit 1)" $?
+
+cp "$W/plain.p7m" "$W/bad.p7m" && printf 'X' | dd of="$W/bad.p7m" bs=1 seek=$(( $(wc -c < "$W/bad.p7m") - 20 )) conv=notrunc 2>/dev/null
+q "$CRYPT" decrypt --in "$W/bad.p7m" --out "$W/bad.out" --module "$LIB"
+[ $? -eq 4 ] && [ ! -e "$W/bad.out" ]
+ok "an altered file: exit 4, and no output" $?
+
+q "$CRYPT" encrypt --in "$W/plain" --out "$W/y.p7m" --module "$LIB"
+[ $? -eq 1 ]
+ok "encrypt without --key is a usage error" $?
 
 q "$CRYPT" list --class nonsense --module "$LIB"
 [ $? -eq 1 ] && grep -q "takes key, cert or all" "$W/out"

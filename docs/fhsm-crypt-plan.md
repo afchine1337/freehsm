@@ -2,7 +2,8 @@
 
 Status: accepted 2026-10-09. Stages 0 and 1 built the same day; stage 1 also
 brought, at the user's request, an attribute view for every object and
-operator-mode re-initialisation of a token seen empty.
+operator-mode re-initialisation of a token seen empty. Stage 2 built
+2026-10-10, command line and tests; its window comes with stage 5.
 
 ## What is being asked
 
@@ -116,13 +117,16 @@ line.
 
 ## Open questions
 
-- **Which CMS calls let the token hold the key-encryption key.** OpenSSL's CMS
-  API wraps and unwraps the content key itself when given the key-encryption
-  key's bytes, which a sensitive token key never yields. Settled by a probe at
-  the start of stage 2: either OpenSSL lets the content key be supplied and
-  the `RecipientInfo` be filled with the token's result, or the
-  `RecipientInfo` is assembled here, the way `fhsm_composite.c` assembles
-  certificates. The format does not change either way.
+- **Which CMS calls let the token hold the key-encryption key.** Settled
+  2026-10-10, against the OpenSSL 3.3 and 3.5 headers: none. A KEK
+  recipient is made with `CMS_add0_recipient_key` and opened with
+  `CMS_decrypt_set1_key` or `CMS_RecipientInfo_set0_key`, all from the
+  key-encryption key's bytes; nothing takes a content key, and nothing
+  exposes a `RecipientInfo`'s `encryptedKey`. So `tools/cms_env.c` writes and
+  reads the structure -- definite-length DER, a primitive encryptedContent,
+  no authenticated attributes, which is also what OpenSSL writes for this
+  case -- and OpenSSL does the AES-GCM. The test checks the result against
+  OpenSSL in both directions.
 - **`KEMRecipientInfo` in OpenSSL 3.5.** RFC 9629 support, and ML-KEM in it,
   are to be measured on the Debian 13 build, not assumed. If it is absent,
   stage 4 is either assembled here or left until it arrives -- a decision to

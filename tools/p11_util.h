@@ -100,6 +100,10 @@ static struct {
     CK_RV (*DestroyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE);
     CK_RV (*GenerateKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_ATTRIBUTE*,CK_ULONG,
                          CK_OBJECT_HANDLE*);
+    CK_RV (*EncryptInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
+    CK_RV (*Encrypt)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
+    CK_RV (*DecryptInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
+    CK_RV (*Decrypt)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
 } p11;
 
 /* Set by each tool before anything can fail. Extracting this header from
@@ -198,6 +202,10 @@ enum {                          /* PKCS#11 v2.40 §C.6 slot numbers */
     P11_SLOT_Login             = 18,
     P11_SLOT_DestroyObject     = 22,
     P11_SLOT_GenerateKey       = 58,
+    P11_SLOT_EncryptInit       = 29,
+    P11_SLOT_Encrypt           = 30,
+    P11_SLOT_DecryptInit       = 33,
+    P11_SLOT_Decrypt           = 34,
     P11_SLOT_GetAttributeValue = 24,
     P11_SLOT_FindObjectsInit   = 26,
     P11_SLOT_FindObjects       = 27,
@@ -260,6 +268,10 @@ P11_MAYBE_UNUSED static int p11_load_module_e(const char *path, struct p11_err *
         #undef T
         *(void**)&p11.DestroyObject = fl->pfn[P11_SLOT_DestroyObject];
         *(void**)&p11.GenerateKey   = fl->pfn[P11_SLOT_GenerateKey];
+        *(void**)&p11.EncryptInit   = fl->pfn[P11_SLOT_EncryptInit];
+        *(void**)&p11.Encrypt       = fl->pfn[P11_SLOT_Encrypt];
+        *(void**)&p11.DecryptInit   = fl->pfn[P11_SLOT_DecryptInit];
+        *(void**)&p11.Decrypt       = fl->pfn[P11_SLOT_Decrypt];
         return 0;
     }
 
@@ -286,6 +298,10 @@ P11_MAYBE_UNUSED static int p11_load_module_e(const char *path, struct p11_err *
     #undef S
     *(void**)&p11.DestroyObject = dlsym(p11.h, "C_DestroyObject");
     *(void**)&p11.GenerateKey   = dlsym(p11.h, "C_GenerateKey");
+    *(void**)&p11.EncryptInit   = dlsym(p11.h, "C_EncryptInit");
+    *(void**)&p11.Encrypt       = dlsym(p11.h, "C_Encrypt");
+    *(void**)&p11.DecryptInit   = dlsym(p11.h, "C_DecryptInit");
+    *(void**)&p11.Decrypt       = dlsym(p11.h, "C_Decrypt");
     return 0;
 }
 
@@ -308,7 +324,8 @@ P11_MAYBE_UNUSED static int p11_find_one_e(CK_SESSION_HANDLE s, CK_ULONG cls, co
     p11.FindObjectsFinal(s);
     if (rv != CKR_OK) return p11_fail(e, 2, "C_FindObjects failed (0x%lx)\n", (unsigned long)rv);
     if (n == 0) return p11_fail(e, 3, "no %s key labelled \"%s\"\n",
-                                cls == CKO_PUBLIC_KEY ? "public" : "private", label);
+                                cls == CKO_PUBLIC_KEY ? "public"
+                                : cls == CKO_SECRET_KEY ? "secret" : "private", label);
     if (n > 1)  return p11_fail(e, 3, "%lu keys labelled \"%s\" -- ambiguous, "
                                 "refusing to guess\n", (unsigned long)n, label);
     *out = h[0];

@@ -243,6 +243,25 @@ int pkiops_skey_parse(const char *name, enum pkiops_skey *out, struct p11_err *e
 int pkiops_keygen_secret(pkiops_handle session, const char *label, enum pkiops_skey k,
                          pkiops_handle *key, struct p11_err *e);
 
+/* --- file encryption with a token AES key (docs/fhsm-crypt-plan.md stage 2)
+ *
+ * CMS AuthEnvelopedData (RFC 5083), one key-encryption-key recipient whose
+ * identifier is the key's label, AES-256-GCM content (RFC 5084), DER. The
+ * content key is fresh per file and wrapped by the token key with AES key
+ * wrap; the token key never leaves the token. Files are streamed, not held.
+ *
+ * Neither function writes over an existing file, and neither leaves one
+ * behind when it fails: decryption keeps its output only once the GCM tag
+ * has verified. Codes: 1 a file this does not read or an output that exists,
+ * 2 the module or the file system, 3 no such key, 4 a file that does not
+ * open with the key -- altered, or made for another. */
+int pkiops_encrypt_file(pkiops_handle session, const char *label, const char *in_path,
+                        const char *out_path, struct p11_err *e);
+/* The key is found from the file: the first recipient naming an AES key on
+ * the token. Its label goes into `used` (may be NULL). */
+int pkiops_decrypt_file(pkiops_handle session, const char *in_path, const char *out_path,
+                        char *used, size_t used_cap, struct p11_err *e);
+
 /* A key pair for `alg`, both halves on the token, the private one sensitive
  * and for signing only. RSA keys are 3072 bits. */
 int pkiops_keygen_alg(pkiops_handle session, const char *label, enum pkiops_alg alg,

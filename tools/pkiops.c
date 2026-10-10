@@ -70,6 +70,7 @@ static const char *mech_name(CK_ULONG m, char buf[32]) {
     case 0x1057UL: return "CKM_EDDSA";
     case 0x0350UL: return "CKM_GENERIC_SECRET_KEY_GEN";
     case 0x1080UL: return "CKM_AES_KEY_GEN";
+    case 0x2109UL: return "CKM_AES_KEY_WRAP";
     default: break;
     }
     snprintf(buf, 32, "mechanism 0x%lx", (unsigned long)m);
@@ -147,6 +148,10 @@ static struct {
     CK_RV (*DestroyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE);
     CK_RV (*GenerateKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_ATTRIBUTE*,CK_ULONG,
                          CK_OBJECT_HANDLE*);
+    CK_RV (*EncryptInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
+    CK_RV (*Encrypt)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
+    CK_RV (*DecryptInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
+    CK_RV (*Decrypt)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
 } real;
 
 static CK_RV w_Initialize(void *a) {
@@ -222,6 +227,34 @@ static CK_RV w_GenerateKey(CK_SESSION_HANDLE s, CK_MECHANISM *m, CK_ATTRIBUTE *t
     logcall("C_GenerateKey", rv, t0, "session %lu, %s, template %s -> key %lu",
             (unsigned long)s, m ? mech_name(m->mechanism, mb) : "no mechanism", ty,
             rv == CKR_OK && k ? (unsigned long)*k : 0UL);
+    return rv;
+}
+/* The cipher calls: mechanism and key, byte counts in and out. Never a byte
+ * of data -- here the data is a content key. */
+static CK_RV w_EncryptInit(CK_SESSION_HANDLE s, CK_MECHANISM *m, CK_OBJECT_HANDLE k) {
+    double t = now_ms(); CK_RV rv = real.EncryptInit(s, m, k);
+    char mb[32];
+    logcall("C_EncryptInit", rv, t, "session %lu, %s, key %lu", (unsigned long)s,
+            m ? mech_name(m->mechanism, mb) : "no mechanism", (unsigned long)k);
+    return rv;
+}
+static CK_RV w_Encrypt(CK_SESSION_HANDLE s, CK_BYTE *in, CK_ULONG n, CK_BYTE *out, CK_ULONG *on) {
+    double t = now_ms(); CK_RV rv = real.Encrypt(s, in, n, out, on);
+    logcall("C_Encrypt", rv, t, "session %lu, %lu bytes in -> %lu out%s, not shown", (unsigned long)s,
+            (unsigned long)n, rv == CKR_OK && on ? (unsigned long)*on : 0UL, out ? "" : " (size)");
+    return rv;
+}
+static CK_RV w_DecryptInit(CK_SESSION_HANDLE s, CK_MECHANISM *m, CK_OBJECT_HANDLE k) {
+    double t = now_ms(); CK_RV rv = real.DecryptInit(s, m, k);
+    char mb[32];
+    logcall("C_DecryptInit", rv, t, "session %lu, %s, key %lu", (unsigned long)s,
+            m ? mech_name(m->mechanism, mb) : "no mechanism", (unsigned long)k);
+    return rv;
+}
+static CK_RV w_Decrypt(CK_SESSION_HANDLE s, CK_BYTE *in, CK_ULONG n, CK_BYTE *out, CK_ULONG *on) {
+    double t = now_ms(); CK_RV rv = real.Decrypt(s, in, n, out, on);
+    logcall("C_Decrypt", rv, t, "session %lu, %lu bytes in -> %lu out%s, not shown", (unsigned long)s,
+            (unsigned long)n, rv == CKR_OK && on ? (unsigned long)*on : 0UL, out ? "" : " (size)");
     return rv;
 }
 static CK_RV w_DigestInit(CK_SESSION_HANDLE s, CK_MECHANISM *m) {
@@ -322,6 +355,7 @@ static void install_wrappers(void) {
     W(SignFinal); W(VerifyInit); W(VerifyUpdate); W(VerifyFinal); W(InitToken);
     W(InitPIN); W(GetTokenInfo); W(GenerateRandom); W(GetSlotList);
     W(GetMechanismList); W(GetMechanismInfo); W(DestroyObject); W(GenerateKey);
+    W(EncryptInit); W(Encrypt); W(DecryptInit); W(Decrypt);
     #undef W
 }
 
@@ -1800,4 +1834,317 @@ int pkiops_object_attrs(pkiops_handle session, pkiops_handle object,
     *out = o.v;
     *n = o.n;
     return 0;
+}
+
+/* --- file encryption with a token AES key (docs/fhsm-crypt-plan.md stage 2)
+ *
+ * CMS AuthEnvelopedData, one KEK recipient, AES-256-GCM content; the
+ * structure is written and read by tools/cms_env.c. The content key is 32
+ * fresh bytes per file, wrapped and unwrapped by the token's AES key with
+ * AES key wrap (RFC 3394) through C_Encrypt and C_Decrypt: the token key
+ * never leaves the token, and the content key lives in this process for as
+ * long as the file takes, then is cleansed.
+ *
+ * The KEK identifier is the key's label, so a file says which key opens it
+ * and decryption finds that key itself.
+ *
+ * Nothing is written over an existing file, and nothing is left behind on
+ * failure: output goes to a temporary file beside its destination, renamed
+ * into place only once complete -- for decryption, only once the GCM tag
+ * has verified, so plaintext that does not authenticate is never kept.
+ * ------------------------------------------------------------------------- */
+#include "cms_env.h"
+
+#include <errno.h>
+#include <openssl/rand.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define CKM_AES_KEY_WRAP_ 0x00002109UL
+#define ENV_CHUNK         65536u
+#define ENV_TAG_LEN       16u
+#define ENV_NONCE_LEN     12u
+
+/* The secret AES key labelled `label`, and its size in bits. */
+static int env_key(CK_SESSION_HANDLE s, const char *label, CK_OBJECT_HANDLE *h, int *bits,
+                   struct p11_err *e) {
+    if (p11_find_one_e(s, CKO_SECRET_KEY, label, h, e)) return e->code;
+    CK_ULONG kt = 0, vl = 0;
+    if (get_ulong(s, *h, CKA_KEY_TYPE_, &kt, e)) return e->code;
+    if (kt != CKK_AES_)
+        return p11_fail(e, 3, "the secret key \"%s\" is not an AES key\n", label);
+    if (get_ulong(s, *h, CKA_VALUE_LEN_, &vl, e)) return e->code;
+    if (vl != 16 && vl != 24 && vl != 32)
+        return p11_fail(e, 3, "the AES key \"%s\" is %lu bytes long\n", label, (unsigned long)vl);
+    *bits = (int)vl * 8;
+    return 0;
+}
+
+static int token_wrap(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE h, const uint8_t *cek, size_t n,
+                      uint8_t *out, size_t *out_len, struct p11_err *e) {
+    if (!p11.EncryptInit || !p11.Encrypt)
+        return p11_fail(e, 2, "the module does not implement C_Encrypt\n");
+    CK_MECHANISM m = { CKM_AES_KEY_WRAP_, NULL, 0 };
+    CK_RV rv = p11.EncryptInit(s, &m, h);
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_EncryptInit(CKM_AES_KEY_WRAP) failed (0x%lx)\n", (unsigned long)rv);
+    CK_ULONG ol = (CK_ULONG)*out_len;
+    rv = p11.Encrypt(s, (CK_BYTE *)(uintptr_t)cek, (CK_ULONG)n, out, &ol);
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_Encrypt(CKM_AES_KEY_WRAP) failed (0x%lx)\n", (unsigned long)rv);
+    if (ol != n + 8) return p11_fail(e, 2, "AES key wrap returned %lu bytes for %lu\n",
+                                     (unsigned long)ol, (unsigned long)n);
+    *out_len = (size_t)ol;
+    return 0;
+}
+
+static int token_unwrap(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE h, const uint8_t *in, size_t n,
+                        uint8_t *out, size_t want, struct p11_err *e) {
+    if (!p11.DecryptInit || !p11.Decrypt)
+        return p11_fail(e, 2, "the module does not implement C_Decrypt\n");
+    CK_MECHANISM m = { CKM_AES_KEY_WRAP_, NULL, 0 };
+    CK_RV rv = p11.DecryptInit(s, &m, h);
+    if (rv != CKR_OK) return p11_fail(e, 2, "C_DecryptInit(CKM_AES_KEY_WRAP) failed (0x%lx)\n", (unsigned long)rv);
+    uint8_t buf[64];
+    CK_ULONG ol = sizeof buf;
+    rv = p11.Decrypt(s, (CK_BYTE *)(uintptr_t)in, (CK_ULONG)n, buf, &ol);
+    if (rv != CKR_OK) {
+        OPENSSL_cleanse(buf, sizeof buf);
+        /* AES key wrap carries its own integrity check: a wrong key fails
+         * here, before a byte of content is touched. */
+        return p11_fail(e, 4, "the content key does not unwrap with this key (0x%lx): "
+                              "the file was not made for it, or was altered\n", (unsigned long)rv);
+    }
+    if (ol != want) {
+        OPENSSL_cleanse(buf, sizeof buf);
+        return p11_fail(e, 4, "the content key is %lu bytes; AES-%lu-GCM needs %lu\n",
+                        (unsigned long)ol, (unsigned long)want * 8, (unsigned long)want);
+    }
+    memcpy(out, buf, want);
+    OPENSSL_cleanse(buf, sizeof buf);
+    return 0;
+}
+
+/* A temporary file beside `path`, for writing; *tmp is malloc'd. */
+static FILE *temp_beside(const char *path, char **tmp, struct p11_err *e) {
+    size_t n = strlen(path) + 8;
+    char *t = malloc(n);
+    if (!t) { p11_fail(e, 2, "out of memory\n"); return NULL; }
+    snprintf(t, n, "%s.XXXXXX", path);
+    int fd = mkstemp(t);
+    if (fd < 0) { p11_fail(e, 2, "cannot create a file beside %s: %s\n", path, strerror(errno)); free(t); return NULL; }
+    FILE *f = fdopen(fd, "wb");
+    if (!f) { p11_fail(e, 2, "cannot write %s: %s\n", t, strerror(errno)); close(fd); unlink(t); free(t); return NULL; }
+    *tmp = t;
+    return f;
+}
+
+/* Rename into place when `ok`, remove otherwise. Frees `tmp`. */
+static int temp_finish(FILE *f, char *tmp, const char *path, int ok, struct p11_err *e) {
+    int rc = 0;
+    if (ok && (fflush(f) != 0 || fsync(fileno(f)) != 0)) {
+        rc = p11_fail(e, 2, "cannot write %s: %s\n", path, strerror(errno));
+        ok = 0;
+    }
+    if (fclose(f) != 0 && ok) { rc = p11_fail(e, 2, "cannot write %s: %s\n", path, strerror(errno)); ok = 0; }
+    if (ok && rename(tmp, path) != 0) { rc = p11_fail(e, 2, "cannot rename onto %s: %s\n", path, strerror(errno)); ok = 0; }
+    if (!ok) unlink(tmp);
+    free(tmp);
+    return rc;
+}
+
+static int refuse_existing(const char *path, struct p11_err *e) {
+    struct stat st;
+    if (stat(path, &st) == 0)
+        return p11_fail(e, 1, "%s exists; nothing is written over it\n", path);
+    return 0;
+}
+
+static const char *gcm_name(int bits) {
+    return bits == 128 ? "AES-128-GCM" : bits == 192 ? "AES-192-GCM" : "AES-256-GCM";
+}
+
+int pkiops_encrypt_file(pkiops_handle session, const char *label, const char *in_path,
+                        const char *out_path, struct p11_err *e) {
+    CK_SESSION_HANDLE s = (CK_SESSION_HANDLE)session;
+    if (refuse_existing(out_path, e)) return e->code;
+    CK_OBJECT_HANDLE h = 0; int kbits = 0;
+    if (env_key(s, label, &h, &kbits, e)) return e->code;
+
+    FILE *in = fopen(in_path, "rb");
+    if (!in) return p11_fail(e, 2, "cannot read %s: %s\n", in_path, strerror(errno));
+    struct stat st;
+    if (fstat(fileno(in), &st) != 0 || !S_ISREG(st.st_mode)) {
+        fclose(in);
+        return p11_fail(e, 2, "%s is not a regular file\n", in_path);
+    }
+    uint64_t size = (uint64_t)st.st_size;
+
+    uint8_t cek[32], nonce[ENV_NONCE_LEN], ekey[48], tag[ENV_TAG_LEN];
+    size_t ekey_len = sizeof ekey;
+    int rc = 0;
+    FILE *out = NULL; char *tmp = NULL;
+    EVP_CIPHER *ciph = NULL; EVP_CIPHER_CTX *ctx = NULL;
+    uint8_t *ib = NULL, *ob = NULL;
+    int ok = 0;
+
+    if (RAND_priv_bytes(cek, sizeof cek) != 1 || RAND_bytes(nonce, sizeof nonce) != 1) {
+        rc = p11_fail(e, 2, "no random bytes for the content key\n"); goto done;
+    }
+    if (token_wrap(s, h, cek, sizeof cek, ekey, &ekey_len, e)) { rc = e->code; goto done; }
+    if (!(out = temp_beside(out_path, &tmp, e))) { rc = e->code; goto done; }
+    if (cmsenv_write_head(out, (const uint8_t *)label, strlen(label), kbits, ekey, ekey_len,
+                          256, nonce, sizeof nonce, size, ENV_TAG_LEN)) {
+        rc = p11_fail(e, 2, "cannot write %s\n", out_path); goto done;
+    }
+    ciph = EVP_CIPHER_fetch(NULL, "AES-256-GCM", NULL);
+    ctx = EVP_CIPHER_CTX_new();
+    ib = malloc(ENV_CHUNK); ob = malloc(ENV_CHUNK + 32);
+    if (!ciph || !ctx || !ib || !ob || EVP_EncryptInit_ex2(ctx, ciph, cek, nonce, NULL) != 1) {
+        rc = p11_fail(e, 2, "AES-256-GCM is not available\n"); goto done;
+    }
+    uint64_t seen = 0;
+    for (;;) {
+        size_t got = fread(ib, 1, ENV_CHUNK, in);
+        if (got == 0) break;
+        int w = 0;
+        if (EVP_EncryptUpdate(ctx, ob, &w, ib, (int)got) != 1 || fwrite(ob, 1, (size_t)w, out) != (size_t)w) {
+            rc = p11_fail(e, 2, "cannot encrypt into %s\n", out_path); goto done;
+        }
+        seen += got;
+    }
+    /* The head promised `size` bytes of content; a file that changed while
+     * it was read would make the structure lie about its own length. */
+    if (ferror(in) || seen != size) {
+        rc = p11_fail(e, 2, "%s changed while it was read\n", in_path); goto done;
+    }
+    int w = 0;
+    if (EVP_EncryptFinal_ex(ctx, ob, &w) != 1
+        || EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, ENV_TAG_LEN, tag) != 1
+        || cmsenv_write_tail(out, tag, ENV_TAG_LEN)) {
+        rc = p11_fail(e, 2, "cannot finish %s\n", out_path); goto done;
+    }
+    ok = 1;
+done:
+    OPENSSL_cleanse(cek, sizeof cek);
+    if (ib) { OPENSSL_cleanse(ib, ENV_CHUNK); free(ib); }
+    if (ob) { OPENSSL_cleanse(ob, ENV_CHUNK + 32); free(ob); }
+    EVP_CIPHER_CTX_free(ctx);
+    EVP_CIPHER_free(ciph);
+    fclose(in);
+    if (out) {
+        struct p11_err fe;
+        if (temp_finish(out, tmp, out_path, ok, &fe) && !rc) { *e = fe; rc = fe.code; }
+    }
+    return rc;
+}
+
+int pkiops_decrypt_file(pkiops_handle session, const char *in_path, const char *out_path,
+                        char *used, size_t used_cap, struct p11_err *e) {
+    CK_SESSION_HANDLE s = (CK_SESSION_HANDLE)session;
+    if (refuse_existing(out_path, e)) return e->code;
+    FILE *in = fopen(in_path, "rb");
+    if (!in) return p11_fail(e, 2, "cannot read %s: %s\n", in_path, strerror(errno));
+    struct stat st;
+    if (fstat(fileno(in), &st) != 0 || !S_ISREG(st.st_mode)) {
+        fclose(in);
+        return p11_fail(e, 2, "%s is not a regular file\n", in_path);
+    }
+    uint64_t size = (uint64_t)st.st_size;
+
+    int rc = 0, ok = 0;
+    uint8_t *head = malloc(CMSENV_HEAD_MAX), *ib = NULL, *ob = NULL, tail[256];
+    uint8_t cek[32];
+    FILE *out = NULL; char *tmp = NULL;
+    EVP_CIPHER *ciph = NULL; EVP_CIPHER_CTX *ctx = NULL;
+    struct cmsenv_head hd;
+    const char *why = NULL;
+    const uint8_t *tag = NULL;
+
+    if (!head) { rc = p11_fail(e, 2, "out of memory\n"); goto done; }
+    size_t hn = fread(head, 1, CMSENV_HEAD_MAX, in);
+    if (cmsenv_parse_head(head, hn, &hd, &why)) {
+        rc = p11_fail(e, 1, "%s: %s\n", in_path, why); goto done;
+    }
+    if (hd.content_off > size || hd.content_len > size - hd.content_off
+        || size - hd.content_off - hd.content_len > sizeof tail) {
+        rc = p11_fail(e, 1, "%s: its length does not match the structure it declares\n", in_path); goto done;
+    }
+    size_t tn = (size_t)(size - hd.content_off - hd.content_len);
+    if (fseeko(in, (off_t)(hd.content_off + hd.content_len), SEEK_SET) != 0
+        || fread(tail, 1, tn, in) != tn
+        || cmsenv_parse_tail(tail, tn, &hd, &tag, &why)) {
+        rc = p11_fail(e, 1, "%s: %s\n", in_path, why ? why : "cannot read its end"); goto done;
+    }
+
+    /* The first recipient whose identifier names an AES key on this token. */
+    size_t want = (size_t)hd.gcm_bits / 8;
+    int found = 0;
+    char names[200] = ""; size_t nl = 0;
+    for (size_t i = 0; i < hd.n_kek && !found; i++) {
+        const struct cmsenv_kek *k = &hd.kek[i];
+        char label[65];
+        if (k->id_len == 0 || k->id_len >= sizeof label || memchr(k->id, 0, k->id_len)) continue;
+        memcpy(label, k->id, k->id_len); label[k->id_len] = '\0';
+        int w = snprintf(names + nl, sizeof names - nl, "%s\"%s\"", nl ? ", " : "", label);
+        if (w > 0 && (size_t)w < sizeof names - nl) nl += (size_t)w;
+        CK_OBJECT_HANDLE h = 0; int kbits = 0; struct p11_err ignored;
+        if (env_key(s, label, &h, &kbits, &ignored)) continue;
+        if (kbits != k->wrap_bits) {
+            rc = p11_fail(e, 4, "the key \"%s\" is AES-%d; the file wraps its content key with AES-%d\n",
+                          label, kbits, k->wrap_bits);
+            goto done;
+        }
+        if (token_unwrap(s, h, k->ekey, k->ekey_len, cek, want, e)) { rc = e->code; goto done; }
+        if (used && used_cap) snprintf(used, used_cap, "%s", label);
+        found = 1;
+    }
+    if (!found) {
+        rc = p11_fail(e, 3, "no AES key on this token is named by the file's recipients%s%s\n",
+                      nl ? ": " : "", names);
+        goto done;
+    }
+
+    if (fseeko(in, (off_t)hd.content_off, SEEK_SET) != 0) {
+        rc = p11_fail(e, 2, "cannot read %s\n", in_path); goto done;
+    }
+    if (!(out = temp_beside(out_path, &tmp, e))) { rc = e->code; goto done; }
+    ciph = EVP_CIPHER_fetch(NULL, gcm_name(hd.gcm_bits), NULL);
+    ctx = EVP_CIPHER_CTX_new();
+    ib = malloc(ENV_CHUNK); ob = malloc(ENV_CHUNK + 32);
+    if (!ciph || !ctx || !ib || !ob
+        || EVP_DecryptInit_ex2(ctx, ciph, NULL, NULL, NULL) != 1
+        || EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, (int)hd.nonce_len, NULL) != 1
+        || EVP_DecryptInit_ex2(ctx, NULL, cek, hd.nonce, NULL) != 1) {
+        rc = p11_fail(e, 2, "%s is not available\n", gcm_name(hd.gcm_bits)); goto done;
+    }
+    for (uint64_t left = hd.content_len; left; ) {
+        size_t chunk = left < ENV_CHUNK ? (size_t)left : ENV_CHUNK;
+        int w = 0;
+        if (fread(ib, 1, chunk, in) != chunk
+            || EVP_DecryptUpdate(ctx, ob, &w, ib, (int)chunk) != 1
+            || fwrite(ob, 1, (size_t)w, out) != (size_t)w) {
+            rc = p11_fail(e, 2, "cannot decrypt %s\n", in_path); goto done;
+        }
+        left -= chunk;
+    }
+    int w = 0;
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, (int)hd.tag_len, (void *)(uintptr_t)tag) != 1
+        || EVP_DecryptFinal_ex(ctx, ob, &w) != 1) {
+        rc = p11_fail(e, 4, "%s does not authenticate: it was altered after it was made. "
+                            "Nothing was written.\n", in_path);
+        goto done;
+    }
+    ok = 1;
+done:
+    OPENSSL_cleanse(cek, sizeof cek);
+    if (ib) { OPENSSL_cleanse(ib, ENV_CHUNK); free(ib); }
+    if (ob) { OPENSSL_cleanse(ob, ENV_CHUNK + 32); free(ob); }
+    free(head);
+    EVP_CIPHER_CTX_free(ctx);
+    EVP_CIPHER_free(ciph);
+    fclose(in);
+    if (out) {
+        struct p11_err fe;
+        if (temp_finish(out, tmp, out_path, ok, &fe) && !rc) { *e = fe; rc = fe.code; }
+    }
+    return rc;
 }

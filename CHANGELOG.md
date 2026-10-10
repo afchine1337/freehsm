@@ -92,6 +92,20 @@ notes.*
   subject, issuer, serial and validity. A private or secret key's value is
   never asked for. `tests/test_pkiops_secret.c`.
 
+* **Files encrypted for a key on the token** (stage 2). `fhsm-crypt encrypt
+  --key L --in F --out F.p7m` writes CMS AuthEnvelopedData (RFC 5083),
+  AES-256-GCM content (RFC 5084), with one key-encryption-key recipient whose
+  identifier is the key's label; `fhsm-crypt decrypt` finds the key from the
+  file. The content key is fresh per file and wrapped by the token's AES key
+  with AES key wrap through `C_Encrypt` -- the token key never leaves it --
+  and files are streamed in 64 KiB chunks, not held. An existing output is
+  never written over, and decryption keeps its output only once the GCM tag
+  has verified; an altered file leaves nothing behind and exits 4. The
+  structure is written by hand because OpenSSL's CMS API makes and opens a
+  KEK recipient only from the key-encryption key's bytes, which a token key
+  never yields; `tests/test_pkiops_envelope.c` has OpenSSL open our files and
+  opens OpenSSL's, both ways.
+
 * **Operator mode re-initialises a token it has seen empty.** It refused any
   initialised token, so a CA's operator who had deleted everything still had
   to leave the mode. A token listed while logged in with nothing on it may now

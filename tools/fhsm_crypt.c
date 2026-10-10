@@ -8,8 +8,12 @@
  *    fhsm-crypt list   [--class key|cert|all] [--module PATH] [--slot N]
  *    fhsm-crypt keygen --label NAME --alg aes128|aes256|hmac
  *    fhsm-crypt show   --label NAME [--class key|cert|all]
+ *    fhsm-crypt encrypt --key LABEL --in FILE --out FILE.p7m
+ *    fhsm-crypt decrypt --in FILE.p7m --out FILE
  *    fhsm-crypt delete --label NAME [--class key|cert|all] [--yes]
- *  Encryption key pairs, and file encryption, come in the later stages of
+ *  Files are encrypted as CMS AuthEnvelopedData (RFC 5083), AES-256-GCM,
+ *  for an AES key on the token, and `openssl cms -decrypt` reads them given
+ *  that key. Encryption for a public key comes in the later stages of
  *  docs/fhsm-crypt-plan.md; signature keys stay with fhsm-csr, and each tool
  *  names the other when given the other's algorithm.
  *
@@ -41,6 +45,8 @@ static void usage(void) {
       "  fhsm-crypt list   [--class key|cert|all] [--module PATH] [--slot N]\n"
       "  fhsm-crypt keygen --label NAME --alg ALG ...\n"
       "  fhsm-crypt show   --label NAME [--class key|cert|all] ...\n"
+      "  fhsm-crypt encrypt --key LABEL --in FILE --out FILE.p7m ...\n"
+      "  fhsm-crypt decrypt --in FILE.p7m --out FILE ...\n"
       "  fhsm-crypt delete --label NAME [--class key|cert|all] [--yes] ...\n\n"
       "  --alg ALG       keygen: aes128, aes256 (encrypt and wrap) or hmac (a\n"
       "                  32-byte secret for HMAC). Sensitive, not extractable.\n"
@@ -50,10 +56,17 @@ static void usage(void) {
       "  --label NAME    show, delete: every object of the class carrying this label\n"
       "  --yes           delete: destroy them. Without it, delete lists what it\n"
       "                  would destroy and stops.\n"
+      "  --key LABEL     encrypt: the AES key on the token. decrypt finds the key\n"
+      "                  itself, from the file.\n"
+      "  --in, --out     encrypt, decrypt: the file read and the file written.\n"
+      "                  An existing --out is never written over, and a file\n"
+      "                  that does not authenticate leaves nothing behind.\n"
       "  --module PATH   PKCS#11 module (default ./libfreehsm.so)\n"
       "  --slot N        slot to address. Default: the one slot holding a token.\n\n"
       "  The PIN is read from FHSM_PIN. There is no --pin option: an argument\n"
-      "  is visible in ps to every user on the machine.\n");
+      "  is visible in ps to every user on the machine.\n\n"
+      "  Exit: 0 done, 1 usage or a file this does not read, 2 the module or the\n"
+      "  file system, 3 no such key, 4 the file does not open with the key.\n");
     exit(1);
 }
 
@@ -78,7 +91,7 @@ int main(int argc, char **argv) {
     if (argc < 2) usage();
     const char *cmd = argv[1];
     const char *module = "./libfreehsm.so", *label = NULL, *cls_name = "all";
-    const char *alg_name = NULL;
+    const char *alg_name = NULL, *key = NULL, *in = NULL, *out = NULL;
     long slot = -1;
     int yes = 0;
 
@@ -87,6 +100,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--label")  && i+1<argc) label    = argv[++i];
         else if (!strcmp(argv[i],"--class")  && i+1<argc) cls_name = argv[++i];
         else if (!strcmp(argv[i],"--alg")    && i+1<argc) alg_name = argv[++i];
+        else if (!strcmp(argv[i],"--key")    && i+1<argc) key      = argv[++i];
+        else if (!strcmp(argv[i],"--in")     && i+1<argc) in       = argv[++i];
+        else if (!strcmp(argv[i],"--out")    && i+1<argc) out      = argv[++i];
         else if (!strcmp(argv[i],"--slot")   && i+1<argc) {
             if (pkiops_parse_slot(argv[++i], &slot, &e)) fail(&e);
         }
@@ -110,7 +126,12 @@ int main(int argc, char **argv) {
 
     int is_list = !strcmp(cmd, "list"), is_delete = !strcmp(cmd, "delete");
     int is_keygen = !strcmp(cmd, "keygen"), is_show = !strcmp(cmd, "show");
-    if (!is_list && !is_delete && !is_keygen && !is_show) usage();
+    int is_enc = !strcmp(cmd, "encrypt"), is_dec = !strcmp(cmd, "decrypt");
+    if (!is_list && !is_delete && !is_keygen && !is_show && !is_enc && !is_dec) usage();
+    if ((is_enc || is_dec) && (!in || !out || label || yes)) usage();
+    if (is_enc && !key) usage();
+    if (!is_enc && key) usage();
+    if (!is_enc && !is_dec && (in || out)) usage();
     if ((is_delete || is_keygen || is_show) && !label) usage();
     if (is_show && yes) usage();
     if (is_list && (label || yes)) usage();
@@ -134,6 +155,18 @@ int main(int argc, char **argv) {
     pkiops_handle sid = 0, s = 0;
     if (pkiops_open(module, slot, PKIOPS_SLOT_WITH_TOKEN, &sid, &e)) fail(&e);
     if (pkiops_session_user(sid, (const uint8_t *)pin, strlen(pin), &s, &e)) fail(&e);
+
+    if (is_enc || is_dec) {
+        char used[65] = "";
+        int rc = is_enc ? pkiops_encrypt_file(s, key, in, out, &e)
+                        : pkiops_decrypt_file(s, in, out, used, sizeof used, &e);
+        if (rc) fprintf(stderr, "%s: %s", prog, e.msg);
+        else if (is_enc) fprintf(stderr, "fhsm-crypt: %s encrypted for \"%s\" into %s\n", in, key, out);
+        else             fprintf(stderr, "fhsm-crypt: %s decrypted with \"%s\" into %s\n", in, used, out);
+        pkiops_session_close(s);
+        pkiops_close();
+        return rc;
+    }
 
     if (is_keygen) {
         /* One label, one key: a second key under a label already in use is
