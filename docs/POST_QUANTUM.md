@@ -5,6 +5,7 @@
 | **ML-KEM-512/768/1024** | `CKM_ML_KEM*` (0x4021,0x4022) | ✅ FIPS 203 | OpenSSL 3.5 FIPS | **WIRED + tested** (`mlkem_e2e`) |
 | **Kyber alias** | `CKM_KYBER*` | Same as ML-KEM | OpenSSL 3.5 FIPS | **Alias of ML-KEM** in `fhsm_pkcs11_mechanisms.h` |
 | **ML-DSA-44/65/87** | `CKM_ML_DSA*` (0x4023,0x4024) | ✅ FIPS 204 | OpenSSL 3.5 FIPS | **WIRED + tested** (`mldsa_e2e`) |
+| **HashML-DSA** | `CKM_HASH_ML_DSA` (0x1F), `CKM_HASH_ML_DSA_<hash>` (0x23–0x2C) | ✅ FIPS 204 Algorithm 4 | OpenSSL 3.5 FIPS (M' built by the module) | **WIRED + tested** (`test_hash_ml_dsa`, NIST ACVP known answers) |
 | **SLH-DSA-SHA2-128s/192s/256s** | `CKM_SLH_DSA*` (0x4025,0x4026) | ✅ FIPS 205 | OpenSSL 3.5 FIPS | **WIRED + tested** (`slhdsa_e2e`) |
 | **Falcon / FN-DSA** | `CKM_FALCON*` (0x4032,0x4033) | ⚠️ FIPS 206 (draft) | oqsprovider required | **Constants declared**, dispatch returns NOT_APPROVED until oqsprovider loaded |
 | **LMS** | `CKM_LMS*` (0x4034,0x4035) | ✅ NIST SP 800-208 | oqsprovider | **Constants declared**, awaiting provider integration |

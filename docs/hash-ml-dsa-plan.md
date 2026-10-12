@@ -1,7 +1,10 @@
 # HashML-DSA in the module — plan
 
 Status: stage 1 done, 2026-10-12: `tests/test_hash_ml_dsa` passes under
-`nist-approved-only` and `all-mechanisms`. Branch `hash-ml-dsa`, for 2.4.0.
+`nist-approved-only` and `all-mechanisms`. Stage 2 done the same day, same
+two profiles, and the whole suite. Stage 3 written: the mechanisms are
+declared in `scripts/gen_p11_thunks.py`, awaiting the build and a
+pkcs11-check run. Branch `hash-ml-dsa`, for 2.4.0.
 
 ## What is being asked
 
@@ -62,8 +65,13 @@ rests on, and the only new bytes are the prefix and `OID ‖ PH(M)`.
 **Multipart** for the hash-specific mechanisms streams `M` into the digest
 and signs at Final: nothing proportional to the message is held.
 
-**The generic mechanism** checks that `ulDataLen` is the named hash's output
-length and refuses anything else with `CKR_DATA_LEN_RANGE`. It names the hash
+**The generic mechanism** is given `PH(M)` — v3.2 §6.67.6: "The data
+passed in is an already hashed message PH(M)" — and Table 283 sets its
+`C_Sign` input to the length of the hash, single-part only. `C_Sign` refuses
+any other length with `CKR_DATA_LEN_RANGE`; `C_Verify`, whose input the table
+gives as "any", answers `CKR_SIGNATURE_INVALID`. `C_SignUpdate`,
+`C_SignFinal`, `C_VerifyUpdate` and `C_VerifyFinal` answer
+`CKR_FUNCTION_NOT_SUPPORTED` and end the operation. It names the hash
 by digest mechanism: `CKM_SHA224` … `CKM_SHA512`, `CKM_SHA512_224`,
 `CKM_SHA512_256`, `CKM_SHA3_224` … `CKM_SHA3_512`. SHA-512/224 and SHA-512/256
 reach HashML-DSA only this way: they have no `CKM_HASH_ML_DSA_<hash>`.
@@ -96,13 +104,40 @@ works under the FIPS provider: `nist-approved-only` offers it.
    `tests/test_hash_ml_dsa.c` checks against the known answers.
    `CKM_ML_DSA` itself now also refuses a key that is not `CKK_ML_DSA` with
    `CKR_KEY_TYPE_INCONSISTENT` at Init, as the HashML-DSA mechanisms do.
-2. **Multipart** for the ten hash-specific mechanisms: stream `M` into the
-   digest instead of holding it, and refuse `C_SignUpdate` for the generic
-   mechanism, which is single-part.
+2. **Multipart** for the ten hash-specific mechanisms: `M` streamed into
+   the digest instead of held. At the first Final, `PH(M)` replaces the
+   message in the multipart buffer, so the retry after
+   `CKR_BUFFER_TOO_SMALL` signs the same `PH(M)` through the same
+   `sign_asymmetric()`. The generic mechanism's multipart calls are refused.
+   `op_init` now also releases a digest context an abandoned operation left,
+   which the composite mechanism needed as well.
 3. **Advertisement and documentation**: the generated mechanism table,
    `MECHANISMS.md`, `CKA_ALLOWED_MECHANISMS` handling, and a pkcs11-check run.
 
+## CHANGELOG, at the 2.4.0 merge
+
+Held here rather than written into `[Unreleased]`, which describes 2.3.1
+until that tag:
+
+    ### Added
+    * **HashML-DSA** (FIPS 204 Algorithm 4; PKCS#11 v3.2 §6.67.6-6.67.7):
+      `CKM_HASH_ML_DSA` and the ten `CKM_HASH_ML_DSA_<hash>`, SHA-2, SHA-3
+      and SHAKE, single- and multi-part, in both profiles. OpenSSL 3.5 has no
+      HashML-DSA: the module builds M' and signs it with ML-DSA.Sign_internal.
+      Checked byte for byte against NIST's deterministic ACVP signatures
+      (`tests/test_hash_ml_dsa`). Asked for by Govardhan Yadava's acvp-assay.
+
+    ### Changed
+    * `CKM_ML_DSA` refuses a key that is not `CKK_ML_DSA` with
+      `CKR_KEY_TYPE_INCONSISTENT` at Init; it failed at C_Sign before.
+
 ## Open questions
+
+- **pkcs11-check's generic test.** `TestHashMLDSAGeneric` signs a 47-byte
+  message with `CKM_HASH_ML_DSA`, where §6.67.6 asks for `PH(M)`. It lists
+  `CKR_DATA_LEN_RANGE` among the codes it reports as "not operational", so
+  this module will show there as an expected failure. To raise with Denis
+  once the stage 3 run shows it; `test_hash_slh_dsa.py` has the same shape.
 
 - **SHAKE in the generic mechanism.** v3.2 has no digest mechanism for
   SHAKE128 or SHAKE256 (only `CKM_SHAKE_*_KEY_DERIVATION`), so
