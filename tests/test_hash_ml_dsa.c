@@ -24,13 +24,19 @@
  *   (2) each G vector whose hash has a digest mechanism: the generic
  *       mechanism, given C_Digest's PH(M), gives the same signature -- the
  *       table's digest column and the mechanism column agree
- *   (3) each G vector with a hash-specific mechanism: two C_SignUpdate
- *       parts and C_SignFinal give the same signature as one-shot
+ *   (3) each G vector with a hash-specific mechanism, streamed: three
+ *       C_SignUpdate parts (one empty), a C_SignFinal into 16 bytes that
+ *       answers CKR_BUFFER_TOO_SMALL with the length, and the retry, which
+ *       gives NIST's signature
  *   (4) each V vector: C_Verify says CKR_OK or CKR_SIGNATURE_INVALID as
- *       NIST does
- *   (5) refusals at Init and at Sign: the generic mechanism without its
- *       parameter block, with a hash it cannot name, a context of 256
- *       bytes, an unknown hedge variant; PH(M) of the wrong length
+ *       NIST does, and so does C_VerifyUpdate / C_VerifyFinal where the
+ *       hash has its own mechanism
+ *   (5) refusals: the generic mechanism without its parameter block, with a
+ *       hash it cannot name, a context of 256 bytes, an unknown hedge
+ *       variant; PH(M) of the wrong length (CKR_DATA_LEN_RANGE at C_Sign,
+ *       CKR_SIGNATURE_INVALID at C_Verify, v3.2 Table 283); C_SignUpdate,
+ *       C_SignFinal and C_VerifyUpdate on the generic mechanism, which is
+ *       single-part, refused with CKR_FUNCTION_NOT_SUPPORTED
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -49,6 +55,8 @@ typedef struct { CK_ULONG hedgeVariant; CK_BYTE *pContext; CK_ULONG ulContextLen
 
 #define CKR_OK                     0UL
 #define CKR_DATA_LEN_RANGE         0x21UL
+#define CKR_FUNCTION_NOT_SUPPORTED 0x54UL
+#define CKR_BUFFER_TOO_SMALL       0x150UL
 #define CKR_MECHANISM_PARAM_INVALID 0x71UL
 #define CKR_SIGNATURE_INVALID      0xC0UL
 #define CKF_RW                     6UL
@@ -103,6 +111,8 @@ static CK_RV (*C_SignUpdate)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
 static CK_RV (*C_SignFinal)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG*);
 static CK_RV (*C_VerifyInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
 static CK_RV (*C_Verify)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG);
+static CK_RV (*C_VerifyUpdate)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
+static CK_RV (*C_VerifyFinal)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
 
 /* Hex to a fresh buffer; "-" is empty. NULL on a malformed field. */
 static CK_BYTE *unhex(const char *h, CK_ULONG *len) {
@@ -203,9 +213,10 @@ int main(void)
     SYM(C_Login); SYM(C_Logout); SYM(C_InitPIN);
     SYM(C_CreateObject); SYM(C_DestroyObject); SYM(C_DigestInit); SYM(C_Digest);
     SYM(C_SignInit); SYM(C_Sign); SYM(C_SignUpdate); SYM(C_SignFinal);
-    SYM(C_VerifyInit); SYM(C_Verify);
+    SYM(C_VerifyInit); SYM(C_Verify); SYM(C_VerifyUpdate); SYM(C_VerifyFinal);
     if (!C_CreateObject || !C_SignInit || !C_Sign || !C_SignUpdate || !C_SignFinal
-        || !C_VerifyInit || !C_Verify || !C_Digest || !C_DestroyObject) {
+        || !C_VerifyInit || !C_Verify || !C_VerifyUpdate || !C_VerifyFinal
+        || !C_Digest || !C_DestroyObject) {
         fprintf(stderr, "missing symbols\n"); return 2;
     }
 
@@ -229,7 +240,7 @@ int main(void)
     char *line = NULL; size_t cap = 0;
     char what[128];
     int gens = 0, vers = 0;
-    CK_OBJECT_HANDLE any_sk = 0;
+    CK_OBJECT_HANDLE any_sk = 0, any_pk = 0;
     CK_BYTE sig[8192];
 
     while (getline(&line, &cap, f) > 0) {
@@ -275,15 +286,18 @@ int main(void)
                 mech_t x;
                 CK_BYTE *d = msg; CK_ULONG dl = ml;
                 (void)setup(s, &x, hi, 0, ctx, ctxl, &d, &dl);
-                CK_ULONG half = ml / 2;
+                CK_ULONG half = ml / 2, small = 16;
+                CK_RV r3 = C_SignInit(s, &x.m, k);
+                if (r3 == CKR_OK) r3 = C_SignUpdate(s, msg, half);
+                if (r3 == CKR_OK) r3 = C_SignUpdate(s, msg + half, 0);
+                if (r3 == CKR_OK) r3 = C_SignUpdate(s, msg + half, ml - half);
+                CK_RV r_small = r3 == CKR_OK ? C_SignFinal(s, sig, &small) : r3;
                 sl = sizeof sig;
-                CK_RV r1 = C_SignInit(s, &x.m, k);
-                CK_RV r2 = r1 == CKR_OK ? C_SignUpdate(s, msg, half) : r1;
-                CK_RV r3 = r2 == CKR_OK ? C_SignUpdate(s, msg + half, ml - half) : r2;
-                CK_RV r4 = r3 == CKR_OK ? C_SignFinal(s, sig, &sl) : r3;
-                snprintf(what, sizeof what, "(3) %s %s in two parts: the same (rv 0x%lx)",
-                         fld[1], fld[2], r4);
-                ok(r4 == CKR_OK && sl == el && !memcmp(sig, exp, el), what);
+                CK_RV r_full = r_small == CKR_BUFFER_TOO_SMALL ? C_SignFinal(s, sig, &sl) : r_small;
+                snprintf(what, sizeof what, "(3) %s %s streamed, retried: the same (rv 0x%lx/0x%lx)",
+                         fld[1], fld[2], r_small, r_full);
+                ok(r_small == CKR_BUFFER_TOO_SMALL && small == el && r_full == CKR_OK
+                   && sl == el && !memcmp(sig, exp, el), what);
             }
             if (k && k != any_sk) (void)C_DestroyObject(s, k);
         } else {
@@ -299,7 +313,20 @@ int main(void)
                      fld[1], fld[2], specific ? "" : " via generic",
                      accepted ? "accepted" : "rejected", rv);
             ok(rv == (accepted ? CKR_OK : CKR_SIGNATURE_INVALID), what);
-            if (k) (void)C_DestroyObject(s, k);
+            if (k && specific) {
+                d = msg; dl = ml;
+                (void)setup(s, &x, hi, 0, ctx, ctxl, &d, &dl);
+                CK_ULONG half = ml / 2;
+                rv = C_VerifyInit(s, &x.m, k);
+                if (rv == CKR_OK) rv = C_VerifyUpdate(s, msg, half);
+                if (rv == CKR_OK) rv = C_VerifyUpdate(s, msg + half, ml - half);
+                if (rv == CKR_OK) rv = C_VerifyFinal(s, exp, el);
+                snprintf(what, sizeof what, "(4) %s %s streamed: %s (rv 0x%lx)",
+                         fld[1], fld[2], accepted ? "accepted" : "rejected", rv);
+                ok(rv == (accepted ? CKR_OK : CKR_SIGNATURE_INVALID), what);
+            }
+            if (!any_pk && k) any_pk = k;
+            else if (k) (void)C_DestroyObject(s, k);
         }
         free(ctx); free(msg); free(key); free(exp);
     }
@@ -339,6 +366,28 @@ int main(void)
         if (rv == CKR_OK)
             ok(C_Sign(s, ph, 33, sig, &sl) == CKR_DATA_LEN_RANGE,
                "(5) generic SHA-256 given 33 bytes: CKR_DATA_LEN_RANGE");
+        rv = C_SignInit(s, &m, any_sk);
+        ok(rv == CKR_OK && C_SignUpdate(s, ph, 32) == CKR_FUNCTION_NOT_SUPPORTED,
+           "(5) generic: C_SignUpdate refused, single-part");
+        rv = C_SignInit(s, &m, any_sk);
+        sl = sizeof sig;
+        ok(rv == CKR_OK && C_SignFinal(s, sig, &sl) == CKR_FUNCTION_NOT_SUPPORTED,
+           "(5) generic: C_SignFinal refused, single-part");
+        ok(C_SignInit(s, &m, any_sk) == CKR_OK,
+           "(5) generic: each refusal ended its operation");
+        sl = sizeof sig;
+        (void)C_Sign(s, ph, 32, sig, &sl);
+        if (any_pk) {
+            CK_BYTE fake[2420] = { 0 };
+            rv = C_VerifyInit(s, &m, any_pk);
+            ok(rv == CKR_OK && C_Verify(s, ph, 33, fake, sizeof fake) == CKR_SIGNATURE_INVALID,
+               "(5) generic SHA-256 verify of 33 bytes: CKR_SIGNATURE_INVALID");
+            rv = C_VerifyInit(s, &m, any_pk);
+            ok(rv == CKR_OK && C_VerifyUpdate(s, ph, 32) == CKR_FUNCTION_NOT_SUPPORTED,
+               "(5) generic: C_VerifyUpdate refused, single-part");
+        } else {
+            ok(0, "an ML-DSA-44 public key to test verify refusals with");
+        }
     }
 
     (void)C_Finalize(NULL);

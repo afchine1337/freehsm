@@ -1953,6 +1953,9 @@ typedef struct fhsm_op_s {
      * every other mechanism. Its context and hedge variant are the two
      * fields above. */
     int         hm_row;
+    /* Set at the first C_SignFinal / C_VerifyFinal of a streamed HashML-DSA
+     * operation: the multipart buffer then holds PH(M), not M. */
+    int         hm_prehashed;
     /* CKA_ALWAYS_AUTHENTICATE (PKCS#11 v3.2 §5.6). Set at op_init from the
      * key's stored flags, so every operation that takes a key handle gets the
      * same answer from the same place -- the alternative, testing the flag at
@@ -5879,7 +5882,9 @@ static fhsm_rv_t hmldsa_init(fhsm_op_t *op, const void *param, CK_ULONG param_le
 }
 
 /* Build M' into mp (HMLDSA_MP_MAX bytes). The generic mechanism is given
- * PH(M) and refuses any other length; the others are given M and hash it. */
+ * PH(M) and refuses any other length, and so is a hash-specific one whose
+ * parts were streamed into PH(M) (hm_prehashed); otherwise the data is M and
+ * is hashed here. */
 static fhsm_rv_t hmldsa_message(const fhsm_op_t *op, const uint8_t *data, size_t data_len,
                                 uint8_t *mp, size_t *mp_len) {
     if (op->hm_row < 1 || (size_t)op->hm_row > HMLDSA_N || op->pq_ctx_len > 255)
@@ -5893,7 +5898,7 @@ static fhsm_rv_t hmldsa_message(const fhsm_op_t *op, const uint8_t *data, size_t
     memcpy(mp + n, HMLDSA_OID_PREFIX, sizeof HMLDSA_OID_PREFIX);
     n += sizeof HMLDSA_OID_PREFIX;
     mp[n++] = r->arc;
-    if (op->mechanism == CKM_HASH_ML_DSA_OP) {
+    if (op->mechanism == CKM_HASH_ML_DSA_OP || op->hm_prehashed) {
         if (data_len != r->out_len) return FHSM_RV_DATA_LEN_RANGE;
         memcpy(mp + n, data, data_len);
     } else {
@@ -8607,6 +8612,10 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * place rather than in a second one that would have to be remembered. */
     op_free_aad(op);
     op_free_multipart(op);
+    /* The same for a digest context an abandoned multipart operation left:
+     * composite and HashML-DSA stream into it, and the next operation in
+     * this slot would otherwise hash on top of the previous one's parts. */
+    if (op->md_ctx) { EVP_MD_CTX_free((EVP_MD_CTX *)op->md_ctx); op->md_ctx = NULL; }
     op->key_handle = (uint32_t)hKey;
     /* CKA_ALWAYS_AUTHENTICATE, read once here rather than at each entry point
      * (§5.6). Every C_*Init reaches op_init, so the flag is carried by every
@@ -8997,6 +9006,7 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         op->pq_hedge = hedge_variant;
     }
     op->hm_row = 0;
+    op->hm_prehashed = 0;
     if (hmldsa_is(op->mechanism)) {
         fhsm_rv_t hr = hmldsa_init(op, pMechanism->pParameter, pMechanism->ulParameterLen);
         if (hr != FHSM_RV_OK) return hr;
@@ -11146,7 +11156,16 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
         uint8_t mp[HMLDSA_MP_MAX];
         size_t mp_len = 0;
         rv = hmldsa_message(op, pData, (size_t)ulDataLen, mp, &mp_len);
-        if (rv != FHSM_RV_OK) { EVP_PKEY_free(pkey); op->active = 0; return rv; }
+        /* v3.2 Table 283 gives C_Verify an input length of "any": a PH(M) of
+         * the wrong length is a signature that does not verify, not a
+         * length error as it is at C_Sign. */
+        if (rv == FHSM_RV_DATA_LEN_RANGE) rv = FHSM_RV_SIGNATURE_INVALID;
+        if (rv != FHSM_RV_OK) {
+            EVP_PKEY_free(pkey); op->active = 0;
+            (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
+                                    fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
+            return rv;
+        }
         int enc = 0;
         OSSL_PARAM vp[2] = {
             OSSL_PARAM_construct_int(OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, &enc),
@@ -11530,6 +11549,60 @@ static fhsm_rv_t composite_ph_final(fhsm_op_t *op, uint8_t *ph, size_t *ph_len) 
     return FHSM_RV_OK;
 }
 
+/* HashML-DSA multipart. The hash-specific mechanisms stream M into PH(M):
+ * nothing proportional to the message is held. The generic one is
+ * single-part (v3.2 Table 283) and its Update and Final are refused. */
+static fhsm_rv_t hmldsa_ph_update(fhsm_op_t *op, const uint8_t *part, size_t len) {
+    if (op->mechanism == CKM_HASH_ML_DSA_OP) return 0x00000054UL; /* CKR_FUNCTION_NOT_SUPPORTED */
+    if (op->hm_row < 1 || (size_t)op->hm_row > HMLDSA_N || op->hm_prehashed)
+        return FHSM_RV_FUNCTION_FAILED;
+    if (!op->md_ctx) {
+        EVP_MD *md = EVP_MD_fetch(NULL, HMLDSA[op->hm_row - 1].md, NULL);
+        EVP_MD_CTX *c = md ? EVP_MD_CTX_new() : NULL;
+        int ok = c && EVP_DigestInit_ex(c, md, NULL) == 1;
+        EVP_MD_free(md);
+        if (!ok) { EVP_MD_CTX_free(c); return FHSM_RV_FUNCTION_FAILED; }
+        op->md_ctx = c;
+    }
+    if (len && EVP_DigestUpdate((EVP_MD_CTX *)op->md_ctx, part, len) != 1)
+        return FHSM_RV_FUNCTION_FAILED;
+    return FHSM_RV_OK;
+}
+
+/* At Final: PH(M) replaces the message in the multipart buffer and the
+ * operation is marked as holding it, so the buffered Final below signs or
+ * verifies it through the same sign_asymmetric() / verify_asymmetric() --
+ * and a retry after CKR_BUFFER_TOO_SMALL, which comes back here with the
+ * context already gone, signs the same PH(M). With no Update at all there
+ * is no context and the buffer is empty: the empty message, hashed by
+ * hmldsa_message() as the one-shot path does. */
+static fhsm_rv_t hmldsa_ph_finish(fhsm_op_t *op) {
+    if (op->mechanism == CKM_HASH_ML_DSA_OP) return 0x00000054UL; /* CKR_FUNCTION_NOT_SUPPORTED */
+    if (!op->md_ctx) return FHSM_RV_OK;
+    const fhsm_hmldsa_t *r = &HMLDSA[op->hm_row - 1];
+    EVP_MD_CTX *c = (EVP_MD_CTX *)op->md_ctx;
+    uint8_t ph[64];
+    unsigned int l = 0;
+    int ok = (EVP_MD_get_flags(EVP_MD_CTX_get0_md(c)) & EVP_MD_FLAG_XOF)
+             ? EVP_DigestFinalXOF(c, ph, r->out_len) == 1
+             : EVP_DigestFinal_ex(c, ph, &l) == 1 && l == r->out_len;
+    EVP_MD_CTX_free(c);
+    op->md_ctx = NULL;
+    if (!ok) return FHSM_RV_FUNCTION_FAILED;
+    op_free_multipart(op);
+    fhsm_rv_t rv = op_append_multipart(op, ph, r->out_len);
+    if (rv == FHSM_RV_OK) op->hm_prehashed = 1;
+    return rv;
+}
+
+/* An error from either helper ends the operation (§5.2) with its state. */
+static fhsm_rv_t hmldsa_fail(fhsm_op_t *op, fhsm_rv_t rv) {
+    if (op->md_ctx) { EVP_MD_CTX_free((EVP_MD_CTX *)op->md_ctx); op->md_ctx = NULL; }
+    op_free_multipart(op);
+    op->active = 0;
+    return rv;
+}
+
 /* Does this signature mechanism take the buffered multipart path?
  *
  * Derived from the same predicates the one-shot C_Sign dispatches on, rather
@@ -11575,6 +11648,11 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
      * because nothing about the key is needed to hash the message. */
     if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519)
         return composite_ph_update(op, pPart, (size_t)ulPartLen);
+    /* HashML-DSA: stream into PH(M), for the same reason. */
+    if (op->hm_row) {
+        fhsm_rv_t hr = hmldsa_ph_update(op, pPart, (size_t)ulPartLen);
+        return hr == FHSM_RV_OK ? hr : hmldsa_fail(op, hr);
+    }
 
     /* Asymmetric mechanisms: accumulate the message, sign it at Final.
      * Here for the same reason as the composite branch above -- nothing
@@ -11708,6 +11786,10 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
     if (mech_sign_is_buffered_multipart(op->mechanism)) {
         fhsm_token_t *t = fhsm_session_token(hSession);
         if (!t) { op->active = 0; return FHSM_RV_SESSION_HANDLE_INVALID; }
+        if (op->hm_row) {
+            fhsm_rv_t hr = hmldsa_ph_finish(op);
+            if (hr != FHSM_RV_OK) return hmldsa_fail(op, hr);
+        }
 
         /* Size query: nothing is signed, so the length comes from the key.
          * The operation stays active -- the caller is about to call again. */
@@ -11835,6 +11917,10 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     /* Composite: accumulate PH(M), same single site as the sign path. */
     if (op->mechanism == CKM_COMPOSITE_MLDSA65_ED25519)
         return composite_ph_update(op, pPart, (size_t)ulPartLen);
+    if (op->hm_row) {
+        fhsm_rv_t hr = hmldsa_ph_update(op, pPart, (size_t)ulPartLen);
+        return hr == FHSM_RV_OK ? hr : hmldsa_fail(op, hr);
+    }
 
     /* Asymmetric: accumulate the message, verify it at Final. The same
      * predicate and the same buffer as the sign path, so the two cannot
@@ -11933,6 +12019,10 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
         fhsm_token_t *t = fhsm_session_token(hSession);
         if (!t) { op_free_multipart(op); op->active = 0;
                   return FHSM_RV_SESSION_HANDLE_INVALID; }
+        if (op->hm_row) {
+            fhsm_rv_t hr = hmldsa_ph_finish(op);
+            if (hr != FHSM_RV_OK) return hmldsa_fail(op, hr);
+        }
         static uint8_t empty[1] = { 0 };
         fhsm_rv_t vrv = verify_asymmetric(hSession, t, op,
                                            op->mp_buf ? op->mp_buf : empty,
