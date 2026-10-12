@@ -37,6 +37,7 @@ typedef struct { CK_ULONG type; void *pValue; CK_ULONG ulValueLen; } CK_ATTRIBUT
 typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; } CK_MECHANISM;
 
 #define CKR_OK                        0UL
+#define CKR_TEMPLATE_INCOMPLETE       0xD0UL
 #define CKR_TEMPLATE_INCONSISTENT     0xD1UL
 #define CKR_ATTRIBUTE_VALUE_INVALID   0x13UL
 
@@ -162,8 +163,14 @@ int main(void)
             ok(n == 1184, "CKA_VALUE reads back as the 1184-byte raw key");
 
             CK_RV irv = 0;
-            CK_OBJECT_HANDLE imp = import_pub(s, CKK_ML_KEM, raw, n, NULL, &irv);
-            ok(irv == CKR_OK && imp != 0, "the raw key imports without CKA_PARAMETER_SET");
+            CK_OBJECT_HANDLE imp = import_pub(s, CKK_ML_KEM, raw, n, "ML-KEM-768", &irv);
+            ok(irv == CKR_OK && imp != 0, "the raw key imports with its CKA_PARAMETER_SET");
+            /* v3.2 Table 287, footnote 1. Inferred from the length until
+             * 2026-10-12. */
+            CK_RV nrv = 0;
+            (void)import_pub(s, CKK_ML_KEM, raw, n, NULL, &nrv);
+            ok(nrv == CKR_TEMPLATE_INCOMPLETE,
+               "without CKA_PARAMETER_SET: CKR_TEMPLATE_INCOMPLETE");
 
             if (imp) {
                 CK_ULONG m = read_pub(s, imp, raw + 2048, 2048);
@@ -201,8 +208,12 @@ int main(void)
             ok(n == 1952, "CKA_VALUE reads back as the 1952-byte raw key (ML-DSA-65)");
 
             CK_RV irv = 0;
-            CK_OBJECT_HANDLE imp = import_pub(s, CKK_ML_DSA, raw, n, NULL, &irv);
+            CK_OBJECT_HANDLE imp = import_pub(s, CKK_ML_DSA, raw, n, "ML-DSA-65", &irv);
             ok(irv == CKR_OK && imp != 0, "the raw key imports");
+            CK_RV nrv = 0;
+            (void)import_pub(s, CKK_ML_DSA, raw, n, NULL, &nrv);
+            ok(nrv == CKR_TEMPLATE_INCOMPLETE,
+               "without CKA_PARAMETER_SET: CKR_TEMPLATE_INCOMPLETE (Table 280)");
 
             /* Sign with the token's own private key, verify with the imported
              * public one. Before this change the import returned CKR_OK and
@@ -250,30 +261,36 @@ int main(void)
 
         CK_BYTE yes2 = 1;
         CK_ULONG cls = 3UL /* CKO_PRIVATE_KEY */, kt = CKK_ML_DSA;
+        char p65[] = "ML-DSA-65";
         CK_ATTRIBUTE t[] = {
-            { CKA_CLASS,    &cls, sizeof cls },
-            { CKA_KEY_TYPE, &kt,  sizeof kt  },
-            { CKA_VALUE,    dk,   sizeof dk  },
-            { CKA_LABEL,    kl,   sizeof kl - 1 },
+            { CKA_CLASS,         &cls, sizeof cls },
+            { CKA_KEY_TYPE,      &kt,  sizeof kt  },
+            { CKA_VALUE,         dk,   sizeof dk  },
+            { CKA_LABEL,         kl,   sizeof kl - 1 },
+            { CKA_PARAMETER_SET, p65,  sizeof p65 - 1 },
         };
         (void)yes2;
         CK_OBJECT_HANDLE h = 0;
-        CK_RV prv = C_CreateObject(s, t, 4, &h);
+        CK_RV prv = C_CreateObject(s, t, 5, &h);
         /* Whatever the verdict, it must not be "accepted, and unusable". A
          * malformed key refused by EVP is CKR_ATTRIBUTE_VALUE_INVALID; a
          * well-formed one is CKR_OK. Silence with a stored blob is what this
          * change removes. */
         ok(prv == CKR_OK || prv == CKR_ATTRIBUTE_VALUE_INVALID,
            "a 4032-byte ML-DSA private key is judged, not stored blindly");
+        CK_OBJECT_HANDLE h0 = 0;
+        ok(C_CreateObject(s, t, 4, &h0) == CKR_TEMPLATE_INCOMPLETE,
+           "the same without CKA_PARAMETER_SET: CKR_TEMPLATE_INCOMPLETE (Table 281)");
 
         /* A length matching no parameter set must be refused outright. */
         CK_ATTRIBUTE t2[] = {
-            { CKA_CLASS,    &cls, sizeof cls },
-            { CKA_KEY_TYPE, &kt,  sizeof kt  },
-            { CKA_VALUE,    dk,   777 },
+            { CKA_CLASS,         &cls, sizeof cls },
+            { CKA_KEY_TYPE,      &kt,  sizeof kt  },
+            { CKA_VALUE,         dk,   777 },
+            { CKA_PARAMETER_SET, p65,  sizeof p65 - 1 },
         };
         CK_OBJECT_HANDLE h2 = 0;
-        ok(C_CreateObject(s, t2, 3, &h2) != CKR_OK,
+        ok(C_CreateObject(s, t2, 4, &h2) != CKR_OK,
            "a private key of no recognised length is refused");
 
         /* And a CKA_PARAMETER_SET contradicting the length. */
@@ -292,9 +309,9 @@ int main(void)
     /* ---- The refusals -------------------------------------------------- */
     {
         CK_RV brv = 0;
-        (void)import_pub(s, CKK_ML_KEM, raw, 100, NULL, &brv);
+        (void)import_pub(s, CKK_ML_KEM, raw, 100, "ML-KEM-768", &brv);
         ok(brv != CKR_OK, "a value of no recognised length is refused");
-        (void)import_pub(s, CKK_ML_KEM, raw, 1952, NULL, &brv);
+        (void)import_pub(s, CKK_ML_KEM, raw, 1952, "ML-KEM-768", &brv);
         ok(brv != CKR_OK,
            "an ML-DSA-65 length declared CKK_ML_KEM is refused, not crossed over");
     }

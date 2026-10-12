@@ -112,7 +112,7 @@ class MldsaAdapter(Adapter):
             "ml_dsa_87_seen":         0,
             "ctx_empty":              0,
             "ctx_nonempty_seen":      0,
-            "ctx_oversize_skip":      0,
+            "ctx_oversize":           0,
             "key_import_failed":      0,
             "no_pubkey_der":          0,
             "unsupported_param_set":  0,
@@ -169,13 +169,13 @@ class MldsaAdapter(Adapter):
         ctx_hex = test.get("ctx", "")
         ctx_bytes = bytes.fromhex(ctx_hex)
         if len(ctx_bytes) > 255:
-            # FIPS 204 §5.2.1 caps context at 255 bytes ; the test is
-            # invalid by spec and the module will reject it. We don't
-            # try to forward it because the static buffer in the op
-            # struct is sized for the legal range only.
-            self.diag["ctx_oversize_skip"] += 1
-            return "skip"
-        if ctx_bytes:
+            # FIPS 204 Algorithm 3 caps the context at 255 bytes and
+            # returns false beyond: forwarded, so the module has to say
+            # CKR_SIGNATURE_INVALID. Skipped until 2026-10-12, when the
+            # module answered CKR_FUNCTION_FAILED at 256 bytes and used the
+            # empty context beyond.
+            self.diag["ctx_oversize"] += 1
+        elif ctx_bytes:
             self.diag["ctx_nonempty_seen"] += 1
         else:
             self.diag["ctx_empty"] += 1
@@ -202,6 +202,9 @@ class MldsaAdapter(Adapter):
                 A.TOKEN(False),
                 A.VERIFY(True),
                 A.VALUE(pk_der),
+                # Required on C_CreateObject (v3.2 Table 280, footnote 1).
+                A.PARAMETER_SET({"ML-DSA-44": 1, "ML-DSA-65": 2,
+                                 "ML-DSA-87": 3}[algo]),
             ])
         except P11Error:
             self.diag["key_import_failed"] += 1

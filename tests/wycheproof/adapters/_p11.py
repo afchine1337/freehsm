@@ -238,6 +238,8 @@ class _AttrBuilder:
     @classmethod
     def VALUE(cls, v: bytes): return cls._bytes(CKA_VALUE, v)
     @classmethod
+    def PARAMETER_SET(cls, v): return cls._ulong(0x0000061D, v)  # CKA_PARAMETER_SET
+    @classmethod
     def DECRYPT(cls, v): return cls._bbool(0x00000105, v)  # CKA_DECRYPT
     @classmethod
     def EXTRACTABLE(cls, v): return cls._bbool(0x00000162, v)  # CKA_EXTRACTABLE

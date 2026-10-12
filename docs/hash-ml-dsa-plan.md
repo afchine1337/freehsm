@@ -141,6 +141,13 @@ until that tag:
     ### Changed
     * `CKM_ML_DSA` refuses a key that is not `CKK_ML_DSA` with
       `CKR_KEY_TYPE_INCONSISTENT` at Init; it failed at C_Sign before.
+    * **`C_CreateObject` requires `CKA_PARAMETER_SET`** on an ML-KEM, ML-DSA
+      or SLH-DSA key, public or private: `CKR_TEMPLATE_INCOMPLETE` without
+      it (PKCS#11 v3.2 Tables 280-281, 287-288, 290-291, footnote 1). It was
+      inferred from the key's length. A DER SubjectPublicKeyInfo is now held
+      to the stated set as a raw key was. Callers that relied on the
+      inference must send the attribute. Raised by Govardhan Yadava for
+      acvp-assay's PKCS#11 harness.
 
 ## Open questions
 

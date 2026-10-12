@@ -3523,6 +3523,22 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         (const fhsm_attr_t *)pTemplate, ulCount, &a));
     if (rv_parse != FHSM_RV_OK) return rv_parse;
 
+    /* CKA_PARAMETER_SET on an ML-KEM, ML-DSA or SLH-DSA key. PKCS#11 v3.2
+     * Tables 280-281, 287-288 and 290-291 give it footnote 1: "MUST be
+     * specified when object is created with C_CreateObject". This module
+     * inferred it from the length of CKA_VALUE when it was missing, which
+     * accepted a template another token is entitled to refuse -- and a
+     * caller tested only here would not find out until it met one. Raised by
+     * Govardhan Yadava for acvp-assay's PKCS#11 harness, 2026-10-12.
+     *
+     * Present is all this asks. Whether the value names a set, and agrees
+     * with the key supplied, is checked where the key is built. */
+    if ((a.cko == CKO_PUBLIC_KEY || a.cko == CKO_PRIVATE_KEY)
+        && (a.ckk == CKK_ML_KEM || a.ckk == CKK_ML_DSA
+            || a.ckk == 0x0000004BUL /* CKK_SLH_DSA */)
+        && find_attr(pTemplate, ulCount, 0x0000061DUL /* CKA_PARAMETER_SET */) < 0)
+        return CKR_TEMPLATE_INCOMPLETE;
+
     /* === Builder stage : path-specific construction of either a raw blob
      * (verbatim path) or an EVP_PKEY that is then i2d_PUBKEY-serialised
      * into a SubjectPublicKeyInfo. The builder remains inline because
@@ -3751,17 +3767,19 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         }
         if (!pkey) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
 
-        /* CKA_PARAMETER_SET, when the caller states it, must agree with the
-         * key actually supplied. Stating one and being given another is the
-         * template contradicting itself, and accepting the pair while using
-         * only one of them is how a caller ends up sure it holds an
-         * ML-KEM-1024 key that is an ML-KEM-512 key. */
-        if (a.pqc_alg) {
+        /* CKA_PARAMETER_SET must agree with the key actually supplied.
+         * Stating one and being given another is the template contradicting
+         * itself, and accepting the pair while using only one of them is how
+         * a caller ends up sure it holds an ML-KEM-1024 key that is an
+         * ML-KEM-512 key. Asked of the built key, so a DER
+         * SubjectPublicKeyInfo is held to it as well as a raw value -- the
+         * check used to apply to the raw form only. */
+        {
             char pset[64] = "";
             CK_ULONG fam = (a.ckk == CKK_ML_KEM) ? CKM_ML_KEM_KEY_PAIR_GEN
                                                   : CKM_ML_DSA_KEY_PAIR_GEN;
             int pr = fhsm_pset_read(pTemplate, ulCount, fam, pset, sizeof pset);
-            if (pr < 0 || (pr == 1 && strcmp(pset, a.pqc_alg) != 0)) {
+            if (pr != 1 || !EVP_PKEY_is_a(pkey, pset)) {
                 EVP_PKEY_free(pkey);
                 return CKR_TEMPLATE_INCONSISTENT;
             }

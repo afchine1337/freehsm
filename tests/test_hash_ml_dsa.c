@@ -73,6 +73,7 @@ typedef struct { CK_ULONG hedgeVariant; CK_BYTE *pContext; CK_ULONG ulContextLen
 #define CKA_KEY_TYPE               0x100UL
 #define CKA_SIGN                   0x108UL
 #define CKA_VERIFY                 0x10AUL
+#define CKA_PARAMETER_SET          0x61DUL
 #define CKO_PUBLIC_KEY             2UL
 #define CKO_PRIVATE_KEY            3UL
 #define CKK_ML_DSA                 0x4AUL
@@ -143,15 +144,20 @@ static int hash_index(const char *name) {
     return -1;
 }
 
-static CK_OBJECT_HANDLE import_key(CK_SESSION_HANDLE s, CK_ULONG cls,
+/* CKA_PARAMETER_SET is required on import (v3.2 Tables 280-281, footnote
+ * 1): CKP_ML_DSA_44/65/87 = 1/2/3, from the vector's set name. */
+static CK_OBJECT_HANDLE import_key(CK_SESSION_HANDLE s, CK_ULONG cls, const char *set,
                                    CK_BYTE *v, CK_ULONG vlen) {
     CK_ULONG kt = CKK_ML_DSA;
+    CK_ULONG ps = !strcmp(set, "ML-DSA-44") ? 1 : !strcmp(set, "ML-DSA-65") ? 2
+                : !strcmp(set, "ML-DSA-87") ? 3 : 0;
     CK_BYTE yes = 1, no = 0;
     CK_ATTRIBUTE t[] = {
         { CKA_CLASS, &cls, sizeof cls }, { CKA_KEY_TYPE, &kt, sizeof kt },
         { CKA_TOKEN, &no, 1 },
         { cls == CKO_PRIVATE_KEY ? CKA_SIGN : CKA_VERIFY, &yes, 1 },
         { CKA_VALUE, v, vlen },
+        { CKA_PARAMETER_SET, &ps, sizeof ps },
     };
     CK_OBJECT_HANDLE h = 0;
     CK_RV rv = C_CreateObject(s, t, sizeof t / sizeof t[0], &h);
@@ -272,7 +278,7 @@ int main(void)
 
         if (gen) {
             gens++;
-            CK_OBJECT_HANDLE k = import_key(s, CKO_PRIVATE_KEY, key, kl);
+            CK_OBJECT_HANDLE k = import_key(s, CKO_PRIVATE_KEY, fld[1], key, kl);
             if (!any_sk && k && !strcmp(fld[1], "ML-DSA-44")) any_sk = k;
             /* (1) */
             CK_ULONG sl = sizeof sig;
@@ -310,7 +316,7 @@ int main(void)
         } else {
             vers++;
             const int accepted = !strcmp(fld[7], "1");
-            CK_OBJECT_HANDLE k = import_key(s, CKO_PUBLIC_KEY, key, kl);
+            CK_OBJECT_HANDLE k = import_key(s, CKO_PUBLIC_KEY, fld[1], key, kl);
             mech_t x;
             CK_BYTE *d = msg; CK_ULONG dl = ml;
             CK_RV rv = k ? setup(s, &x, hi, !specific, ctx, ctxl, &d, &dl) : 0x6UL;
