@@ -2624,3 +2624,8 @@ The first targeted run stopped at `C_Initialize`: the FIPS provider no longer
 loaded on the VM, `SELF_TEST_post: invalid state`, the stale `fipsmodule.cnf`
 case of AGD_PRE §3.3.1 with OpenSSL's version unchanged. Regenerated as that
 section says.
+
+`CKA_PARAMETER_SET` then became required on PQC key import (v3.2 footnote 1).
+A run of the ML-DSA, ML-KEM and PQC tests after it,
+reports/p11check-pset-nist, 2 891 tests, moved none of them against the full
+nist run above: pkcs11-check's importers already send the attribute.
