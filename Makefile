@@ -797,6 +797,11 @@ tests/test_digest_multipart: tests/test_digest_multipart.c $(LIB)
 tests/test_sensitive_value: tests/test_sensitive_value.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# HashML-DSA signs an M' the module builds itself; NIST's deterministic
+# signatures compared byte for byte (docs/hash-ml-dsa-plan.md).
+tests/test_hash_ml_dsa: tests/test_hash_ml_dsa.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # The advertised set and the implemented set are two structures with nothing
 # holding them equal: fhsm_mechanism_table[] carries a handler pointer that no
 # code dereferences, and the PKCS#11 entry points switch on mechanisms by hand.
@@ -838,6 +843,12 @@ tests/probe_ecdh_curves: tests/probe_ecdh_curves.c $(LIB)
 # question is about the provider's capability. Not in `make tests` -- it
 # measures the environment rather than asserting anything about us.
 tests/probe_digestsign_stream: tests/probe_digestsign_stream.c
+	$(CC) $(CFLAGS) -o $@ $< $(OPENSSL_LDFLAGS) -lcrypto
+
+# Whether OpenSSL 3.5 can make HashML-DSA, natively or as Sign_internal over
+# an M' built here, under the default and the FIPS provider. Not in `make
+# tests`: it measures the environment (docs/hash-ml-dsa-plan.md).
+tests/probe_hash_ml_dsa: tests/probe_hash_ml_dsa.c
 	$(CC) $(CFLAGS) -o $@ $< $(OPENSSL_LDFLAGS) -lcrypto
 
 # What the module answers to the harness's HKDF call shapes. Reports return
@@ -1092,6 +1103,7 @@ TEST_BINS = \
 	tests/test_eddsa_params \
 	tests/test_digest_multipart \
 	tests/test_sensitive_value \
+	tests/test_hash_ml_dsa \
 	tests/test_advertised_operational \
 	tests/test_derive_concat \
 	tests/test_ecdh_peer_point \
@@ -1189,6 +1201,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_digest_multipart
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_sensitive_value
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_hash_ml_dsa
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_advertised_operational
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

@@ -1948,6 +1948,11 @@ typedef struct fhsm_op_s {
      * v1.1.14 but discarded until now; see the forwarding in the ML-DSA /
      * SLH-DSA sign branch. */
     unsigned long pq_hedge;
+    /* HashML-DSA: 1 + the row of HMLDSA[] the mechanism, or the generic
+     * mechanism's CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash, selected; 0 for
+     * every other mechanism. Its context and hedge variant are the two
+     * fields above. */
+    int         hm_row;
     /* CKA_ALWAYS_AUTHENTICATE (PKCS#11 v3.2 §5.6). Set at op_init from the
      * key's stored flags, so every operation that takes a key handle gets the
      * same answer from the same place -- the alternative, testing the flag at
@@ -5768,6 +5773,147 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
  * CKK_ML_DSA would be a claim that a caller could act on -- extracting it and
  * feeding it to an ML-DSA verifier -- and it would be false. */
 #define CKK_COMPOSITE_MLDSA65_ED25519  0x80004202UL
+
+/* HashML-DSA (PKCS#11 v3.2 §6.67.6-6.67.7): FIPS 204 Algorithm 4, which is
+ * ML-DSA.Sign_internal over
+ *
+ *     M' = 0x01 || len(ctx) || ctx || OID(PH) || PH(M)
+ *
+ * OpenSSL 3.5 does not do it: an ML-DSA key refuses a digest name. It does
+ * sign and verify a message as given with message-encoding 0, and building
+ * the pure-ML-DSA M' that way gives the pure signature byte for byte, under
+ * the default and the FIPS provider alike (tests/probe_hash_ml_dsa.c). So
+ * the module hashes, builds M' and signs it raw; docs/hash-ml-dsa-plan.md.
+ *
+ * One table: the mechanism, the digest that names the hash in
+ * CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash, the OID arc and the output length
+ * are one row, so the hash-specific mechanisms, the generic one and the
+ * verify path cannot disagree. SHA-512/224 and SHA-512/256 have no
+ * mechanism of their own; SHAKE has no digest mechanism, so the generic
+ * mechanism cannot name it. */
+#define CKM_HASH_ML_DSA_OP         0x0000001FUL
+
+typedef struct {
+    CK_ULONG    mech;      /* CKM_HASH_ML_DSA_<hash>; 0: generic only */
+    CK_ULONG    digest;    /* CKM_<hash>; 0: not nameable (SHAKE) */
+    const char *md;        /* OpenSSL name */
+    uint8_t     arc;       /* OID 2.16.840.1.101.3.4.2.<arc> */
+    uint8_t     out_len;   /* bytes of PH(M) */
+} fhsm_hmldsa_t;
+
+static const fhsm_hmldsa_t HMLDSA[] = {
+    { 0x23UL, 0x255UL, "SHA2-224",      4, 28 },
+    { 0x24UL, 0x250UL, "SHA2-256",      1, 32 },
+    { 0x25UL, 0x260UL, "SHA2-384",      2, 48 },
+    { 0x26UL, 0x270UL, "SHA2-512",      3, 64 },
+    { 0,      0x048UL, "SHA2-512/224",  5, 28 },
+    { 0,      0x04CUL, "SHA2-512/256",  6, 32 },
+    { 0x27UL, 0x2B5UL, "SHA3-224",      7, 28 },
+    { 0x28UL, 0x2B0UL, "SHA3-256",      8, 32 },
+    { 0x29UL, 0x2C0UL, "SHA3-384",      9, 48 },
+    { 0x2AUL, 0x2D0UL, "SHA3-512",     10, 64 },
+    /* FIPS 204 §5.4: 256 and 512 bits of SHAKE output. */
+    { 0x2BUL, 0,       "SHAKE128",     11, 32 },
+    { 0x2CUL, 0,       "SHAKE256",     12, 64 },
+};
+#define HMLDSA_N (sizeof HMLDSA / sizeof HMLDSA[0])
+
+/* DER of 2.16.840.1.101.3.4.2, less the last arc. */
+static const uint8_t HMLDSA_OID_PREFIX[] = {
+    0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02
+};
+/* 0x01, len(ctx), ctx (at most 255), OID, PH(M) (at most 64). */
+#define HMLDSA_MP_MAX (2u + 255u + sizeof HMLDSA_OID_PREFIX + 1u + 64u)
+
+/* The row a hash-specific mechanism selects, as 1 + its index; 0 if the
+ * mechanism is not one. */
+static int hmldsa_row_of_mech(CK_ULONG mech) {
+    for (size_t i = 0; i < HMLDSA_N; ++i)
+        if (HMLDSA[i].mech && HMLDSA[i].mech == mech) return (int)i + 1;
+    return 0;
+}
+
+static int hmldsa_is(CK_ULONG mech) {
+    return mech == CKM_HASH_ML_DSA_OP || hmldsa_row_of_mech(mech) != 0;
+}
+
+/* Read CK_SIGN_ADDITIONAL_CONTEXT { hedgeVariant; pContext; ulContextLen }
+ * (hash-specific, optional) or CK_HASH_SIGN_ADDITIONAL_CONTEXT, the same
+ * plus `hash` (generic, required), into the operation.
+ *
+ * Stricter than fhsm_parse_pq_params(), which lets an oversized context
+ * fall through to "no context" for CKM_ML_DSA: here a context beyond 255
+ * bytes, a NULL one with a length, an unknown hedge variant, a block of the
+ * wrong size or a hash the generic mechanism cannot name is refused at Init
+ * rather than signed some other way. */
+static fhsm_rv_t hmldsa_init(fhsm_op_t *op, const void *param, CK_ULONG param_len) {
+    const int generic = (op->mechanism == CKM_HASH_ML_DSA_OP);
+    op->hm_row = generic ? 0 : hmldsa_row_of_mech(op->mechanism);
+    op->pq_ctx_have = 0;
+    op->pq_ctx_len  = 0;
+    op->pq_hedge    = 0;
+    if (!param && param_len == 0) {
+        /* No block: empty context, hedged. The generic mechanism has no
+         * hash without one. */
+        return generic ? FHSM_RV_MECHANISM_PARAM_INVALID : FHSM_RV_OK;
+    }
+    const size_t want = (generic ? 4u : 3u) * sizeof(unsigned long);
+    if (!param || (size_t)param_len != want) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    unsigned long f[4] = { 0, 0, 0, 0 };
+    memcpy(f, param, want);
+    const unsigned long hedge = f[0];
+    const void *ctx = (const void *)(uintptr_t)f[1];
+    const unsigned long ctx_len = f[2];
+    if (hedge > 2UL) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (ctx_len > 255UL || (ctx_len && !ctx)) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (generic) {
+        for (size_t i = 0; i < HMLDSA_N; ++i)
+            if (HMLDSA[i].digest && HMLDSA[i].digest == f[3]) { op->hm_row = (int)i + 1; break; }
+        if (!op->hm_row) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    }
+    if (ctx_len) memcpy(op->pq_ctx, ctx, (size_t)ctx_len);
+    op->pq_ctx_len  = (size_t)ctx_len;
+    op->pq_ctx_have = 1;
+    op->pq_hedge    = hedge;
+    return FHSM_RV_OK;
+}
+
+/* Build M' into mp (HMLDSA_MP_MAX bytes). The generic mechanism is given
+ * PH(M) and refuses any other length; the others are given M and hash it. */
+static fhsm_rv_t hmldsa_message(const fhsm_op_t *op, const uint8_t *data, size_t data_len,
+                                uint8_t *mp, size_t *mp_len) {
+    if (op->hm_row < 1 || (size_t)op->hm_row > HMLDSA_N || op->pq_ctx_len > 255)
+        return FHSM_RV_FUNCTION_FAILED;
+    const fhsm_hmldsa_t *r = &HMLDSA[op->hm_row - 1];
+    size_t n = 0;
+    mp[n++] = 0x01;
+    mp[n++] = (uint8_t)op->pq_ctx_len;
+    if (op->pq_ctx_len) memcpy(mp + n, op->pq_ctx, op->pq_ctx_len);
+    n += op->pq_ctx_len;
+    memcpy(mp + n, HMLDSA_OID_PREFIX, sizeof HMLDSA_OID_PREFIX);
+    n += sizeof HMLDSA_OID_PREFIX;
+    mp[n++] = r->arc;
+    if (op->mechanism == CKM_HASH_ML_DSA_OP) {
+        if (data_len != r->out_len) return FHSM_RV_DATA_LEN_RANGE;
+        memcpy(mp + n, data, data_len);
+    } else {
+        EVP_MD *md = EVP_MD_fetch(NULL, r->md, NULL);
+        EVP_MD_CTX *c = EVP_MD_CTX_new();
+        unsigned int l = 0;
+        int ok = md && c && EVP_DigestInit_ex(c, md, NULL) == 1
+                 && EVP_DigestUpdate(c, data, data_len) == 1;
+        if (ok && (EVP_MD_get_flags(md) & EVP_MD_FLAG_XOF))
+            ok = EVP_DigestFinalXOF(c, mp + n, r->out_len) == 1;
+        else if (ok)
+            ok = EVP_DigestFinal_ex(c, mp + n, &l) == 1 && l == r->out_len;
+        EVP_MD_CTX_free(c);
+        EVP_MD_free(md);
+        if (!ok) return FHSM_RV_FUNCTION_FAILED;
+    }
+    n += r->out_len;
+    *mp_len = n;
+    return FHSM_RV_OK;
+}
 /* CKA_PARAMETER_SET = 0x0000061D (PKCS#11 v3.2). This was previously
  * #defined as 0x170, which is CKA_MODIFIABLE -- a plain boolean attribute.
  * Two consequences, both observed (#125):
@@ -8850,6 +8996,11 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         if (hedge_variant > 2UL) return FHSM_RV_MECHANISM_PARAM_INVALID;
         op->pq_hedge = hedge_variant;
     }
+    op->hm_row = 0;
+    if (hmldsa_is(op->mechanism)) {
+        fhsm_rv_t hr = hmldsa_init(op, pMechanism->pParameter, pMechanism->ulParameterLen);
+        if (hr != FHSM_RV_OK) return hr;
+    }
     /* CK_EDDSA_PARAMS (PKCS#11 v3.0 §2.3.6) : { CK_BBOOL phFlag ; CK_ULONG
      * ulContextDataLen ; CK_BYTE_PTR pContextData }. The block is optional --
      * absent means pure Ed25519 / Ed448 over an empty context, which is what
@@ -9006,6 +9157,11 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x1044: case 0x1045: case 0x1046:              /* ECDSA_SHA{256,384,512} */
             want = 0x03; break;                             /* CKK_EC */
         case 0x1057: want = 0x40; break;                    /* EDDSA -> CKK_EC_EDWARDS */
+        case 0x001D: case 0x001F:                           /* ML_DSA, HASH_ML_DSA */
+        case 0x0023: case 0x0024: case 0x0025: case 0x0026: /* HASH_ML_DSA_SHA{224..512} */
+        case 0x0027: case 0x0028: case 0x0029: case 0x002A: /* HASH_ML_DSA_SHA3_* */
+        case 0x002B: case 0x002C:                           /* HASH_ML_DSA_SHAKE* */
+            want = 0x4A; break;                             /* CKK_ML_DSA */
         case 0x1081: case 0x1082: case 0x1085: case 0x1086: /* AES ECB/CBC/CBC_PAD/CTR */
         case 0x1087: case 0x1088:                           /* AES GCM/CCM */
         case 0x108A: case 0x108E:                           /* AES CMAC/GMAC */
@@ -10134,6 +10290,10 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA3_224_RSA_PKCS: case CKM_SHA3_256_RSA_PKCS:
         case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
+        case CKM_HASH_ML_DSA_OP:
+        case 0x23UL: case 0x24UL: case 0x25UL: case 0x26UL: /* CKM_HASH_ML_DSA_SHA{224..512} */
+        case 0x27UL: case 0x28UL: case 0x29UL: case 0x2AUL: /* CKM_HASH_ML_DSA_SHA3_* */
+        case 0x2BUL: case 0x2CUL:                           /* CKM_HASH_ML_DSA_SHAKE* */
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
         case CKM_RSA_X_509:     /* raw RSA, no padding : all-mechanisms only */
@@ -10404,7 +10564,7 @@ static size_t fhsm_exact_sig_len(fhsm_token_t *t, fhsm_op_t *op) {
  * edits one. */
 static size_t sig_family_bound(uint32_t mech) {
     if (mech == CKM_SLH_DSA_OP) return 65536u;
-    if (mech == CKM_ML_DSA_OP)  return 8192u;
+    if (mech == CKM_ML_DSA_OP || hmldsa_is(mech)) return 8192u;
     return 512u;
 }
 
@@ -10421,6 +10581,30 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
     if ((kt == CKK_RSA && EVP_PKEY_get_base_id(pkey) != EVP_PKEY_RSA) ||
         (kt == CKK_EC  && EVP_PKEY_get_base_id(pkey) != EVP_PKEY_EC)) {
         EVP_PKEY_free(pkey); return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    }
+
+    /* HashML-DSA: Sign_internal over M', built here (see HMLDSA[]). No
+     * context parameter is passed: the context is inside M'. */
+    if (op->hm_row) {
+        uint8_t mp[HMLDSA_MP_MAX];
+        size_t mp_len = 0;
+        rv = hmldsa_message(op, data, data_len, mp, &mp_len);
+        if (rv != FHSM_RV_OK) { EVP_PKEY_free(pkey); return rv; }
+        int enc = 0, det = (op->pq_hedge == 2UL) ? 1 : 0;
+        OSSL_PARAM sp[3];
+        int n = 0;
+        sp[n++] = OSSL_PARAM_construct_int(OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, &enc);
+        if (det) sp[n++] = OSSL_PARAM_construct_int(OSSL_SIGNATURE_PARAM_DETERMINISTIC, &det);
+        sp[n] = OSSL_PARAM_construct_end();
+        EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+        if (!mdctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
+        size_t out_len = *sig_len;
+        int ok = EVP_DigestSignInit_ex(mdctx, NULL, NULL, NULL, NULL, pkey, sp) == 1
+                 && EVP_DigestSign(mdctx, sig, &out_len, mp, mp_len) == 1;
+        EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+        if (!ok) return FHSM_RV_FUNCTION_FAILED;
+        *sig_len = out_len;
+        return FHSM_RV_OK;
     }
 
     /* Post-quantum schemes + EdDSA : OpenSSL 3.x exposes ML-DSA,
@@ -10784,6 +10968,10 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA3_224_RSA_PKCS: case CKM_SHA3_256_RSA_PKCS:
         case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
+        case CKM_HASH_ML_DSA_OP:
+        case 0x23UL: case 0x24UL: case 0x25UL: case 0x26UL: /* CKM_HASH_ML_DSA_SHA{224..512} */
+        case 0x27UL: case 0x28UL: case 0x29UL: case 0x2AUL: /* CKM_HASH_ML_DSA_SHA3_* */
+        case 0x2BUL: case 0x2CUL:                           /* CKM_HASH_ML_DSA_SHAKE* */
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
         case CKM_RSA_X_509:     /* raw RSA, no padding : all-mechanisms only */
@@ -10921,7 +11109,7 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
     }
     const uint8_t *p = kv;
     EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
-    if (!pkey && op->mechanism == CKM_ML_DSA_OP) {
+    if (!pkey && (op->mechanism == CKM_ML_DSA_OP || op->hm_row)) {
         /* Raw ML-DSA public key import fallback. Wycheproof and most
          * FIPS 204 test corpora carry the verification key as raw
          * 1312 / 1952 / 2592 bytes (ML-DSA-44 / 65 / 87) rather than
@@ -10952,6 +11140,33 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
         }
     }
     if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
+
+    /* HashML-DSA: Verify_internal over the same M' the sign path builds. */
+    if (op->hm_row) {
+        uint8_t mp[HMLDSA_MP_MAX];
+        size_t mp_len = 0;
+        rv = hmldsa_message(op, pData, (size_t)ulDataLen, mp, &mp_len);
+        if (rv != FHSM_RV_OK) { EVP_PKEY_free(pkey); op->active = 0; return rv; }
+        int enc = 0;
+        OSSL_PARAM vp[2] = {
+            OSSL_PARAM_construct_int(OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, &enc),
+            OSSL_PARAM_construct_end(),
+        };
+        EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+        int init = mdctx
+                   && EVP_DigestVerifyInit_ex(mdctx, NULL, NULL, NULL, NULL, pkey, vp) == 1;
+        /* Any answer but 1 is a signature that does not verify -- a wrong
+         * length included, which OpenSSL reports as an error rather than 0. */
+        int v = init ? EVP_DigestVerify(mdctx, pSig, ulSigLen, mp, mp_len) : -1;
+        EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
+        op->active = 0;
+        rv = !init ? FHSM_RV_FUNCTION_FAILED
+           : v == 1 ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
+        ERR_clear_error();
+        (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
+        return rv;
+    }
 
     /* PQ schemes + EdDSA : EVP_DigestVerify with hash=NULL. EdDSA is a
      * single-shot signature with no separate pre-hash step, so the
