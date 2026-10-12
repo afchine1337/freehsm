@@ -37,6 +37,13 @@
  *       CKR_SIGNATURE_INVALID at C_Verify, v3.2 Table 283); C_SignUpdate,
  *       C_SignFinal and C_VerifyUpdate on the generic mechanism, which is
  *       single-part, refused with CKR_FUNCTION_NOT_SUPPORTED
+ *   (6) a context over 255 bytes, for CKM_ML_DSA and HashML-DSA alike:
+ *       C_SignInit refuses it with CKR_MECHANISM_PARAM_INVALID (FIPS 204
+ *       Algorithms 2 and 4), C_Verify and C_VerifyFinal answer
+ *       CKR_SIGNATURE_INVALID (Algorithms 3 and 5). It was
+ *       CKR_FUNCTION_FAILED at 256 bytes, and beyond that the context was
+ *       dropped and the empty one used. A NULL context with a length is
+ *       refused; 255 bytes signs.
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -388,6 +395,54 @@ int main(void)
         } else {
             ok(0, "an ML-DSA-44 public key to test verify refusals with");
         }
+    }
+
+    printf("\na context over 255 bytes\n");
+    if (any_sk && any_pk) {
+        CK_BYTE big[300], fake[2420] = { 0 }, sig2[8192];
+        memset(big, 'c', sizeof big);
+        CK_BYTE msg3[] = "abc";
+        CK_ULONG sl = sizeof sig2;
+        const CK_ULONG CKM_ML_DSA = 0x1DUL, CKM_HASH_ML_DSA_SHA256 = 0x24UL;
+        CK_SIGN_CTX sc = { 0, big, 256 };
+        CK_MECHANISM m = { CKM_ML_DSA, &sc, sizeof sc };
+
+        ok(C_SignInit(s, &m, any_sk) == CKR_MECHANISM_PARAM_INVALID,
+           "(6) CKM_ML_DSA C_SignInit, 256-byte context: refused");
+        sc.ulContextLen = 300;
+        ok(C_SignInit(s, &m, any_sk) == CKR_MECHANISM_PARAM_INVALID,
+           "(6) CKM_ML_DSA C_SignInit, 300-byte context: refused");
+        sc = (CK_SIGN_CTX){ 0, NULL, 5 };
+        ok(C_SignInit(s, &m, any_sk) == CKR_MECHANISM_PARAM_INVALID,
+           "(6) CKM_ML_DSA C_SignInit, NULL context of length 5: refused");
+
+        sc = (CK_SIGN_CTX){ 0, big, 256 };
+        CK_RV rv = C_VerifyInit(s, &m, any_pk);
+        ok(rv == CKR_OK && C_Verify(s, msg3, 3, fake, sizeof fake) == CKR_SIGNATURE_INVALID,
+           "(6) CKM_ML_DSA verify, 256-byte context: CKR_SIGNATURE_INVALID");
+        sc.ulContextLen = 300;
+        rv = C_VerifyInit(s, &m, any_pk);
+        ok(rv == CKR_OK && C_Verify(s, msg3, 3, fake, sizeof fake) == CKR_SIGNATURE_INVALID,
+           "(6) CKM_ML_DSA verify, 300-byte context: CKR_SIGNATURE_INVALID");
+        sc.ulContextLen = 256;
+        rv = C_VerifyInit(s, &m, any_pk);
+        if (rv == CKR_OK) rv = C_VerifyUpdate(s, msg3, 3);
+        if (rv == CKR_OK) rv = C_VerifyFinal(s, fake, sizeof fake);
+        ok(rv == CKR_SIGNATURE_INVALID,
+           "(6) CKM_ML_DSA multipart verify, 256-byte context: CKR_SIGNATURE_INVALID");
+        m.mechanism = CKM_HASH_ML_DSA_SHA256;
+        rv = C_VerifyInit(s, &m, any_pk);
+        ok(rv == CKR_OK && C_Verify(s, msg3, 3, fake, sizeof fake) == CKR_SIGNATURE_INVALID,
+           "(6) HASH_ML_DSA_SHA256 verify, 256-byte context: CKR_SIGNATURE_INVALID");
+
+        /* The control: 255 bytes is a context like any other. */
+        sc = (CK_SIGN_CTX){ 0, big, 255 };
+        m = (CK_MECHANISM){ CKM_ML_DSA, &sc, sizeof sc };
+        rv = C_SignInit(s, &m, any_sk);
+        if (rv == CKR_OK) rv = C_Sign(s, msg3, 3, sig2, &sl);
+        ok(rv == CKR_OK && sl == 2420, "(6) CKM_ML_DSA, 255-byte context: signed");
+    } else {
+        ok(0, "an ML-DSA-44 key pair to test context bounds with");
     }
 
     (void)C_Finalize(NULL);

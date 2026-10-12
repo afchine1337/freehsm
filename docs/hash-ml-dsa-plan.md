@@ -127,6 +127,16 @@ until that tag:
       Checked byte for byte against NIST's deterministic ACVP signatures
       (`tests/test_hash_ml_dsa`). Asked for by Govardhan Yadava's acvp-assay.
 
+    ### Fixed
+    * **A context string over 255 bytes** for `CKM_ML_DSA` and `CKM_SLH_DSA`.
+      At 256 bytes signing and verification answered `CKR_FUNCTION_FAILED`;
+      beyond that, and for a NULL `pContext` with a length, the context was
+      dropped and the signature made or checked under the empty one, with
+      nothing to say so. Now, as FIPS 204 and 205 define it: `C_SignInit`
+      refuses with `CKR_MECHANISM_PARAM_INVALID`, verification answers
+      `CKR_SIGNATURE_INVALID`, and a NULL context with a length is refused.
+      Wycheproof's InvalidContext cases, 18 xfails in pkcs11-check 0.2.3.
+
     ### Changed
     * `CKM_ML_DSA` refuses a key that is not `CKK_ML_DSA` with
       `CKR_KEY_TYPE_INCONSISTENT` at Init; it failed at C_Sign before.

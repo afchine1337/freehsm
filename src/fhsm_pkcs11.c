@@ -1948,6 +1948,12 @@ typedef struct fhsm_op_s {
      * v1.1.14 but discarded until now; see the forwarding in the ML-DSA /
      * SLH-DSA sign branch. */
     unsigned long pq_hedge;
+    /* The caller's context string was longer than 255 bytes. FIPS 204
+     * Algorithms 2-5 and FIPS 205 Algorithms 22-25 answer that differently
+     * on each side: signing is an error, refused at C_SignInit; verification
+     * returns false, so C_VerifyInit accepts the operation and C_Verify /
+     * C_VerifyFinal answer CKR_SIGNATURE_INVALID. */
+    int         pq_ctx_toolong;
     /* HashML-DSA: 1 + the row of HMLDSA[] the mechanism, or the generic
      * mechanism's CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash, selected; 0 for
      * every other mechanism. Its context and hedge variant are the two
@@ -5844,16 +5850,17 @@ static int hmldsa_is(CK_ULONG mech) {
  * (hash-specific, optional) or CK_HASH_SIGN_ADDITIONAL_CONTEXT, the same
  * plus `hash` (generic, required), into the operation.
  *
- * Stricter than fhsm_parse_pq_params(), which lets an oversized context
- * fall through to "no context" for CKM_ML_DSA: here a context beyond 255
- * bytes, a NULL one with a length, an unknown hedge variant, a block of the
+ * A NULL context with a length, an unknown hedge variant, a block of the
  * wrong size or a hash the generic mechanism cannot name is refused at Init
- * rather than signed some other way. */
+ * rather than signed some other way. A context beyond 255 bytes is marked
+ * (pq_ctx_toolong), as for CKM_ML_DSA: C_SignInit refuses it and
+ * verification answers CKR_SIGNATURE_INVALID, per FIPS 204 Algorithms 4-5. */
 static fhsm_rv_t hmldsa_init(fhsm_op_t *op, const void *param, CK_ULONG param_len) {
     const int generic = (op->mechanism == CKM_HASH_ML_DSA_OP);
     op->hm_row = generic ? 0 : hmldsa_row_of_mech(op->mechanism);
     op->pq_ctx_have = 0;
     op->pq_ctx_len  = 0;
+    op->pq_ctx_toolong = 0;
     op->pq_hedge    = 0;
     if (!param && param_len == 0) {
         /* No block: empty context, hedged. The generic mechanism has no
@@ -5868,16 +5875,21 @@ static fhsm_rv_t hmldsa_init(fhsm_op_t *op, const void *param, CK_ULONG param_le
     const void *ctx = (const void *)(uintptr_t)f[1];
     const unsigned long ctx_len = f[2];
     if (hedge > 2UL) return FHSM_RV_MECHANISM_PARAM_INVALID;
-    if (ctx_len > 255UL || (ctx_len && !ctx)) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (ctx_len && !ctx && ctx_len <= 255UL) return FHSM_RV_MECHANISM_PARAM_INVALID;
     if (generic) {
         for (size_t i = 0; i < HMLDSA_N; ++i)
             if (HMLDSA[i].digest && HMLDSA[i].digest == f[3]) { op->hm_row = (int)i + 1; break; }
         if (!op->hm_row) return FHSM_RV_MECHANISM_PARAM_INVALID;
     }
+    op->pq_hedge = hedge;
+    if (ctx_len > 255UL) {
+        /* Refused at C_SignInit, false at verification: pq_ctx_toolong. */
+        op->pq_ctx_toolong = 1;
+        return FHSM_RV_OK;
+    }
     if (ctx_len) memcpy(op->pq_ctx, ctx, (size_t)ctx_len);
     op->pq_ctx_len  = (size_t)ctx_len;
     op->pq_ctx_have = 1;
-    op->pq_hedge    = hedge;
     return FHSM_RV_OK;
 }
 
@@ -8990,6 +9002,7 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * "{ hedgeVariant ; pContext ; ulContextLen }" triple). */
     op->pq_ctx_have = 0;
     op->pq_ctx_len  = 0;
+    op->pq_ctx_toolong = 0;
     if (op->mechanism == 0x0000001DUL /* CKM_ML_DSA_OP */
         || op->mechanism == 0x0000002EUL /* CKM_SLH_DSA_OP */) {
         unsigned long hedge_variant = 0;
@@ -9004,6 +9017,24 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
          * series: accept the caller's request, ignore it, report success. */
         if (hedge_variant > 2UL) return FHSM_RV_MECHANISM_PARAM_INVALID;
         op->pq_hedge = hedge_variant;
+        /* What the parser cannot say. It drops a context it has no room for,
+         * and one with a NULL pointer and a length, as "no context" -- so a
+         * caller asking for a 300-byte context, or passing a NULL pContext
+         * by mistake, got a signature over the empty context and no sign of
+         * it. A NULL context with a length is refused; a context over 255
+         * bytes is marked, and each side answers as FIPS 204 / 205 say. */
+        if (pMechanism->pParameter
+            && (size_t)pMechanism->ulParameterLen >= 3 * sizeof(unsigned long)) {
+            unsigned long f[3];
+            memcpy(f, pMechanism->pParameter, sizeof f);
+            if (f[2] > 255UL) {
+                op->pq_ctx_toolong = 1;
+                op->pq_ctx_have = 0;
+                op->pq_ctx_len = 0;
+            } else if (f[2] && !f[1]) {
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            }
+        }
     }
     op->hm_row = 0;
     op->hm_prehashed = 0;
@@ -10319,7 +10350,15 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_SIGN); if (uc != FHSM_RV_OK) return uc; }
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
-    return op_init(op, hSession, pMechanism, hKey);
+    fhsm_rv_t ir = op_init(op, hSession, pMechanism, hKey);
+    /* A context over 255 bytes cannot be signed (FIPS 204 Algorithms 2 and
+     * 4, FIPS 205 Algorithms 22 and 24). Verification takes it and says
+     * false; see pq_ctx_toolong. */
+    if (ir == FHSM_RV_OK && op->pq_ctx_toolong) {
+        op->active = 0;
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    }
+    return ir;
 }
 
 /* Resolve mechanism identifier through the optional FHSM_OPENSC_GMAC_ALIAS
@@ -11116,6 +11155,18 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
     if (cl != CKO_PUBLIC_KEY) {
         op->active = 0;
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    }
+    /* A context over 255 bytes: Verify returns false (FIPS 204 Algorithms 3
+     * and 5, FIPS 205 Algorithms 23 and 25). It was CKR_FUNCTION_FAILED --
+     * OpenSSL refusing the parameter -- for 256 bytes, and a verification
+     * under the empty context beyond that. Wycheproof's mldsa_*_verify
+     * InvalidContext cases, 15 xfails in pkcs11-check 0.2.3. */
+    if (op->pq_ctx_toolong) {
+        op->active = 0;
+        rv = FHSM_RV_SIGNATURE_INVALID;
+        (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
+        return rv;
     }
     const uint8_t *p = kv;
     EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
