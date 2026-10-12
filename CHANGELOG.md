@@ -8,13 +8,33 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 *To become 2.3.1, on or after 2026-10-14, a week after 2.3.0. Patch: two
-defects corrected, nothing added. Calls answer differently where they
-succeeded before: reading the value of a private or secret key that is not
-extractable, and an imported key's CKA_SENSITIVE and CKA_EXTRACTABLE, which
-now read back as the template set them. No security advisory. `RELEASE_v2.3.1.md` has the release
-notes.*
+defects corrected and the build fixed on 64-bit non-x86 targets, nothing
+added. Calls answer differently where they succeeded before: reading the
+value of a private or secret key that is not extractable, and an imported
+key's CKA_SENSITIVE and CKA_EXTRACTABLE, which now read back as the template
+set them. No security advisory. `RELEASE_v2.3.1.md` has the release notes.*
 
 ### Fixed
+* **The module builds on arm64, ppc64el, riscv64 and s390x** (PR #18,
+  seb128; Debian #1144631, #1149536). `-fcf-protection=full` is Intel CET and
+  exists on x86 only: GCC refused it elsewhere and the build stopped. The
+  Makefile now adds it when the compiler accepts it, so x86 builds -- and the
+  published reproducibility reference -- are unchanged. And
+  `find_section_offset()`, which reads the module's own ELF headers for the
+  integrity check, cast the file buffer to `Elf64_Ehdr` / `Elf64_Shdr`; on a
+  strict-alignment target `-Wcast-align` with `-Werror` refused the casts.
+  It now copies the headers out, and checks `e_shentsize` and each name's
+  offset. 32-bit stays unsupported (#2).
+
+  Reading that function again found what the PR had not touched: its size
+  sums were not checked for overflow, a section name was compared without
+  being bounded to the string table, and the caller zeroed the section's
+  range in its copy of the file without that range being checked against the
+  file's length. Every bound is now a subtraction from what is known to fit,
+  names must end inside the table, and the section must fit the file.
+  Hardening: the file read is the module itself, which a caller would
+  already have to be able to rewrite.
+
 * **A key's value was given when it should have been withheld, and withheld
   without saying so.** PKCS#11 v3.2 does not reveal a private or secret key's
   `CKA_VALUE` when the key is sensitive *or* not extractable (the attribute

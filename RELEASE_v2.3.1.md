@@ -21,6 +21,9 @@ well for its value to be given; without it, the read answers
 `CKR_ATTRIBUTE_SENSITIVE`. Keys generated on the token are sensitive by
 default and are not affected.
 
+It also builds on arm64, ppc64el, riscv64 and s390x, where it did not
+(PR #18, from seb128). x86 builds are unchanged.
+
 There is no security advisory in this release.
 
 ---
@@ -103,6 +106,25 @@ both still default to FALSE.
 
 On the `fhsm-crypt` branch, the first test in this tree to ask for a secret
 key's value and check the return code.
+
+## Building on 64-bit non-x86 targets
+
+`-fcf-protection=full` is Intel CET and exists only on x86; elsewhere GCC
+refused it and the build stopped. The Makefile now adds it when the compiler
+accepts it. The integrity check's ELF reader cast the file buffer to header
+structures, which `-Wcast-align` with `-Werror` refuses on strict-alignment
+targets; it now copies them out. Both changes are seb128's (PR #18), from
+Debian #1144631 and #1149536, and were built in the Ubuntu archive on amd64,
+arm64, ppc64el, riscv64 and s390x. The test suite has not been run on
+non-x86 hardware here either.
+
+Reviewing that reader found three older weaknesses, fixed with it: size sums
+that could overflow, a section name compared without a bound, and a section
+range zeroed without being checked against the file. The file read is the
+module itself, so this is hardening rather than a fix for anything an
+outsider could reach.
+
+32-bit builds remain unsupported.
 
 ## Measured
 

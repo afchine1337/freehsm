@@ -119,6 +119,10 @@ Flags de durcissement appliqués (cf. `Makefile`) :
 -Wl,-z,relro,-z,now,-z,noexecstack,-z,defs -Wl,--no-undefined
 ```
 
+`-fcf-protection=full` (Intel CET) n'existe que sur x86 : le `Makefile` ne
+l'ajoute que si le compilateur l'accepte, ce qui permet la compilation sur
+arm64, ppc64el, riscv64 et s390x (PR #18).
+
 ## Modes runtime (v1.1.0)
 
 Depuis la sous-version `.1`, le module distingue **deux modes** sélectionnés au runtime via la variable d'environnement `FHSM_MODE` (ou la directive `mode =` dans `/etc/freehsm/freehsm.conf`) :
