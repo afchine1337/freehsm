@@ -2,9 +2,10 @@
 
 Status: stage 1 done, 2026-10-12: `tests/test_hash_ml_dsa` passes under
 `nist-approved-only` and `all-mechanisms`. Stage 2 done the same day, same
-two profiles, and the whole suite. Stage 3 written: the mechanisms are
-declared in `scripts/gen_p11_thunks.py`, awaiting the build and a
-pkcs11-check run. Branch `hash-ml-dsa`, for 2.4.0.
+two profiles, and the whole suite. Stage 3 done the same day: advertised in
+both profiles, full pkcs11-check 0.2.3 runs attributed in
+`PKCS11_CHECK_FINDINGS.md` (2026-10-12). Waits for the 2.3.1 tag, then
+merges for 2.4.0. Branch `hash-ml-dsa`, for 2.4.0.
 
 ## What is being asked
 

@@ -2582,3 +2582,45 @@ library, so run after `make PROFILE=all-mechanisms` without repeating the
 profile it rebuilt the library in the default one and signed that — the first
 "all" run measured a nist-approved-only module, caught by its provenance line.
 Every command in a profile build has to carry the profile.
+
+## 2026-10-12 — HashML-DSA, both profiles
+
+    pkcs11-check 0.2.3 · signed module, FIPS provider loaded · branch
+    hash-ml-dsa · reports/p11check-hashmldsa-full-{nist,all}
+
+| profile | passed | failed | 2.3.1 candidate (2026-10-10) |
+|---|---|---|---|
+| nist-approved-only | 55 658 / 93 285 | 4, all known | 55 396 / 93 010 |
+| all-mechanisms | 56 113 / 93 416 | 5, all known | 55 851 / 93 141 |
+
+Diffed by node-id against the 2026-10-10 runs: 453 moves in each profile, the
+same 453 in both, every one attributed. +262 passed, nothing that passed
+before moved.
+
+- **skipped → passed, 156.** The suites that had no mechanism to run on:
+  `test_acvp_mldsa.py` `TestMlDsaSigGen` (78) and `TestMlDsaSigVer` (37),
+  their preHash groups, and the 41 tests of `test_hash_ml_dsa.py` for the ten
+  hash-specific mechanisms and the generic one's advertisement.
+- **(absent) → passed, 88, and (absent) → skipped, 183.** The registry tests
+  the harness derives for each advertised mechanism, eleven more of them.
+- **xfailed → passed, 18.** Wycheproof's InvalidContext cases for
+  `CKM_ML_DSA`: a context over 255 bytes is now refused at `C_SignInit` and
+  false at verification, as FIPS 204 has it, where 256 bytes answered
+  `CKR_FUNCTION_FAILED`. Looking into them found worse: beyond 256 bytes,
+  and for a NULL `pContext` with a length, the context was dropped and the
+  empty one used.
+- **xfailed, 8, new — the harness, raised upstream.** All on the generic
+  `CKM_HASH_ML_DSA`, which takes `PH(M)` single-part (v3.2 §6.67.6, Table
+  283). `TestHashMLDSAGeneric::test_sign_verify_roundtrip` (4) and
+  `TestMechSignRoundtrip` (2) pass the message, which `C_Sign` refuses with
+  `CKR_DATA_LEN_RANGE`; `TestMultipartSign` (2) drives `C_SignUpdate`, which
+  answers `CKR_FUNCTION_NOT_SUPPORTED`.
+
+The failures are the known ones, and the gate passes in both. The
+all-mechanisms count of advertised mechanisms, 88, is its provenance check:
+the nist module advertises 82.
+
+The first targeted run stopped at `C_Initialize`: the FIPS provider no longer
+loaded on the VM, `SELF_TEST_post: invalid state`, the stale `fipsmodule.cnf`
+case of AGD_PRE §3.3.1 with OpenSSL's version unchanged. Regenerated as that
+section says.
