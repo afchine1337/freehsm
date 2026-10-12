@@ -139,6 +139,15 @@ until that tag:
   this module will show there as an expected failure. To raise with Denis
   once the stage 3 run shows it; `test_hash_slh_dsa.py` has the same shape.
 
+  Measured 2026-10-12 (pkcs11-check 0.2.1 and 0.2.3 alike, nist-approved-only, ML-DSA
+  subset): eight xfails, all on the generic mechanism and all for this one
+  reason. `TestHashMLDSAGeneric::test_sign_verify_roundtrip` (4) passes the
+  message; the registry tests `TestMechSignRoundtrip` (2) pass arbitrary
+  data, and `TestMultipartSign` (2) drives multipart on a mechanism Table
+  283 makes single-part. The forty tests of the ten hash-specific mechanisms
+  pass, and `TestMlDsaSigGen` / `TestMlDsaSigVer` pass all they run, 258 and
+  82, where the 2026-09-18 run had 180 and 45 with the rest skipped or xfail.
+
 - **SHAKE in the generic mechanism.** v3.2 has no digest mechanism for
   SHAKE128 or SHAKE256 (only `CKM_SHAKE_*_KEY_DERIVATION`), so
   `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` cannot name them. SHAKE is reached
