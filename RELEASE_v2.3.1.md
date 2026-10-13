@@ -136,6 +136,13 @@ tests moved in each profile, all attributed in `docs/PKCS11_CHECK_FINDINGS.md`;
 the two that went from passed to xfailed are the new rules applying to the
 harness's own keys.
 
+Those runs predate PR #18 and the hardening beside it, which change the
+integrity check every `C_Initialize` of a signed module runs. The release
+commits sit on d909d4a, which CI measured: the signed module in both
+profiles through pkcs11-check 0.2.3 with the known-failures gate, the
+Wycheproof and fuzz jobs, and the build — all green on 2026-10-12 and
+2026-10-13.
+
 `tests/test_digest_multipart.c`, new: for every digest the build accepts,
 multipart equals one-shot; an Update error ends the operation; and the next
 operation carries nothing of the failed one. pkcs11-check 0.2.3, every

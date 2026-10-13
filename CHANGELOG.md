@@ -7,12 +7,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-*To become 2.3.1, on or after 2026-10-14, a week after 2.3.0. Patch: two
-defects corrected and the build fixed on 64-bit non-x86 targets, nothing
-added. Calls answer differently where they succeeded before: reading the
-value of a private or secret key that is not extractable, and an imported
-key's CKA_SENSITIVE and CKA_EXTRACTABLE, which now read back as the template
-set them. No security advisory. `RELEASE_v2.3.1.md` has the release notes.*
+## [2.3.1] --- 2026-10-14
+
+*Patch: two defects corrected and the build fixed on 64-bit non-x86
+targets, nothing added. Calls answer differently where they succeeded
+before: reading the value of a private or secret key that is not
+extractable, and an imported key's CKA_SENSITIVE and CKA_EXTRACTABLE, which
+now read back as the template set them. No security advisory.
+`RELEASE_v2.3.1.md` has the release notes.*
 
 ### Fixed
 * **The module builds on arm64, ppc64el, riscv64 and s390x** (PR #18,
