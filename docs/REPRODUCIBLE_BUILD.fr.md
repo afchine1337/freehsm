@@ -44,7 +44,7 @@ make dist-verify
 | Chemins source dans DWARF / `__FILE__`   | `-ffile-prefix-map`, `-fdebug-prefix-map`    |
 | `.note.gnu.build-id` (160 bits aléatoires) | `-Wl,--build-id=none`                      |
 | Ordre des tables de hash                 | `-Wl,--hash-style=gnu --sort-common`         |
-| Section `.comment` (version toolchain)   | épinglée via le digest de l'image Docker     |
+| Section `.comment` (version toolchain)   | digest de l'image de base et snapshot apt (§6) |
 | Timestamps des membres d'archive `ar`    | `SOURCE_DATE_EPOCH` honoré par binutils ≥ 2.27 |
 | uid/gid dans `tar`                       | `--owner=root --group=root --numeric-owner` |
 | Ordre des fichiers dans `tar`            | `--sort=name`                                |
@@ -67,34 +67,51 @@ Toute dérive de version de `gcc`, `binutils` ou `libc6-dev` fera diverger le di
 
 ## 5. Intégration CI
 
-```yaml
-jobs:
-  reproducibility:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build A
-        run: make repro && mv libfreehsm.so out/run-a.so
-      - name: Build B (clean)
-        run: docker volume prune -f && make repro
-      - name: Assert byte-identical
-        run: |
-          a=$(sha256sum out/run-a.so | awk '{print $1}')
-          b=$(sha256sum libfreehsm.so | awk '{print $1}')
-          test "$a" = "$b" || { echo "REPRO FAIL"; exit 1; }
-```
+Trois workflows touchent à la reproductibilité, et ils doivent concorder :
 
-La CI utilise `diffoscope` comme fallback quand les digests divergent, exposant les octets différents (noms de sections, offsets, hex dump).
+| workflow | construit dans | fait |
+|---|---|---|
+| `baseline.yml` (à la demande) | `ghcr.io/…/freehsm-c-build:debian13-<date du snapshot>` | construit et signe deux fois, refuse si les deux diffèrent, et donne `dist/refs/vX.Y.Z.sha256` à commiter |
+| `release.yml` (sur un tag) | la même image | refuse de publier un build qui ne correspond pas à `dist/refs/` |
+| `dist-verify.yml` (sur un tag, ou à la demande) | une image reconstruite à neuf depuis `Dockerfile.build` | `make dist-verify` : le chemin d'un tiers, comparé à `dist/refs/` |
+
+L'image ghcr est elle-même construite depuis `Dockerfile.build`
+(`build-image.yml`, dès que ce fichier change sur `main`). Les deux premières
+lignes mesurent donc l'image de release ; la troisième mesure si quelqu'un
+d'autre, partant du seul dépôt, obtient les mêmes octets.
+
+De v2.2.0 à v2.3.1, ce n'était pas le cas : `dist-verify` a échoué sur chaque
+tag pendant que `release.yml` passait. `Dockerfile.build` désignait
+`debian:trixie-slim` par son tag et installait ce qu'apt proposait le jour même
+: l'image ghcr gardait la toolchain du jour de sa construction — les
+reconstructions suivantes venaient du cache de couches d'Actions — et chaque
+build à neuf suivait les mises à jour de Debian. Les binaires publiés
+correspondaient toujours à leurs références ; une reconstruction indépendante
+n'aurait pas pu les retrouver. Épinglé le 2026-10-14, pour v2.4.0 (§6).
 
 ## 6. Mise à jour de l'environnement de build
 
-À chaque release qui exige une mise à jour de toolchain :
+`Dockerfile.build` fixe la toolchain par deux épingles, et rien d'autre ne doit
+la faire bouger :
 
-1. Mettre à jour `ARG OPENSSL_VERSION` et `ARG OPENSSL_SHA256` dans `Dockerfile.build`.
-2. Mettre à jour les pins de version apt (lancer *(à la main — un `scripts/freeze_apt_versions.sh` a été nommé ici et n'existe pas ; `scripts/build_reproducible.sh` et `scripts/verify_reproducibility.sh`, eux, existent)* dans un container Debian propre).
-3. Bumper `FHSM_VERSION_STRING` dans `include/fhsm_common.h`.
-4. Lancer `make dist-verify` localement pour confirmer la reproductibilité sur la nouvelle toolchain.
-5. Publier le nouveau digest d'image et le SHA-256 du `libfreehsm.so` résultant dans les release notes.
+- l'image de base, `debian:trixie-AAAAMMJJ-slim@sha256:…` — le digest de
+  l'index multi-architecture d'un tag daté, lu sur Docker Hub ;
+- `ARG SNAPSHOT`, un horodatage `snapshot.debian.org` : apt lit l'archive telle
+  qu'elle était à cet instant, et toutes les versions de paquets en découlent.
+
+Pour les déplacer, lors d'une mise à jour de la toolchain ou d'OpenSSL :
+
+1. Choisir un tag `trixie-*-slim` daté et son digest d'index, et un `SNAPSHOT`
+   à cette date ou après. Changer les deux dans `Dockerfile.build` dans un seul
+   commit.
+2. La fusion sur `main` reconstruit l'image ghcr (`build-image.yml`). Vérifier
+   que la CI est verte sur cette image.
+3. Monter la version : une nouvelle toolchain donne de nouveaux octets, et une
+   référence n'appartient qu'à une version.
+4. Lancer `baseline.yml`, commiter la référence, puis lancer `dist-verify.yml`
+   avec `target: head` sur ce commit : il doit concorder avec la référence
+   avant le tag, pas après.
+5. Indiquer les nouvelles épingles dans les notes de version.
 
 ## 7. Vérification par un évaluateur
 
