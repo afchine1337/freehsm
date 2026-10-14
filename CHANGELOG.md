@@ -7,6 +7,70 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+* **Deleting keys and certificates from the token** (`docs/fhsm-crypt-plan.md`,
+  stage 0). A new tool, `fhsm-crypt`, lists what a session sees --
+  certificates and public, private and secret keys, with their `CKA_ID` --
+  and deletes by label: `fhsm-crypt delete --label L` names what it would
+  destroy and stops, and only `--yes` destroys. In `fhsm-gui` the Token tab
+  lists certificates beside the keys, and **Delete…** asks once, with a tick
+  box per object sharing the label and only the selected one ticked. Operator
+  mode refuses to delete the CA's key. `C_DestroyObject` is optional in the
+  tools' loader: a module without it still loads, and deletion alone is
+  refused. `tests/test_pkiops_objects.c`, `tests/fhsm_crypt_cli.sh`.
+
+* **Secret keys, and what any key is** (stage 1). `fhsm-crypt keygen --alg
+  aes128|aes256|hmac` makes a sensitive, non-extractable secret key with every
+  usage stated -- an AES key encrypts and wraps and cannot sign, the 32-byte
+  HMAC secret signs and cannot encrypt -- and the Token tab offers the three
+  after the signature algorithms. Each tool names the other when given the
+  other's algorithm. `fhsm-crypt show --label L`, and a pane under the
+  Token tab's list, give an object's attributes as a person reads them: usage,
+  size or curve, allowed mechanisms, protection, origin; a certificate's
+  subject, issuer, serial and validity. A private or secret key's value is
+  never asked for. `tests/test_pkiops_secret.c`.
+
+* **An Encryption tab in `fhsm-gui`, and `docs/FHSM_CRYPT.md`** (stage 5).
+  Encrypt a file for an AES key or an `rsa-oaep` pair on the token, or for a
+  certificate's holder without logging in; decrypt one, the status line
+  naming the key that opened it. ML-KEM recipients (stage 4) wait:
+  OpenSSL 3.5 has ML-KEM but no CMS `KEMRecipientInfo`, so nothing could
+  check an encoding written here.
+
+* **Files encrypted for an RSA key, with RSA-OAEP** (stage 3). `fhsm-crypt
+  keygen --alg rsa-oaep` makes an RSA 3072 pair whose only allowed mechanism
+  is RSA-OAEP -- it cannot sign, and is no longer taken for an RSA-PSS key.
+  `fhsm-crypt encrypt --key L` encrypts for such a pair, and `--cert C`
+  for the holder of a certificate with neither the module nor a PIN:
+  encrypting for someone is a public operation. The recipient is a
+  KeyTransRecipientInfo, RSAES-OAEP with SHA-256 and MGF1-SHA-256, named by
+  subjectKeyIdentifier -- computed as the CA and OpenSSL compute it -- or by
+  issuer and serial for a certificate without one; decryption finds the
+  token's RSA key by that identifier and opens with `C_Decrypt`. PKCS#1 v1.5
+  key transport, OpenSSL's default, and OAEP with SHA-1 are refused by name.
+  `tests/test_pkiops_envelope_rsa.c`: OpenSSL opens our files and we open
+  its, with an RSA key it generated and the token imported.
+
+* **Files encrypted for a key on the token** (stage 2). `fhsm-crypt encrypt
+  --key L --in F --out F.p7m` writes CMS AuthEnvelopedData (RFC 5083),
+  AES-256-GCM content (RFC 5084), with one key-encryption-key recipient whose
+  identifier is the key's label; `fhsm-crypt decrypt` finds the key from the
+  file. The content key is fresh per file and wrapped by the token's AES key
+  with AES key wrap through `C_Encrypt` -- the token key never leaves it --
+  and files are streamed in 64 KiB chunks, not held. An existing output is
+  never written over, and decryption keeps its output only once the GCM tag
+  has verified; an altered file leaves nothing behind and exits 4. The
+  structure is written by hand because OpenSSL's CMS API makes and opens a
+  KEK recipient only from the key-encryption key's bytes, which a token key
+  never yields; `tests/test_pkiops_envelope.c` has OpenSSL open our files and
+  opens OpenSSL's, both ways.
+
+* **Operator mode re-initialises a token it has seen empty.** It refused any
+  initialised token, so a CA's operator who had deleted everything still had
+  to leave the mode. A token listed while logged in with nothing on it may now
+  be re-initialised there, with a confirmation that says so; one that may
+  hold keys is still refused.
+
 ## [2.3.1] --- 2026-10-14
 
 *Patch: two defects corrected and the build fixed on 64-bit non-x86
@@ -90,70 +154,6 @@ now read back as the template set them. No security advisory.
   The static-analysis job failed on every commit of the 2.3.0 cycle after the
   PKI builders were made generic, and went unread while attention was on
   pkcs11-check; the released binary is unaffected.
-
-### Added
-* **Deleting keys and certificates from the token** (`docs/fhsm-crypt-plan.md`,
-  stage 0). A new tool, `fhsm-crypt`, lists what a session sees --
-  certificates and public, private and secret keys, with their `CKA_ID` --
-  and deletes by label: `fhsm-crypt delete --label L` names what it would
-  destroy and stops, and only `--yes` destroys. In `fhsm-gui` the Token tab
-  lists certificates beside the keys, and **Delete…** asks once, with a tick
-  box per object sharing the label and only the selected one ticked. Operator
-  mode refuses to delete the CA's key. `C_DestroyObject` is optional in the
-  tools' loader: a module without it still loads, and deletion alone is
-  refused. `tests/test_pkiops_objects.c`, `tests/fhsm_crypt_cli.sh`.
-
-* **Secret keys, and what any key is** (stage 1). `fhsm-crypt keygen --alg
-  aes128|aes256|hmac` makes a sensitive, non-extractable secret key with every
-  usage stated -- an AES key encrypts and wraps and cannot sign, the 32-byte
-  HMAC secret signs and cannot encrypt -- and the Token tab offers the three
-  after the signature algorithms. Each tool names the other when given the
-  other's algorithm. `fhsm-crypt show --label L`, and a pane under the
-  Token tab's list, give an object's attributes as a person reads them: usage,
-  size or curve, allowed mechanisms, protection, origin; a certificate's
-  subject, issuer, serial and validity. A private or secret key's value is
-  never asked for. `tests/test_pkiops_secret.c`.
-
-* **An Encryption tab in `fhsm-gui`, and `docs/FHSM_CRYPT.md`** (stage 5).
-  Encrypt a file for an AES key or an `rsa-oaep` pair on the token, or for a
-  certificate's holder without logging in; decrypt one, the status line
-  naming the key that opened it. ML-KEM recipients (stage 4) wait:
-  OpenSSL 3.5 has ML-KEM but no CMS `KEMRecipientInfo`, so nothing could
-  check an encoding written here.
-
-* **Files encrypted for an RSA key, with RSA-OAEP** (stage 3). `fhsm-crypt
-  keygen --alg rsa-oaep` makes an RSA 3072 pair whose only allowed mechanism
-  is RSA-OAEP -- it cannot sign, and is no longer taken for an RSA-PSS key.
-  `fhsm-crypt encrypt --key L` encrypts for such a pair, and `--cert C`
-  for the holder of a certificate with neither the module nor a PIN:
-  encrypting for someone is a public operation. The recipient is a
-  KeyTransRecipientInfo, RSAES-OAEP with SHA-256 and MGF1-SHA-256, named by
-  subjectKeyIdentifier -- computed as the CA and OpenSSL compute it -- or by
-  issuer and serial for a certificate without one; decryption finds the
-  token's RSA key by that identifier and opens with `C_Decrypt`. PKCS#1 v1.5
-  key transport, OpenSSL's default, and OAEP with SHA-1 are refused by name.
-  `tests/test_pkiops_envelope_rsa.c`: OpenSSL opens our files and we open
-  its, with an RSA key it generated and the token imported.
-
-* **Files encrypted for a key on the token** (stage 2). `fhsm-crypt encrypt
-  --key L --in F --out F.p7m` writes CMS AuthEnvelopedData (RFC 5083),
-  AES-256-GCM content (RFC 5084), with one key-encryption-key recipient whose
-  identifier is the key's label; `fhsm-crypt decrypt` finds the key from the
-  file. The content key is fresh per file and wrapped by the token's AES key
-  with AES key wrap through `C_Encrypt` -- the token key never leaves it --
-  and files are streamed in 64 KiB chunks, not held. An existing output is
-  never written over, and decryption keeps its output only once the GCM tag
-  has verified; an altered file leaves nothing behind and exits 4. The
-  structure is written by hand because OpenSSL's CMS API makes and opens a
-  KEK recipient only from the key-encryption key's bytes, which a token key
-  never yields; `tests/test_pkiops_envelope.c` has OpenSSL open our files and
-  opens OpenSSL's, both ways.
-
-* **Operator mode re-initialises a token it has seen empty.** It refused any
-  initialised token, so a CA's operator who had deleted everything still had
-  to leave the mode. A token listed while logged in with nothing on it may now
-  be re-initialised there, with a confirmation that says so; one that may
-  hold keys is still refused.
 
 ## [2.3.0] --- 2026-10-07
 
