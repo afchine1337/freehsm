@@ -220,9 +220,9 @@ will not alter. §10.2 of the draft is explicit about its own standing:
 > This guidance is not authoritative and has not been endorsed by US NIST.
 
 What follows it is a *design goal* — that a composite "be able to be considered
-FIPS-approved even when one of the component algorithms is not" — addressed to
-implementers seeking certification. FreeHSM seeks none and will not; the
-reasoning is in `README.md` under *Certification*, and the same notice heads
+FIPS-approved even when one of the component algorithms is not" — about
+certification, which does not apply here; the reasoning is in
+`README.md` under *Certification*, and the same notice heads
 `docs/AGD_PRE.md` and `docs/AGD_OPE.md`. A mechanism enters `nist-approved-only`
 because it is approved, not because a specification argues that it ought to be,
 so `CKM_COMPOSITE_MLDSA65_ED25519` stays outside that profile whatever the RFC

@@ -86,6 +86,18 @@ Preparing Debian packages, and reporting what that exposed:
 * **#8** — an ELF binary committed to git. Already removed eleven days before he
   filed it, and nobody had told him.
 
+## `seb128`
+
+**PR #18** — building the module on arm64, ppc64el, riscv64 and s390x, from
+Debian #1144631 and #1149536. Two changes, each with its compiler error
+quoted: `-fcf-protection=full` probed rather than assumed, since it exists on
+x86 only, and the integrity check's ELF reader moved from pointer casts to
+`memcpy`, which strict-alignment targets require. Measured on amd64 with
+`make test-integrity`, and in the Ubuntu archive on all five architectures;
+the PR said plainly that it could not run the suite on non-x86 hardware.
+Merged for v2.3.1. Reading the function again for the review found three
+older weaknesses in it, fixed beside it.
+
 ## Petr (`petrn`)
 
 Followed `AGD_PRE.md` as written, on a clean machine, repeatedly:

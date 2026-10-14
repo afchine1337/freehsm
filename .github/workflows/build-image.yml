@@ -5,7 +5,14 @@
 # release.yml (production releases) and CI.
 #
 # Output image:
-#   ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+#   ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-<date>,
+#   <date> being the day of ARG SNAPSHOT in Dockerfile.build, and :latest.
+#
+#   A new SNAPSHOT is a new tag, and a rebuild under the same tag installs
+#   the same packages, so what the tag names does not drift. Until
+#   2026-10-14 the one tag, debian13-openssl-3.5, was rewritten by every build,
+#   so the image that made a release could be replaced under its name. It is
+#   no longer pushed; it stays as the image of v2.2.0 to v2.3.1.
 #
 # Triggered:
 #   - On manual dispatch (Actions tab -> "Build Docker build image" -> Run)
@@ -53,6 +60,16 @@ jobs:
         run: |
           OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "owner_lc=$OWNER_LC" >> $GITHUB_OUTPUT
+          SNAP=$(sed -n 's/^ARG SNAPSHOT=\([0-9]\{8\}\)T.*/\1/p' Dockerfile.build)
+          [ -n "$SNAP" ] || { echo "::error::no ARG SNAPSHOT in Dockerfile.build"; exit 1; }
+          echo "tag=debian13-$SNAP" >> $GITHUB_OUTPUT
+          # The workflows that build in the image must name this tag; a
+          # SNAPSHOT moved without them would leave them on the old one.
+          if grep -l 'freehsm-c-build:debian13-' .github/workflows/*.yml \
+               | xargs grep -L "freehsm-c-build:debian13-$SNAP" | grep -v build-image.yml; then
+              echo "::error::the workflows above do not use freehsm-c-build:debian13-$SNAP"
+              exit 1
+          fi
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -61,7 +78,7 @@ jobs:
           file: Dockerfile.build
           push: true
           tags: |
-            ghcr.io/${{ steps.meta.outputs.owner_lc }}/freehsm-c-build:debian13-openssl-3.5
+            ghcr.io/${{ steps.meta.outputs.owner_lc }}/freehsm-c-build:${{ steps.meta.outputs.tag }}
             ghcr.io/${{ steps.meta.outputs.owner_lc }}/freehsm-c-build:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

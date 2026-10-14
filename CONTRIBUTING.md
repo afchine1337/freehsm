@@ -1,6 +1,6 @@
 # Contributing to FreeHSM C
 
-Thank you for your interest in contributing to FreeHSM C. This project is a PKCS#11 cryptographic module written to the FIPS 140-3 Level 1 and CC EAL4+ methodologies, holding no certificate and seeking none ; contributions are welcome, but that discipline imposes constraints on what can be merged and how. Please read this guide carefully before submitting a pull request.
+Thank you for your interest in contributing to FreeHSM C. This project is a PKCS#11 cryptographic module written to the FIPS 140-3 Level 1 and CC EAL4+ methodologies, holding no certificate ; contributions are welcome, but that discipline imposes constraints on what can be merged and how. Please read this guide carefully before submitting a pull request.
 
 Project lead : **Afchine Madjlessi** ([`afchine.mad@gmail.com`](mailto:afchine.mad@gmail.com))
 

@@ -127,7 +127,7 @@ the only place in the suite that runs the integrity check without
 `FHSM_INTEGRITY_ALLOW_UNSIGNED`.
 
 **Disclosure decision : no CVE.** The project holds no certificate and
-seeks none, and has no known production deployments. The defect is disclosed transparently via :
+has no known production deployments. The defect is disclosed transparently via :
 
 - the CHANGELOG entry for v1.2.1 ;
 - this SECURITY.md section ;
@@ -398,7 +398,7 @@ present in `0c0f5df`, the initial open-source release. There is no version of
 this module published before v2.2.0 that does not have it.
 
 The `-FIPS` suffix was dropped from version strings in v2.0.0: it asserted in
-the version number a certification this project does not hold and will not seek.
+the version number a certification this project does not hold.
 Older tags carry it; it means nothing beyond the name they were released under.
 
 This table was last accurate at v1.2.1, corrected when the `C_UnwrapKey` entry

@@ -66,7 +66,7 @@ Only **lengths and event types** are written to the audit log. No PIN, no DEK by
 
 * DEK and unwrapped keys live in the `fhsm_secure_heap` arena (`mlock`ed pages, allocated via `OPENSSL_secure_malloc`).
 * The arena is allocated at module init and zeroized at finalize.
-* PaX/grsecurity-style hardening : `-fstack-protector-strong`, `-D_FORTIFY_SOURCE=2`, `-fstack-clash-protection`, `-fcf-protection=full` enabled in Makefile.
+* PaX/grsecurity-style hardening : `-fstack-protector-strong`, `-D_FORTIFY_SOURCE=2`, `-fstack-clash-protection` enabled in Makefile, and `-fcf-protection=full` (Intel CET) wherever the compiler accepts it -- x86 only; the Makefile probes for it so that arm64, ppc64el, riscv64 and s390x build (PR #18).
 
 ---
 

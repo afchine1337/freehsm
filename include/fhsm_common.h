@@ -66,7 +66,7 @@ extern "C" {
  * The version is part of the module identity: it is what CK_INFO reports,
  * what dist/refs/ pins, and what release.yml refuses to tag when it and the
  * tag disagree. Under FIPS 140-3 / CC a change here would invalidate a
- * certificate; this module holds none and will not seek one, so what it
+ * certificate; this module holds none, so what it
  * actually invalidates is the reproducibility reference for the previous
  * version --- which is why the baseline is taken after this bump, never
  * before.
@@ -93,17 +93,22 @@ extern "C" {
  * 2.3.0, MINOR a third time and without the tension: no security fix. The
  * PKI tools gain algorithms and a window, and calls answer differently in the
  * direction PKCS#11 v3.2 asks -- C_OpenSession without CKF_SERIAL_SESSION,
- * one role's C_Login over the other's, a parameter block on Ed25519. */
+ * one role's C_Login over the other's, a parameter block on Ed25519.
+ *
+ * 2.3.1, PATCH: two defects corrected and the build fixed off x86, nothing
+ * added. Calls answer differently only where they answered wrongly -- a
+ * non-extractable key's value, an imported key's CKA_SENSITIVE and
+ * CKA_EXTRACTABLE. */
 #define FHSM_VERSION_MAJOR   2
 #define FHSM_VERSION_MINOR   3
-#define FHSM_VERSION_PATCH   0
+#define FHSM_VERSION_PATCH   1
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
- * a certification this project holds and will not seek. The profile a
+ * a certification this project does not hold. The profile a
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
-#define FHSM_VERSION_STRING  "2.3.0"
+#define FHSM_VERSION_STRING  "2.3.1"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including

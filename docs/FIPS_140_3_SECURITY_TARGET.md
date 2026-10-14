@@ -216,7 +216,7 @@ Fixed in v1.2.1 (commit `63e1b35`, 2026-06-21). The comparison block now returns
 
 A `killer test` validates the fix : after re-signing the binary with the v1.2.1 build, the `tests/test_smoke` harness loads the signed binary correctly and the `tests/test_smoke.tampered` variant (1 byte flipped in `.text`) is rejected with `C_Initialize` returning `0x80000002 = FHSM_RV_INTEGRITY_FAILED`. The same procedure on a v1.2.0 binary returns OK silently, confirming the defect's behaviour on the affected window.
 
-Discovery was triggered by an investigation of a dev-environment integrity quirk on the maintainer's VM ; the visibility of the underlying defect was enabled by the v1.2.0 ALC_DVS-grade decomposition of `C_CreateObject` (see §13.5 and §13.8), which sharpened the focus on the integrity surface and made the dev-env quirk worth chasing. The project holds no certificate and seeks none, so no CVE is requested ; full disclosure is in CHANGELOG, this Security Target, and the GitHub Security Advisory in informational mode.
+Discovery was triggered by an investigation of a dev-environment integrity quirk on the maintainer's VM ; the visibility of the underlying defect was enabled by the v1.2.0 ALC_DVS-grade decomposition of `C_CreateObject` (see §13.5 and §13.8), which sharpened the focus on the integrity surface and made the dev-env quirk worth chasing. The project holds no certificate, so no CVE is requested ; full disclosure is in CHANGELOG, this Security Target, and the GitHub Security Advisory in informational mode.
 
 #### 9.1.2 v1.2.2 fix : raw CKM_ECDSA / CKM_RSA_PKCS sign+verify
 
@@ -401,7 +401,7 @@ The 8 skips are all due to tooling gaps in the harness layer (e.g., OpenSC's `pk
 
 ### 13.3 Reproducible build
 
-Every release tag triggers a deterministic build inside a pinned Docker image (`ghcr.io/<owner>/freehsm-c-build:debian13-openssl-3.5`). The resulting `libfreehsm.so` is bit-identical (same SHA-256) across independent builds, verified continuously by the `reproducibility` CI job (cross-build + compare). A GPG-signed source + binary tarball is published per tag.
+Every release tag triggers a deterministic build inside a pinned Docker image (`ghcr.io/<owner>/freehsm-c-build:debian13-20261006`). The resulting `libfreehsm.so` is bit-identical (same SHA-256) across independent builds, verified continuously by the `reproducibility` CI job (cross-build + compare). A GPG-signed source + binary tarball is published per tag.
 
 ### 13.4 Public attestation summary
 
@@ -481,7 +481,7 @@ The self-consistency design used for AES-GMAC (§9.4) is a variant of the same i
 **23 consecutive GPG-signed releases** since v1.1.0, every one Ed25519-signed by key `743A 6A59 04A1 461A 6464 08DE 4856 0162 DBBF 28A2`. Each release tag triggers an automated workflow (`release.yml`) that :
 
 1. Verifies the tag's GPG signature against the canonical fingerprint.
-2. Builds `libfreehsm.so` reproducibly in the pinned `freehsm-c-build:debian13-openssl-3.5` container.
+2. Builds `libfreehsm.so` reproducibly in the pinned `freehsm-c-build:debian13-20261006` container.
 3. Patches the `.fhsm_digest` section with the post-link SHA-384 of the binary.
 4. Builds both source and binary tarballs (`freehsm-c-X.Y.Z-src.tar.xz` and `-bin.tar.xz`).
 5. Detached-signs both tarballs with the release GPG key.
