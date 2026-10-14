@@ -1,8 +1,8 @@
 # FreeHSM C --- Preparative Procedures (CC EAL4+ AGD_PRE.1)
 
-> **Not certified, and not seeking certification.** FreeHSM is built to the
+> **Not certified.** FreeHSM is built to the
 > requirements of FIPS 140-3 Level 1 and Common Criteria EAL4+, and documented
-> with their methodologies. It holds no certificate and will not pursue one: a
+> with their methodologies. A
 > certificate costs more than this project will ever have, and that cost is
 > exactly the barrier that keeps public bodies, universities and developing
 > countries away from auditable cryptography. What a certificate attests,

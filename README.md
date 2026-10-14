@@ -13,7 +13,7 @@
 >
 > **FreeHSM** is the open-source PKCS#11 library, stewarded by **[Simorgh Labs](https://chaharsou.com)**. PKI and signing tooling on top of it is planned, not built. *(Repository renamed from `freehsm-c` to `freehsm` in July 2026; old URLs redirect.)*
 >
-> **Uncertified, and not seeking certification.** A CMVP or CC certificate costs more than this project will ever have, and that cost is precisely the barrier that keeps public bodies, universities, teaching institutions and developing countries away from auditable cryptography. The ten evaluation documents are published as worked examples — material that is hard to find outside a paid engagement. What a certificate attests, discipline can make checkable: by anyone, for free.
+> **Uncertified.** A CMVP or CC certificate costs more than this project will ever have, and that cost is precisely the barrier that keeps public bodies, universities, teaching institutions and developing countries away from auditable cryptography. The ten evaluation documents are published as worked examples — material that is hard to find outside a paid engagement. What a certificate attests, discipline can make checkable: by anyone, for free.
 >
 > This is software given away. It is not sold, it is not positioned against anyone's product, and it makes no claim to be first at anything.
 
@@ -171,7 +171,7 @@ Legend : ✅ implemented · 🟡 partial/scaffold · ⏳ to do
 - **CAVP `.rsp` parser** + **83 sample vectors** Python cross-validated.
 - **10 evaluation documents** covering what a full CC EAL4+ / FIPS 140-3 dossier contains (Security Policy, TOE, Architecture, Mechanisms, Reproducible Build, ATE_FUN, AVA_VAN, ALC_CMC, AGD_PRE, AGD_OPE) — written to the methodologies and published as worked examples, not submitted anywhere.
 - **~ 8 000 lines** of C + Python + Markdown across 40+ files.
-- **Certification.** FreeHSM holds no certificate and is not seeking one. A CMVP or CC submission costs more than this project will ever have, and that cost is exactly the barrier that keeps public bodies, universities and developing countries away from auditable cryptography. The ten evaluation documents are published as worked examples of how such a module is specified and tested — material that is otherwise hard to find outside a paid engagement. What a certificate attests, discipline can make verifiable: by anyone, at no cost.
+- **Certification.** FreeHSM holds no certificate. A CMVP or CC submission costs more than this project will ever have, and that cost is exactly the barrier that keeps public bodies, universities and developing countries away from auditable cryptography. The ten evaluation documents are published as worked examples of how such a module is specified and tested — material that is otherwise hard to find outside a paid engagement. What a certificate attests, discipline can make verifiable: by anyone, at no cost.
 
 ---
 

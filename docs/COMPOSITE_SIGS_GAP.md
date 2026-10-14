@@ -19,9 +19,8 @@ SPDX-License-Identifier: Apache-2.0
 > On FIPS, §10.2 of the draft is the authority and it disclaims itself in its
 > own second sentence — "This guidance is not authoritative and has not been
 > endorsed by US NIST" — before setting out the design goal that a composite
-> "be able to be considered FIPS-approved". That goal addresses implementers
-> seeking certification. FreeHSM seeks none (see *Certification* in
-> `README.md`), so `CKM_COMPOSITE_MLDSA65_ED25519` is all-mechanisms-only as a
+> "be able to be considered FIPS-approved". That goal is about certification,
+> which does not apply here (see *Certification* in `README.md`), so `CKM_COMPOSITE_MLDSA65_ED25519` is all-mechanisms-only as a
 > settled choice and not as a state awaiting the RFC. Publication will lift
 > the interoperability limit — third-party CAs accepting these requests — and
 > will not change the profile question, because a mechanism enters

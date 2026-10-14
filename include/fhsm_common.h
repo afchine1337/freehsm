@@ -66,7 +66,7 @@ extern "C" {
  * The version is part of the module identity: it is what CK_INFO reports,
  * what dist/refs/ pins, and what release.yml refuses to tag when it and the
  * tag disagree. Under FIPS 140-3 / CC a change here would invalidate a
- * certificate; this module holds none and will not seek one, so what it
+ * certificate; this module holds none, so what it
  * actually invalidates is the reproducibility reference for the previous
  * version --- which is why the baseline is taken after this bump, never
  * before.
@@ -104,7 +104,7 @@ extern "C" {
 #define FHSM_VERSION_PATCH   1
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
- * a certification this project holds and will not seek. The profile a
+ * a certification this project does not hold. The profile a
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
