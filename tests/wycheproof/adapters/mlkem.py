@@ -147,6 +147,9 @@ class MlkemAdapter(Adapter):
                 A.KEY_TYPE(_p11.CKK_ML_KEM),
                 A.TOKEN(False),
                 A.VALUE(dk),
+                # Required on C_CreateObject (v3.2 Table 288, footnote 1).
+                A.PARAMETER_SET({"ML-KEM-512": 1, "ML-KEM-768": 2,
+                                 "ML-KEM-1024": 3}[param_set]),
             ])
         except P11Error:
             # Module refused the import. For 'invalid' result with the

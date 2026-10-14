@@ -73,6 +73,7 @@ Après `C_Finalize`, le processus ne doit appeler aucun autre `C_*` avant un nou
 | MAC streaming (gros messages)            | `CKM_KMAC128` / `CKM_KMAC256`              |
 | Signature asymétrique (classique)        | `CKM_SHA384_RSA_PKCS_PSS` ou `CKM_ECDSA_SHA384` |
 | Signature asymétrique (PQ)               | `CKM_ML_DSA` (jeu paramètre ML-DSA-65)     |
+| Signature asymétrique (PQ, pré-hachage)  | `CKM_HASH_ML_DSA_<hash>`, ou `CKM_HASH_ML_DSA` quand l'appelant hache |
 | Signature asymétrique (hybride)          | **Retiré.** `CKM_HYBRID_ED25519_ML_DSA_65` a été désannoncé le 2026-09-24 (#17) : les deux composants signaient le message nu et les résultats étaient concaténés, de sorte que la moitié Ed25519 s'extrait comme signature autonome valide — le défaut de non-séparabilité que draft-ietf-lamps-pq-composite-sigs §2.2 existe pour empêcher. `CKM_COMPOSITE_MLDSA65_ED25519` le remplace, dans le profil `all-mechanisms` uniquement. |
 | Encapsulation de clé (classique)         | `CKM_ECDH1_DERIVE` sur P-256/384 ; X25519/X448 par le même mécanisme avec une clé `CKK_EC_MONTGOMERY`, dans le profil `all-mechanisms` avec `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` uniquement (le fournisseur FIPS d'OpenSSL que charge un module signé n'a aucune des deux courbes). PKCS#11 ne définit pas de `CKM_X25519_DERIVE`. |
 | Encapsulation de clé (PQ)                | `CKM_ML_KEM` (jeu paramètre ML-KEM-768)    |

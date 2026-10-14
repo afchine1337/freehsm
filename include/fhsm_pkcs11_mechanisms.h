@@ -113,6 +113,17 @@ extern "C" {
 /* --- ML-DSA --- */
 #define CKM_ML_DSA_KEY_PAIR_GEN              0x0000001Cu
 #define CKM_ML_DSA                           0x0000001Du
+#define CKM_HASH_ML_DSA                      0x0000001Fu
+#define CKM_HASH_ML_DSA_SHA224               0x00000023u
+#define CKM_HASH_ML_DSA_SHA256               0x00000024u
+#define CKM_HASH_ML_DSA_SHA384               0x00000025u
+#define CKM_HASH_ML_DSA_SHA512               0x00000026u
+#define CKM_HASH_ML_DSA_SHA3_224             0x00000027u
+#define CKM_HASH_ML_DSA_SHA3_256             0x00000028u
+#define CKM_HASH_ML_DSA_SHA3_384             0x00000029u
+#define CKM_HASH_ML_DSA_SHA3_512             0x0000002Au
+#define CKM_HASH_ML_DSA_SHAKE128             0x0000002Bu
+#define CKM_HASH_ML_DSA_SHAKE256             0x0000002Cu
 
 /* --- SLH-DSA --- */
 #define CKM_SLH_DSA_KEY_PAIR_GEN             0x0000002Du

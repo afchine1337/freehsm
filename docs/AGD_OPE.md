@@ -78,6 +78,7 @@ Pick mechanisms from the **approved set** listed in `docs/MECHANISMS.md` and `do
 | Streaming MAC (large messages)        | `CKM_KMAC128` / `CKM_KMAC256`          |
 | Asymmetric signature (classical)      | `CKM_SHA384_RSA_PKCS_PSS` or `CKM_ECDSA_SHA384` |
 | Asymmetric signature (PQ)             | `CKM_ML_DSA` (parameter set ML-DSA-65) |
+| Asymmetric signature (PQ, pre-hash)   | `CKM_HASH_ML_DSA_<hash>`, or `CKM_HASH_ML_DSA` when the caller hashes |
 | Asymmetric signature (hybrid)         | **Withdrawn.** `CKM_HYBRID_ED25519_ML_DSA_65` was de-advertised on 2026-09-24 (#17): the two components signed the bare message and the results were concatenated, so the Ed25519 half lifts out as a valid standalone signature — the non-separability failure draft-ietf-lamps-pq-composite-sigs §2.2 exists to prevent. `CKM_COMPOSITE_MLDSA65_ED25519` replaces it and is available in the `all-mechanisms` profile only. |
 | Key encapsulation (classical)         | `CKM_ECDH1_DERIVE` over P-256/384; X25519/X448 through the same mechanism with a `CKK_EC_MONTGOMERY` key, in the `all-mechanisms` profile with `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` only (the OpenSSL FIPS provider a signed module loads has neither curve). PKCS#11 defines no `CKM_X25519_DERIVE`. |
 | Key encapsulation (PQ)                | `CKM_ML_KEM` (parameter set ML-KEM-768) |

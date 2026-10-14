@@ -51,9 +51,10 @@ void fhsm_parse_pq_params(const void *param_ptr, size_t param_len,
     if (ctx_len > out_ctx_cap || !ctx_ptr) {
         /* FIPS 204 §5.2.1 and FIPS 205 §5.2.1 bound the context string
          * at 255 octets ; oversize values fall through to a "no
-         * parameter" outcome, matching the original behavior in
-         * src/fhsm_pkcs11.c. OpenSSL then receives no override and
-         * itself rejects the eventual sign/verify. */
+         * parameter" outcome here. That outcome is not safe on its own:
+         * OpenSSL then receives no context and signs or verifies under the
+         * empty one. op_init() in src/fhsm_pkcs11.c reads the length again
+         * and refuses or marks the operation (pq_ctx_toolong). */
         return;
     }
 
