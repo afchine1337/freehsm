@@ -7,7 +7,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+* **A context string over 255 bytes** for `CKM_ML_DSA` and `CKM_SLH_DSA`.
+  At 256 bytes signing and verification answered `CKR_FUNCTION_FAILED`;
+  beyond that, and for a NULL `pContext` with a length, the context was
+  dropped and the signature made or checked under the empty one, with
+  nothing to say so. Now, as FIPS 204 and 205 define it: `C_SignInit`
+  refuses with `CKR_MECHANISM_PARAM_INVALID`, verification answers
+  `CKR_SIGNATURE_INVALID`, and a NULL context with a length is refused.
+  Wycheproof's InvalidContext cases, 18 xfails in pkcs11-check 0.2.3.
+
 ### Added
+* **HashML-DSA** (FIPS 204 Algorithm 4; PKCS#11 v3.2 §6.67.6-6.67.7):
+  `CKM_HASH_ML_DSA` and the ten `CKM_HASH_ML_DSA_<hash>`, SHA-2, SHA-3
+  and SHAKE, single- and multi-part, in both profiles. OpenSSL 3.5 has no
+  HashML-DSA: the module builds M' and signs it with ML-DSA.Sign_internal.
+  Checked byte for byte against NIST's deterministic ACVP signatures
+  (`tests/test_hash_ml_dsa`). The generic mechanism takes PH(M),
+  single-part, as §6.67.6 and Table 283 say. Asked for by Govardhan
+  Yadava's acvp-assay. `docs/hash-ml-dsa-plan.md`.
+
 * **Deleting keys and certificates from the token** (`docs/fhsm-crypt-plan.md`,
   stage 0). A new tool, `fhsm-crypt`, lists what a session sees --
   certificates and public, private and secret keys, with their `CKA_ID` --
@@ -70,6 +89,27 @@ project adheres to [Semantic Versioning](https://semver.org/).
   to leave the mode. A token listed while logged in with nothing on it may now
   be re-initialised there, with a confirmation that says so; one that may
   hold keys is still refused.
+
+### Changed
+* **`C_CreateObject` requires `CKA_PARAMETER_SET`** on an ML-KEM, ML-DSA
+  or SLH-DSA key, public or private: `CKR_TEMPLATE_INCOMPLETE` without
+  it (PKCS#11 v3.2 Tables 280-281, 287-288, 290-291, footnote 1). It was
+  inferred from the key's length. A DER SubjectPublicKeyInfo is now held
+  to the stated set as a raw key was. Callers that relied on the
+  inference must send the attribute. Raised by Govardhan Yadava for
+  acvp-assay's PKCS#11 harness.
+* `CKM_ML_DSA` refuses a key that is not `CKK_ML_DSA` with
+  `CKR_KEY_TYPE_INCONSISTENT` at Init; it failed at C_Sign before.
+* **The build image is pinned** (PR #19). `Dockerfile.build` names its base
+  image by digest and reads apt from snapshot.debian.org at one instant,
+  and the image it makes carries a dated tag, `debian13-20261006`. From
+  v2.2.0 to v2.3.1 `dist-verify` failed on every tag while `release.yml`
+  passed: the release image kept the toolchain of the day it was built and
+  a fresh build of the unpinned file took that day's packages. The
+  published binaries matched their references throughout; an independent
+  rebuild could not have. The toolchain moves with the pin, so this
+  release's bytes differ from what the old image would have made.
+  `docs/REPRODUCIBLE_BUILD.md` §5-6.
 
 ## [2.3.1] --- 2026-10-14
 

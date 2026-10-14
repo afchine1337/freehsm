@@ -117,8 +117,8 @@ works under the FIPS provider: `nist-approved-only` offers it.
 
 ## CHANGELOG, at the 2.4.0 merge
 
-Held here rather than written into `[Unreleased]`, which describes 2.3.1
-until that tag:
+Held here until the 2.3.1 tag, and moved into `[Unreleased]` at the merge
+(2026-10-14):
 
     ### Added
     * **HashML-DSA** (FIPS 204 Algorithm 4; PKCS#11 v3.2 §6.67.6-6.67.7):
