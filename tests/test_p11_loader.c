@@ -76,6 +76,9 @@ int main(int argc, char **argv)
     SAME(InitToken);        SAME(InitPIN);
     SAME(GetTokenInfo);     SAME(GenerateRandom);
     SAME(GetSlotList);
+    SAME(DestroyObject);    SAME(GenerateKey);
+    SAME(EncryptInit);      SAME(Encrypt);
+    SAME(DecryptInit);      SAME(Decrypt);
     #undef SAME
 
     printf("\n  %d slots compared against dlsym", checked);

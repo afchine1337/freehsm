@@ -81,8 +81,16 @@ static struct {
     GtkWidget *slots_box;
     GtkWidget *pin_entry, *login_btn, *logout_btn;
     GtkWidget *init_box, *init_label, *init_so, *init_so2, *init_user, *init_user2;
-    GtkWidget *keys_box, *label_entry, *keygen_btn, *keygen_alg;
+    GtkWidget *keys_box, *label_entry, *keygen_btn, *keygen_alg, *delete_btn;
     GtkWidget *log_view, *status;
+    /* What the object list shows, row for row: a row's index is its object's.
+     * docs/fhsm-crypt-plan.md stage 0. */
+    struct pkiops_object *objs;
+    size_t n_objs;
+    GtkWidget *attr_view;           /* the selected object's attributes */
+    /* The slot whose token this window last listed, logged in, and found
+     * empty -- or -1. Operator mode re-initialises only such a token. */
+    long empty_slot;
 
     /* The Certificates tab. */
     GtkWidget *cert_page, *key_drop, *pem_check;
@@ -99,6 +107,11 @@ static struct {
     GtkWidget *rv_key_drop, *rv_ca_btn, *crl_days_spin, *crl_pem_check;
     GtkWidget *req_btn, *responder_btn, *ocsp_days_spin;
     char *db_path, *rv_ca_path, *req_path, *responder_path;
+
+    /* The Encryption tab (docs/fhsm-crypt-plan.md stage 5). */
+    GtkWidget *en_key_box, *en_key_drop, *en_cert_btn, *en_dec_btn;
+    GtkStringList *enc_labels;      /* AES keys and rsa-oaep pairs, by label */
+    char *en_data_path, *en_cert_path;
 
     /* The Signing tab. */
     GtkWidget *sg_data_box, *sg_key_box, *sg_cmsv_btn;
@@ -121,7 +134,7 @@ static struct {
     size_t n_slots;
     long selected;                  /* index into slots, or -1 */
     pkiops_handle session;
-} A = { .selected = -1 };
+} A = { .selected = -1, .empty_slot = -1 };
 
 /* --- the call log ------------------------------------------------------- */
 
@@ -223,6 +236,12 @@ static void update_sensitivity(void) {
     gtk_widget_set_sensitive(A.logout_btn,   !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.label_entry,  !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.keygen_btn,   !A.busy && A.logged_in);
+    {
+        GtkListBoxRow *r = gtk_list_box_get_selected_row(GTK_LIST_BOX(A.keys_box));
+        int idx = r ? gtk_list_box_row_get_index(r) : -1;
+        gtk_widget_set_sensitive(A.delete_btn, !A.busy && A.logged_in
+                                               && idx >= 0 && (size_t)idx < A.n_objs);
+    }
     gtk_widget_set_sensitive(A.cert_page,    !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.rv_db_box,     !A.busy);
     gtk_widget_set_sensitive(A.rv_revoke_box, !A.busy && A.db_path);
@@ -230,6 +249,9 @@ static void update_sensitivity(void) {
     gtk_widget_set_sensitive(A.sg_data_box,   !A.busy);
     gtk_widget_set_sensitive(A.sg_key_box,    !A.busy && A.sg_data_path && A.logged_in);
     gtk_widget_set_sensitive(A.sg_cmsv_btn,   !A.busy && A.sg_data_path);
+    gtk_widget_set_sensitive(A.en_key_box,    !A.busy && A.en_data_path && A.logged_in);
+    gtk_widget_set_sensitive(A.en_cert_btn,   !A.busy && A.en_data_path && A.en_cert_path);
+    gtk_widget_set_sensitive(A.en_dec_btn,    !A.busy && A.en_data_path && A.logged_in);
     gtk_widget_set_sensitive(A.page_op_ca,    !A.busy);
     gtk_widget_set_sensitive(A.op_ca_signing_box, !A.busy && A.logged_in);
     gtk_widget_set_sensitive(A.page_op_issue, !A.busy && A.logged_in);
@@ -255,7 +277,8 @@ static void list_add(GtkWidget *box, const char *text) {
 enum job_kind { J_LOAD, J_UNLOAD, J_SLOTS, J_LOGIN, J_KEYS, J_KEYGEN, J_LOGOUT,
                 J_CSR, J_ROOT, J_ISSUE, J_DB_LOAD, J_REVOKE, J_CRL, J_OCSP,
                 J_SIGN, J_VERIFY, J_CMS_SIGN, J_CMS_VERIFY,
-                J_NEW_CA, J_REVOKE_PUBLISH, J_TOKEN_INIT };
+                J_NEW_CA, J_REVOKE_PUBLISH, J_TOKEN_INIT, J_DELETE, J_ATTRS,
+                J_ENCRYPT, J_ENC_CERT, J_DECRYPT };
 
 struct job {
     enum job_kind kind;
@@ -275,11 +298,18 @@ struct job {
     char *data_path, *in_path, *cert_path;
     int operator_mode;              /* apply operator mode's refusals */
     int alg;                        /* enum pkiops_alg, for a key pair */
+    int skey;                       /* enum pkiops_skey for a secret key, or -1 */
     /* results */
     int rc;
     struct p11_err e;
     struct pkiops_slot *slots; size_t n_slots;
     struct pkiops_key  *keys;  size_t n_keys;
+    struct pkiops_object *objs; size_t n_objs;
+    pkiops_handle *del; size_t n_del;   /* J_DELETE: what was ticked */
+    size_t n_deleted;                   /* J_DELETE: how many went */
+    pkiops_handle object;               /* J_ATTRS: the object described */
+    char used[65];                      /* J_DECRYPT: the key that opened it */
+    struct pkiops_attr *attrs; size_t n_attrs;
     int pop_valid;
     size_t out_len;
     fhsm_rev_db_t db; int have_db;  /* the database as the job left it */
@@ -311,6 +341,9 @@ static void job_free(gpointer p) {
     if (j->have_db) fhsm_rev_db_free(&j->db);
     free(j->slots);
     free(j->keys);
+    free(j->objs);
+    g_free(j->del);
+    free(j->attrs);
     g_free(j);
 }
 
@@ -396,8 +429,10 @@ static int write_out(const char *path, const uint8_t *der, size_t n, int pem,
  * to sign with an ambiguous label -- after the second key exists. Checked on
  * the token itself, not on the list the window last showed. */
 static int label_in_use(pkiops_handle s, const char *label, struct p11_err *e) {
-    struct pkiops_key *k = NULL; size_t n = 0;
-    int rc = pkiops_keys(s, &k, &n, e);
+    /* Every key, secret keys included: an AES key and a key pair under one
+     * label are as ambiguous as two key pairs. */
+    struct pkiops_object *k = NULL; size_t n = 0;
+    int rc = pkiops_objects(s, PKIOPS_OBJS_KEYS, &k, &n, e);
     if (rc) return rc;
     int used = 0;
     for (size_t i = 0; i < n; i++) if (!strcmp(k[i].label, label)) used = 1;
@@ -677,6 +712,15 @@ static void run_ocsp(struct job *j) {
     g_free(req);
 }
 
+/* The keys, for the drop-downs that sign and their algorithms, and every
+ * object, for the list on the Token tab. Read together wherever either was,
+ * so the two cannot describe different moments of the token. */
+static int list_objects(struct job *j, struct p11_err *e) {
+    int rc = pkiops_keys(j->session, &j->keys, &j->n_keys, e);
+    if (!rc) rc = pkiops_objects(j->session, PKIOPS_OBJS_ALL, &j->objs, &j->n_objs, e);
+    return rc;
+}
+
 static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
     (void)task; (void)src; (void)c;
     struct job *j = data;
@@ -696,17 +740,45 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
         j->rc = pkiops_session_user(j->slot, j->pin, j->pin_len, &j->session, &j->e);
         /* Wiped as soon as the module has answered, not when the job is freed. */
         OPENSSL_cleanse(j->pin, j->pin_len);
-        if (!j->rc) j->rc = pkiops_keys(j->session, &j->keys, &j->n_keys, &j->e);
+        if (!j->rc) j->rc = list_objects(j, &j->e);
         break;
     case J_KEYS:
-        j->rc = pkiops_keys(j->session, &j->keys, &j->n_keys, &j->e);
+        j->rc = list_objects(j, &j->e);
         break;
+    case J_ATTRS:
+        j->rc = pkiops_object_attrs(j->session, j->object, &j->attrs, &j->n_attrs, &j->e);
+        break;
+    case J_ENCRYPT:
+        j->rc = pkiops_encrypt_file(j->session, j->label, j->data_path, j->out_path, &j->e);
+        break;
+    case J_ENC_CERT:
+        j->rc = pkiops_encrypt_file_for_cert(j->cert_path, j->data_path, j->out_path, &j->e);
+        break;
+    case J_DECRYPT:
+        j->rc = pkiops_decrypt_file(j->session, j->data_path, j->out_path,
+                                    j->used, sizeof j->used, &j->e);
+        break;
+    case J_DELETE: {
+        /* Stop at the first refusal: the rest was ticked together with it,
+         * and the list read afterwards shows exactly what is left. */
+        for (size_t i = 0; i < j->n_del; i++) {
+            if ((j->rc = pkiops_destroy(j->session, j->del[i], &j->e)) != 0) break;
+            j->n_deleted++;
+        }
+        struct p11_err ignored;
+        if (list_objects(j, j->rc ? &ignored : &j->e) && !j->rc) j->rc = j->e.code;
+        break;
+    }
     case J_KEYGEN: {
         pkiops_handle hp = 0, hk = 0;
         if (j->operator_mode) j->rc = label_in_use(j->session, j->label, &j->e);
-        if (!j->rc) j->rc = pkiops_keygen_alg(j->session, j->label,
-                                              (enum pkiops_alg)j->alg, &hp, &hk, &j->e);
-        if (!j->rc) j->rc = pkiops_keys(j->session, &j->keys, &j->n_keys, &j->e);
+        if (!j->rc && j->skey >= 0)
+            j->rc = pkiops_keygen_secret(j->session, j->label,
+                                         (enum pkiops_skey)j->skey, &hk, &j->e);
+        else if (!j->rc)
+            j->rc = pkiops_keygen_alg(j->session, j->label,
+                                      (enum pkiops_alg)j->alg, &hp, &hk, &j->e);
+        if (!j->rc) j->rc = list_objects(j, &j->e);
         break;
     }
     case J_NEW_CA: {
@@ -724,7 +796,7 @@ static void run_job(GTask *task, gpointer src, gpointer data, GCancellable *c) {
             g_free(der);
         }
         struct p11_err ignored;
-        if (pkiops_keys(j->session, &j->keys, &j->n_keys, j->rc ? &ignored : &j->e) && !j->rc)
+        if (list_objects(j, j->rc ? &ignored : &j->e) && !j->rc)
             j->rc = j->e.code;
         break;
     }
@@ -946,21 +1018,59 @@ static void clear_key_labels(void) {
                            g_list_model_get_n_items(G_LIST_MODEL(A.key_labels)), NULL);
 }
 
+/* The object list and what it shows, emptied together. */
+static void clear_objects(void) {
+    gtk_string_list_splice(A.enc_labels, 0,
+                           g_list_model_get_n_items(G_LIST_MODEL(A.enc_labels)), NULL);
+    clear_list(A.keys_box);
+    gtk_label_set_text(GTK_LABEL(A.attr_view), "");
+    free(A.objs);
+    A.objs = NULL;
+    A.n_objs = 0;
+}
+
 static void show_keys(struct job *j) {
     /* The Certificates tab signs with a private key, named by its label. */
     clear_key_labels();
     for (size_t i = 0; i < j->n_keys; i++)
         if (j->keys[i].is_private && j->keys[i].label[0])
             gtk_string_list_append(A.key_labels, j->keys[i].label);
-    clear_list(A.keys_box);
-    for (size_t i = 0; i < j->n_keys; i++) {
-        char t[160];
-        snprintf(t, sizeof t, "%-7s  object %lu   \"%s\"   %s",
-                 j->keys[i].is_private ? "private" : "public",
-                 j->keys[i].handle, j->keys[i].label, j->keys[i].alg);
+    /* Every object, certificates first, each with the algorithm the signing
+     * tabs know it by when it has one. The rows are the objects, in order, so
+     * a selected row's index is the object to delete. */
+    clear_objects();
+    A.objs = j->objs; A.n_objs = j->n_objs;
+    j->objs = NULL; j->n_objs = 0;
+    /* What the Encryption tab can encrypt for: an AES key, or the public half
+     * of an rsa-oaep pair -- one entry per label. */
+    for (size_t i = 0; i < A.n_objs; i++) {
+        const struct pkiops_object *o = &A.objs[i];
+        int aes = o->cls == PKIOPS_OBJ_SECRET && !strncmp(o->alg, "aes", 3);
+        int oaep = o->cls == PKIOPS_OBJ_PUBLIC && !strcmp(o->alg, "rsa-oaep");
+        if ((aes || oaep) && o->label[0]) gtk_string_list_append(A.enc_labels, o->label);
+    }
+    for (size_t i = 0; i < A.n_objs; i++) {
+        const struct pkiops_object *o = &A.objs[i];
+        /* A secret key or an rsa-oaep key carries its own name; a signing
+         * key's comes from pkiops_keys. */
+        const char *alg = o->alg;
+        for (size_t k = 0; !alg[0] && k < j->n_keys; k++)
+            if (j->keys[k].handle == o->handle) alg = j->keys[k].alg;
+        char t[200];
+        snprintf(t, sizeof t, "%-11s  object %lu   \"%s\"   %s",
+                 pkiops_obj_class_name(o->cls), o->handle, o->label, alg);
         list_add(A.keys_box, t);
     }
-    if (j->n_keys == 0) list_add(A.keys_box, "(no key on this token)");
+    /* Logged in, so the list is everything the token holds for this user:
+     * an empty one is what operator mode needs to see before it will
+     * re-initialise the token. */
+    A.empty_slot = (A.n_objs == 0 && A.selected >= 0 && (size_t)A.selected < A.n_slots)
+                 ? (long)A.slots[A.selected].id : -1;
+    if (A.n_objs == 0) {
+        list_add(A.keys_box, "(nothing on this token)");
+        GtkListBoxRow *r = gtk_list_box_get_row_at_index(GTK_LIST_BOX(A.keys_box), 0);
+        if (r) gtk_list_box_row_set_selectable(r, FALSE);
+    }
 }
 
 static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
@@ -993,8 +1103,9 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
         A.slots = NULL; A.n_slots = 0;
         A.selected = -1;
         clear_list(A.slots_box);
-        clear_list(A.keys_box);
+        clear_objects();
         clear_key_labels();
+        A.empty_slot = -1;
         status("Module unloaded. Load the same one or another.");
         break;
     case J_SLOTS:
@@ -1013,26 +1124,81 @@ static void job_done(GObject *src, GAsyncResult *res, gpointer ud) {
         break;
     case J_KEYGEN:
         if (j->rc) {
-            status_err("Generating the key pair", &j->e);
+            status_err(j->skey >= 0 ? "Generating the key" : "Generating the key pair", &j->e);
             if (strstr(j->e.msg, "0x70")) {
                 char msg[400];
-                snprintf(msg, sizeof msg, "Generating the key pair: this module does not "
+                snprintf(msg, sizeof msg, "Generating the key: this module does not "
                          "offer %s (CKR_MECHANISM_INVALID).%s",
-                         pkiops_alg_name((enum pkiops_alg)j->alg),
-                         j->alg == PKIOPS_ALG_COMPOSITE
+                         j->skey >= 0 ? pkiops_skey_name((enum pkiops_skey)j->skey)
+                                      : pkiops_alg_name((enum pkiops_alg)j->alg),
+                         j->skey < 0 && j->alg == PKIOPS_ALG_COMPOSITE
                              ? " The composite exists only in builds made with "
                                "PROFILE=all-mechanisms." : "");
                 status(msg);
             }
         } else {
             show_keys(j);
-            status("Key pair generated.");
+            status(j->skey == PKIOPS_SKEY_RSA_OAEP ? "Encryption key pair generated."
+                   : j->skey >= 0 ? "Secret key generated." : "Key pair generated.");
         }
         break;
+    case J_DELETE: {
+        char msg[4400];
+        if (j->rc) {
+            char head[96];
+            snprintf(head, sizeof head, "Deleting (%zu of %zu deleted before the refusal)",
+                     j->n_deleted, j->n_del);
+            snprintf(msg, sizeof msg, "%s: %s", head, j->e.msg);
+            size_t n = strlen(msg);
+            if (n && msg[n-1] == '\n') msg[n-1] = '\0';
+            status(msg);
+        }
+        if (j->keys || j->objs) show_keys(j);
+        if (!j->rc) {
+            snprintf(msg, sizeof msg, "Deleted %zu object%s from the token.%s",
+                     j->n_deleted, j->n_deleted == 1 ? "" : "s",
+                     A.n_objs == 0 ? " The token is now empty: log out to re-initialise it."
+                                   : "");
+            status(msg);
+        }
+        break;
+    }
+    case J_ENCRYPT:
+    case J_ENC_CERT:
+    case J_DECRYPT: {
+        const char *what = j->kind == J_DECRYPT ? "Decrypting" : "Encrypting";
+        if (j->rc) { status_err(what, &j->e); break; }
+        char *base = g_path_get_basename(j->out_path);
+        char msg[400];
+        if (j->kind == J_DECRYPT)
+            snprintf(msg, sizeof msg, "Decrypted with \"%s\" into %s.", j->used, base);
+        else if (j->kind == J_ENCRYPT)
+            snprintf(msg, sizeof msg, "Encrypted for \"%s\" into %s.", j->label, base);
+        else
+            snprintf(msg, sizeof msg, "Encrypted for the certificate's holder into %s.", base);
+        g_free(base);
+        status(msg);
+        break;
+    }
+    case J_ATTRS: {
+        /* Shown only if that object is still the one selected: a click on
+         * another row while this ran has its own job coming. */
+        GtkListBoxRow *r = gtk_list_box_get_selected_row(GTK_LIST_BOX(A.keys_box));
+        int idx = r ? gtk_list_box_row_get_index(r) : -1;
+        if (idx < 0 || (size_t)idx >= A.n_objs || A.objs[idx].handle != j->object) break;
+        if (j->rc) { gtk_label_set_text(GTK_LABEL(A.attr_view), j->e.msg); break; }
+        GString *t = g_string_new(NULL);
+        for (size_t i = 0; i < j->n_attrs; i++)
+            g_string_append_printf(t, "%s%-24s %s", i ? "\n" : "",
+                                   j->attrs[i].name, j->attrs[i].value);
+        gtk_label_set_text(GTK_LABEL(A.attr_view), t->str);
+        g_string_free(t, TRUE);
+        break;
+    }
     case J_LOGOUT:
         A.logged_in = 0;
         A.session = 0;
-        clear_list(A.keys_box);
+        clear_objects();
         clear_key_labels();
         if (!j->rc) show_slots(j);
         status("Logged out: the session is closed.");
@@ -1217,6 +1383,10 @@ static const char *running_text(enum job_kind k) {
     case J_CMS_VERIFY: return "Hashing the data, then checking the CMS...";
     case J_NEW_CA:     return "Creating the CA: key pair, then the root...";
     case J_TOKEN_INIT: return "Initialising the token: both PINs are derived, which takes a moment...";
+    case J_DELETE:     return "Deleting from the token...";
+    case J_ENCRYPT:
+    case J_ENC_CERT:   return "Encrypting: the file is streamed, not held...";
+    case J_DECRYPT:    return "Decrypting: nothing is kept unless it authenticates...";
     default:           return "Working...";
     }
 }
@@ -1311,11 +1481,15 @@ static void on_init(GtkButton *b, gpointer ud) {
         status("The token label is at most 32 characters (PKCS#11 pads it to exactly that).");
         return;
     }
-    if (A.operator_mode && sl->has_token) {
+    /* Operator mode re-initialises a token only once it has seen it empty:
+     * listed while logged in, with nothing on it. Anything else could hold a
+     * CA's key, and C_InitToken does not ask. */
+    int seen_empty = sl->has_token && A.empty_slot == (long)sl->id;
+    if (A.operator_mode && sl->has_token && !seen_empty) {
         clear_init_pins();
-        status("Refused in operator mode: this slot holds an initialised token, and "
-               "re-initialising it destroys every key on it. Exploration mode asks for "
-               "confirmation; fhsm-token init --force does it from the command line.");
+        status("Refused in operator mode: this token may hold keys, and re-initialising "
+               "destroys every one. Log in, delete what is on it until the list is empty, "
+               "log out, then re-initialise. Exploration mode asks instead of refusing.");
         return;
     }
     const char *so = gtk_editable_get_text(GTK_EDITABLE(A.init_so));
@@ -1347,9 +1521,11 @@ static void on_init(GtkButton *b, gpointer ud) {
     }
     GtkAlertDialog *d = gtk_alert_dialog_new("Re-initialise slot %lu (\"%s\")?",
                                              sl->id, sl->label);
-    gtk_alert_dialog_set_detail(d,
-        "C_InitToken destroys every object on the token: every key, a CA's included. "
-        "This is not undone.");
+    gtk_alert_dialog_set_detail(d, seen_empty
+        ? "This token was empty when this window last listed it. C_InitToken destroys "
+          "whatever another program has put on it since. This is not undone."
+        : "C_InitToken destroys every object on the token: every key, a CA's included. "
+          "This is not undone.");
     const char *const buttons[] = { "Cancel", "Destroy and re-initialise", NULL };
     gtk_alert_dialog_set_buttons(d, buttons);
     gtk_alert_dialog_set_cancel_button(d, 0);
@@ -1368,10 +1544,17 @@ static void on_keygen(GtkWidget *w, gpointer ud) {
     j->session = A.session;
     j->label = g_strdup(label);
     j->operator_mode = A.operator_mode;
-    j->alg = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(A.keygen_alg));
+    /* One list: the signature algorithms, then the secret keys. */
+    int sel = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(A.keygen_alg));
+    j->alg = sel < PKIOPS_ALG_COUNT ? sel : -1;
+    j->skey = sel < PKIOPS_ALG_COUNT ? -1 : sel - PKIOPS_ALG_COUNT;
     char msg[96];
-    snprintf(msg, sizeof msg, "Generating a %s key pair...",
-             pkiops_alg_name((enum pkiops_alg)j->alg));
+    if (j->skey >= 0)
+        snprintf(msg, sizeof msg, "Generating a %s secret key...",
+                 pkiops_skey_name((enum pkiops_skey)j->skey));
+    else
+        snprintf(msg, sizeof msg, "Generating a %s key pair...",
+                 pkiops_alg_name((enum pkiops_alg)j->alg));
     status(msg);
     start(j);
 }
@@ -1381,6 +1564,172 @@ static void on_keygen(GtkWidget *w, gpointer ud) {
 static const char *chosen_key(GtkWidget *drop) {
     GtkStringObject *o = gtk_drop_down_get_selected_item(GTK_DROP_DOWN(drop));
     return o ? gtk_string_object_get_string(o) : NULL;
+}
+
+/* --- deleting objects (docs/fhsm-crypt-plan.md stage 0) ------------------ */
+
+static void on_object_selected(GtkListBox *box, GtkListBoxRow *row, gpointer ud) {
+    (void)box; (void)ud;
+    if (A.closing) return;          /* the list empties itself as it is destroyed */
+    update_sensitivity();
+    int idx = row ? gtk_list_box_row_get_index(row) : -1;
+    if (idx < 0 || (size_t)idx >= A.n_objs || !A.logged_in) {
+        gtk_label_set_text(GTK_LABEL(A.attr_view), "");
+        return;
+    }
+    if (A.busy) {                   /* one call into the module at a time */
+        gtk_label_set_text(GTK_LABEL(A.attr_view), "Busy: select the row again in a moment.");
+        return;
+    }
+    struct job *j = g_new0(struct job, 1);
+    j->kind = J_ATTRS;
+    j->session = A.session;
+    j->object = A.objs[idx].handle;
+    gtk_label_set_text(GTK_LABEL(A.attr_view), "Reading the attributes...");
+    /* Not start(): that takes the focus off whatever has it, so that an entry
+     * turning insensitive gets its focus-out -- and here what has the focus is
+     * the list, whose arrow keys should keep moving through it. */
+    A.busy = 1;
+    update_sensitivity();
+    GTask *t = g_task_new(NULL, NULL, job_done, NULL);
+    g_task_set_task_data(t, j, job_free);
+    g_task_run_in_thread(t, run_job);
+    g_object_unref(t);
+}
+
+/* The confirmation: one tick box per object sharing the label, the clicked
+ * one ticked, the others not. A private key, its public half and a
+ * certificate usually go together, but which of them goes is the operator's
+ * to say, and the window will not guess. */
+struct del_ask {
+    GtkWidget *win;
+    GtkWidget **checks;
+    pkiops_handle *handles;
+    size_t n;
+};
+
+static void del_ask_free(gpointer p) {
+    struct del_ask *d = p;
+    g_free(d->checks);
+    g_free(d->handles);
+    g_free(d);
+}
+
+static void on_del_cancel(GtkButton *b, gpointer data) {
+    (void)b;
+    struct del_ask *d = data;
+    gtk_window_destroy(GTK_WINDOW(d->win));
+}
+
+static void on_del_confirm(GtkButton *b, gpointer data) {
+    (void)b;
+    struct del_ask *d = data;
+    pkiops_handle *pick = g_new(pkiops_handle, d->n ? d->n : 1);
+    size_t n = 0;
+    for (size_t i = 0; i < d->n; i++)
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(d->checks[i]))) pick[n++] = d->handles[i];
+    gtk_window_destroy(GTK_WINDOW(d->win));      /* frees d */
+    if (n == 0) { g_free(pick); status("Nothing ticked; nothing deleted."); return; }
+    if (A.busy || !A.logged_in || A.closing) { g_free(pick); return; }
+    struct job *j = g_new0(struct job, 1);
+    j->kind = J_DELETE;
+    j->session = A.session;
+    j->operator_mode = A.operator_mode;
+    j->del = pick;
+    j->n_del = n;
+    status(running_text(J_DELETE));
+    start(j);
+}
+
+static void on_delete(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (A.busy || !A.logged_in) return;
+    GtkListBoxRow *r = gtk_list_box_get_selected_row(GTK_LIST_BOX(A.keys_box));
+    int idx = r ? gtk_list_box_row_get_index(r) : -1;
+    if (idx < 0 || (size_t)idx >= A.n_objs) return;
+    const struct pkiops_object *o = &A.objs[idx];
+
+    /* Operator mode keeps the CA it works for: its key pair, and any
+     * certificate on the token under the same label. No "delete anyway" --
+     * exploration mode and fhsm-crypt remain for the exception, as for every
+     * other refusal of this mode. */
+    if (A.operator_mode && o->label[0]) {
+        const char *ca = chosen_key(A.op_key_drop);
+        if (ca && !strcmp(ca, o->label)) {
+            char msg[200];
+            snprintf(msg, sizeof msg, "Refused in operator mode: \"%s\" is the CA's key. "
+                     "Leave operator mode to delete it.", o->label);
+            status(msg);
+            return;
+        }
+    }
+
+    struct del_ask *d = g_new0(struct del_ask, 1);
+    size_t cap = 0;
+    for (size_t i = 0; i < A.n_objs; i++)
+        if ((size_t)idx == i || (o->label[0] && !strcmp(A.objs[i].label, o->label))) cap++;
+    d->checks = g_new0(GtkWidget *, cap);
+    d->handles = g_new0(pkiops_handle, cap);
+
+    d->win = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(d->win), "Delete from the token");
+    gtk_window_set_transient_for(GTK_WINDOW(d->win), GTK_WINDOW(A.win));
+    gtk_window_set_modal(GTK_WINDOW(d->win), TRUE);
+    gtk_window_set_resizable(GTK_WINDOW(d->win), FALSE);
+    g_object_set_data_full(G_OBJECT(d->win), "del-ask", d, del_ask_free);
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(box, 16);
+    gtk_widget_set_margin_end(box, 16);
+    gtk_widget_set_margin_top(box, 16);
+    gtk_widget_set_margin_bottom(box, 16);
+
+    /* Escaped: a label is whatever its creator typed, markup included. */
+    char *head = o->label[0]
+        ? g_markup_printf_escaped("<b>Delete objects labelled \xe2\x80\x9c%s\xe2\x80\x9d?</b>", o->label)
+        : g_markup_printf_escaped("<b>Delete object %lu?</b>", o->handle);
+    GtkWidget *h = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(h), head);
+    g_free(head);
+    gtk_label_set_xalign(GTK_LABEL(h), 0.0f);
+    gtk_box_append(GTK_BOX(box), h);
+    GtkWidget *note = gtk_label_new(
+        "Nothing deleted from a token comes back. Tick what to delete: the object "
+        "you selected is ticked, the others sharing its label are not.");
+    gtk_label_set_wrap(GTK_LABEL(note), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(note), 56);
+    gtk_label_set_xalign(GTK_LABEL(note), 0.0f);
+    gtk_box_append(GTK_BOX(box), note);
+
+    for (size_t i = 0; i < A.n_objs; i++) {
+        if (!((size_t)idx == i || (o->label[0] && !strcmp(A.objs[i].label, o->label)))) continue;
+        char t[160];
+        snprintf(t, sizeof t, "%s, object %lu%s%s", pkiops_obj_class_name(A.objs[i].cls),
+                 A.objs[i].handle, A.objs[i].id[0] ? ", CKA_ID " : "", A.objs[i].id);
+        GtkWidget *c = gtk_check_button_new_with_label(t);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(c), (size_t)idx == i);
+        gtk_box_append(GTK_BOX(box), c);
+        d->checks[d->n] = c;
+        d->handles[d->n] = A.objs[i].handle;
+        d->n++;
+    }
+
+    GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign(buttons, GTK_ALIGN_END);
+    gtk_widget_set_margin_top(buttons, 8);
+    GtkWidget *cancel = gtk_button_new_with_label("Cancel");
+    g_signal_connect(cancel, "clicked", G_CALLBACK(on_del_cancel), d);
+    GtkWidget *go = gtk_button_new_with_label("Delete");
+    gtk_widget_add_css_class(go, "destructive-action");
+    g_signal_connect(go, "clicked", G_CALLBACK(on_del_confirm), d);
+    gtk_box_append(GTK_BOX(buttons), cancel);
+    gtk_box_append(GTK_BOX(buttons), go);
+    gtk_box_append(GTK_BOX(box), buttons);
+
+    gtk_window_set_child(GTK_WINDOW(d->win), box);
+    gtk_window_set_default_widget(GTK_WINDOW(d->win), cancel);
+    gtk_window_present(GTK_WINDOW(d->win));
+    gtk_widget_grab_focus(cancel);
 }
 
 /* An entry's text, or NULL when it is empty: an optional field left blank. */
@@ -2132,6 +2481,25 @@ static GtkWidget *alg_drop(void) {
     return d;
 }
 
+/* The Token tab's: every signature algorithm, then the secret keys
+ * fhsm-crypt makes. Operator mode's Create a new CA keeps alg_drop: a CA
+ * signs. */
+static GtkWidget *keygen_drop(void) {
+    GtkStringList *l = gtk_string_list_new(NULL);
+    for (int i = 0; i < PKIOPS_ALG_COUNT; i++)
+        gtk_string_list_append(l, pkiops_alg_name((enum pkiops_alg)i));
+    for (int i = 0; i < PKIOPS_SKEY_COUNT; i++)
+        gtk_string_list_append(l, pkiops_skey_name((enum pkiops_skey)i));
+    GtkWidget *d = gtk_drop_down_new(G_LIST_MODEL(l), NULL);
+    gtk_widget_set_tooltip_text(d,
+        "Signature key pairs first; their algorithm is used for everything signed "
+        "with them, and the composite exists only in PROFILE=all-mechanisms builds. "
+        "Then aes128 and aes256, which encrypt and wrap, hmac, a 32-byte secret "
+        "for MACs, and rsa-oaep, an RSA 3072 pair that encrypts with OAEP and cannot "
+        "sign: sensitive, and never leave the token.");
+    return d;
+}
+
 static GtkWidget *entry_with(const char *placeholder) {
     GtkWidget *e = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(e), placeholder);
@@ -2339,6 +2707,144 @@ static GtkWidget *revocation_tab(void) {
 }
 
 /* Stage 4: detached signatures over files, raw and CMS. */
+/* --- the Encryption tab (docs/fhsm-crypt-plan.md stage 5) ----------------- */
+
+/* The save dialog answered for an encryption job. Encrypting for a
+ * certificate needs no login, so this does not ask for one where on_saved
+ * would; the other two do. */
+static void on_env_saved(GObject *src, GAsyncResult *res, gpointer data) {
+    struct job *j = data;
+    GFile *f = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(src), res, NULL);
+    char *path = f ? g_file_get_path(f) : NULL;
+    if (f) g_object_unref(f);
+    if (!path || A.closing || A.busy || (j->kind != J_ENC_CERT && !A.logged_in)) {
+        g_free(path); job_free(j); return;
+    }
+    j->out_path = path;
+    j->session = A.session;
+    status(running_text(j->kind));
+    start(j);
+}
+
+static void env_ask(struct job *j, const char *name) {
+    GtkFileDialog *d = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(d, j->kind == J_DECRYPT ? "Decrypt into" : "Encrypt into");
+    gtk_file_dialog_set_initial_name(d, name);
+    gtk_file_dialog_save(d, GTK_WINDOW(A.win), NULL, on_env_saved, j);
+    g_object_unref(d);
+}
+
+static struct job *env_job(enum job_kind kind) {
+    if (A.busy || !A.en_data_path) return NULL;
+    struct job *j = g_new0(struct job, 1);
+    j->kind = kind;
+    j->data_path = g_strdup(A.en_data_path);
+    return j;
+}
+
+static void on_encrypt_key(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.logged_in) return;
+    const char *key = chosen_key(A.en_key_drop);
+    if (!key) {
+        status("No key on this token to encrypt for: generate an aes128, aes256 or "
+               "rsa-oaep key on the Token tab, or encrypt for a certificate.");
+        return;
+    }
+    struct job *j = env_job(J_ENCRYPT);
+    if (!j) return;
+    j->label = g_strdup(key);
+    char *base = g_path_get_basename(A.en_data_path);
+    char *name = g_strconcat(base, ".p7m", NULL);
+    env_ask(j, name);
+    g_free(name); g_free(base);
+}
+
+static void on_encrypt_cert(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.en_cert_path) { status("Choose the recipient's certificate."); return; }
+    struct job *j = env_job(J_ENC_CERT);
+    if (!j) return;
+    j->cert_path = g_strdup(A.en_cert_path);
+    char *base = g_path_get_basename(A.en_data_path);
+    char *name = g_strconcat(base, ".p7m", NULL);
+    env_ask(j, name);
+    g_free(name); g_free(base);
+}
+
+static void on_decrypt(GtkButton *b, gpointer ud) {
+    (void)b; (void)ud;
+    if (!A.logged_in) return;
+    struct job *j = env_job(J_DECRYPT);
+    if (!j) return;
+    /* "x.p7m" suggests "x"; anything else, "x.decrypted". */
+    char *base = g_path_get_basename(A.en_data_path);
+    size_t n = strlen(base);
+    char *name = n > 4 && !strcmp(base + n - 4, ".p7m") ? g_strndup(base, n - 4)
+                                                        : g_strconcat(base, ".decrypted", NULL);
+    env_ask(j, name);
+    g_free(name); g_free(base);
+}
+
+static GtkWidget *encryption_tab(void) {
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_margin_start(page, 4);
+    gtk_widget_set_margin_end(page, 8);
+
+    GtkWidget *g = form();
+    form_row(g, 0, "File", file_button("The file to encrypt or decrypt", &A.en_data_path));
+    gtk_box_append(GTK_BOX(page), g);
+    gtk_box_append(GTK_BOX(page), note_label(
+        "CMS AuthEnvelopedData, AES-256-GCM (RFC 5083, 5084), which openssl cms reads. "
+        "The file is streamed, not held. An existing file is never written over: choose "
+        "a new name. A file that does not authenticate when decrypted leaves nothing "
+        "behind."));
+
+    gtk_box_append(GTK_BOX(page), heading("For a key on the token"));
+    A.en_key_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    g = form();
+    A.enc_labels = gtk_string_list_new(NULL);
+    A.en_key_drop = gtk_drop_down_new(G_LIST_MODEL(A.enc_labels), NULL);
+    form_row(g, 0, "Key", A.en_key_drop);
+    gtk_box_append(GTK_BOX(A.en_key_box), g);
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(row), button_to("Encrypt for this key\xe2\x80\xa6",
+                                           G_CALLBACK(on_encrypt_key), NULL));
+    gtk_box_append(GTK_BOX(A.en_key_box), row);
+    gtk_box_append(GTK_BOX(A.en_key_box), note_label(
+        "An AES key wraps the file's content key itself; an rsa-oaep pair's public half "
+        "encrypts it with RSA-OAEP. Either way the key that can open the file stays on "
+        "the token."));
+    gtk_box_append(GTK_BOX(page), A.en_key_box);
+
+    gtk_box_append(GTK_BOX(page), heading("For the holder of a certificate"));
+    g = form();
+    form_row(g, 0, "Certificate", file_button("The recipient's certificate", &A.en_cert_path));
+    gtk_box_append(GTK_BOX(page), g);
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    A.en_cert_btn = button_to("Encrypt for this certificate\xe2\x80\xa6",
+                              G_CALLBACK(on_encrypt_cert), NULL);
+    gtk_box_append(GTK_BOX(row), A.en_cert_btn);
+    gtk_box_append(GTK_BOX(page), row);
+    gtk_box_append(GTK_BOX(page), note_label(
+        "An RSA certificate, PEM or DER. Encrypting for someone needs only their public "
+        "key: no token and no login."));
+
+    gtk_box_append(GTK_BOX(page), heading("Decrypt"));
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    A.en_dec_btn = button_to("Decrypt\xe2\x80\xa6", G_CALLBACK(on_decrypt), NULL);
+    gtk_box_append(GTK_BOX(row), A.en_dec_btn);
+    gtk_box_append(GTK_BOX(page), row);
+    gtk_box_append(GTK_BOX(page), note_label(
+        "The file names its recipients; the key on this token that opens it is found "
+        "from there, and the status line says which one it was."));
+
+    GtkWidget *sw = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), page);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    return sw;
+}
+
 static GtkWidget *signing_tab(void) {
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_set_margin_start(page, 4);
@@ -2606,25 +3112,49 @@ static void activate(GtkApplication *app, gpointer ud) {
     gtk_box_append(GTK_BOX(row), A.logout_btn);
     gtk_box_append(GTK_BOX(left), row);
 
-    gtk_box_append(GTK_BOX(left), heading("Keys"));
+    gtk_box_append(GTK_BOX(left), heading("Keys and certificates"));
     A.keys_box = gtk_list_box_new();
-    gtk_list_box_set_selection_mode(GTK_LIST_BOX(A.keys_box), GTK_SELECTION_NONE);
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(A.keys_box), GTK_SELECTION_SINGLE);
+    g_signal_connect(A.keys_box, "row-selected", G_CALLBACK(on_object_selected), NULL);
     gtk_box_append(GTK_BOX(left), scrolled(A.keys_box, 160));
+    /* Generating and deleting, on one row right under the list they change.
+     * Generation sat below the attribute pane, and with two panes that grow
+     * it was pushed out of the window on an ordinary screen (2026-10-10). */
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     A.label_entry = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(A.label_entry), "label for a new key pair");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(A.label_entry), "label for a new key");
     gtk_widget_set_hexpand(A.label_entry, TRUE);
     g_signal_connect(A.label_entry, "activate", G_CALLBACK(on_keygen), NULL);
     gtk_box_append(GTK_BOX(row), A.label_entry);
-    A.keygen_alg = alg_drop();
+    A.keygen_alg = keygen_drop();
     gtk_box_append(GTK_BOX(row), A.keygen_alg);
-    A.keygen_btn = gtk_button_new_with_label("Generate key pair");
+    A.keygen_btn = gtk_button_new_with_label("Generate key");
     g_signal_connect(A.keygen_btn, "clicked", G_CALLBACK(on_keygen), NULL);
     gtk_box_append(GTK_BOX(row), A.keygen_btn);
+    A.delete_btn = gtk_button_new_with_label("Delete\xe2\x80\xa6");
+    gtk_widget_set_tooltip_text(A.delete_btn,
+        "Delete the selected object, and any others sharing its label that you tick. "
+        "Nothing deleted from a token comes back.");
+    g_signal_connect(A.delete_btn, "clicked", G_CALLBACK(on_delete), NULL);
+    gtk_widget_set_margin_start(A.delete_btn, 18);
+    gtk_box_append(GTK_BOX(row), A.delete_btn);
     gtk_box_append(GTK_BOX(left), row);
+    gtk_box_append(GTK_BOX(left), heading("Attributes of the selected object"));
+    A.attr_view = gtk_label_new("");
+    gtk_label_set_selectable(GTK_LABEL(A.attr_view), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(A.attr_view), 0.0f);
+    gtk_label_set_yalign(GTK_LABEL(A.attr_view), 0.0f);
+    gtk_widget_add_css_class(A.attr_view, "monospace");
+    gtk_widget_set_margin_start(A.attr_view, 6);
+    gtk_box_append(GTK_BOX(left), scrolled(A.attr_view, 140));
 
     GtkWidget *tabs = gtk_notebook_new();
-    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), left, gtk_label_new("Token"));
+    /* Scrolled, as the other tabs are, so a low screen scrolls rather than
+     * cuts the tab off. */
+    GtkWidget *token_page = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(token_page), left);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(token_page), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), token_page, gtk_label_new("Token"));
     A.page_certs = cert_tab();       /* first: it creates the key list the others share */
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), A.page_certs, gtk_label_new("Certificates"));
     A.page_revocation = revocation_tab();
@@ -2636,6 +3166,7 @@ static void activate(GtkApplication *app, gpointer ud) {
     A.page_op_revoke = op_revoke_tab();
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), A.page_op_revoke, gtk_label_new("Revoke"));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), signing_tab(), gtk_label_new("Signing"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), encryption_tab(), gtk_label_new("Encryption"));
     /* Exploration first; the switch swaps the middle tabs. */
     gtk_widget_set_visible(A.page_op_ca, FALSE);
     gtk_widget_set_visible(A.page_op_issue, FALSE);

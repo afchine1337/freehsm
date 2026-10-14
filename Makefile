@@ -290,7 +290,7 @@ LIB_VER = $(LIB).$(shell awk -F'"' '/FHSM_VERSION_STRING/{print $$2; exit}' incl
 # release pre-flight ran `all`, and a tree in which a quarter of the shipped
 # programs did not build was validated and tagged. They are named here so the
 # question cannot be asked again.
-TOOLS = tools/fhsm-csr tools/fhsm-ca tools/fhsm-sign tools/fhsm-token
+TOOLS = tools/fhsm-csr tools/fhsm-ca tools/fhsm-sign tools/fhsm-token tools/fhsm-crypt
 
 .PHONY: audit-switch all
 all: generate $(LIB) tests/test_smoke tools/freehsm-audit $(TOOLS)
@@ -324,32 +324,57 @@ tools/freehsm-audit: tools/freehsm_audit.c
 # includes tools/p11_util.h, whose function table is static per file.
 # It signs CRLs and OCSP answers too, so every tool that links it links
 # $(REVOCATION_OBJ) as well.
-PKIOPS_SRC = tools/pkiops.c tools/pkiops.h tools/p11_util.h tools/p11_err.h
+PKIOPS_SRC = tools/pkiops.c tools/pkiops.h tools/p11_util.h tools/p11_err.h tools/cms_env.c tools/cms_env.h
 
 tools/fhsm-csr: tools/fhsm_csr.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
-	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
 # fhsm-ca signs for other people; fhsm-csr makes requests and its own root.
 # Separate binaries because they are separate authorities, usually separate
 # operators, and a single tool named for one of them would misname the other.
 tools/fhsm-ca: tools/fhsm_ca.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
-	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
 tools/fhsm-sign: tools/fhsm_sign.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
-	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
 tools/fhsm-token: tools/fhsm_token.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
-	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+
+# Keys that do not sign, and the objects on the token: listing and deletion
+# first, encryption in the later stages (docs/fhsm-crypt-plan.md).
+tools/fhsm-crypt: tools/fhsm_crypt.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
 # tools/pkiops without a window: the slot and key listings and the call log
 # the interface needs, and a check that no PIN reaches the log.
 tests/test_pkiops: tests/test_pkiops.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
-	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
 # Every algorithm through the token, each artefact checked by OpenSSL
 # (docs/classic-algorithms-plan.md, stage 2).
 tests/test_pkiops_algs: tests/test_pkiops_algs.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
-	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+
+# Listing and deleting objects, certificates included (docs/fhsm-crypt-plan.md,
+# stage 0), and the CLI that drives them.
+tests/test_pkiops_objects: tests/test_pkiops_objects.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+
+# Secret keys: their attributes, their use, and the name parsers that send
+# each tool's algorithms to the other (docs/fhsm-crypt-plan.md, stage 1).
+tests/test_pkiops_secret: tests/test_pkiops_secret.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+
+# Files encrypted for a token AES key, and OpenSSL reading ours and writing
+# what we read (docs/fhsm-crypt-plan.md, stage 2).
+tests/test_pkiops_envelope: tests/test_pkiops_envelope.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
+
+# Files encrypted for an RSA key with RSA-OAEP: a pair on the token, a
+# certificate, and OpenSSL both ways (docs/fhsm-crypt-plan.md, stage 3).
+tests/test_pkiops_envelope_rsa: tests/test_pkiops_envelope_rsa.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LIB)
+	$(CC) $(CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) -ldl
 
 # fhsm-gui --- the desktop interface over pkiops (docs/fhsm-gui-plan.md).
 # Not part of `all`: building the module, the tools and the tests must not
@@ -371,7 +396,7 @@ gui-smoke: tools/fhsm-gui
 
 tools/fhsm-gui: tools/fhsm_gui.c $(PKIOPS_SRC) $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ)
 	@pkg-config --exists gtk4 || { echo "fhsm-gui needs GTK 4: sudo apt install libgtk-4-dev" >&2; exit 2; }
-	$(CC) $(CFLAGS) $(GTK_CFLAGS) -Itools -o $@ $< tools/pkiops.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) $(GTK_LIBS) -ldl
+	$(CC) $(CFLAGS) $(GTK_CFLAGS) -Itools -o $@ $< tools/pkiops.c tools/cms_env.c $(OBJDIR)/src/fhsm_composite.o $(REVOCATION_OBJ) $(LDFLAGS) $(GTK_LIBS) -ldl
 
 # ---------------------------------------------------------------------------
 # Code generation --- runs scripts/gen_p11_thunks.py to regenerate
@@ -1122,6 +1147,10 @@ TEST_BINS = \
 	tests/test_login_conflicts \
 	tests/test_pkiops \
 	tests/test_pkiops_algs \
+	tests/test_pkiops_objects \
+	tests/test_pkiops_secret \
+	tests/test_pkiops_envelope \
+	tests/test_pkiops_envelope_rsa \
 	tests/test_secure_heap_shared
 
 .PHONY: test-bins
@@ -1132,7 +1161,7 @@ test-bins: $(TEST_BINS) tools/fhsm-token
 # beside the tokens, so any test that initialises the module writes there.
 # Without this they all fall back to /var/lib/freehsm/tokens and fail with a
 # bare 0x6 on any machine where that does not exist.
-tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sign
+tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sign tools/fhsm-crypt
 # test_conf had a build rule since #128 and appeared in no list: not in the
 # prerequisites above, not in the recipe below, not in any script, not in CI.
 # `make tests` never built it and nothing ever ran it. Found on 2026-09-26
@@ -1263,6 +1292,17 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_pkiops
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_pkiops_algs
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_pkiops_objects
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_pkiops_secret
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_pkiops_envelope
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_pkiops_envelope_rsa
+# fhsm-crypt list and delete, as an operator would type them; the script
+# sets up its own token, as pki_tools_algs.sh does.
+	$(TEST_LD) sh tests/fhsm_crypt_cli.sh
 # The command-line tools with every algorithm but the composite, each file
 # checked by the openssl command line (docs/classic-algorithms-plan.md).
 	$(TEST_LD) sh tests/pki_tools_algs.sh
