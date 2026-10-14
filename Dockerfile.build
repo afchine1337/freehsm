@@ -8,16 +8,12 @@
 #        validation.
 #
 # Strategy :
-#   1. Base image : Debian 13 (trixie) by tag. Once this Dockerfile is
-#      finalised for v2.0, replace `debian:trixie-slim` with a
-#      sha256-pinned reference and re-record the SBOM under
-#      docs/REPRODUCIBLE_BUILD.md.
+#   1. Base image : Debian 13 (trixie) slim, pinned by digest.
 #   2. Toolchain & FIPS provider come from Debian apt (OpenSSL 3.5.x with
-#      the FIPS module built and packaged by the Debian crypto team).
-#      Apt versions are NOT pinned in this transitional Dockerfile so the
-#      image keeps building on the latest trixie point release ; this is
-#      acceptable for v1.1.x (RC-grade) but must be tightened for the
-#      formal FIPS / CC submission.
+#      the FIPS module built and packaged by the Debian crypto team), read
+#      from snapshot.debian.org at one fixed instant. Every package version
+#      is therefore fixed by the timestamp below, and rebuilding this image
+#      on any day installs the same .debs.
 #   3. SOURCE_DATE_EPOCH is set at build time -- purges __DATE__,
 #      __TIME__, .file timestamps, ar timestamps, etc.
 #   4. The .so is linked with LD_BUILD_ID=none and `-frandom-seed=<commit>`
@@ -31,12 +27,40 @@
 # ===========================================================================
 
 # --- Base image -----------------------------------------------------------
-# Debian 13 ("trixie") slim, amd64. Pulled by tag for the v1.1.x
-# transitional pipeline ; pin to digest before tagging v2.0 (production).
-FROM debian:trixie-slim AS build
+# Debian 13 ("trixie") slim, the 2026-10-05 build, pinned by its multi-arch
+# index digest. Until 2026-10-14 this was `debian:trixie-slim` by tag, with
+# apt unpinned, and a comment saying to pin it before v2.0. It never was, and
+# it cost what it said it would: the release image (ghcr, built once and then
+# served from the Actions cache) kept the toolchain of the day it was built,
+# while `make dist-verify` rebuilt this file from scratch with that day's
+# packages. The two stopped agreeing from v2.2.0 on, and dist-verify failed on
+# every tag since -- with the published binaries matching their references
+# all along. docs/REPRODUCIBLE_BUILD.md §6 says how to move both pins.
+FROM debian:trixie-20261005-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS build
 
 # --- Toolchain ------------------------------------------------------------
+# The archive as it was at SNAPSHOT, in place of the live mirrors. Valid-Until
+# is not checked: a snapshot's Release files expire by design, and the
+# signatures, which apt still checks, are what vouches for them.
+ARG SNAPSHOT=20261006T000000Z
 ARG DEBIAN_FRONTEND=noninteractive
+RUN printf '%s\n' \
+        'Types: deb' \
+        "URIs: http://snapshot.debian.org/archive/debian/${SNAPSHOT}" \
+        'Suites: trixie trixie-updates' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        '' \
+        'Types: deb' \
+        "URIs: http://snapshot.debian.org/archive/debian-security/${SNAPSHOT}" \
+        'Suites: trixie-security' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        > /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+        'Acquire::Check-Valid-Until "false";' \
+        'Acquire::Retries "5";' \
+        > /etc/apt/apt.conf.d/99snapshot
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         binutils \
