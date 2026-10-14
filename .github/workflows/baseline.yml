@@ -49,7 +49,7 @@ jobs:
   baseline:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-20261006
       options: --user root
     steps:
       - uses: actions/checkout@v7
@@ -134,7 +134,7 @@ jobs:
             cat "$REF"
             echo '```'
             echo
-            echo "Two builds in \`freehsm-c-build:debian13-openssl-3.5\` agreed."
+            echo "Two builds in \`freehsm-c-build:debian13-20261006\` agreed."
             echo "Download the artefact below, put it at \`${REF}\`, commit it,"
             echo "then tag. \`release.yml\` will refuse to publish a build that"
             echo "does not match it."

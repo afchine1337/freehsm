@@ -24,7 +24,7 @@ jobs:
   wycheproof:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-20261006
       options: --user root
     steps:
       - uses: actions/checkout@v7
@@ -89,7 +89,7 @@ jobs:
   # The failure notice is its own job, on the runner, deliberately.
   #
   # The first version of it was a step inside the job above, which runs in
-  # freehsm-c-build:debian13-openssl-3.5. `gh` is on GitHub's hosted runners,
+  # freehsm-c-build:debian13-20261006. `gh` is on GitHub's hosted runners,
   # not in an arbitrary container, so it failed with
   #
   #     gh: not found
@@ -168,7 +168,7 @@ jobs:
   wycheproof-smoke:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-openssl-3.5
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-20261006
       options: --user root
     if: github.event_name == 'push'
     env:

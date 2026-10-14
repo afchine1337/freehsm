@@ -168,6 +168,12 @@ for t in tests/test_*; do
         *test_integrity) continue ;;
     esac
     [ -x "$t" ] || continue
+    # Only tests of the tree being tagged. Build outputs are ignored by git,
+    # so a binary compiled on another branch survives `git switch` and the
+    # clean-tree check alike: on 2026-10-13 the 2.3.1 pre-flight ran
+    # test_hash_ml_dsa, whose source and vectors exist on hash-ml-dsa only,
+    # and counted four test_pkiops_* from fhsm-crypt among its passes.
+    [ -f "$t.c" ] || continue
     D=$(mktemp -d)
     # FHSM_INTEGRITY_ALLOW_UNSIGNED is required here and was missing.
     #

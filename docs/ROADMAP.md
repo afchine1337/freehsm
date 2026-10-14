@@ -13,7 +13,7 @@ as a methodological reference — no submission is planned).
 people who cannot buy a certified module: researchers, students, teaching
 institutions, public bodies and universities, and developing countries. It is
 built to FIPS 140-3 Level 1 and CC EAL4+ requirements and documented with their
-methodologies; it holds no certificate and will not pursue one. A certificate
+methodologies; it holds no certificate. A certificate
 costs more than this project will ever have, and that cost is precisely the
 barrier this project exists to route around. Nothing on this roadmap should read
 as working towards a submission.

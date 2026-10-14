@@ -175,6 +175,110 @@ int pkiops_keys(pkiops_handle session, struct pkiops_key **out, size_t *n,
 int pkiops_keygen(pkiops_handle session, const char *label,
                   pkiops_handle *pub, pkiops_handle *priv, struct p11_err *e);
 
+/* --- objects: listing and deletion (docs/fhsm-crypt-plan.md stage 0) ------- */
+
+enum pkiops_obj_class {
+    PKIOPS_OBJ_CERT = 0,
+    PKIOPS_OBJ_PUBLIC,
+    PKIOPS_OBJ_PRIVATE,
+    PKIOPS_OBJ_SECRET,
+    PKIOPS_OBJ_COUNT
+};
+/* Masks for pkiops_objects. */
+#define PKIOPS_OBJS_CERTS (1u << PKIOPS_OBJ_CERT)
+#define PKIOPS_OBJS_KEYS  ((1u << PKIOPS_OBJ_PUBLIC) | (1u << PKIOPS_OBJ_PRIVATE) | \
+                           (1u << PKIOPS_OBJ_SECRET))
+#define PKIOPS_OBJS_ALL   (PKIOPS_OBJS_CERTS | PKIOPS_OBJS_KEYS)
+
+/* "certificate", "public key", "private key", "secret key"; NULL out of range. */
+const char *pkiops_obj_class_name(enum pkiops_obj_class c);
+
+struct pkiops_object {
+    pkiops_handle         handle;
+    enum pkiops_obj_class cls;
+    unsigned long         key_type;   /* CKA_KEY_TYPE; 0 for a certificate */
+    char                  label[65];  /* truncated if longer; "" if none */
+    char                  id[41];     /* CKA_ID in hex, first 20 bytes; "" if none */
+    char                  alg[16];    /* a secret key's kind: "aes256", "hmac"; else "" */
+};
+/* The objects of the classes in `classes` a session can see -- private and
+ * secret keys only once logged in -- certificates first, in a malloc'd array
+ * the caller frees. */
+int pkiops_objects(pkiops_handle session, unsigned classes,
+                   struct pkiops_object **out, size_t *n, struct p11_err *e);
+
+/* One object's attributes as name/value lines a person reads: class, label,
+ * CKA_ID, storage and protection flags, usage, size or curve, allowed
+ * mechanisms, origin -- and for a certificate its subject, issuer, serial and
+ * validity. A private or secret key's value is never asked for. Each
+ * attribute is read on its own, and one the module does not keep is left
+ * out. A malloc'd array the caller frees. */
+struct pkiops_attr {
+    char name[28];
+    char value[220];
+};
+int pkiops_object_attrs(pkiops_handle session, pkiops_handle object,
+                        struct pkiops_attr **out, size_t *n, struct p11_err *e);
+
+/* Destroy one object. Cannot be undone: the caller asks first. Refused with a
+ * message, not a crash, when the module has no C_DestroyObject. */
+int pkiops_destroy(pkiops_handle session, pkiops_handle object, struct p11_err *e);
+
+/* --- keys that do not sign (docs/fhsm-crypt-plan.md stage 1) ------------- */
+
+enum pkiops_skey {
+    PKIOPS_SKEY_AES128 = 0,
+    PKIOPS_SKEY_AES256,
+    PKIOPS_SKEY_HMAC,               /* a 32-byte generic secret */
+    PKIOPS_SKEY_RSA_OAEP,           /* an RSA 3072 pair, OAEP only */
+    PKIOPS_SKEY_COUNT
+};
+/* "aes128", "aes256", "hmac"; NULL out of range. */
+const char *pkiops_skey_name(enum pkiops_skey k);
+const char *pkiops_skey_list(void);
+/* The name as typed, or 1 (usage). A signature algorithm's name is refused
+ * with the command that makes it; pkiops_alg_parse does the converse. */
+int pkiops_skey_parse(const char *name, enum pkiops_skey *out, struct p11_err *e);
+/* A secret key on the token: sensitive, not extractable, private. AES keys
+ * encrypt, decrypt, wrap and unwrap; the HMAC key signs and verifies. For
+ * rsa-oaep, an RSA 3072 key pair whose only allowed mechanism is RSA-OAEP,
+ * so it cannot sign; `*key` is then its private half. */
+int pkiops_keygen_secret(pkiops_handle session, const char *label, enum pkiops_skey k,
+                         pkiops_handle *key, struct p11_err *e);
+
+/* --- file encryption with a token AES key (docs/fhsm-crypt-plan.md stage 2)
+ *
+ * CMS AuthEnvelopedData (RFC 5083), one key-encryption-key recipient whose
+ * identifier is the key's label, AES-256-GCM content (RFC 5084), DER. The
+ * content key is fresh per file and wrapped by the token key with AES key
+ * wrap; the token key never leaves the token. Files are streamed, not held.
+ *
+ * Neither function writes over an existing file, and neither leaves one
+ * behind when it fails: decryption keeps its output only once the GCM tag
+ * has verified. Codes: 1 a file this does not read or an output that exists,
+ * 2 the module or the file system, 3 no such key, 4 a file that does not
+ * open with the key -- altered, or made for another. */
+int pkiops_encrypt_file(pkiops_handle session, const char *label, const char *in_path,
+                        const char *out_path, struct p11_err *e);
+/* For `label`: an AES key wraps the content key (a KEK recipient), an
+ * RSA-OAEP key pair's public half encrypts it (a key-transport recipient,
+ * RSAES-OAEP with SHA-256, named by subjectKeyIdentifier). */
+
+/* For the holder of the certificate in `cert_path` (PEM or DER), an RSA
+ * key. No token and no login: encrypting for someone needs only their
+ * public key. Named by the certificate's subjectKeyIdentifier, or by issuer
+ * and serial number when it has none. */
+int pkiops_encrypt_file_for_cert(const char *cert_path, const char *in_path,
+                                 const char *out_path, struct p11_err *e);
+
+/* The key is found from the file: the first recipient this token can open --
+ * a KEK recipient naming one of its AES keys, or an RSA-OAEP recipient one of
+ * its RSA keys opens. Its label goes into `used` (may be NULL). A recipient
+ * this does not open -- RSA PKCS#1 v1.5, OAEP with SHA-1 -- is named in the
+ * error when nothing else opens the file. */
+int pkiops_decrypt_file(pkiops_handle session, const char *in_path, const char *out_path,
+                        char *used, size_t used_cap, struct p11_err *e);
+
 /* A key pair for `alg`, both halves on the token, the private one sensitive
  * and for signing only. RSA keys are 3072 bits. */
 int pkiops_keygen_alg(pkiops_handle session, const char *label, enum pkiops_alg alg,

@@ -718,8 +718,7 @@ CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
      *
      * It read as a certification to anyone who found it -- `pkcs11-tool
      * --show-info` prints it as the Library, and that is where an evaluator or
-     * a packager looks first. FreeHSM holds no certificate and will not seek
-     * one; README.md, AGD_PRE, AGD_OPE, the Security Target and every release
+     * a packager looks first. FreeHSM holds no certificate; README.md, AGD_PRE, AGD_OPE, the Security Target and every release
      * note say so. A module cannot declare the opposite in the one field a
      * consumer reads programmatically.
      *

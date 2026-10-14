@@ -30,8 +30,7 @@ it.
 are evidence to investigate, not judgements. A divergence tells you where to
 look, not who is right.
 
-**Not a claim about anyone's product.** FreeHSM holds no certification and seeks
-none. If a divergence shows FreeHSM to be wrong, that is the ordinary outcome of
+**Not a claim about anyone's product.** FreeHSM holds no certification. If a divergence shows FreeHSM to be wrong, that is the ordinary outcome of
 the exercise and the reason it is worth running.
 
 ---

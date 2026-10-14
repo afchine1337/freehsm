@@ -63,7 +63,7 @@ quality of either implementation.
   2026-07.
 
 Recorded here as context for what a hardware HSM in this segment carries.
-FreeHSM holds no certification and seeks none; its evaluation documents are
+FreeHSM holds no certification; its evaluation documents are
 published as examples of method, not as claims.
 
 ---
