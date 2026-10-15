@@ -2629,3 +2629,21 @@ section says.
 A run of the ML-DSA, ML-KEM and PQC tests after it,
 reports/p11check-pset-nist, 2 891 tests, moved none of them against the full
 nist run above: pkcs11-check's importers already send the attribute.
+
+## 2026-10-15 — merged main for 2.4.0, both profiles
+
+    pkcs11-check 0.2.3 · signed module, FIPS provider loaded · main after
+    PR #20 (fhsm-crypt) and PR #21 (hash-ml-dsa) ·
+    reports/pkcs11-check-{nist,all}-2.4.0
+
+55 658 passed of 93 285 in `nist-approved-only`, 56 113 of 93 416 in
+`all-mechanisms`, 4 and 5 failures, all known; the gate passes in both.
+Against the `hash-ml-dsa` branch runs of 2026-10-12, by node-id: nothing
+moved in either profile. `fhsm-crypt` changes the tools, not the module.
+
+The first all-mechanisms attempt froze the VM twice in
+`test_wycheproof_ecdsa.py`, which passed alone in 460 s with the same 28 915
+outcomes as on 2026-10-12. The likeliest cause is memory, not the module:
+the harness writes one JSONL log per test file under `/tmp`, which Debian 13
+mounts as tmpfs, and the corpus's logs total about 384 MB, ECDSA's alone
+about 145 MB.

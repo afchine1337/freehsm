@@ -98,6 +98,17 @@ the PR said plainly that it could not run the suite on non-x86 hardware.
 Merged for v2.3.1. Reading the function again for the review found three
 older weaknesses in it, fixed beside it.
 
+## Govardhan Yadava — [`acvp-assay`](https://github.com/Govardhan527/acvp-assay)
+
+Planning a PKCS#11 harness for his ACVP tool, he asked for two things this
+module did not do. **HashML-DSA**, so that the preHash ML-DSA cases would
+have a token to be measured on: the eleven mechanisms of PKCS#11 v3.2
+§6.67.6-6.67.7 are in v2.4.0, checked against NIST's signatures byte for
+byte. And **`CKA_PARAMETER_SET`**, which v3.2 requires on a PQC key import
+and which the module had been inferring from the key's length — accepting a
+template another token may refuse, so a caller tested only here would not
+learn it was wrong. Required since v2.4.0.
+
 ## Petr (`petrn`)
 
 Followed `AGD_PRE.md` as written, on a clean machine, repeatedly:
