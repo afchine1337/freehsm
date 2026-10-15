@@ -95,7 +95,27 @@ fi
 
 mkdir -p "$REPORTS"
 TOKENS_DIR="$(mktemp -d /tmp/fhsm-p11check.XXXXXX)"
-trap 'rm -rf "$TOKENS_DIR"' EXIT
+
+# The harness's temporary files on disk, not in memory.
+#
+# pkcs11-check writes one pytest report log per test file through Python's
+# tempfile, under $TMPDIR or /tmp: about 384 MB for the full corpus, which
+# Debian 13's tmpfs /tmp holds in RAM. On 2026-10-14 the all-mechanisms run
+# froze the maintainer's VM twice in test_wycheproof_ecdsa.py and finished
+# with TMPDIR on disk. That is not shown to be the cause -- 384 MB does not
+# exhaust 16 GB -- but keeping a few hundred megabytes of logs out of RAM
+# costs nothing, so it stays. A caller's own TMPDIR is
+# kept; otherwise, when /tmp is a tmpfs, a directory under the user's cache
+# is used -- on the machine's own disk, not beside the reports, which may sit
+# on a shared folder -- and removed at the end.
+P11_TMP=""
+if [ -z "${TMPDIR:-}" ] && [ "$(stat -f -c %T /tmp 2>/dev/null)" = "tmpfs" ]; then
+    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
+    P11_TMP="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/fhsm-p11check-tmp.XXXXXX")"
+    export TMPDIR="$P11_TMP"
+    echo "NOTE: /tmp is tmpfs; the harness's temporary files go to $P11_TMP"
+fi
+trap 'rm -rf "$TOKENS_DIR" ${P11_TMP:+"$P11_TMP"}' EXIT
 
 # Which harness produced these numbers?
 #

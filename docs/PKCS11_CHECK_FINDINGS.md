@@ -2643,7 +2643,9 @@ moved in either profile. `fhsm-crypt` changes the tools, not the module.
 
 The first all-mechanisms attempt froze the VM twice in
 `test_wycheproof_ecdsa.py`, which passed alone in 460 s with the same 28 915
-outcomes as on 2026-10-12. The likeliest cause is memory, not the module:
-the harness writes one JSONL log per test file under `/tmp`, which Debian 13
-mounts as tmpfs, and the corpus's logs total about 384 MB, ECDSA's alone
-about 145 MB.
+outcomes as on 2026-10-12. The third attempt, with `TMPDIR` on disk rather
+than in Debian 13's tmpfs `/tmp`, finished. The cause is not established:
+the harness's per-file logs, about 384 MB for the corpus, cannot by
+themselves exhaust a VM with 16 GB of RAM, and one success against two
+freezes proves nothing. Next time it happens, `vmstat` and `dmesg` from
+inside the VM are what would say.
