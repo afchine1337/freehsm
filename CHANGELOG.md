@@ -15,6 +15,22 @@ CKM_ML_DSA with a key of another type. No security advisory.
 `RELEASE_v2.4.0.md` has the release notes.*
 
 ### Fixed
+* **Sessions on one token used from several threads could free a key under
+  a running signature.** `C_DestroyObject` or `C_CloseSession` in one
+  thread zeroized and freed a key value another thread's `C_Sign` was still
+  reading -- `CKR_FUNCTION_FAILED`, or a signature over a reallocated
+  block. Three smaller races sat beside it: `C_GetAttributeValue` could
+  return a torn `CKA_LABEL` (or another object's) during a concurrent
+  `C_SetAttributeValue` or destroy; the login state was read without the
+  token mutex; and two threads calling `C_GetFunctionList` or
+  `C_GetInterface` at once could be handed a half-filled table. Every
+  `C_` function now runs under one read-write lock, shared for most calls
+  and exclusive for the six that free what others may be reading; a value
+  released inside a shared call is wiped once no call is in flight. A
+  single-threaded application sees no change. `tests/test_concurrency_store`
+  reproduces all four, `tests/test_apilock` drives the deferred release,
+  and `make tsan-concurrency` runs both under ThreadSanitizer, in CI too
+  (#111-prep).
 * **Eight of the twelve SLH-DSA parameter sets could not be generated, and
   asking latched the module into ERROR.** The pair-wise consistency check
   after `C_GenerateKeyPair` signed into a 16384-byte array; SLH-DSA-128f,
