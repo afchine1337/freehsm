@@ -51,6 +51,7 @@ freehsm/
 │   ├── fhsm_audit.c               # Log append-only HMAC chaîné
 │   ├── fhsm_token.c               # Persistance slot + throttle PIN
 │   ├── fhsm_session.c             # Table de sessions
+│   ├── fhsm_apilock.c             # Verrou d'entrée des C_* + libération différée des clés
 │   ├── fhsm_pkcs11.c              # Entry points C_* (TSFI)
 │   ├── fhsm_integrity.c           # Boot self-test : section .fhsm_digest + SHA-256
 │   ├── gen/

@@ -132,12 +132,11 @@ DEBUG_FLAGS ?= -g3 -O2
 # TSAN=1 builds with ThreadSanitizer. Separate from SANITIZE=1 because ASan and
 # TSan cannot coexist in one binary.
 #
-# Added for #111-prep. PKCS#11's model is one process per application, so the
-# absence of locking in fhsm_pkcs11.c is harmless today; a REST server inverts
-# that and makes g_op_*, g_slots and g_finds shared mutable state. TSan is to
+# Added for #111-prep: a REST server serves N clients from one process, and
+# what sessions on one token share becomes shared between threads. TSan is to
 # concurrency what SANITIZE=1 was to memory in #125 -- it finds what review does
 # not. Never ship a TSAN build.
-#   make TSAN=1 && make TSAN=1 tests/test_concurrency
+#   make tsan-concurrency        (the concurrency tests, the way CI runs them)
 ifeq ($(TSAN),1)
 SAN_FLAGS    = -fsanitize=thread -fno-omit-frame-pointer
 HARDEN_FLAGS = -fPIC -fvisibility=hidden -fno-strict-aliasing \
@@ -187,6 +186,7 @@ LIB_SRC = \
     src/fhsm_create_attrs.c           \
     src/fhsm_token.c                  \
     src/fhsm_session.c                \
+    src/fhsm_apilock.c                \
     src/fhsm_integrity.c              \
     src/fhsm_pairwise.c               \
     src/fhsm_composite.c              \
@@ -597,6 +597,19 @@ d[off+18]^=0x01; open(p,'wb').write(d)"
 # `make TSAN=1`; it is written to be able to fail.
 tests/test_concurrency: tests/test_concurrency.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl -lpthread
+
+# Its second half: what sessions on one token share -- the object store, the
+# login state, the function tables -- with one thread mutating while the
+# others read. Four passes, each in its own process. Checks results when run
+# plain; under `make TSAN=1` it also fails on every race TSan reports.
+tests/test_concurrency_store: tests/test_concurrency_store.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl -lpthread
+
+# The entry lock's deferred release, with the interleaving fixed by hand
+# rather than left to the scheduler. Linked against the objects: it drives
+# src/fhsm_apilock.c directly.
+tests/test_apilock: tests/test_apilock.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
 tests/bench_capacity: tests/bench_capacity.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
@@ -1079,12 +1092,27 @@ asan:
 	@echo "[asan] This tree is instrumented and must not be shipped or signed."
 	@echo "[asan] The next plain 'make' rebuilds it; then 'make integrity'."
 
-# No `tsan` twin yet, deliberately. TSAN=1 carries the same two-invocation
-# trap and deserves the same treatment, but the full suite has never been
-# run under ThreadSanitizer here and a target that claims to run it green
-# would be asserting something nobody has measured. The Makefile comment
-# above points TSAN=1 at tests/test_concurrency, which is what it is known
-# to do.
+# No `tsan` twin of the whole suite, deliberately. TSAN=1 carries the same
+# two-invocation trap and deserves the same treatment, but the full suite has
+# never been run under ThreadSanitizer here and a target that claims to run it
+# green would be asserting something nobody has measured.
+#
+# What has been measured is the concurrency tests, and this runs exactly
+# those: 10 runs clean on 2026-10-16 after the entry lock, against a failure
+# on every run before it (#111-prep). TSan exits 66 on any report, so a race
+# fails the target. The variable is repeated on each make, as for asan.
+.PHONY: tsan-concurrency
+tsan-concurrency:
+	$(MAKE) TSAN=1
+	$(MAKE) TSAN=1 tests/test_apilock tests/test_concurrency tests/test_concurrency_store
+	$(TEST_LD) ./tests/test_apilock
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_concurrency
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_concurrency_store
+	@echo
+	@echo "[tsan] concurrency tests clean under ThreadSanitizer."
+	@echo "[tsan] This tree is instrumented and must not be shipped or signed."
 
 .PHONY: tests test check
 # `make test` and `make check` are what a Makefile project is expected to
@@ -1163,6 +1191,9 @@ TEST_BINS = \
 	tests/test_nested_templates \
 	tests/test_wrap_with_trusted \
 	tests/test_finalize_release \
+	tests/test_apilock \
+	tests/test_concurrency \
+	tests/test_concurrency_store \
 	tests/test_fips_digests \
 	tests/test_attributes \
 	tests/test_input_validation \
@@ -1290,6 +1321,15 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_wrap_with_trusted
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_finalize_release
+# The concurrency tests (#111-prep) were run by hand under TSAN=1 and by
+# nothing else. Run plain here they still check results -- a key freed under
+# a running C_Sign shows as CKR_FUNCTION_FAILED, a torn label as a wrong
+# label -- and `make tsan-concurrency` runs them where they also see races.
+	$(TEST_LD) ./tests/test_apilock
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_concurrency
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_concurrency_store
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_fips_digests
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

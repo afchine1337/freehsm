@@ -346,6 +346,33 @@ jobs:
           path: asan.log
           retention-days: 14
 
+  # The concurrency tests under ThreadSanitizer (#111-prep). They also run in
+  # the plain suite, where they check results; only here do they see a race
+  # that happens to give the right answer. Not the whole suite under TSan --
+  # see the comment above `tsan-concurrency` in the Makefile.
+  tsan-concurrency:
+    runs-on: ubuntu-latest
+    needs: lint
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-20261006
+      options: --user root
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Concurrency tests under ThreadSanitizer
+        run: |
+          set -o pipefail
+          make tsan-concurrency 2>&1 | tee tsan.log
+
+      - name: Upload the sanitizer log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsan-log
+          path: tsan.log
+          retention-days: 14
+
   test-coverage-matrix:
     runs-on: ubuntu-latest
     needs: build
