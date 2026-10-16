@@ -3448,6 +3448,30 @@ static CK_RV fhsm_apply_encap_flags(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
     return fhsm_token_object_set_flags2(t, handle, (uint8_t)(f2 | bit));
 }
 
+/* Record that an Edwards key was given CKA_EC_PARAMS as the RFC 8032 curveName
+ * PrintableString rather than the RFC 8410 OID. See FHSM_OBJF3_ED_CURVE_NAME.
+ *
+ * `tmpl` is the template that carried CKA_EC_PARAMS -- for a generated pair,
+ * the public one, and the bit goes on both halves. Anything else (the OID,
+ * no CKA_EC_PARAMS, a non-Edwards value) records nothing, which is the
+ * behaviour every key had before the bit existed.
+ *
+ * A failure to record is returned, not dropped: a curveName edwards448 key
+ * that lost the bit would accept the NULL parameter its profile forbids, and
+ * would report its CKA_EC_PARAMS in the form it was not given. */
+static CK_RV fhsm_apply_ed_curve_name(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
+                                       CK_ULONG n, uint32_t handle) {
+    long i = find_attr(tmpl, n, CKA_EC_PARAMS);
+    if (i < 0 || !tmpl[i].pValue || tmpl[i].ulValueLen < 2) return FHSM_RV_OK;
+    const uint8_t *v = tmpl[i].pValue;
+    if (v[0] != 0x13 /* PrintableString */
+        || !match_ed_curve(v, (size_t)tmpl[i].ulValueLen)) return FHSM_RV_OK;
+    uint8_t f3 = 0;
+    (void)fhsm_token_object_get_flags3(t, handle, &f3);
+    return fhsm_token_object_set_flags3(t, handle,
+                                        (uint8_t)(f3 | FHSM_OBJF3_ED_CURVE_NAME));
+}
+
 /* The parameter set whose raw *private* key is `len` bytes, within the family
  * the key type names.
  *
@@ -3693,6 +3717,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         { CK_RV fr = fhsm_apply_encap_flags(t, pTemplate, ulCount, handle,
                                             (uint32_t)a.cko);
           if (fr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return fr; } }
+        { CK_RV er = fhsm_apply_ed_curve_name(t, pTemplate, ulCount, handle);
+          if (er != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return er; } }
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
         { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
           if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -4000,6 +4026,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
                                         CKA_WRAP_TEMPLATE_ATTR, FHSM_TMPL_WRAP);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
+    { CK_RV er = fhsm_apply_ed_curve_name(t, pTemplate, ulCount, handle);
+      if (er != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return er; } }
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
@@ -6641,6 +6669,12 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV fr = fhsm_apply_encap_flags(t, pPriv, ulPriv, hk, CKO_PRIVATE_KEY);
       if (fr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
                               (void)fhsm_token_object_destroy(t, hk); return fr; } }
+    /* CKA_EC_PARAMS is in the public template only; the profile it names is
+     * the pair's, so both halves carry it. */
+    { CK_RV er = fhsm_apply_ed_curve_name(t, pPub, ulPub, hp);
+      if (er == FHSM_RV_OK) er = fhsm_apply_ed_curve_name(t, pPub, ulPub, hk);
+      if (er != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
+                              (void)fhsm_token_object_destroy(t, hk); return er; } }
     fhsm_apply_token_scope(t, hSession, pPub,  ulPub,  hp);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pPub, ulPub, hp);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
@@ -6798,7 +6832,23 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
                 oid_buf[4] = ECX[k].oid_last; oid = oid_buf; break;
             }
         }
-        if (oid) {
+        /* An Edwards key given its curve as the RFC 8032 curveName answers
+         * with that string: the encoding is how PKCS#11 v3.2 tells the two
+         * EdDSA profiles apart, so answering with the OID would report a key
+         * of the other profile. See FHSM_OBJF3_ED_CURVE_NAME. */
+        uint8_t f3 = 0;
+        if (oid && type == CKA_EC_PARAMS_QUERY && oid[4] >= 0x70
+            && fhsm_token_object_get_flags3(t, handle, &f3) == FHSM_RV_OK
+            && (f3 & FHSM_OBJF3_ED_CURVE_NAME)) {
+            const char *nm = (oid[4] == 0x70) ? "edwards25519" : "edwards448";
+            size_t nl = strlen(nm);
+            if (*out_len < 2 + nl) { *out_len = 2 + nl; rc = -2; }
+            else {
+                out[0] = 0x13; out[1] = (uint8_t)nl;
+                memcpy(out + 2, nm, nl);
+                *out_len = 2 + nl; rc = 0;
+            }
+        } else if (oid) {
             if (type == CKA_EC_PARAMS_QUERY) {
                 if (*out_len < 5) { *out_len = 5; rc = -2; }
                 else { memcpy(out, oid, 5); *out_len = 5; rc = 0; }
@@ -7863,6 +7913,12 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
         if (fhsm_token_object_get_flags2(t, (uint32_t)hObject, &src_f2) == FHSM_RV_OK
             && src_f2 != 0)
             (void)fhsm_token_object_set_flags2(t, new_handle, src_f2);
+        /* The third byte describes the key, not a restriction on it, and a
+         * copy is the same key. */
+        uint8_t src_f3 = 0;
+        if (fhsm_token_object_get_flags3(t, (uint32_t)hObject, &src_f3) == FHSM_RV_OK
+            && src_f3 != 0)
+            (void)fhsm_token_object_set_flags3(t, new_handle, src_f3);
         {
             uint32_t copy_class = 0, copy_kt = 0;
             const uint8_t *cv = NULL; size_t cvl = 0;
@@ -9081,10 +9137,44 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         fhsm_rv_t hr = hmldsa_init(op, pMechanism->pParameter, pMechanism->ulParameterLen);
         if (hr != FHSM_RV_OK) return hr;
     }
+    /* No parameter block on an RFC 8032 edwards448 key. The EdDSA scheme
+     * table (PKCS#11 v3.2 §6.3.14) selects the scheme from the key's profile
+     * and the parameter together: on an RFC 8410 id-Ed448 key a NULL
+     * parameter is pure Ed448, while on the RFC 8032 edwards448 curve every
+     * scheme, Ed448 included, takes a CK_EDDSA_PARAMS block. That is the
+     * table as pkcs11-check 0.2.3 encodes it; the normative text could not be
+     * fetched when this was written, and the question stays open upstream in
+     * mingulov/pkcs11-check#49. Accepting NULL there answered a request the
+     * profile does not define. pkcs11-check 0.2.3
+     * TestEdDSAParameters::test_eddsa_edwards448_{sign,verify}_missing_required_param.
+     *
+     * Only keys whose CKA_EC_PARAMS was the curveName string are refused; the
+     * OID form, which OpenSC pkcs11-tool and every key made before
+     * FHSM_OBJF3_ED_CURVE_NAME use, is unchanged. Ed25519 is unchanged in
+     * both profiles: NULL is pure Ed25519 in each. */
+    if (op->mechanism == 0x00001057UL /* CKM_EDDSA */ && !pMechanism->pParameter) {
+        fhsm_token_t *tk = fhsm_session_token(hSession);
+        uint8_t f3 = 0;
+        if (tk && fhsm_token_object_get_flags3(tk, (uint32_t)hKey, &f3) == FHSM_RV_OK
+            && (f3 & FHSM_OBJF3_ED_CURVE_NAME)) {
+            const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+            if (fhsm_token_object_get(tk, (uint32_t)hKey, &kv, &kvl,
+                                      &cl, &kt) == FHSM_RV_OK) {
+                const uint8_t *p = kv;
+                EVP_PKEY *pk = NULL;
+                if (cl == CKO_PUBLIC_KEY)       pk = d2i_PUBKEY(NULL, &p, (long)kvl);
+                else if (cl == CKO_PRIVATE_KEY) pk = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+                int is_ed448 = pk && EVP_PKEY_is_a(pk, "ED448");
+                EVP_PKEY_free(pk);
+                if (is_ed448) return FHSM_RV_MECHANISM_PARAM_INVALID;
+            }
+        }
+    }
     /* CK_EDDSA_PARAMS (PKCS#11 v3.0 §2.3.6) : { CK_BBOOL phFlag ; CK_ULONG
      * ulContextDataLen ; CK_BYTE_PTR pContextData }. The block is optional --
      * absent means pure Ed25519 / Ed448 over an empty context, which is what
-     * the signature path produces.
+     * the signature path produces -- except on an RFC 8032 edwards448 key,
+     * where it is required (the block above).
      *
      * Until Edwards key generation existed nothing external could reach this
      * mechanism, so the block was never looked at: a NULL pContextData with a

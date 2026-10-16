@@ -36,11 +36,3 @@ all-mechanisms  pkcs11_check/testcases/security/test_padding_oracle.py::TestRSAP
 # 0.2.1 reported as a skip. Open upstream: mingulov/pkcs11-check#49.
 *  pkcs11_check/testcases/ckr/test_ckr_v32_raw.py::TestAsyncErrors::test_async_get_id_no_operation
 *  pkcs11_check/testcases/ckr/test_ckr_v32_raw.py::TestAsyncErrors::test_async_get_id_empty_selector
-
-# Ed448 C_SignInit / C_VerifyInit with no parameter block: accepted as pure
-# Ed448, the same as a CK_EDDSA_PARAMS with phFlag clear and no context. The
-# harness requires the block for Ed448. Whether PKCS#11 v3.2 does is asked
-# upstream, with the clause, in mingulov/pkcs11-check#49; if it does, the
-# module will refuse NULL and these two lines go.
-*  pkcs11_check/testcases/test_mech_negative.py::TestEdDSAParameters::test_eddsa_edwards448_sign_missing_required_param
-*  pkcs11_check/testcases/test_mech_negative.py::TestEdDSAParameters::test_eddsa_edwards448_verify_missing_required_param

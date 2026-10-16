@@ -15,6 +15,22 @@ CKM_ML_DSA with a key of another type. No security advisory.
 `RELEASE_v2.4.0.md` has the release notes.*
 
 ### Fixed
+* **`CKM_EDDSA` with no parameter accepted on an RFC 8032 `edwards448`
+  key.** PKCS#11 v3.2 tells the two Edwards key profiles apart by
+  `CKA_EC_PARAMS`: the RFC 8410 OID (`id-Ed448`), where a NULL parameter is
+  pure Ed448, or the RFC 8032 curveName string (`edwards448`), where every
+  scheme takes a `CK_EDDSA_PARAMS` block. The module accepted both forms and
+  then forgot which it had been given, so it could not refuse NULL on the
+  second. It now records the form (`FHSM_OBJF3_ED_CURVE_NAME`, a spare byte
+  of the v4 token record, no format bump), refuses NULL on an `edwards448`
+  key with `CKR_MECHANISM_PARAM_INVALID` at `C_SignInit` and `C_VerifyInit`,
+  and reads `CKA_EC_PARAMS` back in the form it was given. Keys made with the
+  OID, which OpenSC pkcs11-tool sends, and every key made before this change,
+  are unchanged; so is Ed25519 in either profile. The two pkcs11-check
+  0.2.3 `TestEdDSAParameters::test_eddsa_edwards448_*_missing_required_param`
+  known failures pass and leave `tests/pkcs11_check_known_failures.txt`;
+  `tests/test_eddsa_params.c` covers both profiles and a token key across
+  `C_Finalize`.
 * **Eight of the twelve SLH-DSA parameter sets could not be generated, and
   asking latched the module into ERROR.** The pair-wise consistency check
   after `C_GenerateKeyPair` signed into a 16384-byte array; SLH-DSA-128f,

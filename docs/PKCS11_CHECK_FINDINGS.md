@@ -2673,3 +2673,43 @@ none of them the wrong way:
   the fix was written for; what it reached.
 - **skipped → passed, 2, `TestSLHDSAKeyGeneration`.** Parameter sets the
   pair-wise check's buffer had made ungenerable.
+
+## 2026-10-16 — Ed448 on an RFC 8032 key, out of the known failures
+
+    pkcs11-check 0.2.3 · unsigned module, default provider, default build
+    profile · Debian 13, OpenSSL 3.5.7 · the 82 tests matching
+    "eddsa or EdDSA or ed448 or Ed448 or edwards", before and after
+
+Of the five known failures, three are not the module's and stay listed: the
+two `TestAsyncErrors` probes, a ctypes type error in the harness fixed
+upstream after 0.2.3 (#49, not yet released), and the v1.5 structured oracle,
+which is implicit rejection doing its job (#37).
+
+The Ed448 pair was listed as a question for #49, still unanswered. Reading the
+two tests answered most of it: both generate the key with `CKA_EC_PARAMS` set
+to the PrintableString `edwards448`, the RFC 8032 curveName, not the
+`id-Ed448` OID. The harness's own mode table (`tests/test_eddsa_param_modes.py`
+in its sdist) makes the encoding the switch: on an RFC 8410 key a NULL
+parameter is pure Ed448, on an RFC 8032 `edwards448` key every scheme takes a
+`CK_EDDSA_PARAMS` block. Its Wycheproof Ed448 vectors import with the OID,
+so this change does not reach them (they were skipped in the run below, which
+had no vector data). So the disagreement was never "is the block required for
+Ed448", which would have broken OpenSC and the Wycheproof run alike, but
+"which profile is this key", and the module could not answer: it accepted
+both encodings at generation and import, mapped both to the same OpenSSL key,
+and reported the OID for either.
+
+The form is now recorded per object, in a byte of the v4 record that was
+written as zero and never read (docs/TOKEN_STORE_FORMAT.md, "The third flags
+byte"). On an `edwards448` key, NULL is `CKR_MECHANISM_PARAM_INVALID` at both
+Inits; `CKA_EC_PARAMS` reads back as given.
+
+Diffed by node-id against the same 82 tests on main: 2 moved,
+`test_eddsa_edwards448_{sign,verify}_missing_required_param`, failed →
+passed. Nothing else moved. The two lines are out of the known-failures list.
+
+What is still inferred rather than read: the clause. The OASIS v3.2 text
+could not be fetched from here, as on 2026-09-14 (#23); the table above is
+pkcs11-check's encoding of it. If the clause turns out to say otherwise, the
+refusal is one `if` in `op_init` and the recorded form stays useful for
+`CKA_EC_PARAMS` alone.

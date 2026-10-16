@@ -341,6 +341,27 @@ fhsm_rv_t fhsm_token_object_get_flags2(fhsm_token_t *t, uint32_t handle,
 fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
                                         uint8_t flags2);
 
+/* Third flags byte, at offset 118 of the v4 record -- a byte every writer
+ * since v2 has emitted as zero and no reader looked at. A build that predates
+ * it reads a record carrying it as if the bits were clear and, on its next
+ * write, clears them; each bit below is chosen so that "clear" is the
+ * behaviour the module had before the bit existed.
+ *
+ * FHSM_OBJF3_ED_CURVE_NAME: the Edwards key was created with CKA_EC_PARAMS
+ * as the RFC 8032 curveName PrintableString ("edwards25519" / "edwards448")
+ * rather than the RFC 8410 OID. PKCS#11 v3.2 tells the two profiles apart by
+ * that encoding, and CKM_EDDSA's parameter rules differ between them: on an
+ * RFC 8032 edwards448 key the CK_EDDSA_PARAMS block is required, on an
+ * RFC 8410 id-Ed448 key a NULL parameter is pure Ed448. CKA_EC_PARAMS is read
+ * back in the form it was given. Clear: the OID form, which is what every key
+ * made before this bit was reported as. */
+#define FHSM_OBJF3_ED_CURVE_NAME 0x01
+
+fhsm_rv_t fhsm_token_object_get_flags3(fhsm_token_t *t, uint32_t handle,
+                                        uint8_t *out_flags3);
+fhsm_rv_t fhsm_token_object_set_flags3(fhsm_token_t *t, uint32_t handle,
+                                        uint8_t flags3);
+
 /* What a v4 record can hold, per object. Measured against pkcs11-check 0.2.0
  * rather than chosen: the corpus sends one mechanism and at most two template
  * entries, and the longest value in a template is a 41-byte CKA_LABEL. These
