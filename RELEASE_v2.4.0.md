@@ -173,10 +173,14 @@ seed: the module has no `CKA_SEED`.
 ## Credits
 
 Govardhan Yadava's acvp-assay asked for HashML-DSA, so that its preHash
-cases have a token to be measured on, and raised `CKA_PARAMETER_SET`. The
-harness is Denis Mingulov's `pkcs11-check`; Wycheproof's ML-DSA context
-vectors found the context defect. `ACKNOWLEDGEMENTS.md` records who found
-what.
+cases have a token to be measured on, and raised `CKA_PARAMETER_SET`. Its
+PKCS#11 reference harness now answers ML-DSA, and through it this module
+passes 90 of NIST's pinned sigGen and 90 sigVer cases, preHash included,
+with nothing failing; he reproduced those counts on his own build
+(Govardhan527/acvp-assay#2). The harness is Denis Mingulov's
+`pkcs11-check`; Wycheproof's ML-DSA context vectors found the context
+defect, and OpenSC's `pkcs11-tool` the SLH-DSA one. `ACKNOWLEDGEMENTS.md`
+records who found what.
 
 ## Verifying this release
 

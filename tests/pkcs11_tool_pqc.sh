@@ -143,15 +143,18 @@ fi
 # its CKM_HASH_ML_DSA branch cannot be reached. That is reported as a SKIP:
 # it says nothing about the module.
 openssl dgst -sha256 -binary "$WORK/msg" >"$WORK/ph"
-if sign 65 0x1f "$WORK/ph" "$WORK/sigg" --hash-algorithm SHA256 >"$WORK/out" 2>&1; then
-    ok "CKM_HASH_ML_DSA (0x1f), SHA256, on PH(M)"
-    expect 0 "  verify" verify 65 0x1f "$WORK/ph" "$WORK/sigg" --hash-algorithm SHA256
+# By name once pkcs11-tool has one for it (OpenSC, after this was reported).
+GEN=0x1f
+p11 -M 2>/dev/null | grep -q '^ *HASH-ML-DSA,' && GEN=HASH-ML-DSA
+if sign 65 "$GEN" "$WORK/ph" "$WORK/sigg" --hash-algorithm SHA256 >"$WORK/out" 2>&1; then
+    ok "CKM_HASH_ML_DSA ($GEN), SHA256, on PH(M)"
+    expect 0 "  verify" verify 65 "$GEN" "$WORK/ph" "$WORK/sigg" --hash-algorithm SHA256
     expect 0 "  and the same signature verifies under HASH-ML-DSA-SHA256 on M" \
         verify 65 HASH-ML-DSA-SHA256 "$WORK/msg" "$WORK/sigg"
 elif grep -q "applicable only to RSA-PKCS-PSS" "$WORK/out"; then
     skip "CKM_HASH_ML_DSA: pkcs11-tool refuses --hash-algorithm outside RSA-PSS"
 else
-    bad "CKM_HASH_ML_DSA (0x1f), SHA256, on PH(M)" "$WORK/out"
+    bad "CKM_HASH_ML_DSA ($GEN), SHA256, on PH(M)" "$WORK/out"
 fi
 
 # --- SLH-DSA -------------------------------------------------------------

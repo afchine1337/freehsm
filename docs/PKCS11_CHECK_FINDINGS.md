@@ -2655,3 +2655,21 @@ the harness's per-file logs, about 384 MB for the corpus, cannot by
 themselves exhaust a VM with 16 GB of RAM, and one success against two
 freezes proves nothing. Next time it happens, `vmstat` and `dmesg` from
 inside the VM are what would say.
+
+## 2026-10-16 — RSA-OAEP hashes and the SLH-DSA sets
+
+    pkcs11-check 0.2.3 · signed module, nist-approved-only · main after the
+    OAEP and SLH-DSA fixes · reports/p11check-oaep-slh-nist (OAEP, RSA,
+    SLH-DSA subset, 11 620 tests)
+
+Against the same tests in the merged-main run of 2026-10-14, 203 moved,
+none of them the wrong way:
+
+- **xfailed → passed, 183, `test_wycheproof_rsa_oaep`.** The vectors with
+  SHA-224 and SHA-3 as OAEP or MGF1 hash, which the module refused.
+- **xfailed → passed, 18, `test_wycheproof_rsa_pss`.** RSA-PSS takes its
+  MGF1 hash from the same table, so valid PSS vectors with MGF1-SHA-224 or
+  SHA-3 had been answered `CKR_MECHANISM_PARAM_INVALID` as well. Not what
+  the fix was written for; what it reached.
+- **skipped → passed, 2, `TestSLHDSAKeyGeneration`.** Parameter sets the
+  pair-wise check's buffer had made ungenerable.

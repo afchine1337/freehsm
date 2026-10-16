@@ -33,7 +33,10 @@ CKM_ML_DSA with a key of another type. No security advisory.
   with `CKR_MECHANISM_PARAM_INVALID`, where it was accepted at Init and
   refused at the operation as `CKR_MECHANISM_INVALID`. And a message longer
   than k - 2hLen - 2 bytes is `CKR_DATA_LEN_RANGE`, as RFC 8017 and PKCS#11
-  have it; it was `CKR_FUNCTION_FAILED`. `tests/test_rsa_oaep.c` has OpenSSL
+  have it; it was `CKR_FUNCTION_FAILED`. RSA-PSS takes its MGF1 hash from
+  the same table, so PSS with MGF1-SHA-224 or SHA-3 works now too; the
+  pkcs11-check subset run moved 183 Wycheproof OAEP and 18 PSS vectors from
+  xfailed to passed. `tests/test_rsa_oaep.c` has OpenSSL
   encrypt with the token's public key and the module decrypt, for RSA 2048
   to 4096 across hashes, MGFs and labels; `tests/test_aes_sizes.c` checks
   every AES mechanism at 128, 192 and 256 bits against OpenSSL the same way,
