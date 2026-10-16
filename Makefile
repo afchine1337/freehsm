@@ -598,6 +598,13 @@ d[off+18]^=0x01; open(p,'wb').write(d)"
 tests/test_concurrency: tests/test_concurrency.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl -lpthread
 
+# Its second half: what sessions on one token share -- the object store, the
+# login state, the function tables -- with one thread mutating while the
+# others read. Four passes, each in its own process. Checks results when run
+# plain; under `make TSAN=1` it also fails on every race TSan reports.
+tests/test_concurrency_store: tests/test_concurrency_store.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl -lpthread
+
 tests/bench_capacity: tests/bench_capacity.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
