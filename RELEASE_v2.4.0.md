@@ -94,6 +94,17 @@ signature's size, and `tests/test_slh_dsa_sets.c` generates, signs and
 verifies all twelve sets. Found by running OpenSC's pkcs11-tool against the
 module (`tests/pkcs11_tool_pqc.sh`).
 
+## RSA-OAEP: SHA-224, SHA-3, and two return codes
+
+OAEP with SHA-224 or any SHA-3 hash was refused, though PKCS#11 v3.2
+defines them; the module now takes them as hash and as MGF1 hash. An unknown
+hash is refused at Init with `CKR_MECHANISM_PARAM_INVALID` instead of at the
+operation with `CKR_MECHANISM_INVALID`, and a message too long for the key
+is `CKR_DATA_LEN_RANGE` instead of `CKR_FUNCTION_FAILED`. Found by a new
+test that has OpenSSL encrypt with the token's public key and the module
+decrypt, for RSA 2048, 3072 and 4096; its AES counterpart checks every AES
+mechanism at 128, 192 and 256 bits against OpenSSL and found nothing.
+
 ## What the module now answers differently
 
 - **A context string over 255 bytes** for ML-DSA, SLH-DSA and HashML-DSA is

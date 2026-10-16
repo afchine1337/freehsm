@@ -8128,13 +8128,22 @@ typedef struct fhsm_oaep_params_s {
     CK_ULONG ulSourceDataLen;
 } fhsm_oaep_params_t;
 
+/* The hashes and MGF1 hashes PKCS#11 v3.2 defines for OAEP. SHA-224 and the
+ * SHA-3 family were missing from both tables, so a caller asking for them
+ * got CKR_MECHANISM_INVALID at Init, for a mechanism this module offers --
+ * tests/test_rsa_oaep.c found SHA-224, 2026-10-16. */
 static const EVP_MD *oaep_md(CK_ULONG ckm) {
     const char *name = NULL;
     switch (ckm) {
         case CKM_SHA_1:  name = "SHA1";   break;
+        case 0x255UL:    name = "SHA224"; break;   /* CKM_SHA224 */
         case CKM_SHA256: name = "SHA256"; break;
         case CKM_SHA384_LIST: name = "SHA384"; break;
         case CKM_SHA512_LIST: name = "SHA512"; break;
+        case 0x2B5UL:    name = "SHA3-224"; break; /* CKM_SHA3_224 */
+        case 0x2B0UL:    name = "SHA3-256"; break; /* CKM_SHA3_256 */
+        case 0x2C0UL:    name = "SHA3-384"; break; /* CKM_SHA3_384 */
+        case 0x2D0UL:    name = "SHA3-512"; break; /* CKM_SHA3_512 */
         default: return NULL;
     }
     return EVP_MD_fetch(NULL, name, NULL);
@@ -8144,9 +8153,14 @@ static const EVP_MD *mgf_md(CK_ULONG mgf) {
     const char *name = NULL;
     switch (mgf) {
         case CKG_MGF1_SHA1:    name = "SHA1";   break;
+        case CKG_MGF1_SHA224:  name = "SHA224"; break;
         case CKG_MGF1_SHA256:  name = "SHA256"; break;
         case CKG_MGF1_SHA384:  name = "SHA384"; break;
         case CKG_MGF1_SHA512:  name = "SHA512"; break;
+        case 0x6UL:            name = "SHA3-224"; break; /* CKG_MGF1_SHA3_224 */
+        case 0x7UL:            name = "SHA3-256"; break; /* CKG_MGF1_SHA3_256 */
+        case 0x8UL:            name = "SHA3-384"; break; /* CKG_MGF1_SHA3_384 */
+        case 0x9UL:            name = "SHA3-512"; break; /* CKG_MGF1_SHA3_512 */
         default: return NULL;
     }
     return EVP_MD_fetch(NULL, name, NULL);
@@ -8196,7 +8210,7 @@ static fhsm_rv_t oaep_ctx_init(EVP_PKEY *pkey, int encrypt,
 
 fail_invalid:
     EVP_PKEY_CTX_free(ctx);
-    return FHSM_RV_MECHANISM_INVALID;
+    return FHSM_RV_MECHANISM_PARAM_INVALID;
 fail:
     EVP_PKEY_CTX_free(ctx);
     return FHSM_RV_FUNCTION_FAILED;
@@ -8222,7 +8236,15 @@ static fhsm_rv_t fhsm_oaep_params_from_mech(CK_MECHANISM *pMechanism,
     if (out->source == CKZ_DATA_SPECIFIED && out->ulSourceDataLen > 0
         && !out->pSourceData)
         return FHSM_RV_MECHANISM_PARAM_INVALID;
-    return FHSM_RV_OK;
+    /* The hash and the MGF's hash are checked here, at Init, rather than
+     * first at C_Encrypt / C_Decrypt, where an unknown one used to surface
+     * as CKR_MECHANISM_INVALID: the mechanism is valid, its parameter is
+     * not. */
+    const EVP_MD *h = oaep_md(out->hashAlg), *g = mgf_md(out->mgf);
+    int known = h && g;
+    EVP_MD_free((EVP_MD *)h);
+    EVP_MD_free((EVP_MD *)g);
+    return known ? FHSM_RV_OK : FHSM_RV_MECHANISM_PARAM_INVALID;
 }
 
 static fhsm_rv_t fhsm_rsa_oaep_wrap(const uint8_t *pub_der, size_t pub_len,
@@ -9355,6 +9377,26 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         rv = oaep_ctx_init(pkey, 1, &g_oaep_enc[hSession].p, &ectx);
         if (rv != FHSM_RV_OK) {
             EVP_PKEY_free(pkey); op->active = 0; return rv;
+        }
+        /* RFC 8017 7.1.1: a message longer than k - 2hLen - 2 octets is
+         * "message too long", which PKCS#11 answers CKR_DATA_LEN_RANGE.
+         * OpenSSL refuses it too, and its refusal became CKR_FUNCTION_FAILED
+         * below, indistinguishable from a fault. Checked here, before
+         * OpenSSL is asked, from the modulus and the OAEP hash in force.
+         * tests/test_rsa_oaep.c (6). */
+        {
+            const EVP_MD *omd = NULL;
+            int k = EVP_PKEY_get_size(pkey);
+            int hl = (EVP_PKEY_CTX_get_rsa_oaep_md(ectx, &omd) > 0 && omd)
+                     ? EVP_MD_get_size(omd) : -1;
+            if (k <= 0 || hl <= 0) {
+                EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey);
+                op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+            }
+            if (k < 2 * hl + 2 || (size_t)ulDataLen > (size_t)(k - 2 * hl - 2)) {
+                EVP_PKEY_CTX_free(ectx); EVP_PKEY_free(pkey);
+                op->active = 0; return FHSM_RV_DATA_LEN_RANGE;
+            }
         }
         size_t out_len = 0;
         if (EVP_PKEY_encrypt(ectx, NULL, &out_len, pData, ulDataLen) <= 0) {
