@@ -2609,7 +2609,8 @@ before moved.
   `CKR_FUNCTION_FAILED`. Looking into them found worse: beyond 256 bytes,
   and for a NULL `pContext` with a length, the context was dropped and the
   empty one used.
-- **xfailed, 8, new — the harness, raised upstream.** All on the generic
+- **xfailed, 8, new — the harness, raised upstream as
+  mingulov/pkcs11-check#51.** All on the generic
   `CKM_HASH_ML_DSA`, which takes `PH(M)` single-part (v3.2 §6.67.6, Table
   283). `TestHashMLDSAGeneric::test_sign_verify_roundtrip` (4) passes the
   message, which `C_Sign` refuses with `CKR_DATA_LEN_RANGE`.

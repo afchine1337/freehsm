@@ -126,8 +126,8 @@ branch on 2026-10-12: 453 moves in each profile, +262 passed, nothing that
 passed before regressed, every move attributed in
 `docs/PKCS11_CHECK_FINDINGS.md`. The 8 new xfails are all on
 `CKM_HASH_ML_DSA`, which takes PH(M) single-part: four tests pass it the
-message, four call it without its required parameter. Raised with the
-harness's author.
+message, four call it without its required parameter
+(mingulov/pkcs11-check#51).
 
 Wycheproof: the ML-DSA adapter now sends contexts over 255 bytes instead of
 skipping them, 629 match and 0 violations; ML-KEM 21 match, 0 violations.
