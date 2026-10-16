@@ -364,6 +364,39 @@ names a key that already exists, so it is compared against that object's
 attributes, which is why it can only name attributes the module can read back
 and why a template naming anything else is refused at creation.
 
+### The third flags byte (2026-10-16)
+
+Offset 118 of the record, the first of the two `pad` bytes after
+`usage_flags`, which every writer since v2 has emitted as zero and no reader
+has looked at. v4 now writes and reads it as `flags3` (`FHSM_OBJF3_*` in
+`fhsm_token.h`); 119 stays pad. The record size and the magic do not change.
+
+One bit is defined. `FHSM_OBJF3_ED_CURVE_NAME` (0x01) records that an Edwards
+key was given `CKA_EC_PARAMS` as the RFC 8032 curveName PrintableString
+(`edwards25519`, `edwards448`) rather than the RFC 8410 OID. PKCS#11 v3.2
+tells the two EdDSA profiles apart by that encoding: on an `edwards448` key
+`CKM_EDDSA` requires its parameter block, on an `id-Ed448` key a NULL
+parameter is pure Ed448. The key material is the same either way, so only
+the store can remember which was asked for.
+
+Why this is not a v5:
+
+* **Old records.** A record written before the byte meant anything carries
+  zero, which reads as the OID profile: what every key was reported as
+  before the bit existed.
+* **Old readers.** A build that predates the byte reads a record carrying it
+  as if the bit were clear, and clears it on its next write. A curveName
+  `edwards448` key opened by such a build accepts a NULL parameter again and
+  reads back its `CKA_EC_PARAMS` as the OID, which is that build's own
+  behaviour, not a new one. No restriction or policy rides on the bit, so
+  there is nothing a downgrade could silently lift. That is the line a future
+  bit in this byte has to stay on; one that restricts belongs in a v5, where
+  an old reader fails loudly.
+
+`tests/test_eddsa_params.c` (8) generates a token `edwards448` pair and
+checks, after `C_Finalize` and `C_Initialize`, that the parameter is still
+required and `CKA_EC_PARAMS` still reads back as the string.
+
 ## Versioning policy
 
 Header `Version` (offset 4) is bumped on any *header* layout change;

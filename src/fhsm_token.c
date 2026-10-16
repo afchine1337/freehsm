@@ -140,6 +140,11 @@ typedef struct fhsm_object_s {
      * is what every record written before 2026-09-19 carries there -- means
      * permitted, and no migration is needed. */
     uint8_t  flags2;
+    /* Third flags byte (FHSM_OBJF3_*), serialised into the v4 record's spare
+     * byte at offset 118. Same polarity rule as flags2: zero is what every
+     * record written before it carried there, and zero means what those
+     * records meant. */
+    uint8_t  flags3;
     /* In-memory only (NOT serialised to the .tok file) : 0 = persistent
      * token object ; non-zero = session object owned by that session
      * handle, destroyed on C_CloseSession and never written to disk
@@ -549,7 +554,9 @@ static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
         put_u32_le(out + off + 112, o->id_len);
         out[off + 116] = o->flags;
         out[off + 117] = o->usage_flags;
-        out[off + 118] = 0; out[off + 119] = 0;
+        /* Was pad, written zero by every writer since v2. Now the third
+         * flags byte -- see FHSM_OBJF3_* in fhsm_token.h. 119 stays pad. */
+        out[off + 118] = o->flags3; out[off + 119] = 0;
         /* v3 metadata block. */
         memcpy(out + off + 120, o->start_date, 8);
         out[off + 128] = o->start_date_len;
@@ -799,6 +806,7 @@ static fhsm_rv_t parse_objects_v4(fhsm_token_t *t, const uint8_t *buf, size_t le
         o->application_len = buf[off + 202];
         if (o->application_len > FHSM_OBJ_APP_LEN) return FHSM_RV_FUNCTION_FAILED;
         o->flags2 = buf[off + 203];
+        o->flags3 = buf[off + 118];
         /* Policy block. */
         {
             const uint8_t *p = buf + off + FHSM_OBJ_REC_V3_FIXED;
@@ -2358,6 +2366,44 @@ fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
             t->objects[i].flags2 = flags2;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+/* The third flags byte. Same shape as the second: the bits change no
+ * handling of the value, so the setter stores and persists, and no more. */
+fhsm_rv_t fhsm_token_object_get_flags3(fhsm_token_t *t, uint32_t handle,
+                                        uint8_t *out_flags3) {
+    if (!t || !out_flags3) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            *out_flags3 = t->objects[i].flags3;
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_OK;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+fhsm_rv_t fhsm_token_object_set_flags3(fhsm_token_t *t, uint32_t handle,
+                                        uint8_t flags3) {
+    if (!t) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            t->objects[i].flags3 = flags3;
             t->objects_dirty = 1;
             fhsm_rv_t rv = write_atomic(t);
             pthread_mutex_unlock(&t->mu);
