@@ -158,11 +158,12 @@ Held here until the 2.3.1 tag, and moved into `[Unreleased]` at the merge
   once the stage 3 run shows it; `test_hash_slh_dsa.py` has the same shape.
 
   Measured 2026-10-12 (pkcs11-check 0.2.1 and 0.2.3 alike, nist-approved-only, ML-DSA
-  subset): eight xfails, all on the generic mechanism and all for this one
-  reason. `TestHashMLDSAGeneric::test_sign_verify_roundtrip` (4) passes the
-  message; the registry tests `TestMechSignRoundtrip` (2) pass arbitrary
-  data, and `TestMultipartSign` (2) drives multipart on a mechanism Table
-  283 makes single-part. The forty tests of the ten hash-specific mechanisms
+  subset): eight xfails, all on the generic mechanism, for two reasons.
+  `TestHashMLDSAGeneric::test_sign_verify_roundtrip` (4) passes the message.
+  The registry tests `TestMechSignRoundtrip` (2) and `TestMultipartSign` (2)
+  call `C_SignInit` without the required `CK_HASH_SIGN_ADDITIONAL_CONTEXT`
+  (the registry entry has no parameter recipe) and meet
+  `CKR_MECHANISM_PARAM_INVALID`. The forty tests of the ten hash-specific mechanisms
   pass, and `TestMlDsaSigGen` / `TestMlDsaSigVer` pass all they run, 258 and
   82, where the 2026-09-18 run had 180 and 45 with the rest skipped or xfail.
 

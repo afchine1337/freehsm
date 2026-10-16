@@ -124,8 +124,10 @@ runs of 2026-10-12, nothing moved in either profile. Against the 2.3.1
 candidate, on the `hash-ml-dsa`
 branch on 2026-10-12: 453 moves in each profile, +262 passed, nothing that
 passed before regressed, every move attributed in
-`docs/PKCS11_CHECK_FINDINGS.md`. The 8 new xfails are the harness passing a
-message to `CKM_HASH_ML_DSA`, which takes PH(M); raised with its author.
+`docs/PKCS11_CHECK_FINDINGS.md`. The 8 new xfails are all on
+`CKM_HASH_ML_DSA`, which takes PH(M) single-part: four tests pass it the
+message, four call it without its required parameter. Raised with the
+harness's author.
 
 Wycheproof: the ML-DSA adapter now sends contexts over 255 bytes instead of
 skipping them, 629 match and 0 violations; ML-KEM 21 match, 0 violations.

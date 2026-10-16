@@ -2611,10 +2611,15 @@ before moved.
   empty one used.
 - **xfailed, 8, new — the harness, raised upstream.** All on the generic
   `CKM_HASH_ML_DSA`, which takes `PH(M)` single-part (v3.2 §6.67.6, Table
-  283). `TestHashMLDSAGeneric::test_sign_verify_roundtrip` (4) and
-  `TestMechSignRoundtrip` (2) pass the message, which `C_Sign` refuses with
-  `CKR_DATA_LEN_RANGE`; `TestMultipartSign` (2) drives `C_SignUpdate`, which
-  answers `CKR_FUNCTION_NOT_SUPPORTED`.
+  283). `TestHashMLDSAGeneric::test_sign_verify_roundtrip` (4) passes the
+  message, which `C_Sign` refuses with `CKR_DATA_LEN_RANGE`.
+  `TestMechSignRoundtrip` (2) and `TestMultipartSign` (2) come from the
+  harness's registry, whose entry marks the parameter required and gives no
+  recipe for it, so `C_SignInit` is called without
+  `CK_HASH_SIGN_ADDITIONAL_CONTEXT` and answers
+  `CKR_MECHANISM_PARAM_INVALID`. (Corrected 2026-10-16: this said the
+  registry tests passed the message and drove `C_SignUpdate`; the reports say
+  otherwise.)
 
 The failures are the known ones, and the gate passes in both. The
 all-mechanisms count of advertised mechanisms, 88, is its provenance check:
