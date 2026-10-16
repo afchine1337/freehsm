@@ -7,11 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-*To become 2.4.0, on or after 2026-10-21. Minor: a new tool and a new
-window tab for key management and file encryption, the HashML-DSA
-mechanisms, and calls that answer differently -- an ML-KEM, ML-DSA or
-SLH-DSA import without CKA_PARAMETER_SET, a context string over 255 bytes,
-CKM_ML_DSA with a key of another type. No security advisory.
+## [2.4.0] --- 2026-10-21
+
+*Minor: a new tool and a new window tab for key management and file
+encryption, the HashML-DSA mechanisms, and calls that answer differently --
+an ML-KEM, ML-DSA or SLH-DSA import without CKA_PARAMETER_SET, a context
+string over 255 bytes, CKM_ML_DSA with a key of another type, CKM_EDDSA
+without a parameter on an `edwards448` key. No security advisory.
 `RELEASE_v2.4.0.md` has the release notes.*
 
 ### Fixed

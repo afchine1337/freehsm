@@ -98,17 +98,23 @@ extern "C" {
  * 2.3.1, PATCH: two defects corrected and the build fixed off x86, nothing
  * added. Calls answer differently only where they answered wrongly -- a
  * non-extractable key's value, an imported key's CKA_SENSITIVE and
- * CKA_EXTRACTABLE. */
+ * CKA_EXTRACTABLE.
+ *
+ * 2.4.0, MINOR: a new tool and a new window tab, the HashML-DSA mechanisms,
+ * and calls that answer differently in the direction PKCS#11 v3.2 and
+ * FIPS 204 ask -- a PQC import without CKA_PARAMETER_SET, a context string
+ * over 255 bytes, CKM_ML_DSA with a key of another type, CKM_EDDSA without
+ * a parameter on an edwards448 key. */
 #define FHSM_VERSION_MAJOR   2
-#define FHSM_VERSION_MINOR   3
-#define FHSM_VERSION_PATCH   1
+#define FHSM_VERSION_MINOR   4
+#define FHSM_VERSION_PATCH   0
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
  * a certification this project does not hold. The profile a
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
-#define FHSM_VERSION_STRING  "2.3.1"
+#define FHSM_VERSION_STRING  "2.4.0"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including

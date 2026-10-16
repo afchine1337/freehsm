@@ -137,6 +137,13 @@ it under TSan.
   stated set as a raw key was.
 - **`CKM_ML_DSA` refuses a key of another type** at Init with
   `CKR_KEY_TYPE_INCONSISTENT`; it failed at `C_Sign` before.
+- **`CKM_EDDSA` without a parameter on an RFC 8032 `edwards448` key** is
+  refused at `C_SignInit` and `C_VerifyInit` with
+  `CKR_MECHANISM_PARAM_INVALID`: under that form of `CKA_EC_PARAMS` every
+  scheme takes a `CK_EDDSA_PARAMS` block. `CKA_EC_PARAMS` now reads back in
+  the form it was given. Keys made with the RFC 8410 OID, which OpenSC
+  `pkcs11-tool` sends, keys made before this release, and Ed25519 are
+  unchanged.
 
 ## The build image is pinned
 
