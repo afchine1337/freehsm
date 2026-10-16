@@ -136,10 +136,13 @@ static void *tables_worker(void *arg) {
     int i = (int)(long)arg;
     pthread_barrier_wait(&g_start);
     FL *l = NULL;
-    if (C_GetFunctionList(&l) == CKR_OK && l) memcpy(&g_snap_v2[i], l, sizeof(FL));
+    /* 68 slots and no more: the v2.40 table is that long, and reading the
+     * size of FL off its end is an overflow ASan reports. */
+    if (C_GetFunctionList(&l) == CKR_OK && l)
+        memcpy(g_snap_v2[i].pfn, l->pfn, 68 * sizeof(void*));
     IFACE *ifc = NULL;
     if (C_GetInterface(NULL, NULL, &ifc, 0) == CKR_OK && ifc && ifc->list)
-        memcpy(&g_snap_v3[i], ifc->list, sizeof(FL));
+        memcpy(g_snap_v3[i].pfn, ifc->list->pfn, 68 * sizeof(void*));
     return NULL;
 }
 
