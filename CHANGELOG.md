@@ -15,6 +15,16 @@ CKM_ML_DSA with a key of another type. No security advisory.
 `RELEASE_v2.4.0.md` has the release notes.*
 
 ### Fixed
+* **Eight of the twelve SLH-DSA parameter sets could not be generated, and
+  asking latched the module into ERROR.** The pair-wise consistency check
+  after `C_GenerateKeyPair` signed into a 16384-byte array; SLH-DSA-128f,
+  192f, 256s and 256f, SHA2 and SHAKE alike, sign larger (17,088 to 49,856
+  bytes). The check failed, the call answered `CKR_FUNCTION_FAILED`, and the
+  module entered its ERROR state, so one request for such a key made the
+  token unusable until the process restarted. The check now asks the
+  signature's size. Found with OpenSC pkcs11-tool
+  (`tests/pkcs11_tool_pqc.sh`); `tests/test_slh_dsa_sets.c` generates,
+  signs and verifies all twelve.
 * **A context string over 255 bytes** for `CKM_ML_DSA` and `CKM_SLH_DSA`.
   At 256 bytes signing and verification answered `CKR_FUNCTION_FAILED`;
   beyond that, and for a NULL `pContext` with a length, the context was

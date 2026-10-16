@@ -83,6 +83,17 @@ A signature that verifies against the module's own verification proves
 nothing about M', so `tests/test_hash_ml_dsa.c` signs NIST's ACVP preHash
 vectors deterministically and compares the signatures byte for byte.
 
+## Eight SLH-DSA parameter sets
+
+SLH-DSA-128f, 192f, 256s and 256f, SHA2 and SHAKE alike, could not be
+generated: the pair-wise consistency check that follows `C_GenerateKeyPair`
+signed into a 16384-byte buffer, their signatures are larger, and the
+failure latched the module into ERROR — one request for such a key left the
+token unusable until the application restarted. The check now asks the
+signature's size, and `tests/test_slh_dsa_sets.c` generates, signs and
+verifies all twelve sets. Found by running OpenSC's pkcs11-tool against the
+module (`tests/pkcs11_tool_pqc.sh`).
+
 ## What the module now answers differently
 
 - **A context string over 255 bytes** for ML-DSA, SLH-DSA and HashML-DSA is

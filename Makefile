@@ -827,6 +827,11 @@ tests/test_sensitive_value: tests/test_sensitive_value.c $(LIB)
 tests/test_hash_ml_dsa: tests/test_hash_ml_dsa.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Every SLH-DSA parameter set through C_GenerateKeyPair, C_Sign, C_Verify:
+# eight of the twelve sign larger than the pair-wise check's old buffer.
+tests/test_slh_dsa_sets: tests/test_slh_dsa_sets.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # The advertised set and the implemented set are two structures with nothing
 # holding them equal: fhsm_mechanism_table[] carries a handler pointer that no
 # code dereferences, and the PKCS#11 entry points switch on mechanisms by hand.
@@ -1129,6 +1134,7 @@ TEST_BINS = \
 	tests/test_digest_multipart \
 	tests/test_sensitive_value \
 	tests/test_hash_ml_dsa \
+	tests/test_slh_dsa_sets \
 	tests/test_advertised_operational \
 	tests/test_derive_concat \
 	tests/test_ecdh_peer_point \
@@ -1232,6 +1238,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_sensitive_value
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_hash_ml_dsa
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_slh_dsa_sets
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_advertised_operational
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

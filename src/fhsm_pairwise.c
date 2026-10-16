@@ -172,12 +172,25 @@ done:
 static fhsm_rv_t pairwise_pq_sign(EVP_PKEY *pkey) {
     fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
     EVP_MD_CTX *s = NULL, *v = NULL;
-    uint8_t sig[16384];   /* enough for SLH-DSA-SHA2-128s (~8k) */
-    size_t  sig_len = sizeof(sig);
+    uint8_t *sig = NULL;
+    size_t  sig_len = 0;
 
+    /* The signature's size is asked, not assumed. This was a 16384-byte
+     * array "enough for SLH-DSA-SHA2-128s", and eight of the twelve SLH-DSA
+     * sets sign larger -- 128f 17,088 bytes, 192f 35,664, 256s 29,792, 256f
+     * 49,856, SHA2 and SHAKE alike. Their signature did not fit, this check
+     * failed, and C_GenerateKeyPair latched the module into ERROR: one
+     * request for an SLH-DSA-128f key made the token unusable until the
+     * process restarted. Found by OpenSC pkcs11-tool, 2026-10-16
+     * (tests/pkcs11_tool_pqc.sh); tests/test_slh_dsa_sets.c covers all
+     * twelve. */
     s = EVP_MD_CTX_new();
     if (!s) goto done;
     if (EVP_DigestSignInit(s, NULL, NULL, NULL, pkey) <= 0) goto done;
+    if (EVP_DigestSign(s, NULL, &sig_len, s_msg, sizeof(s_msg)) <= 0 || sig_len == 0)
+        goto done;
+    sig = OPENSSL_malloc(sig_len);
+    if (!sig) goto done;
     if (EVP_DigestSign(s, sig, &sig_len, s_msg, sizeof(s_msg)) <= 0) goto done;
 
     v = EVP_MD_CTX_new();
@@ -187,6 +200,7 @@ static fhsm_rv_t pairwise_pq_sign(EVP_PKEY *pkey) {
     rv = FHSM_RV_OK;
 
 done:
+    OPENSSL_free(sig);
     EVP_MD_CTX_free(s);
     EVP_MD_CTX_free(v);
     return rv;
