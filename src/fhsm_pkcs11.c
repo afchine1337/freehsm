@@ -48,6 +48,7 @@
 #include "fhsm_session.h"
 #include "fhsm_session.h"
 #include "fhsm_pairwise.h"
+#include "fhsm_apilock.h"
 
 #include <unistd.h>      /* getpid() : post-fork state detection (#125) */
 #include <stdint.h>
@@ -390,6 +391,7 @@ static void fhsm_finalize_release(void);
 static const char *fhsm_tokens_dir(void);
 
 CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
+    FHSM_API_EXCLUSIVE();
     (void)pInitArgs;
     /* Before anything else: if the state was built by another process, this is
      * a forked child adopting its parent's memory. Drop it. */
@@ -530,6 +532,7 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
 }
 
 CK_RV C_Finalize(CK_VOID_PTR pReserved) {
+    FHSM_API_EXCLUSIVE();
     (void)pReserved;
     (void)fhsm_audit_event(FHSM_EV_MODULE_FINALIZE, -1, -1,
                             FHSM_ROLE_NONE, FHSM_RV_OK, FHSM_AUDIT_END);
@@ -569,6 +572,7 @@ CK_RV C_Finalize(CK_VOID_PTR pReserved) {
  * commit completes the v2.40 dispatch table. */
 CK_RV C_WaitForSlotEvent(CK_FLAGS flags, CK_SLOT_ID *pSlot,
                          CK_VOID_PTR pReserved) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (pReserved != NULL) return FHSM_RV_ARGUMENTS_BAD;
     (void)pSlot;
@@ -597,6 +601,7 @@ CK_RV C_WaitForSlotEvent(CK_FLAGS flags, CK_SLOT_ID *pSlot,
  * C_CloseSession is idempotent on stale handles and returns
  * CKR_SESSION_HANDLE_INVALID which we silently consume here. */
 CK_RV C_CloseAllSessions(CK_SLOT_ID slotID) {
+    FHSM_API_EXCLUSIVE();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (slotID != 0) return 0x00000003UL;   /* CKR_SLOT_ID_INVALID */
     for (CK_SESSION_HANDLE h = 1; h < FHSM_MAX_SESSIONS; h++) {
@@ -627,6 +632,7 @@ CK_RV C_CloseAllSessions(CK_SLOT_ID slotID) {
 CK_RV C_SeedRandom(CK_SESSION_HANDLE hSession,
                     unsigned char *pSeed,
                     CK_ULONG ulSeedLen) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pSeed || ulSeedLen == 0) return FHSM_RV_ARGUMENTS_BAD;
@@ -640,16 +646,19 @@ CK_RV C_SeedRandom(CK_SESSION_HANDLE hSession,
  * is every modern PKCS#11 module since v2.10. We follow the spec
  * literally for both. */
 CK_RV C_GetFunctionStatus(CK_SESSION_HANDLE hSession) {
+    FHSM_API_SHARED();
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     return 0x00000051UL;   /* CKR_FUNCTION_NOT_PARALLEL */
 }
 
 CK_RV C_CancelFunction(CK_SESSION_HANDLE hSession) {
+    FHSM_API_SHARED();
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     return 0x00000051UL;   /* CKR_FUNCTION_NOT_PARALLEL */
 }
 
 CK_RV C_GetInfo(CK_VOID_PTR pInfo) {
+    FHSM_API_SHARED();
     if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
     /* CK_INFO layout per PKCS#11 v3.2 spec C.6.1 :
      *   CK_VERSION cryptokiVersion;    // 2 bytes  (major, minor as CK_BYTE)
@@ -746,6 +755,7 @@ static void fhsm_session_ops_reset(CK_SESSION_HANDLE h);
 CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
                      CK_VOID_PTR pApp, CK_VOID_PTR Notify,
                      CK_SESSION_HANDLE *phSession) {
+    FHSM_API_SHARED();
     (void)pApp; (void)Notify;
     const CK_FLAGS rw_session = 0x2UL;   /* CKF_RW_SESSION */
     const CK_FLAGS serial     = 0x4UL;   /* CKF_SERIAL_SESSION */
@@ -781,6 +791,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags,
 }
 
 CK_RV C_CloseSession(CK_SESSION_HANDLE hSession) {
+    FHSM_API_EXCLUSIVE();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     /* Release any in-flight operation state before the handle returns to
      * the pool, so a later C_OpenSession cannot inherit it (#125). */
@@ -829,6 +840,7 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE hSession) {
 #define FHSM_CKF_RW_SESSION 0x00000002UL
 
 CK_RV C_GetSessionInfo(CK_SESSION_HANDLE hSession, CK_VOID_PTR pInfo) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
 
@@ -877,6 +889,7 @@ static void fhsm_session_ctx_auth_grant(CK_SESSION_HANDLE h);
 
 CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
                CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     /* CKU_CONTEXT_SPECIFIC (2) re-authenticates the user for one active
      * operation on a key whose CKA_ALWAYS_AUTHENTICATE is set (§5.6). Calling
@@ -959,6 +972,7 @@ CK_RV C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
 }
 
 CK_RV C_Logout(CK_SESSION_HANDLE hSession) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     fhsm_rv_t rv = fhsm_session_logout(hSession);
     (void)fhsm_audit_event(FHSM_EV_LOGOUT, -1, (int)hSession,
@@ -1075,6 +1089,7 @@ static fhsm_token_t *fhsm_slot_token(CK_SLOT_ID slot) {
 CK_RV C_GetSlotList(unsigned char tokenPresent,
                      CK_SLOT_ID *pSlotList,
                      CK_ULONG *pulCount) {
+    FHSM_API_SHARED();
     if (!pulCount) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_slot_table_init_once();
 
@@ -1114,6 +1129,7 @@ CK_RV C_GetSlotList(unsigned char tokenPresent,
 #define CKF_HW_SLOT           0x00000004UL
 
 CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
+    FHSM_API_SHARED();
     if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
     if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
     fhsm_slot_table_init_once();
@@ -1158,6 +1174,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
 #define CKF_SO_PIN_LOCKED        0x00400000UL
 
 CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_VOID_PTR pInfo) {
+    FHSM_API_SHARED();
     if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
     if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
     fhsm_slot_table_init_once();
@@ -1604,6 +1621,7 @@ static void fhsm_mech_keysizes_for(const char *fam,
 
 CK_RV C_GetMechanismList(CK_SLOT_ID slotID, CK_ULONG *pMechanismList,
                           CK_ULONG *pulCount) {
+    FHSM_API_SHARED();
     if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
     if (!pulCount) return FHSM_RV_ARGUMENTS_BAD;
     CK_ULONG n = 0;
@@ -1620,6 +1638,7 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slotID, CK_ULONG *pMechanismList,
 }
 
 CK_RV C_GetMechanismInfo(CK_SLOT_ID slotID, CK_ULONG type, CK_VOID_PTR pInfo) {
+    FHSM_API_SHARED();
     if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
     if (!pInfo) return FHSM_RV_ARGUMENTS_BAD;
     const fhsm_mech_entry_t *e = fhsm_mechanism_lookup((uint32_t)type);
@@ -1661,6 +1680,7 @@ static int fhsm_pin_has_embedded_nul(const void *p, size_t n) {
  * ----------------------------------------------------------------------- */
 CK_RV C_InitToken(CK_SLOT_ID slotID, CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen,
                    CK_UTF8CHAR_PTR pLabel) {
+    FHSM_API_EXCLUSIVE();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (slotID >= FHSM_MAX_SLOTS) return FHSM_RV_SLOT_ID_INVALID;
     if (!pPin) return FHSM_RV_ARGUMENTS_BAD;
@@ -1704,6 +1724,7 @@ CK_RV C_InitToken(CK_SLOT_ID slotID, CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen,
  * ----------------------------------------------------------------------- */
 CK_RV C_InitPIN(CK_SESSION_HANDLE hSession, CK_UTF8CHAR_PTR pPin,
                  CK_ULONG ulPinLen) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pPin) return FHSM_RV_ARGUMENTS_BAD;
     if (ulPinLen < FHSM_PIN_MIN_LEN || ulPinLen > FHSM_PIN_MAX_LEN)
@@ -1729,6 +1750,7 @@ CK_RV C_InitPIN(CK_SESSION_HANDLE hSession, CK_UTF8CHAR_PTR pPin,
 CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
                 CK_UTF8CHAR_PTR pOldPin, CK_ULONG ulOldLen,
                 CK_UTF8CHAR_PTR pNewPin, CK_ULONG ulNewLen) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pOldPin || !pNewPin) return FHSM_RV_ARGUMENTS_BAD;
     if (ulOldLen < FHSM_PIN_MIN_LEN || ulOldLen > FHSM_PIN_MAX_LEN
@@ -2555,6 +2577,7 @@ static void fhsm_apply_token_scope(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
  * ----------------------------------------------------------------------- */
 CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession, unsigned char *pSeed,
                        CK_ULONG ulLen) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pSeed || ulLen == 0) return FHSM_RV_ARGUMENTS_BAD;
@@ -2632,6 +2655,7 @@ static int digest_mech_to_hash(CK_ULONG mech, fhsm_hash_t *h, int *non_approved)
 }
 
 CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
@@ -2666,6 +2690,7 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
 
 CK_RV C_Digest(CK_SESSION_HANDLE hSession, unsigned char *pData,
                CK_ULONG ulDataLen, unsigned char *pDigest, CK_ULONG *pulDigestLen) {
+    FHSM_API_SHARED();
     if (!pulDigestLen) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
@@ -2798,6 +2823,7 @@ static CK_RV pbkd2_material(CK_MECHANISM *pMechanism,
 CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                     CK_OBJECT_HANDLE *phKey) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_template(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
@@ -3498,6 +3524,7 @@ static const char *fhsm_pqc_alg_from_priv_len(size_t len, CK_ULONG ckk) {
 CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                       CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                       CK_OBJECT_HANDLE *phObject) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pTemplate || !phObject || ulCount == 0) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -4036,6 +4063,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
 }
 
 CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject) {
+    FHSM_API_EXCLUSIVE();
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     /* Destroying a token (persisted) object requires a read/write session ;
@@ -4174,6 +4202,7 @@ typedef struct CK_HKDF_PARAMS_s {
 CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                    CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
                    CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     /* Bounds first, then contents.
@@ -4880,6 +4909,7 @@ static fhsm_rv_t kw_iv_from_mech(CK_MECHANISM *m, const unsigned char **out) {
 CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                 CK_OBJECT_HANDLE hWrappingKey, CK_OBJECT_HANDLE hKey,
                 unsigned char *pWrappedKey, CK_ULONG *pulWrappedKeyLen) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !pulWrappedKeyLen) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -5071,6 +5101,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                   unsigned char *pWrappedKey, CK_ULONG ulWrappedKeyLen,
                   CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                   CK_OBJECT_HANDLE *phKey) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !pWrappedKey || !phKey) return FHSM_RV_ARGUMENTS_BAD;
     /* Bounds before contents; see C_DeriveKey. */
@@ -5341,6 +5372,7 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                        CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                        unsigned char *pCiphertext, CK_ULONG *pulCiphertextLen,
                        CK_OBJECT_HANDLE *phNewKey) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phNewKey || !pulCiphertextLen)
         return FHSM_RV_ARGUMENTS_BAD;
@@ -5544,6 +5576,7 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                        CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                        unsigned char *pCiphertext, CK_ULONG ulCiphertextLen,
                        CK_OBJECT_HANDLE *phNewKey) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phNewKey || !pCiphertext) return FHSM_RV_ARGUMENTS_BAD;
     /* See C_EncapsulateKey: same guards, same reasons. This is the one the
@@ -6292,6 +6325,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                         CK_ATTRIBUTE *pPub, CK_ULONG ulPub,
                         CK_ATTRIBUTE *pPriv, CK_ULONG ulPriv,
                         CK_OBJECT_HANDLE *phPub, CK_OBJECT_HANDLE *phPriv) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pMechanism || !phPub || !phPriv) return FHSM_RV_ARGUMENTS_BAD;
     { CK_RV cr = fhsm_check_template(pPub, ulPub);  if (cr != FHSM_RV_OK) return cr; }
@@ -6915,6 +6949,7 @@ static int fhsm_object_access_denied(fhsm_token_t *t, uint32_t cko_class);
 
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                            CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
+    FHSM_API_SHARED();
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     /* Bound ulCount before the per-attribute loop : an absurd count
@@ -7396,6 +7431,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
  * that flagged this function as missing from the exported list. */
 CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                       CK_ULONG *pulSize) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pulSize) return FHSM_RV_ARGUMENTS_BAD;
 
@@ -7447,6 +7483,7 @@ CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
 CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
                           CK_OBJECT_HANDLE hObject,
                           CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!pTemplate || ulCount == 0) return FHSM_RV_ARGUMENTS_BAD;
 
@@ -7674,6 +7711,7 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
 CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                    CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                    CK_OBJECT_HANDLE *phNewObject) {
+    FHSM_API_SHARED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
     if (!phNewObject) return FHSM_RV_ARGUMENTS_BAD;
     /* Empty template is legal : it means "a verbatim copy". The pointer was
@@ -7972,6 +8010,7 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
 
 CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
                         CK_ULONG ulCount) {
+    FHSM_API_SHARED();
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (hSession >= sizeof(g_finds)/sizeof(g_finds[0]))
@@ -8058,6 +8097,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
 
 CK_RV C_FindObjects(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE *phObject,
                     CK_ULONG ulMaxCount, CK_ULONG *pulCount) {
+    FHSM_API_SHARED();
     if (!phObject || !pulCount) return FHSM_RV_ARGUMENTS_BAD;
     if (hSession >= sizeof(g_finds)/sizeof(g_finds[0]))
         return FHSM_RV_SESSION_HANDLE_INVALID;
@@ -8072,6 +8112,7 @@ CK_RV C_FindObjects(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE *phObject,
 }
 
 CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
+    FHSM_API_SHARED();
     if (hSession >= sizeof(g_finds)/sizeof(g_finds[0]))
         return FHSM_RV_SESSION_HANDLE_INVALID;
     fhsm_find_state_t *f = &g_finds[hSession];
@@ -9427,6 +9468,7 @@ static CK_RV fhsm_check_allowed_mech(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
 
 CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_OBJECT_HANDLE hKey) {
+    FHSM_API_SHARED();
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
@@ -9442,6 +9484,7 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 
 CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
                 CK_ULONG ulDataLen, unsigned char *pEnc, CK_ULONG *pulEncLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -9829,6 +9872,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
 
 CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_OBJECT_HANDLE hKey) {
+    FHSM_API_SHARED();
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     if (fhsm_nonfips_enc_rejected(pMechanism->mechanism)) return FHSM_RV_MECHANISM_INVALID;
@@ -9894,6 +9938,7 @@ static CK_RV rsa_decrypt_sized(EVP_PKEY_CTX *dctx, size_t max_len,
 
 CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncLen,
                 unsigned char *pData, CK_ULONG *pulDataLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
@@ -10455,6 +10500,7 @@ static const char *hmac_digest_name(fhsm_hash_t h) {
 
 CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                   CK_OBJECT_HANDLE hKey) {
+    FHSM_API_SHARED();
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     switch (pMechanism->mechanism) {
@@ -10964,6 +11010,7 @@ cleanup:
 
 CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLen,
               unsigned char *pSignature, CK_ULONG *pulSignatureLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
@@ -11141,6 +11188,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
  * ----------------------------------------------------------------------- */
 CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                     CK_OBJECT_HANDLE hKey) {
+    FHSM_API_SHARED();
     if (fhsm_session_token(hSession) == NULL) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (!pMechanism) return FHSM_RV_ARGUMENTS_BAD;
     switch (pMechanism->mechanism) {
@@ -11197,6 +11245,7 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
 
 CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
                CK_ULONG ulDataLen, unsigned char *pSig, CK_ULONG ulSigLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     /* Reject an absurd input length before touching the data (#125 isize).
@@ -11570,6 +11619,7 @@ static CK_RV digest_update_fail(fhsm_op_t *op, CK_RV rv) {
 
 CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                      CK_ULONG ulPartLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     /* Reject an absurd input length before touching the data (#125 isize).
@@ -11614,6 +11664,7 @@ CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
  * key value bytes ; we reuse the same EVP_MD_CTX so a mixed-mode
  * stream (data + key + data) produces the correct concatenated digest. */
 CK_RV C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -11674,6 +11725,7 @@ CK_RV C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey) {
 
 CK_RV C_DigestFinal(CK_SESSION_HANDLE hSession, unsigned char *pDigest,
                     CK_ULONG *pulDigestLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pulDigestLen) return FHSM_RV_ARGUMENTS_BAD;
@@ -11825,6 +11877,7 @@ static int mech_sign_is_buffered_multipart(uint32_t m) {
 
 CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                    CK_ULONG ulPartLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
@@ -11924,6 +11977,7 @@ fail:
 
 CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
                   CK_ULONG *pulSigLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
@@ -12095,6 +12149,7 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
  * to avoid timing side channels on signature validation. */
 CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                      CK_ULONG ulPartLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     /* Reject an absurd input length before touching the data (#125 isize).
@@ -12184,6 +12239,7 @@ vfail:
 
 CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
                     CK_ULONG ulSigLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pSig) return FHSM_RV_ARGUMENTS_BAD;
@@ -12347,6 +12403,7 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
 
 CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                       CK_ULONG ulPartLen, unsigned char *pEnc, CK_ULONG *pulEncLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -12379,6 +12436,7 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
 
 CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
                      CK_ULONG *pulLastLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
@@ -12499,6 +12557,7 @@ static fhsm_rv_t decrypt_final_exact_len(fhsm_op_t *op, size_t bound,
 
 CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
                       CK_ULONG ulEncLen, unsigned char *pPart, CK_ULONG *pulPartLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
@@ -12568,6 +12627,7 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
 
 CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
                      CK_ULONG *pulLastLen) {
+    FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
@@ -12672,94 +12732,109 @@ static CK_RV fhsm_not_supported(void) {
 
 static struct CK_FUNCTION_LIST fhsm_function_list = { { 2, 40 }, { 0 } };
 
+/* The three tables are filled once, under pthread_once (#111-prep).
+ *
+ * They were filled lazily behind a test on pfn[0], and the fill writes
+ * pfn[0] first -- fhsm_not_supported, before the real entries. A second
+ * thread arriving during the fill saw pfn[0] set, skipped it, and was handed a
+ * table whose remaining slots still refused everything with
+ * CKR_FUNCTION_NOT_SUPPORTED. An application asks for the function list
+ * first, so two threads loading the module at once is enough:
+ * tests/test_concurrency_store --tables. */
+static pthread_once_t g_fl_once     = PTHREAD_ONCE_INIT;
+static pthread_once_t g_fl_v30_once = PTHREAD_ONCE_INIT;
+static pthread_once_t g_fl_v32_once = PTHREAD_ONCE_INIT;
+
+static void fhsm_fill_v240_table(void) {
+    /* Default every slot to fhsm_not_supported. */
+    for (size_t i = 0;
+         i < sizeof(fhsm_function_list.pfn)/sizeof(fhsm_function_list.pfn[0]);
+         i++) {
+        fhsm_function_list.pfn[i] = (void*)(uintptr_t)fhsm_not_supported;
+    }
+    /* PKCS#11 v2.40 sec C.6 ordering --- only the slots used by
+     * pkcs11-tool --show-info and the implemented C_* are populated. */
+    /* PKCS#11 v2.40 §C.6 ordering (verified against OpenSC pkcs11f.h).
+     * C_WaitForSlotEvent is at the END (slot 66), NOT after C_GetTokenInfo. */
+    fhsm_function_list.pfn[0]  = (void*)(uintptr_t)C_Initialize;       /* slot  0 */
+    fhsm_function_list.pfn[1]  = (void*)(uintptr_t)C_Finalize;         /* slot  1 */
+    fhsm_function_list.pfn[2]  = (void*)(uintptr_t)C_GetInfo;          /* slot  2 */
+    fhsm_function_list.pfn[3]  = (void*)(uintptr_t)C_GetFunctionList;  /* slot  3 */
+    fhsm_function_list.pfn[4]  = (void*)(uintptr_t)C_GetSlotList;      /* slot  4 */
+    fhsm_function_list.pfn[5]  = (void*)(uintptr_t)C_GetSlotInfo;      /* slot  5 */
+    fhsm_function_list.pfn[6]  = (void*)(uintptr_t)C_GetTokenInfo;     /* slot  6 */
+    fhsm_function_list.pfn[7]  = (void*)(uintptr_t)C_GetMechanismList; /* slot  7 */
+    fhsm_function_list.pfn[8]  = (void*)(uintptr_t)C_GetMechanismInfo; /* slot  8 */
+    fhsm_function_list.pfn[9]  = (void*)(uintptr_t)C_InitToken;        /* slot  9 */
+    fhsm_function_list.pfn[10] = (void*)(uintptr_t)C_InitPIN;          /* slot 10 */
+    fhsm_function_list.pfn[11] = (void*)(uintptr_t)C_SetPIN;           /* slot 11 */
+    fhsm_function_list.pfn[12] = (void*)(uintptr_t)C_OpenSession;      /* slot 12 */
+    fhsm_function_list.pfn[13] = (void*)(uintptr_t)C_CloseSession;     /* slot 13 */
+    fhsm_function_list.pfn[14] = (void*)(uintptr_t)C_CloseAllSessions; /* slot 14 (v1.4.0) */
+    fhsm_function_list.pfn[15] = (void*)(uintptr_t)C_GetSessionInfo;   /* slot 15 (v1.2.2) */
+    fhsm_function_list.pfn[18] = (void*)(uintptr_t)C_Login;            /* slot 18 */
+    fhsm_function_list.pfn[19] = (void*)(uintptr_t)C_Logout;           /* slot 19 */
+    /* Object lifecycle */
+    fhsm_function_list.pfn[20] = (void*)(uintptr_t)C_CreateObject;     /* slot 20 (v1.2.2) */
+    fhsm_function_list.pfn[21] = (void*)(uintptr_t)C_CopyObject;       /* slot 21 (v1.3.0) */
+    fhsm_function_list.pfn[22] = (void*)(uintptr_t)C_DestroyObject;    /* slot 22 */
+    fhsm_function_list.pfn[23] = (void*)(uintptr_t)C_GetObjectSize;    /* slot 23 (v1.2.2) */
+    fhsm_function_list.pfn[24] = (void*)(uintptr_t)C_GetAttributeValue;/* slot 24 */
+    fhsm_function_list.pfn[25] = (void*)(uintptr_t)C_SetAttributeValue;/* slot 25 (v1.3.0) */
+    fhsm_function_list.pfn[26] = (void*)(uintptr_t)C_FindObjectsInit;  /* slot 26 */
+    fhsm_function_list.pfn[27] = (void*)(uintptr_t)C_FindObjects;      /* slot 27 */
+    fhsm_function_list.pfn[28] = (void*)(uintptr_t)C_FindObjectsFinal; /* slot 28 */
+    /* Encryption */
+    fhsm_function_list.pfn[29] = (void*)(uintptr_t)C_EncryptInit;      /* slot 29 */
+    fhsm_function_list.pfn[30] = (void*)(uintptr_t)C_Encrypt;          /* slot 30 */
+    fhsm_function_list.pfn[31] = (void*)(uintptr_t)C_EncryptUpdate;    /* slot 31 */
+    fhsm_function_list.pfn[32] = (void*)(uintptr_t)C_EncryptFinal;     /* slot 32 */
+    fhsm_function_list.pfn[33] = (void*)(uintptr_t)C_DecryptInit;      /* slot 33 */
+    fhsm_function_list.pfn[34] = (void*)(uintptr_t)C_Decrypt;          /* slot 34 */
+    fhsm_function_list.pfn[35] = (void*)(uintptr_t)C_DecryptUpdate;    /* slot 35 */
+    fhsm_function_list.pfn[36] = (void*)(uintptr_t)C_DecryptFinal;     /* slot 36 */
+    /* Digest */
+    fhsm_function_list.pfn[37] = (void*)(uintptr_t)C_DigestInit;       /* slot 37 */
+    fhsm_function_list.pfn[38] = (void*)(uintptr_t)C_Digest;           /* slot 38 */
+    fhsm_function_list.pfn[39] = (void*)(uintptr_t)C_DigestUpdate;     /* slot 39 */
+    fhsm_function_list.pfn[40] = (void*)(uintptr_t)C_DigestKey;        /* slot 40 (v1.4.0) */
+    fhsm_function_list.pfn[41] = (void*)(uintptr_t)C_DigestFinal;      /* slot 41 */
+    /* Sign */
+    fhsm_function_list.pfn[42] = (void*)(uintptr_t)C_SignInit;         /* slot 42 */
+    fhsm_function_list.pfn[43] = (void*)(uintptr_t)C_Sign;             /* slot 43 */
+    fhsm_function_list.pfn[44] = (void*)(uintptr_t)C_SignUpdate;       /* slot 44 */
+    fhsm_function_list.pfn[45] = (void*)(uintptr_t)C_SignFinal;        /* slot 45 */
+    /* Verify */
+    fhsm_function_list.pfn[48] = (void*)(uintptr_t)C_VerifyInit;       /* slot 48 */
+    fhsm_function_list.pfn[49] = (void*)(uintptr_t)C_Verify;           /* slot 49 */
+    fhsm_function_list.pfn[50] = (void*)(uintptr_t)C_VerifyUpdate;     /* slot 50 (v1.4.0) */
+    fhsm_function_list.pfn[51] = (void*)(uintptr_t)C_VerifyFinal;      /* slot 51 (v1.4.0) */
+    /* Key generation */
+    fhsm_function_list.pfn[58] = (void*)(uintptr_t)C_GenerateKey;      /* slot 58 */
+    fhsm_function_list.pfn[59] = (void*)(uintptr_t)C_GenerateKeyPair;  /* slot 59 */
+    fhsm_function_list.pfn[60] = (void*)(uintptr_t)C_WrapKey;          /* slot 60 */
+    fhsm_function_list.pfn[61] = (void*)(uintptr_t)C_UnwrapKey;        /* slot 61 */
+    /* Key derivation */
+    fhsm_function_list.pfn[62] = (void*)(uintptr_t)C_DeriveKey;        /* slot 62 */
+    /* RNG */
+    fhsm_function_list.pfn[63] = (void*)(uintptr_t)C_SeedRandom;       /* slot 63 (v1.4.0) */
+    fhsm_function_list.pfn[64] = (void*)(uintptr_t)C_GenerateRandom;   /* slot 64 */
+    /* Legacy parallel-function management (v2.40 §C.6.5.6).
+     * Both return CKR_FUNCTION_NOT_PARALLEL per spec on every
+     * modern non-parallel implementation. */
+    fhsm_function_list.pfn[65] = (void*)(uintptr_t)C_GetFunctionStatus;/* slot 65 */
+    fhsm_function_list.pfn[66] = (void*)(uintptr_t)C_CancelFunction;   /* slot 66 (#125) */
+    /* Slot event (software token : no hot-plug ; non-blocking returns
+     * CKR_NO_EVENT, blocking returns CKR_FUNCTION_NOT_SUPPORTED).
+     * NOTE: slot 67, NOT 66 --- C_CancelFunction owns 66. Getting this
+     * wrong shifts every later slot and makes v3.0 callers invoke the
+     * wrong function through the table (#125). */
+    fhsm_function_list.pfn[67] = (void*)(uintptr_t)C_WaitForSlotEvent; /* slot 67 */
+}
+
 CK_RV C_GetFunctionList(struct CK_FUNCTION_LIST **ppFnList) {
     if (!ppFnList) return FHSM_RV_ARGUMENTS_BAD;
-    if (!fhsm_function_list.pfn[0]) {
-        /* Default every slot to fhsm_not_supported. */
-        for (size_t i = 0;
-             i < sizeof(fhsm_function_list.pfn)/sizeof(fhsm_function_list.pfn[0]);
-             i++) {
-            fhsm_function_list.pfn[i] = (void*)(uintptr_t)fhsm_not_supported;
-        }
-        /* PKCS#11 v2.40 sec C.6 ordering --- only the slots used by
-         * pkcs11-tool --show-info and the implemented C_* are populated. */
-        /* PKCS#11 v2.40 §C.6 ordering (verified against OpenSC pkcs11f.h).
-         * C_WaitForSlotEvent is at the END (slot 66), NOT after C_GetTokenInfo. */
-        fhsm_function_list.pfn[0]  = (void*)(uintptr_t)C_Initialize;       /* slot  0 */
-        fhsm_function_list.pfn[1]  = (void*)(uintptr_t)C_Finalize;         /* slot  1 */
-        fhsm_function_list.pfn[2]  = (void*)(uintptr_t)C_GetInfo;          /* slot  2 */
-        fhsm_function_list.pfn[3]  = (void*)(uintptr_t)C_GetFunctionList;  /* slot  3 */
-        fhsm_function_list.pfn[4]  = (void*)(uintptr_t)C_GetSlotList;      /* slot  4 */
-        fhsm_function_list.pfn[5]  = (void*)(uintptr_t)C_GetSlotInfo;      /* slot  5 */
-        fhsm_function_list.pfn[6]  = (void*)(uintptr_t)C_GetTokenInfo;     /* slot  6 */
-        fhsm_function_list.pfn[7]  = (void*)(uintptr_t)C_GetMechanismList; /* slot  7 */
-        fhsm_function_list.pfn[8]  = (void*)(uintptr_t)C_GetMechanismInfo; /* slot  8 */
-        fhsm_function_list.pfn[9]  = (void*)(uintptr_t)C_InitToken;        /* slot  9 */
-        fhsm_function_list.pfn[10] = (void*)(uintptr_t)C_InitPIN;          /* slot 10 */
-        fhsm_function_list.pfn[11] = (void*)(uintptr_t)C_SetPIN;           /* slot 11 */
-        fhsm_function_list.pfn[12] = (void*)(uintptr_t)C_OpenSession;      /* slot 12 */
-        fhsm_function_list.pfn[13] = (void*)(uintptr_t)C_CloseSession;     /* slot 13 */
-        fhsm_function_list.pfn[14] = (void*)(uintptr_t)C_CloseAllSessions; /* slot 14 (v1.4.0) */
-        fhsm_function_list.pfn[15] = (void*)(uintptr_t)C_GetSessionInfo;   /* slot 15 (v1.2.2) */
-        fhsm_function_list.pfn[18] = (void*)(uintptr_t)C_Login;            /* slot 18 */
-        fhsm_function_list.pfn[19] = (void*)(uintptr_t)C_Logout;           /* slot 19 */
-        /* Object lifecycle */
-        fhsm_function_list.pfn[20] = (void*)(uintptr_t)C_CreateObject;     /* slot 20 (v1.2.2) */
-        fhsm_function_list.pfn[21] = (void*)(uintptr_t)C_CopyObject;       /* slot 21 (v1.3.0) */
-        fhsm_function_list.pfn[22] = (void*)(uintptr_t)C_DestroyObject;    /* slot 22 */
-        fhsm_function_list.pfn[23] = (void*)(uintptr_t)C_GetObjectSize;    /* slot 23 (v1.2.2) */
-        fhsm_function_list.pfn[24] = (void*)(uintptr_t)C_GetAttributeValue;/* slot 24 */
-        fhsm_function_list.pfn[25] = (void*)(uintptr_t)C_SetAttributeValue;/* slot 25 (v1.3.0) */
-        fhsm_function_list.pfn[26] = (void*)(uintptr_t)C_FindObjectsInit;  /* slot 26 */
-        fhsm_function_list.pfn[27] = (void*)(uintptr_t)C_FindObjects;      /* slot 27 */
-        fhsm_function_list.pfn[28] = (void*)(uintptr_t)C_FindObjectsFinal; /* slot 28 */
-        /* Encryption */
-        fhsm_function_list.pfn[29] = (void*)(uintptr_t)C_EncryptInit;      /* slot 29 */
-        fhsm_function_list.pfn[30] = (void*)(uintptr_t)C_Encrypt;          /* slot 30 */
-        fhsm_function_list.pfn[31] = (void*)(uintptr_t)C_EncryptUpdate;    /* slot 31 */
-        fhsm_function_list.pfn[32] = (void*)(uintptr_t)C_EncryptFinal;     /* slot 32 */
-        fhsm_function_list.pfn[33] = (void*)(uintptr_t)C_DecryptInit;      /* slot 33 */
-        fhsm_function_list.pfn[34] = (void*)(uintptr_t)C_Decrypt;          /* slot 34 */
-        fhsm_function_list.pfn[35] = (void*)(uintptr_t)C_DecryptUpdate;    /* slot 35 */
-        fhsm_function_list.pfn[36] = (void*)(uintptr_t)C_DecryptFinal;     /* slot 36 */
-        /* Digest */
-        fhsm_function_list.pfn[37] = (void*)(uintptr_t)C_DigestInit;       /* slot 37 */
-        fhsm_function_list.pfn[38] = (void*)(uintptr_t)C_Digest;           /* slot 38 */
-        fhsm_function_list.pfn[39] = (void*)(uintptr_t)C_DigestUpdate;     /* slot 39 */
-        fhsm_function_list.pfn[40] = (void*)(uintptr_t)C_DigestKey;        /* slot 40 (v1.4.0) */
-        fhsm_function_list.pfn[41] = (void*)(uintptr_t)C_DigestFinal;      /* slot 41 */
-        /* Sign */
-        fhsm_function_list.pfn[42] = (void*)(uintptr_t)C_SignInit;         /* slot 42 */
-        fhsm_function_list.pfn[43] = (void*)(uintptr_t)C_Sign;             /* slot 43 */
-        fhsm_function_list.pfn[44] = (void*)(uintptr_t)C_SignUpdate;       /* slot 44 */
-        fhsm_function_list.pfn[45] = (void*)(uintptr_t)C_SignFinal;        /* slot 45 */
-        /* Verify */
-        fhsm_function_list.pfn[48] = (void*)(uintptr_t)C_VerifyInit;       /* slot 48 */
-        fhsm_function_list.pfn[49] = (void*)(uintptr_t)C_Verify;           /* slot 49 */
-        fhsm_function_list.pfn[50] = (void*)(uintptr_t)C_VerifyUpdate;     /* slot 50 (v1.4.0) */
-        fhsm_function_list.pfn[51] = (void*)(uintptr_t)C_VerifyFinal;      /* slot 51 (v1.4.0) */
-        /* Key generation */
-        fhsm_function_list.pfn[58] = (void*)(uintptr_t)C_GenerateKey;      /* slot 58 */
-        fhsm_function_list.pfn[59] = (void*)(uintptr_t)C_GenerateKeyPair;  /* slot 59 */
-        fhsm_function_list.pfn[60] = (void*)(uintptr_t)C_WrapKey;          /* slot 60 */
-        fhsm_function_list.pfn[61] = (void*)(uintptr_t)C_UnwrapKey;        /* slot 61 */
-        /* Key derivation */
-        fhsm_function_list.pfn[62] = (void*)(uintptr_t)C_DeriveKey;        /* slot 62 */
-        /* RNG */
-        fhsm_function_list.pfn[63] = (void*)(uintptr_t)C_SeedRandom;       /* slot 63 (v1.4.0) */
-        fhsm_function_list.pfn[64] = (void*)(uintptr_t)C_GenerateRandom;   /* slot 64 */
-        /* Legacy parallel-function management (v2.40 §C.6.5.6).
-         * Both return CKR_FUNCTION_NOT_PARALLEL per spec on every
-         * modern non-parallel implementation. */
-        fhsm_function_list.pfn[65] = (void*)(uintptr_t)C_GetFunctionStatus;/* slot 65 */
-        fhsm_function_list.pfn[66] = (void*)(uintptr_t)C_CancelFunction;   /* slot 66 (#125) */
-        /* Slot event (software token : no hot-plug ; non-blocking returns
-         * CKR_NO_EVENT, blocking returns CKR_FUNCTION_NOT_SUPPORTED).
-         * NOTE: slot 67, NOT 66 --- C_CancelFunction owns 66. Getting this
-         * wrong shifts every later slot and makes v3.0 callers invoke the
-         * wrong function through the table (#125). */
-        fhsm_function_list.pfn[67] = (void*)(uintptr_t)C_WaitForSlotEvent; /* slot 67 */
-    }
+    pthread_once(&g_fl_once, fhsm_fill_v240_table);
     *ppFnList = &fhsm_function_list;
     return FHSM_RV_OK;
 }
@@ -12793,14 +12868,9 @@ struct CK_FUNCTION_LIST_3_0 {
 
 static struct CK_FUNCTION_LIST_3_0 fhsm_function_list_3_0 = { { 3, 0 }, { 0 } };
 
-static void fhsm_init_v3_0_table(void) {
-    if (fhsm_function_list_3_0.pfn[0]) return;
-    /* Ensure the v2.40 table is initialized first (it triggers our
-     * lazy slot-filling). */
-    if (!fhsm_function_list.pfn[0]) {
-        struct CK_FUNCTION_LIST *unused;
-        (void)C_GetFunctionList(&unused);
-    }
+static void fhsm_fill_v3_0_table(void) {
+    /* The v2.40 table first: this one mirrors it. */
+    pthread_once(&g_fl_once, fhsm_fill_v240_table);
     /* Default every v3.0 slot to fhsm_not_supported. */
     for (size_t i = 0;
          i < sizeof(fhsm_function_list_3_0.pfn)/sizeof(fhsm_function_list_3_0.pfn[0]);
@@ -12824,6 +12894,10 @@ static void fhsm_init_v3_0_table(void) {
      * lead to the same table. */
     fhsm_function_list_3_0.pfn[68] = (void*)(uintptr_t)C_GetInterfaceList;
     fhsm_function_list_3_0.pfn[69] = (void*)(uintptr_t)C_GetInterface;
+}
+
+static void fhsm_init_v3_0_table(void) {
+    pthread_once(&g_fl_v30_once, fhsm_fill_v3_0_table);
 }
 
 /* ---------------------------------------------------------------------------
@@ -12867,8 +12941,7 @@ struct CK_FUNCTION_LIST_3_2 {
 
 static struct CK_FUNCTION_LIST_3_2 fhsm_function_list_3_2 = { { 3, 2 }, { 0 } };
 
-static void fhsm_init_v3_2_table(void) {
-    if (fhsm_function_list_3_2.pfn[0]) return;
+static void fhsm_fill_v3_2_table(void) {
     fhsm_init_v3_0_table();
     for (size_t i = 0;
          i < sizeof(fhsm_function_list_3_2.pfn)/sizeof(fhsm_function_list_3_2.pfn[0]);
@@ -12883,6 +12956,10 @@ static void fhsm_init_v3_2_table(void) {
     }
     fhsm_function_list_3_2.pfn[92] = (void*)(uintptr_t)C_EncapsulateKey;
     fhsm_function_list_3_2.pfn[93] = (void*)(uintptr_t)C_DecapsulateKey;
+}
+
+static void fhsm_init_v3_2_table(void) {
+    pthread_once(&g_fl_v32_once, fhsm_fill_v3_2_table);
 }
 
 /* Both interfaces carry the name "PKCS 11" and are told apart by their
@@ -12945,7 +13022,11 @@ CK_RV C_GetInterface(unsigned char *pInterfaceName, void *pVersion,
      * precisely that sequence: raw/api.py asks for {3,2}, then falls back to
      * the default. The spec does not say the returned CK_INTERFACE may be
      * invalidated by a later call, and a caller is entitled to hold it. */
-    static CK_INTERFACE iface_30, iface_32;
+    /* Constant, and initialised as such: they were filled on every call, so
+     * two threads in C_GetInterface wrote them at once -- the same values,
+     * and still a data race (#111-prep, test_concurrency_store --tables). */
+    static CK_INTERFACE iface_30 = { fhsm_iface_name, &fhsm_function_list_3_0, 0 };
+    static CK_INTERFACE iface_32 = { fhsm_iface_name, &fhsm_function_list_3_2, 0 };
     CK_INTERFACE *iface_p;
 
     /* A NULL version asks for the module's default, and the default stays
@@ -12962,18 +13043,14 @@ CK_RV C_GetInterface(unsigned char *pInterfaceName, void *pVersion,
      * This is a policy, not a limit, and reversing it is one line. */
     if (major == 3 && minor == 2) {
         iface_p = &iface_32;
-        iface_p->pFunctionList = &fhsm_function_list_3_2;
     } else if (major == 3 && minor == 0) {
         iface_p = &iface_30;
-        iface_p->pFunctionList = &fhsm_function_list_3_0;
     } else {
         /* Refusing a version we do not publish, rather than handing back a
          * table whose shape the caller did not ask for and will index by its
          * own idea of the layout. */
         return FHSM_RV_FUNCTION_FAILED;
     }
-    iface_p->pInterfaceName = fhsm_iface_name;
-    iface_p->flags          = 0;
     *ppInterface = iface_p;
     return FHSM_RV_OK;
 }

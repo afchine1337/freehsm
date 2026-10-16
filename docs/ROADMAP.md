@@ -970,7 +970,7 @@ Candidates, cheapest first:
 | # | Task | When | Notes |
 |---|---|---|---|
 | #106 | Exhaustive CC ATE_FUN test book | v2.0 stable +6mo | Worth doing for its own sake: a functional test book to CC ATE_FUN structure is both a real assurance gain and a teaching artefact. **Not for a submission** — there will not be one. |
-| #111-prep | Thread-safety of the PKCS#11 layer (blocks #111) | ~10h | 🟡 v1.6.0 — the two lazy-init races fixed, `make TSAN=1` + `tests/test_concurrency` in tree. Points 2–5 of the note (session binding, per-identity throttle, audit actor) are REST-layer work and stay with #111 |
+| #111-prep | Thread-safety of the PKCS#11 layer (blocks #111) | ~10h | ✅ module side, 2026-10-16 — the two lazy-init races (v1.6.0), then what sessions on one token share: an entry lock with deferred release closes a use-after-free under `C_Sign`, plus torn attributes, login-state and function-table races. `tests/test_concurrency_store`, `make tsan-concurrency`, a CI job. Points 2–5 of the note (session binding, per-identity throttle, audit actor) are REST-layer work and stay with #111 |
 | #111 | Network HSM via REST API | v2.5+ | **Design decided, nothing built** — see [`REST_API_DESIGN.md`](REST_API_DESIGN.md). Four of the five prerequisites are closed, the audit log included. Measured first (`probes/rest/`): a stateless API does **not** make the login stateless, so authorisation has to live in the service on the client certificate, not on the token being logged in. Remaining: the per-identity throttle, and where the daemon's PIN comes from |
 
 ### Two existing transports to weigh before building a third (noted 2026-09-08)
@@ -1042,6 +1042,40 @@ Consolidation points, in priority order:
    is indistinguishable from no race — which is how this would have reached
    production and surfaced under load. `make TSAN=1` and
    `tests/test_concurrency` are in the tree.
+   **Second half — 2026-10-16, and the partition argument above was half
+   right.** Per-session state is partitioned; per-token state is not, and
+   `tests/test_concurrency` only ever read it. `tests/test_concurrency_store`
+   has one thread mutate while the others read, and found four races, three
+   of them on every run under TSan:
+
+   * **A use-after-free under `C_Sign`.** `fhsm_token_object_get` returns a
+     pointer to the key's value and releases the token mutex; 39 call sites
+     then parse or copy it. A `C_DestroyObject` or `C_CloseSession` in
+     another session, in between, zeroized and freed the key — the signer
+     got `CKR_FUNCTION_FAILED`, or worked on a reallocated block.
+   * **Torn and foreign attributes.** `get_label`, `get_id` and `get_meta`
+     returned pointers into the object array itself; a concurrent
+     `C_SetAttributeValue` tore the label, and a destroy's compaction moved
+     another object into the slot.
+   * **Login state read without the token mutex** by the role accessors,
+     while `C_Login` / `C_Logout` wrote it under the mutex.
+   * **Half-built function tables.** `C_GetFunctionList` and
+     `C_GetInterface` filled their tables lazily behind a test on `pfn[0]`,
+     which the fill writes first; a second caller got a table still saying
+     `CKR_FUNCTION_NOT_SUPPORTED`.
+
+   The value fix is not 39 copies. Every `C_` function now runs under one
+   writer-preferring read-write lock (`src/fhsm_apilock.c`, one line per
+   function, released by the compiler on every return path). Most take it
+   shared; the six that free what others may borrow — `C_DestroyObject`,
+   `C_CloseSession`, `C_CloseAllSessions`, `C_InitToken`, `C_Initialize`,
+   `C_Finalize` — take it exclusive. A value released inside a shared call
+   (a rollback after a failed keygen, a `CKA_SENSITIVE` migration) is
+   parked intact and wiped when no call is in flight. Signatures in N
+   sessions still run in parallel; a destroy or a session close waits for
+   the calls in flight. 10 runs clean under TSan afterwards; the module
+   side of #111-prep is closed.
+
 2. **Session binding.** `CK_SESSION_HANDLE` is a process-local integer. Over the
    wire it must be bound to an authenticated client, or client A presents
    handle 3 and reads client B's session. The REST layer owns a

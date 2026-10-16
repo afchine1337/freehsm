@@ -38,6 +38,7 @@
 #include "fhsm_crypto.h"
 #include "fhsm_audit.h"
 #include "fhsm_token_tpm.h"
+#include "fhsm_apilock.h"
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -446,11 +447,15 @@ _Static_assert(FHSM_POLICY_ENTRY_SZ == 8u + FHSM_POLICY_VALUE_MAX,
 
 /* #125 large-object storage helpers. The per-object value is heap-owned;
  * these keep ownership sane across the struct-copy compaction pattern. */
+/*
+ * Released through fhsm_api_free_value rather than freed here: another
+ * session may be between fhsm_token_object_get and its last use of this
+ * pointer. Inside an EXCLUSIVE C_ call (or outside any) that cannot be, and it
+ * is zeroized and freed at once; inside a SHARED one it is parked until no
+ * call is in flight (#111-prep, include/fhsm_apilock.h). */
 static void obj_free_value(fhsm_object_t *o) {
     if (o && o->value) {
-        if (o->value_len) fhsm_zeroize(o->value, o->value_len);
-        if (o->value_secure) fhsm_secure_free(o->value);
-        else                 free(o->value);
+        fhsm_api_free_value(o->value, o->value_len, o->value_secure);
         o->value = NULL;
         o->value_len = 0;
         o->value_secure = 0;
@@ -1446,27 +1451,47 @@ void fhsm_token_logout(fhsm_token_t *t) {
  * shared by all sessions of the token, so access control must consult
  * this rather than a per-session role (#125 F11 : concurrent-session
  * logout). */
+/* These accessors take the token mutex although each reads one word: a
+ * C_Login or C_Logout in another session writes the same word under it, and
+ * an unsynchronised read of it is a data race whatever its width
+ * (#111-prep, tests/test_concurrency_store --login). The const is the
+ * caller's view; the mutex is not part of it. */
+#define TOKEN_MU(t) ((pthread_mutex_t *)&(t)->mu)
+
 fhsm_role_t fhsm_token_current_role(const fhsm_token_t *t) {
-    return t ? t->logged_in : FHSM_ROLE_NONE;
+    if (!t) return FHSM_ROLE_NONE;
+    pthread_mutex_lock(TOKEN_MU(t));
+    fhsm_role_t r = t->logged_in;
+    pthread_mutex_unlock(TOKEN_MU(t));
+    return r;
 }
 
 const char *fhsm_token_label(const fhsm_token_t *t)  { return t ? t->label  : NULL; }
 const char *fhsm_token_serial(const fhsm_token_t *t) { return t ? t->serial : NULL; }
 uint32_t fhsm_token_failed_count(const fhsm_token_t *t, fhsm_role_t role) {
     if (!t) return 0;
-    return (role == FHSM_ROLE_SO) ? t->failed_so : t->failed_user;
+    pthread_mutex_lock(TOKEN_MU(t));
+    uint32_t n = (role == FHSM_ROLE_SO) ? t->failed_so : t->failed_user;
+    pthread_mutex_unlock(TOKEN_MU(t));
+    return n;
 }
 
 int fhsm_token_user_initialized(const fhsm_token_t *t) {
-    return t ? t->user_initialized : 0;
+    if (!t) return 0;
+    pthread_mutex_lock(TOKEN_MU(t));
+    int u = t->user_initialized;
+    pthread_mutex_unlock(TOKEN_MU(t));
+    return u;
 }
 int fhsm_token_is_locked(const fhsm_token_t *t, fhsm_role_t role) {
     return fhsm_token_failed_count(t, role) >= FHSM_PIN_MAX_FAILED;
 }
 uint64_t fhsm_token_throttle_remaining_ms(const fhsm_token_t *t, fhsm_role_t role) {
     if (!t) return 0;
+    pthread_mutex_lock(TOKEN_MU(t));
     uint64_t until = (role == FHSM_ROLE_SO) ? t->throttle_so_until_ms
                                               : t->throttle_user_until_ms;
+    pthread_mutex_unlock(TOKEN_MU(t));
     uint64_t now = now_ms();
     return (now >= until) ? 0 : (until - now);
 }
@@ -1838,9 +1863,11 @@ fhsm_rv_t fhsm_token_object_get_label(fhsm_token_t *t, uint32_t handle,
     pthread_mutex_lock(&t->mu);
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
-            *out     = (const char*)t->objects[i].label;
+            static _Thread_local char copy[FHSM_OBJ_LABEL_LEN];
             *out_len = strnlen((const char*)t->objects[i].label,
                                 FHSM_OBJ_LABEL_LEN);
+            memcpy(copy, t->objects[i].label, *out_len);
+            *out     = copy;
             pthread_mutex_unlock(&t->mu);
             return FHSM_RV_OK;
         }
@@ -1884,17 +1911,21 @@ fhsm_rv_t fhsm_token_object_get_meta(fhsm_token_t *t, uint32_t handle,
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
             fhsm_object_t *o = &t->objects[i];
+            static _Thread_local uint8_t copy[FHSM_OBJ_LABEL_LEN];
+            const uint8_t *src;
             switch (which) {
                 case FHSM_OBJ_META_START_DATE:
-                    *out = o->start_date;  *out_len = o->start_date_len;  break;
+                    src = o->start_date;  *out_len = o->start_date_len;  break;
                 case FHSM_OBJ_META_END_DATE:
-                    *out = o->end_date;    *out_len = o->end_date_len;    break;
+                    src = o->end_date;    *out_len = o->end_date_len;    break;
                 case FHSM_OBJ_META_APPLICATION:
-                    *out = o->application; *out_len = o->application_len; break;
+                    src = o->application; *out_len = o->application_len; break;
                 default:
                     pthread_mutex_unlock(&t->mu);
                     return FHSM_RV_ARGUMENTS_BAD;
             }
+            memcpy(copy, src, *out_len);
+            *out = copy;
             pthread_mutex_unlock(&t->mu);
             return FHSM_RV_OK;
         }
@@ -1909,8 +1940,10 @@ fhsm_rv_t fhsm_token_object_get_id(fhsm_token_t *t, uint32_t handle,
     pthread_mutex_lock(&t->mu);
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
-            *out     = t->objects[i].id;
+            static _Thread_local uint8_t copy[sizeof(t->objects[i].id)];
             *out_len = t->objects[i].id_len;
+            memcpy(copy, t->objects[i].id, *out_len);
+            *out     = copy;
             pthread_mutex_unlock(&t->mu);
             return FHSM_RV_OK;
         }
@@ -2285,8 +2318,9 @@ fhsm_rv_t fhsm_token_object_set_flags(fhsm_token_t *t, uint32_t handle,
                 uint8_t *sec = fhsm_secure_malloc(o->value_len);
                 if (!sec) { pthread_mutex_unlock(&t->mu); return FHSM_RV_DEVICE_MEMORY; }
                 memcpy(sec, o->value, o->value_len);
-                fhsm_zeroize(o->value, o->value_len);
-                free(o->value);
+                /* The old block may be borrowed by a running C_Sign: parked,
+                 * not freed, until no call is in flight (#111-prep). */
+                fhsm_api_free_value(o->value, o->value_len, 0);
                 o->value = sec;
                 o->value_secure = 1;
             }

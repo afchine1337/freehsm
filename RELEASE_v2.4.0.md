@@ -105,6 +105,23 @@ test that has OpenSSL encrypt with the token's public key and the module
 decrypt, for RSA 2048, 3072 and 4096; its AES counterpart checks every AES
 mechanism at 128, 192 and 256 bits against OpenSSL and found nothing.
 
+## One token, several threads
+
+An application that used sessions on the same token from several threads
+could have a key freed under a running signature: `C_DestroyObject` or
+`C_CloseSession` in one thread zeroized and freed a key value another
+thread's `C_Sign` was still reading, which answered `CKR_FUNCTION_FAILED`
+or signed over a reallocated block. Three smaller races sat beside it — a
+torn or foreign `CKA_LABEL` from `C_GetAttributeValue`, the login state
+read without the token's mutex, and a half-filled function table handed to
+two threads loading the module at once. Every `C_` function now runs under
+one read-write lock: shared for most calls, so signatures still run in
+parallel, exclusive for the six that free what others may be reading. A
+single-threaded application sees no change. Found by
+`tests/test_concurrency_store`, written for #111-prep, which failed on every
+ThreadSanitizer run before the change and on none of ten after; CI now runs
+it under TSan.
+
 ## What the module now answers differently
 
 - **A context string over 255 bytes** for ML-DSA, SLH-DSA and HashML-DSA is
@@ -156,6 +173,8 @@ skipping them, 629 match and 0 violations; ML-KEM 21 match, 0 violations.
 
 `make tests`, `tests/fhsm_crypt_cli.sh` and `make gui-smoke` pass, and
 `tests/test_hash_ml_dsa` in both profiles.
+`make tsan-concurrency` passes: the concurrency tests under ThreadSanitizer,
+ten runs clean.
 
 ## Why minor and not patch
 

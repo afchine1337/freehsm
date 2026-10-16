@@ -129,7 +129,13 @@ fhsm_rv_t fhsm_session_login(unsigned long h, fhsm_role_t role,
     /* Set this session's role when the token is (already) logged in as
      * that role : CKR_USER_ALREADY_LOGGED_IN means the application is
      * authenticated, so this session must reflect it too (#125). */
-    if (rv == FHSM_RV_OK || rv == FHSM_RV_USER_ALREADY_LOGGED_IN) s->role = role;
+    if (rv == FHSM_RV_OK || rv == FHSM_RV_USER_ALREADY_LOGGED_IN) {
+        /* Under the table mutex: fhsm_session_info and fhsm_session_logout
+         * read and write it under that lock from other threads (#111-prep). */
+        pthread_mutex_lock(&g_sess_mu);
+        if (s->in_use) s->role = role;
+        pthread_mutex_unlock(&g_sess_mu);
+    }
     return rv;
 }
 

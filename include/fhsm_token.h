@@ -209,7 +209,12 @@ fhsm_rv_t fhsm_token_object_find(fhsm_token_t *t,
 /* Attribute accessors. Used by C_GetAttributeValue to fill the parts of
  * CK_ATTRIBUTE templates that don't fit through fhsm_token_object_get.
  * Return FHSM_RV_KEY_HANDLE_INVALID if the handle is unknown. The
- * pointers reference token-owned storage ; the caller must not free. */
+ * pointers reference a per-thread copy taken under the token mutex, valid
+ * until the same getter is next called on the same thread; the caller must
+ * not free. They used to point into the object array itself, read after the
+ * mutex was released -- where a concurrent C_SetAttributeValue tore the label
+ * and a destroy's compaction moved another object's into the slot
+ * (#111-prep, tests/test_concurrency_store --attrs). */
 fhsm_rv_t fhsm_token_object_get_label(fhsm_token_t *t, uint32_t handle,
                                        const char **out, size_t *out_len);
 /* Which of the in-memory metadata attributes to read. */
