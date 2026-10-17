@@ -2723,3 +2723,22 @@ The refusal on an `edwards448` key and the acceptance on `id-Ed448` are the
 text, not only the harness's reading of it. A full nist-approved-only run
 the same day (reports/p11c-nist) has the pair passing and no failure but the
 two async probes.
+
+## 2026-10-17 — main for 2.4.0, both profiles, after the week's fixes
+
+    pkcs11-check 0.2.3 · signed module, FIPS provider loaded ·
+    reports/p11c-{nist,all}
+
+| profile | passed | failed | merged main, 2026-10-14/15 |
+|---|---|---|---|
+| nist-approved-only | 55 870 / 93 285 | 2, both known | 55 658, 4 failed |
+| all-mechanisms | 56 325 / 93 416 | 3, all known | 56 113, 5 failed |
+
+212 moves in each profile, the same 212, none backwards: 183 Wycheproof
+RSA-OAEP and 18 RSA-PSS vectors (SHA-224 and SHA-3 as OAEP or MGF1 hash),
+6 Wycheproof ML-KEM decapsulations and `test_decapsulate_invalid_ciphertext_length`
+(the ciphertext length checked before OpenSSL), two SLH-DSA parameter sets
+generated, and the Ed448 pair (an RFC 8032 `edwards448` key needs its
+parameter). What fails is the async probes, fixed upstream and unreleased,
+and in all-mechanisms the v1.5 structured oracle (#37). The gate passes in
+both.

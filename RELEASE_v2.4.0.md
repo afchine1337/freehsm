@@ -168,15 +168,16 @@ published, unchanged, as the image of v2.2.0 to v2.3.1.
 
 ## Measured
 
-pkcs11-check 0.2.3, full corpus, signed module, merged `main`, 2026-10-14
-and 15: 55 658 passed in `nist-approved-only` and 56 113 in
-`all-mechanisms`, with 4 and 5 failures, all of them the known ones listed
-in `tests/pkcs11_check_known_failures.txt`. Against the `hash-ml-dsa` branch
-runs of 2026-10-12, nothing moved in either profile. Against the 2.3.1
-candidate, on the `hash-ml-dsa`
-branch on 2026-10-12: 453 moves in each profile, +262 passed, nothing that
-passed before regressed, every move attributed in
-`docs/PKCS11_CHECK_FINDINGS.md`. The 8 new xfails are all on
+pkcs11-check 0.2.3, full corpus, signed module, `main` on 2026-10-17:
+55 870 passed in `nist-approved-only` and 56 325 in `all-mechanisms`, with 2
+and 3 failures, all of them the known ones listed in
+`tests/pkcs11_check_known_failures.txt` -- the async probes, fixed in the
+harness and not yet released, and in `all-mechanisms` the v1.5 structured
+oracle. Against the 2.3.1 candidate, two stages, every move attributed in
+`docs/PKCS11_CHECK_FINDINGS.md` and none backwards: 453 moves on 2026-10-12
+with HashML-DSA and the context fix (+262 passed), then 212 on 2026-10-17
+with the OAEP, PSS, SLH-DSA, ML-KEM and Ed448 fixes (+212 passed, and the
+two Ed448 failures gone). The 8 new xfails are all on
 `CKM_HASH_ML_DSA`, which takes PH(M) single-part: four tests pass it the
 message, four call it without its required parameter
 (mingulov/pkcs11-check#51).
