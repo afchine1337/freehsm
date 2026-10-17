@@ -7,6 +7,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+* **`CKA_PARAMETER_SET` could be written and not read.** ML-KEM, ML-DSA
+  and SLH-DSA keys took it at generation and import, and
+  `C_GetAttributeValue` answered `CKR_ATTRIBUTE_TYPE_INVALID`, so OpenSC
+  pkcs11-tool, which reads it to name the key, refused `--read-object` on
+  every ML-KEM public key. It now returns the `CKP_*` selector on both
+  halves, read from the stored key; other keys report it absent.
+* **`C_DecapsulateKey` with a ciphertext of the wrong size returned
+  `CKR_FUNCTION_FAILED`.** It is now `CKR_ENCRYPTED_DATA_LEN_RANGE`,
+  checked against the parameter set's length (768, 1088 or 1568 bytes)
+  before OpenSSL is called. Both found with pkcs11-tool's proposed
+  `--encapsulate` / `--decapsulate`; `tests/test_pqc_params.c` covers them.
+
 ## [2.4.0] --- 2026-10-21
 
 *Minor: a new tool and a new window tab for key management and file
