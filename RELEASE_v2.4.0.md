@@ -144,6 +144,12 @@ it under TSan.
   the form it was given. Keys made with the RFC 8410 OID, which OpenSC
   `pkcs11-tool` sends, keys made before this release, and Ed25519 are
   unchanged.
+- **`CKA_PARAMETER_SET` reads back** on ML-KEM, ML-DSA and SLH-DSA keys,
+  both halves, as the `CKP_*` selector. It was taken at generation and
+  import and answered `CKR_ATTRIBUTE_TYPE_INVALID` afterwards, so OpenSC
+  `pkcs11-tool --read-object` refused every ML-KEM public key.
+- **`C_DecapsulateKey` with a ciphertext of the wrong size** answers
+  `CKR_ENCRYPTED_DATA_LEN_RANGE`; it was `CKR_FUNCTION_FAILED`.
 
 ## The build image is pinned
 
@@ -178,6 +184,11 @@ message, four call it without its required parameter
 Wycheproof: the ML-DSA adapter now sends contexts over 255 bytes instead of
 skipping them, 629 match and 0 violations; ML-KEM 21 match, 0 violations.
 
+The two ML-KEM answers above came after those runs. pkcs11-check 0.2.3,
+category `pqc`, unsigned module, 2026-10-17: 103 passed and 4 xfailed,
+against 102 and 5 before; `TestMLKEMNegative::test_decapsulate_invalid_ciphertext_length`
+moved from xfail to pass and nothing else moved.
+
 `make tests`, `tests/fhsm_crypt_cli.sh` and `make gui-smoke` pass, and
 `tests/test_hash_ml_dsa` in both profiles.
 `make tsan-concurrency` passes: the concurrency tests under ThreadSanitizer,
@@ -205,7 +216,8 @@ passes 90 of NIST's pinned sigGen and 90 sigVer cases, preHash included,
 with nothing failing; he reproduced those counts on his own build
 (Govardhan527/acvp-assay#2). The harness is Denis Mingulov's
 `pkcs11-check`; Wycheproof's ML-DSA context vectors found the context
-defect, and OpenSC's `pkcs11-tool` the SLH-DSA one. `ACKNOWLEDGEMENTS.md`
+defect, and OpenSC's `pkcs11-tool` the SLH-DSA one and the two ML-KEM
+answers above. `ACKNOWLEDGEMENTS.md`
 records who found what.
 
 ## Verifying this release
