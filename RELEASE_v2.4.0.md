@@ -218,8 +218,9 @@ with nothing failing; he reproduced those counts on his own build
 (Govardhan527/acvp-assay#2). The harness is Denis Mingulov's
 `pkcs11-check`; Wycheproof's ML-DSA context vectors found the context
 defect, and OpenSC's `pkcs11-tool` the SLH-DSA one and the two ML-KEM
-answers above. `ACKNOWLEDGEMENTS.md`
-records who found what.
+answers above. FreeHSM is now listed among Wycheproof's downstream
+projects (C2SP/wycheproof#280). `ACKNOWLEDGEMENTS.md` records who found
+what.
 
 ## Verifying this release
 
