@@ -2713,3 +2713,13 @@ could not be fetched from here, as on 2026-09-14 (#23); the table above is
 pkcs11-check's encoding of it. If the clause turns out to say otherwise, the
 refusal is one `if` in `op_init` and the recorded form stays useful for
 `CKA_EC_PARAMS` alone.
+
+Read on 2026-10-17, and it does not: PKCS#11 v3.2 Table 73, "Mapping to RFC
+8032 Signature Schemes", gives Ed25519 the mechanism parameter "Not
+Required" and Ed448 "Required" (phFlag False, context optional), and the
+sentence after it says that "for curves according to [RFC 8410], the
+mechanism is implicitly given by the curve, which is EdDSA in pure mode".
+The refusal on an `edwards448` key and the acceptance on `id-Ed448` are the
+text, not only the harness's reading of it. A full nist-approved-only run
+the same day (reports/p11c-nist) has the pair passing and no failure but the
+two async probes.

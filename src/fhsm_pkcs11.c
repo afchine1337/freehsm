@@ -9240,11 +9240,14 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * table (PKCS#11 v3.2 §6.3.14) selects the scheme from the key's profile
      * and the parameter together: on an RFC 8410 id-Ed448 key a NULL
      * parameter is pure Ed448, while on the RFC 8032 edwards448 curve every
-     * scheme, Ed448 included, takes a CK_EDDSA_PARAMS block. That is the
-     * table as pkcs11-check 0.2.3 encodes it; the normative text could not be
-     * fetched when this was written, and the question stays open upstream in
-     * mingulov/pkcs11-check#49. Accepting NULL there answered a request the
-     * profile does not define. pkcs11-check 0.2.3
+     * scheme, Ed448 included, takes a CK_EDDSA_PARAMS block. PKCS#11 v3.2
+     * Table 73, "Mapping to RFC 8032 Signature Schemes", lists Ed448 with the
+     * mechanism parameter Required (phFlag False, context optional) and
+     * Ed25519 as Not Required, and adds that for RFC 8410 curves "the
+     * mechanism is implicitly given by the curve, which is EdDSA in pure
+     * mode" -- checked against the published text on 2026-10-17, which
+     * settles item 3 of mingulov/pkcs11-check#49. Accepting NULL there
+     * answered a request the profile does not define. pkcs11-check 0.2.3
      * TestEdDSAParameters::test_eddsa_edwards448_{sign,verify}_missing_required_param.
      *
      * Only keys whose CKA_EC_PARAMS was the curveName string are refused; the
