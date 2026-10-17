@@ -18,6 +18,7 @@ way FIPS 204 defines it.
 **Check your templates if an application imports ML-KEM, ML-DSA or SLH-DSA
 keys.** `C_CreateObject` now requires `CKA_PARAMETER_SET`, as the
 specification does; without it the import answers `CKR_TEMPLATE_INCOMPLETE`.
+It now reads back too, on both halves of those keys.
 
 There is no security advisory in this release.
 
@@ -144,6 +145,15 @@ it under TSan.
   the form it was given. Keys made with the RFC 8410 OID, which OpenSC
   `pkcs11-tool` sends, keys made before this release, and Ed25519 are
   unchanged.
+- **`CKA_PARAMETER_SET` reads back** on ML-KEM, ML-DSA and SLH-DSA keys,
+  public and private, as the `CKP_*` selector read from the stored key; it
+  answered `CKR_ATTRIBUTE_TYPE_INVALID`, so OpenSC `pkcs11-tool
+  --read-object` gave up on every ML-KEM public key. Other keys report it
+  absent.
+- **An ML-KEM ciphertext of the wrong size** is refused by
+  `C_DecapsulateKey` with `CKR_ENCRYPTED_DATA_LEN_RANGE`, checked against
+  the parameter set (768, 1088 or 1568 bytes) before OpenSSL is called; it
+  answered `CKR_FUNCTION_FAILED`.
 
 ## The build image is pinned
 
@@ -205,8 +215,9 @@ passes 90 of NIST's pinned sigGen and 90 sigVer cases, preHash included,
 with nothing failing; he reproduced those counts on his own build
 (Govardhan527/acvp-assay#2). The harness is Denis Mingulov's
 `pkcs11-check`; Wycheproof's ML-DSA context vectors found the context
-defect, and OpenSC's `pkcs11-tool` the SLH-DSA one. `ACKNOWLEDGEMENTS.md`
-records who found what.
+defect, and OpenSC's `pkcs11-tool` the SLH-DSA one and, through its
+proposed `--encapsulate` and `--decapsulate`, the two ML-KEM ones.
+`ACKNOWLEDGEMENTS.md` records who found what.
 
 ## Verifying this release
 
