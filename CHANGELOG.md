@@ -13,10 +13,22 @@ project adheres to [Semantic Versioning](https://semver.org/).
 encryption, the HashML-DSA mechanisms, and calls that answer differently --
 an ML-KEM, ML-DSA or SLH-DSA import without CKA_PARAMETER_SET, a context
 string over 255 bytes, CKM_ML_DSA with a key of another type, CKM_EDDSA
-without a parameter on an `edwards448` key. No security advisory.
+without a parameter on an `edwards448` key, an ML-KEM ciphertext of the
+wrong size. No security advisory.
 `RELEASE_v2.4.0.md` has the release notes.*
 
 ### Fixed
+* **`CKA_PARAMETER_SET` could be written and not read.** ML-KEM, ML-DSA
+  and SLH-DSA keys took it at generation and import, and
+  `C_GetAttributeValue` answered `CKR_ATTRIBUTE_TYPE_INVALID`, so OpenSC
+  pkcs11-tool, which reads it to name the key, refused `--read-object` on
+  every ML-KEM public key. It now returns the `CKP_*` selector on both
+  halves, read from the stored key; other keys report it absent.
+* **`C_DecapsulateKey` with a ciphertext of the wrong size returned
+  `CKR_FUNCTION_FAILED`.** It is now `CKR_ENCRYPTED_DATA_LEN_RANGE`,
+  checked against the parameter set's length (768, 1088 or 1568 bytes)
+  before OpenSSL is called. Both found with pkcs11-tool's proposed
+  `--encapsulate` / `--decapsulate`; `tests/test_pqc_params.c` covers them.
 * **`CKM_EDDSA` with no parameter accepted on an RFC 8032 `edwards448`
   key.** PKCS#11 v3.2 tells the two Edwards key profiles apart by
   `CKA_EC_PARAMS`: the RFC 8410 OID (`id-Ed448`), where a NULL parameter is

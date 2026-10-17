@@ -5681,6 +5681,24 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             return FHSM_RV_FUNCTION_FAILED;
         }
     }
+    /* A ciphertext of the wrong size is the caller's error, and says so:
+     * CKR_ENCRYPTED_DATA_LEN_RANGE, where it fell through to OpenSSL's
+     * refusal and came back CKR_FUNCTION_FAILED. FIPS 203 fixes the size per
+     * parameter set (768, 1088, 1568 bytes); the length is public, so checking
+     * it first leaks nothing implicit rejection protects. Found with OpenSC
+     * pkcs11-tool --decapsulate; pkcs11-check 0.2.3,
+     * TestMLKEMNegative::test_decapsulate_invalid_ciphertext_length. */
+    {
+        CK_ULONG want = EVP_PKEY_is_a(pkey, "ML-KEM-512")  ? 768
+                      : EVP_PKEY_is_a(pkey, "ML-KEM-768")  ? 1088
+                      : EVP_PKEY_is_a(pkey, "ML-KEM-1024") ? 1568 : 0;
+        if (want != 0 && ulCiphertextLen != want) {
+            MLKEM_DBG("ciphertext %lu bytes, %lu expected -- ENCRYPTED_DATA_LEN_RANGE",
+                      (unsigned long)ulCiphertextLen, (unsigned long)want);
+            EVP_PKEY_free(pkey);
+            return FHSM_RV_ENCRYPTED_DATA_LEN_RANGE;
+        }
+    }
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
     if (!ctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
     if (EVP_PKEY_decapsulate_init(ctx, NULL) <= 0) {
@@ -6318,6 +6336,34 @@ static int fhsm_pset_read(CK_ATTRIBUTE *tmpl, CK_ULONG n, CK_ULONG mech,
     if (L == 0 || L >= out_sz) return -1;
     memcpy(out, tmpl[i].pValue, L); out[L] = '\0';
     return fhsm_pset_valid(out) ? 1 : -1;
+}
+
+/* CKA_PARAMETER_SET of a stored ML-KEM, ML-DSA or SLH-DSA key, as the spec's
+ * CK_ULONG selector: the inverse of fhsm_pset_from_selector. The set is not
+ * recorded beside the key, so it is read from the key itself -- the SPKI or
+ * PKCS#8 the store holds -- and nothing can disagree with it. Returns 0 when
+ * the object is not such a key or its value will not parse. */
+static int fhsm_pset_selector_of(uint32_t cko_class, uint32_t ckk_type,
+                                 const uint8_t *value, size_t value_len,
+                                 CK_ULONG *sel) {
+    CK_ULONG mech;
+    if (ckk_type == CKK_ML_KEM)       mech = CKM_ML_KEM_KEY_PAIR_GEN;
+    else if (ckk_type == CKK_ML_DSA)  mech = CKM_ML_DSA_KEY_PAIR_GEN;
+    else if (ckk_type == CKK_SLH_DSA) mech = CKM_SLH_DSA_KEY_PAIR_GEN;
+    else return 0;
+    const unsigned char *pp = value;
+    EVP_PKEY *pk = NULL;
+    if (cko_class == CKO_PUBLIC_KEY)       pk = d2i_PUBKEY(NULL, &pp, (long)value_len);
+    else if (cko_class == CKO_PRIVATE_KEY) pk = d2i_AutoPrivateKey(NULL, &pp, (long)value_len);
+    if (!pk) return 0;
+    int found = 0;
+    for (CK_ULONG k = 1; !found; ++k) {
+        const char *nm = fhsm_pset_from_selector(mech, k);
+        if (!nm) break;
+        if (EVP_PKEY_is_a(pk, nm)) { *sel = k; found = 1; }
+    }
+    EVP_PKEY_free(pk);
+    return found;
 }
 
 
@@ -6975,6 +7021,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
         unsigned char bval = 0;
         /* cppcheck-suppress unreadVariable ; defaults that some attribute branches overwrite and others do not read */
         CK_ULONG  tmp_class = cko_class, tmp_type = ckk_type, tmp_len = value_len;
+        CK_ULONG  pset_sel = 0;
         const char    *label_p = NULL; size_t label_len = 0;
         const uint8_t *id_p    = NULL; size_t id_len    = 0;
         /* Scratch for the PQC public-key readback below. Per iteration, like
@@ -7070,6 +7117,17 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 break;
             }
             case CKA_VALUE_LEN: src = &tmp_len;   src_len = sizeof(CK_ULONG); break;
+            /* CKA_PARAMETER_SET, on ML-KEM, ML-DSA and SLH-DSA keys.
+             * Taken on every creation path and never given back: a caller
+             * reading it -- OpenSC pkcs11-tool does, to name the key -- got
+             * CKR_ATTRIBUTE_TYPE_INVALID and gave up on the object. Absent
+             * on any other key, as CKA_ENCAPSULATE is below. */
+            case CKA_PARAMETER_SET:
+                if (!fhsm_pset_selector_of(cko_class, ckk_type, value, value_len,
+                                           &pset_sel)) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                }
+                src = &pset_sel; src_len = sizeof(CK_ULONG); break;
             /* CKA_ENCAPSULATE / CKA_DECAPSULATE (§5.14.7, §5.14.8).
              *
              * Reported only on the class each belongs to, and only for a KEM

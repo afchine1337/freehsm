@@ -181,10 +181,10 @@ for kt in SLH-DSA-SHA2-128S SLH-DSA-SHA2-128F; do
     fi
 done
 
-# --- ML-KEM: key pairs and their usages; pkcs11-tool has no encapsulation -
+# --- ML-KEM: key pairs, usages, and encapsulation where pkcs11-tool has it
 for set in 512 768 1024; do
     expect 0 "keygen ML-KEM-$set, --usage-encapsulate" user --keypairgen \
-        --key-type "ML-KEM-$set" --usage-encapsulate --label "kem$set" --id "9$((set / 512))"
+        --key-type "ML-KEM-$set" --usage-encapsulate --label "kem$set" --id "9$((set / 256))"
 done
 user --list-objects --type pubkey --label kem768 >"$WORK/out" 2>&1
 if grep -q "encapsulate" "$WORK/out"; then ok "ML-KEM-768 public key lists the encapsulate usage"
@@ -193,7 +193,22 @@ user --list-objects --type privkey --label kem768 >"$WORK/out" 2>&1
 if grep -q "decapsulate" "$WORK/out"; then ok "ML-KEM-768 private key lists the decapsulate usage"
 else bad "ML-KEM-768 private key lists the decapsulate usage" "$WORK/out"; fi
 if "$PKCS11_TOOL" --help 2>&1 | grep -q -- '--encapsulate'; then
-    skip "ML-KEM encapsulation: this pkcs11-tool has it, the script does not yet"
+    # --encapsulate / --decapsulate, proposed to OpenSC from
+    # afchine1337/OpenSC branch pkcs11-tool-mlkem-encapsulate.
+    for set in 512 768 1024; do
+        id="9$((set / 256))"
+        expect 0 "ML-KEM-$set encapsulate" user --encapsulate -m ML-KEM --id "$id" \
+            --output-file "$WORK/ct$set" --secret-file "$WORK/ss$set"
+        expect 0 "  decapsulate" user --decapsulate -m ML-KEM --id "$id" \
+            --input-file "$WORK/ct$set" --output-file "$WORK/ss${set}d"
+        if cmp -s "$WORK/ss$set" "$WORK/ss${set}d"; then ok "  both sides hold the same secret"
+        else bad "  both sides hold the same secret"; fi
+    done
+    head -c 100 "$WORK/ct768" >"$WORK/ctshort"
+    expect 1 "ML-KEM-768 decapsulate, short ciphertext is refused" user --decapsulate \
+        -m ML-KEM --id 93 --input-file "$WORK/ctshort" --output-file "$WORK/ssx"
+    expect 0 "ML-KEM-768 public key reads back (CKA_PARAMETER_SET)" user --read-object \
+        --type pubkey --id 93 --output-file "$WORK/kem768.der"
 else
     skip "ML-KEM encapsulation: pkcs11-tool has no C_EncapsulateKey operation"
 fi
