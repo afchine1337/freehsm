@@ -28,7 +28,7 @@ extern "C" {
  *
  * Consumed by the hand-written C_*Init operation gates in
  * fhsm_pkcs11.c. */
-#define FHSM_BUILD_FIPS_STRICT 0
+#define FHSM_BUILD_FIPS_STRICT 1
 
 /* ---- CKM_* mechanism identifiers (PKCS#11 v3.2 §6.3) ---- */
 /* --- AES --- */
