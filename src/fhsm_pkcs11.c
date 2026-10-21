@@ -3189,6 +3189,12 @@ static CK_RV fhsm_check_trusted_attr(CK_SESSION_HANDLE hSession,
 #ifndef CKM_ML_DSA_KEY_PAIR_GEN
 #define CKM_ML_DSA_KEY_PAIR_GEN    0x0000001CUL
 #endif
+#ifndef CKK_SLH_DSA
+#define CKK_SLH_DSA                0x0000004BUL
+#endif
+#ifndef CKM_SLH_DSA_KEY_PAIR_GEN
+#define CKM_SLH_DSA_KEY_PAIR_GEN   0x0000002DUL
+#endif
 static int fhsm_pset_read(CK_ATTRIBUTE *tmpl, CK_ULONG n, CK_ULONG mech,
                            char *out, size_t out_sz);
 
@@ -3668,7 +3674,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                 if (!curve) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 ipk = fhsm_ec_priv_from_scalar(curve, a.value_data, a.value_len);
                 from_raw = 1;
-            } else if (a.ckk == CKK_ML_KEM || a.ckk == CKK_ML_DSA) {
+            } else if (a.ckk == CKK_ML_KEM || a.ckk == CKK_ML_DSA
+                       || a.ckk == CKK_SLH_DSA) {
                 /* The PQC half of the rule stated in the comment above.
                  *
                  * It was written for EC, Edwards and Montgomery, and ML-KEM
@@ -3681,13 +3688,22 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                  * same day let those tests run at all.
                  *
                  * The set comes from CKA_PARAMETER_SET when given and from
-                 * the length otherwise; when both speak they must agree. */
+                 * the length otherwise; when both speak they must agree.
+                 *
+                 * SLH-DSA was left out the same way and found the same way,
+                 * by NIST's vectors (tests/test_slh_dsa_kat.c): accepted,
+                 * stored as sent, CKR_FUNCTION_FAILED at C_Sign. Its length
+                 * names no set -- 64, 96 or 128 bytes is four sets each --
+                 * so CKA_PARAMETER_SET alone does, and a value of the wrong
+                 * length for it is refused by OpenSSL. */
                 char pset[64] = "";
-                CK_ULONG fam = (a.ckk == CKK_ML_KEM) ? CKM_ML_KEM_KEY_PAIR_GEN
+                CK_ULONG fam = (a.ckk == CKK_ML_KEM)  ? CKM_ML_KEM_KEY_PAIR_GEN
+                             : (a.ckk == CKK_SLH_DSA) ? CKM_SLH_DSA_KEY_PAIR_GEN
                                                       : CKM_ML_DSA_KEY_PAIR_GEN;
                 int pr = fhsm_pset_read(pTemplate, ulCount, fam, pset, sizeof pset);
                 if (pr < 0) return CKR_TEMPLATE_INCONSISTENT;
-                const char *by_len = fhsm_pqc_alg_from_priv_len(a.value_len, a.ckk);
+                const char *by_len = (a.ckk == CKK_SLH_DSA) ? NULL
+                                   : fhsm_pqc_alg_from_priv_len(a.value_len, a.ckk);
                 const char *by_name = (pr == 1) ? pset : NULL;
                 if (by_name && by_len && strcmp(by_name, by_len) != 0)
                     return CKR_TEMPLATE_INCONSISTENT;
@@ -3809,13 +3825,28 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
          * be DER. A caller holding an SPKI should not be refused because the
          * spec prefers raw -- and ML-DSA public import accepted exactly that
          * form until today, so refusing it now would break a caller to fix a
-         * caller. */
+         * caller.
+         *
+         * SLH-DSA has no length table: 32, 48 or 64 bytes is four sets each.
+         * Its raw key is built under the name CKA_PARAMETER_SET gives, and a
+         * value of the wrong length for that set fails there and is tried as
+         * DER. */
+        const CK_ULONG fam = (a.ckk == CKK_ML_KEM)  ? CKM_ML_KEM_KEY_PAIR_GEN
+                           : (a.ckk == CKK_SLH_DSA) ? CKM_SLH_DSA_KEY_PAIR_GEN
+                                                    : CKM_ML_DSA_KEY_PAIR_GEN;
+        char pset[64] = "";
+        const int pr = fhsm_pset_read(pTemplate, ulCount, fam, pset, sizeof pset);
         if (a.pqc_alg) {
             pkey = EVP_PKEY_new_raw_public_key_ex(NULL, a.pqc_alg, NULL,
                                                    a.value_data, a.value_len);
         } else {
-            const unsigned char *p = a.value_data;
-            pkey = d2i_PUBKEY(NULL, &p, (long)a.value_len);
+            if (a.ckk == CKK_SLH_DSA && pr == 1)
+                pkey = EVP_PKEY_new_raw_public_key_ex(NULL, pset, NULL,
+                                                       a.value_data, a.value_len);
+            if (!pkey) {
+                const unsigned char *p = a.value_data;
+                pkey = d2i_PUBKEY(NULL, &p, (long)a.value_len);
+            }
         }
         if (!pkey) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
 
@@ -3825,12 +3856,10 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
          * a caller ends up sure it holds an ML-KEM-1024 key that is an
          * ML-KEM-512 key. Asked of the built key, so a DER
          * SubjectPublicKeyInfo is held to it as well as a raw value -- the
-         * check used to apply to the raw form only. */
+         * check used to apply to the raw form only. The CKP_ selector is read
+         * in the key type's own table: CKP_ numbering restarts per family,
+         * and SLH-DSA's 1 read as ML-DSA's was ML-DSA-44. */
         {
-            char pset[64] = "";
-            CK_ULONG fam = (a.ckk == CKK_ML_KEM) ? CKM_ML_KEM_KEY_PAIR_GEN
-                                                  : CKM_ML_DSA_KEY_PAIR_GEN;
-            int pr = fhsm_pset_read(pTemplate, ulCount, fam, pset, sizeof pset);
             if (pr != 1 || !EVP_PKEY_is_a(pkey, pset)) {
                 EVP_PKEY_free(pkey);
                 return CKR_TEMPLATE_INCONSISTENT;

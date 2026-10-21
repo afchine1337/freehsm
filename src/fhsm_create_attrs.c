@@ -47,6 +47,7 @@
 #define FHSM_CKK_EC_EDWARDS         0x00000040UL
 #define FHSM_CKK_ML_KEM             0x00000049UL
 #define FHSM_CKK_ML_DSA             0x0000004AUL
+#define FHSM_CKK_SLH_DSA            0x0000004BUL
 
 /* ---------------------------------------------------------------------------
  * Curve OID -> group-name lookup. Three NIST curves only, hardcoded for
@@ -148,6 +149,10 @@ static const struct { size_t len; const char *alg; } FHSM_PQC_PUB_LENS[] = {
  * silently accepted as ML-DSA-44. Returns NULL if nothing matches, which the
  * caller reads as "not raw, try DER". */
 static const char *fhsm_pqc_alg_for(size_t len, unsigned long ckk) {
+    /* SLH-DSA has no entry: its raw public keys are 32, 48 or 64 bytes and
+     * each length is four sets (SHA2 or SHAKE, s or f). The builder names the
+     * set from CKA_PARAMETER_SET, which import requires. */
+    if (ckk == FHSM_CKK_SLH_DSA) return NULL;
     const char *want = (ckk == FHSM_CKK_ML_KEM) ? "ML-KEM" : "ML-DSA";
     for (size_t i = 0; i < sizeof(FHSM_PQC_PUB_LENS)/sizeof(FHSM_PQC_PUB_LENS[0]); ++i) {
         if (FHSM_PQC_PUB_LENS[i].len != len) continue;
@@ -403,9 +408,14 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
      * public matched nothing at all and left as CKR_TEMPLATE_INCONSISTENT.
      * Two ways of getting a PQC public key wrong: one accepted and stored
      * something it could not read back, the other refused honestly. Both now
-     * go through the same parser. */
+     * go through the same parser.
+     *
+     * SLH-DSA public was the second kind, unnoticed until NIST's vectors
+     * were run through C_CreateObject (tests/test_slh_dsa_kat.c): no
+     * branch matched, so every SLH-DSA public key was refused. */
     if (attrs->cko == FHSM_CKO_PUBLIC_KEY
-        && (attrs->ckk == FHSM_CKK_ML_KEM || attrs->ckk == FHSM_CKK_ML_DSA))
+        && (attrs->ckk == FHSM_CKK_ML_KEM || attrs->ckk == FHSM_CKK_ML_DSA
+            || attrs->ckk == FHSM_CKK_SLH_DSA))
         return parse_pqc_pub(pTemplate, ulCount, attrs);
 
     if (attrs->cko == FHSM_CKO_PUBLIC_KEY && attrs->ckk == FHSM_CKK_EC)

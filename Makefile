@@ -845,6 +845,11 @@ tests/test_hash_ml_dsa: tests/test_hash_ml_dsa.c $(LIB)
 tests/test_slh_dsa_sets: tests/test_slh_dsa_sets.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# SLH-DSA against NIST's ACVP vectors: deterministic signatures compared
+# byte for byte, NIST's verdicts on modified and resized signatures.
+tests/test_slh_dsa_kat: tests/test_slh_dsa_kat.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # CKA_PARAMETER_SET read back on PQC keys, and a decapsulation ciphertext of
 # the wrong size refused as such. Both found with OpenSC pkcs11-tool.
 tests/test_pqc_params: tests/test_pqc_params.c $(LIB)
@@ -1176,6 +1181,7 @@ TEST_BINS = \
 	tests/test_sensitive_value \
 	tests/test_hash_ml_dsa \
 	tests/test_slh_dsa_sets \
+	tests/test_slh_dsa_kat \
 	tests/test_pqc_params \
 	tests/test_aes_sizes \
 	tests/test_rsa_oaep \
@@ -1287,6 +1293,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_hash_ml_dsa
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_slh_dsa_sets
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_slh_dsa_kat
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_pqc_params
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

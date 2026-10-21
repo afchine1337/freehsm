@@ -7,6 +7,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+* **SLH-DSA keys could not be imported.** `C_CreateObject` refused every
+  SLH-DSA public key with `CKR_TEMPLATE_INCONSISTENT`: no parser branch took
+  the key type. A raw SLH-DSA private key was accepted, stored as sent, and
+  `C_Sign` with it answered `CKR_FUNCTION_FAILED`. Both now take the raw
+  key under the set `CKA_PARAMETER_SET` names, which is the only thing that
+  can name it: 32, 48 or 64 bytes of public key, 64, 96 or 128 of private
+  key, is four sets each. The `CKP_` selector is read in the key type's own
+  table; SLH-DSA's `1` had been read as ML-DSA-44.
+
+### Added
+* **SLH-DSA against NIST's known answers.** `tests/test_slh_dsa_kat.c` runs
+  vectors from NIST's ACVP SLH-DSA-sigGen-FIPS205 and sigVer-FIPS205 through
+  the module: deterministic signatures for all twelve parameter sets, with
+  and without a context, compared byte for byte, and NIST's verdicts on
+  modified messages, R, SIGFORS and SIGHT and on signatures a byte short or
+  long. Wycheproof has no SLH-DSA vectors; until now the module's SLH-DSA
+  was only checked against itself. The subset is extracted by
+  `scripts/extract_slh_dsa_kat.py` into `tests/vectors/slh_dsa_kat.txt`.
+
 ## [2.4.0] --- 2026-10-21
 
 *Minor: a new tool and a new window tab for key management and file
