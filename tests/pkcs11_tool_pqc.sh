@@ -193,8 +193,7 @@ user --list-objects --type privkey --label kem768 >"$WORK/out" 2>&1
 if grep -q "decapsulate" "$WORK/out"; then ok "ML-KEM-768 private key lists the decapsulate usage"
 else bad "ML-KEM-768 private key lists the decapsulate usage" "$WORK/out"; fi
 if "$PKCS11_TOOL" --help 2>&1 | grep -q -- '--encapsulate'; then
-    # --encapsulate / --decapsulate, proposed to OpenSC from
-    # afchine1337/OpenSC branch pkcs11-tool-mlkem-encapsulate.
+    # --encapsulate / --decapsulate, OpenSC/OpenSC#3894.
     for set in 512 768 1024; do
         id="9$((set / 256))"
         expect 0 "ML-KEM-$set encapsulate" user --encapsulate -m ML-KEM --id "$id" \
