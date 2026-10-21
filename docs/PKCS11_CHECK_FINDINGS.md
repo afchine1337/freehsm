@@ -2742,3 +2742,41 @@ generated, and the Ed448 pair (an RFC 8032 `edwards448` key needs its
 parameter). What fails is the async probes, fixed upstream and unreleased,
 and in all-mechanisms the v1.5 structured oracle (#37). The gate passes in
 both.
+
+## 2026-10-21 — SLH-DSA key import, the xfails nobody read
+
+    pkcs11-check 0.2.3 · unsigned module, nist-approved-only ·
+    FHSM_PKCS11CHECK_MATCH=slhdsa · reports/p11check-slhdsa-nist
+
+`tests/test_slh_dsa_kat.c`, written to check SLH-DSA against NIST's ACVP
+vectors because Wycheproof has none, failed on its first run: every SLH-DSA
+public key was refused by `C_CreateObject` with `CKR_TEMPLATE_INCONSISTENT`
+(no parser branch took the key type), and a raw private key was accepted,
+stored as sent, and failed at `C_Sign` with `CKR_FUNCTION_FAILED`. Fixed the
+same day; see the CHANGELOG.
+
+pkcs11-check had been saying so in every run. `test_acvp_slhdsa.py` imports
+NIST's keys, and its 456 tests per profile -- 120 keygen and 168 sigVer
+refused at the public import, 168 sigGen failing at `C_Sign` -- were in the
+2.4.0 reports as xfail, `not_operational`, "advertised but not operational".
+The known-failures list and the run-to-run diffs look at failures; an xfail
+that never moves is in neither, and these were never attributed.
+
+| `test_acvp_slhdsa.py` | 2.4.0 reports | after the fix |
+|---|---|---|
+| `test_slhdsa_keygen` | 120 xfail | 120 passed |
+| `test_slhdsa_sigver` | 168 xfail | 168 passed |
+| `test_slhdsa_siggen` | 168 xfail | 168 passed |
+
+The subset: 464 passed, 42 skipped (`test_hash_slh_*`, HashSLH-DSA not
+implemented), no xfail, no failure.
+
+The other `not_operational` xfails of the 2.4.0 reports, about 13 900 per
+profile, were inventoried the same day. Most are EC curves outside P-256,
+P-384 and P-521 that the loaded provider does not serve, refused with
+`CKR_ATTRIBUTE_VALUE_INVALID` where `CKR_CURVE_NOT_SUPPORTED` would say what
+happened. To look at next: X25519/X448 private import refused in
+all-mechanisms too (1 071), ECDSA verification answering
+`CKR_FUNCTION_FAILED` on invalid signatures (80), and a handful of single
+cases (`CKA_COPYABLE` true to false, a 512-bit generic secret, AES-CMAC
+multipart).
