@@ -162,10 +162,12 @@ fi
 # provider. The tests that need the key run only if it was made: a refusal to
 # verify with no key would otherwise pass, for the wrong reason.
 slh=0
+slh_key=0
 for kt in SLH-DSA-SHA2-128S SLH-DSA-SHA2-128F; do
     slh=$((slh + 1))
     if user --keypairgen --key-type "$kt" --label "slh$slh" --id "8$slh" >"$WORK/out" 2>&1; then
         ok "keygen $kt"
+        [ "$slh_key" = 0 ] && slh_key="8$slh"
     else
         bad "keygen $kt" "$WORK/out"; continue
     fi
@@ -180,6 +182,44 @@ for kt in SLH-DSA-SHA2-128S SLH-DSA-SHA2-128F; do
             verify "8$slh" SLH-DSA "$WORK/msg" "$WORK/sigsc$slh" --sign-context "$CTX2"
     fi
 done
+
+# --- HashSLH-DSA ----------------------------------------------------------
+# pkcs11-tool has names for these since OpenSC #3882; until FreeHSM had the
+# mechanisms nothing had exercised them against a module. The same shape as
+# HashML-DSA above, on the SHA2-128S key: three hash-specific mechanisms, one
+# with a context, and the generic one on PH(M).
+if [ "$slh_key" = 0 ]; then
+    skip "HashSLH-DSA: no SLH-DSA key was generated"
+elif ! p11 -M 2>/dev/null | grep -q '^ *HASH-SLH-DSA-SHA256,'; then
+    skip "HashSLH-DSA: the module or this pkcs11-tool does not name HASH-SLH-DSA-SHA256"
+else
+    for h in SHA256 SHA3_384 SHAKE256; do
+        expect 0 "HASH-SLH-DSA-$h sign" sign "$slh_key" "HASH-SLH-DSA-$h" "$WORK/msg" "$WORK/sigsh$h"
+        expect 0 "HASH-SLH-DSA-$h verify" verify "$slh_key" "HASH-SLH-DSA-$h" "$WORK/msg" "$WORK/sigsh$h"
+    done
+    expect 1 "HASH-SLH-DSA-SHA256 signature does not verify under HASH-SLH-DSA-SHA3_384" \
+        verify "$slh_key" HASH-SLH-DSA-SHA3_384 "$WORK/msg" "$WORK/sigshSHA256"
+    if [ "$HAS_CONTEXT" = 1 ]; then
+        expect 0 "HASH-SLH-DSA-SHA512 sign with context" \
+            sign "$slh_key" HASH-SLH-DSA-SHA512 "$WORK/msg" "$WORK/sigshc" --sign-context "$CTX"
+        expect 0 "  verify under the same context" \
+            verify "$slh_key" HASH-SLH-DSA-SHA512 "$WORK/msg" "$WORK/sigshc" --sign-context "$CTX"
+        expect 1 "  verify with another context is refused" \
+            verify "$slh_key" HASH-SLH-DSA-SHA512 "$WORK/msg" "$WORK/sigshc" --sign-context "$CTX2"
+    fi
+    # The generic mechanism takes PH(M), with the hash named by
+    # --hash-algorithm (accepted for HASH-SLH-DSA since OpenSC #3882).
+    if sign "$slh_key" HASH-SLH-DSA "$WORK/ph" "$WORK/sigsg" --hash-algorithm SHA256 >"$WORK/out" 2>&1; then
+        ok "CKM_HASH_SLH_DSA (HASH-SLH-DSA), SHA256, on PH(M)"
+        expect 0 "  verify" verify "$slh_key" HASH-SLH-DSA "$WORK/ph" "$WORK/sigsg" --hash-algorithm SHA256
+        expect 0 "  and the same signature verifies under HASH-SLH-DSA-SHA256 on M" \
+            verify "$slh_key" HASH-SLH-DSA-SHA256 "$WORK/msg" "$WORK/sigsg"
+    elif grep -q "applicable only to RSA-PKCS-PSS" "$WORK/out"; then
+        skip "CKM_HASH_SLH_DSA: pkcs11-tool refuses --hash-algorithm outside RSA-PSS"
+    else
+        bad "CKM_HASH_SLH_DSA (HASH-SLH-DSA), SHA256, on PH(M)" "$WORK/out"
+    fi
+fi
 
 # --- ML-KEM: key pairs, usages, and encapsulation where pkcs11-tool has it
 for set in 512 768 1024; do
