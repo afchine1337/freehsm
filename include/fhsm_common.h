@@ -104,9 +104,17 @@ extern "C" {
  * and calls that answer differently in the direction PKCS#11 v3.2 and
  * FIPS 204 ask -- a PQC import without CKA_PARAMETER_SET, a context string
  * over 255 bytes, CKM_ML_DSA with a key of another type, CKM_EDDSA without
- * a parameter on an edwards448 key. */
+ * a parameter on an edwards448 key.
+ *
+ * 2.5.0, MINOR: the HashSLH-DSA mechanisms and multipart AES-CMAC and
+ * AES-GMAC are new, and one answer changes for every caller that meets it --
+ * a curve the module does not take is CKR_CURVE_NOT_SUPPORTED, no longer
+ * CKR_ATTRIBUTE_VALUE_INVALID. The fixes (SLH-DSA key import, ECDSA
+ * verification at the point at infinity, generic-secret lengths,
+ * CKA_COPYABLE) would make a patch on their own; together with the rest they
+ * ride in the minor. */
 #define FHSM_VERSION_MAJOR   2
-#define FHSM_VERSION_MINOR   4
+#define FHSM_VERSION_MINOR   5
 #define FHSM_VERSION_PATCH   0
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
@@ -114,7 +122,7 @@ extern "C" {
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
-#define FHSM_VERSION_STRING  "2.4.0"
+#define FHSM_VERSION_STRING  "2.5.0"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including

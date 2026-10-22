@@ -7,6 +7,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.5.0] --- 2026-10-28
+
+*Minor: HashSLH-DSA, multipart AES-CMAC and AES-GMAC, SLH-DSA and
+HashSLH-DSA checked against NIST's known answers, and one answer that
+changes -- a curve the module does not take is `CKR_CURVE_NOT_SUPPORTED`.
+SLH-DSA keys can be imported. No security advisory.
+`RELEASE_v2.5.0.md` has the release notes.*
+
 ### Fixed
 * **An ECDSA signature whose verification reaches the point at infinity
   answered `CKR_FUNCTION_FAILED`.** OpenSSL returns -1 rather than 0 when
