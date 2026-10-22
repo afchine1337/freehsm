@@ -2780,3 +2780,41 @@ all-mechanisms too (1 071), ECDSA verification answering
 `CKR_FUNCTION_FAILED` on invalid signatures (80), and a handful of single
 cases (`CKA_COPYABLE` true to false, a 512-bit generic secret, AES-CMAC
 multipart).
+
+## 2026-10-22 — the not_operational inventory, fixed, both profiles
+
+    pkcs11-check 0.2.3 · signed module, FIPS provider loaded ·
+    reports/p11c-nist (nist-approved-only), reports/p11c-all-1022
+    (all-mechanisms) · diffed by node-id against
+    reports/pkcs11-check-{nist,all}-2.4.0 (2026-10-14/15)
+
+| profile | passed | failed | xfailed | skipped | 2.4.0 reports |
+|---|---|---|---|---|---|
+| nist-approved-only | 49 205 / 93 293 | 2, both known | 440 | 43 646 | 55 658 passed, 4 failed |
+| all-mechanisms | 49 660 / 93 424 | 3, all known | 448 | 43 305 | 56 113 passed, 5 failed |
+
+The same 21 091 tests moved in each profile, and nothing failed that had
+passed. The passed count falls by about 6 450; that is the honest part of
+the change, explained in the third row.
+
+| move | count | why |
+|---|---:|---|
+| xfailed → passed | 746 | SLH-DSA key import (120 keygen, 168 sigVer, 168 sigGen); ECDSA verification reaching the point at infinity now `CKR_SIGNATURE_INVALID` (70 + 5 + 5); RSA-OAEP and RSA-PSS hashes of 2026-10-16 (183 + 18); ML-KEM decapsulation length (6 + 1); a 512-bit generic secret; `CKA_COPYABLE` true to false |
+| xfailed → skipped | 13 138 | a curve the module does not take is now `CKR_CURVE_NOT_SUPPORTED`, which pkcs11-check reads as absence: Wycheproof ECDSA 7 872, ECDH 4 186, X25519/X448 1 071 (no X25519 or X448 in the FIPS provider), and 9 EC tests on P-224 |
+| passed → skipped | 7 202 | Wycheproof ECDSA *invalid* vectors on brainpool, secp160/192/224 and secp256k1. The key was refused with `CKR_ATTRIBUTE_VALUE_INVALID` and the harness counted that as the invalid signature rejected -- a signature nothing had looked at. With the curve declared unsupported they are absences, which is what they always were |
+| failed → passed | 2 | the Ed448 pair of 2026-10-16 |
+| skipped → passed | 2 | two SLH-DSA parameter sets generated (2026-10-16) |
+| passed → xfailed | 1 | `TestECKeySizeBoundary::test_ec_below_min_is_refused`: secp224r1 key generation is refused with `CKR_CURVE_NOT_SUPPORTED`, which this test's list of enforcing refusals does not contain, though the harness's Wycheproof tests treat it as absence. Reported upstream rather than answered with another code |
+
+The 2026-10-17 references in reports/p11c-{nist,all} were overwritten by
+this run and reports/ is not under version control; the 2.4.0 reports of
+2026-10-14/15 are the baseline above, so the moves include those of
+2026-10-16/17 already recorded in the sections before this one.
+
+An all-mechanisms run first measured a nist-approved-only module: the
+signing step was given without `PROFILE=` and rebuilt the default profile,
+the trap the Makefile describes. Its results matched the nist run exactly
+and are kept as reports/p11c-nist-1022-rerun.
+
+Left from the inventory: AES-CMAC multipart (4 xfails), a feature not yet
+written.
