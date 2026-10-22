@@ -128,6 +128,17 @@ extern "C" {
 /* --- SLH-DSA --- */
 #define CKM_SLH_DSA_KEY_PAIR_GEN             0x0000002Du
 #define CKM_SLH_DSA                          0x0000002Eu
+#define CKM_HASH_SLH_DSA                     0x00000034u
+#define CKM_HASH_SLH_DSA_SHA224              0x00000036u
+#define CKM_HASH_SLH_DSA_SHA256              0x00000037u
+#define CKM_HASH_SLH_DSA_SHA384              0x00000038u
+#define CKM_HASH_SLH_DSA_SHA512              0x00000039u
+#define CKM_HASH_SLH_DSA_SHA3_224            0x0000003Au
+#define CKM_HASH_SLH_DSA_SHA3_256            0x0000003Bu
+#define CKM_HASH_SLH_DSA_SHA3_384            0x0000003Cu
+#define CKM_HASH_SLH_DSA_SHA3_512            0x0000003Du
+#define CKM_HASH_SLH_DSA_SHAKE128            0x0000003Eu
+#define CKM_HASH_SLH_DSA_SHAKE256            0x0000003Fu
 
 /* --- HKDF --- */
 #define CKM_HKDF_DERIVE                      0x0000402Au

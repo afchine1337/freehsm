@@ -48,6 +48,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
   operational for want of that answer. `tests/test_ec_curve_refusal.c`.
 
 ### Added
+* **HashSLH-DSA.** `CKM_HASH_SLH_DSA` and the ten
+  `CKM_HASH_SLH_DSA_<hash>` -- SHA-2, SHA-3 and SHAKE -- FIPS 205
+  Algorithms 23-25, in both profiles. OpenSSL 3.5 does not implement
+  HashSLH-DSA, so the module builds `M' = 0x01 ‖ len(ctx) ‖ ctx ‖ OID(PH) ‖
+  PH(M)` and signs it with slh_sign_internal, exactly as it does for
+  HashML-DSA: the two share one table and one M'. The hash-specific
+  mechanisms take the message, in one part or streamed; the generic one
+  takes PH(M), single-part, with the hash named in
+  `CK_HASH_SIGN_ADDITIONAL_CONTEXT`. `tests/test_hash_slh_dsa.c` signs
+  NIST's ACVP preHash vectors deterministically for all twelve hashes and
+  compares byte for byte, and checks NIST's sigVer verdicts; the subset is
+  extracted by `scripts/extract_hash_slh_dsa_kat.py`.
 * **Multipart AES-CMAC.** `CKM_AES_CMAC` through `C_SignUpdate` /
   `C_SignFinal` and `C_VerifyUpdate` / `C_VerifyFinal`. It was accepted by
   `C_SignInit` for the one-shot path and refused with

@@ -5962,8 +5962,22 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
  * mechanism cannot name it. */
 #define CKM_HASH_ML_DSA_OP         0x0000001FUL
 
+/* HashSLH-DSA (PKCS#11 v3.2, CKM_HASH_SLH_DSA and CKM_HASH_SLH_DSA_<hash>):
+ * FIPS 205 Algorithms 23-25, slh_sign_internal over the same
+ *
+ *     M' = 0x01 || len(ctx) || ctx || OID(PH) || PH(M)
+ *
+ * with the same hash OIDs and the same SHAKE output lengths (FIPS 205
+ * §10.2.2: SHAKE128 to 256 bits, SHAKE256 to 512). So the table below,
+ * M', the streamed PH(M) and the single-part rule for the generic mechanism
+ * serve both families; what differs is the mechanism numbers, the key type
+ * and the signature size. OpenSSL 3.5 has no HashSLH-DSA either, and signs
+ * SLH-DSA with message-encoding 0 as it does ML-DSA. */
+#define CKM_HASH_SLH_DSA_OP        0x00000034UL
+
 typedef struct {
     CK_ULONG    mech;      /* CKM_HASH_ML_DSA_<hash>; 0: generic only */
+    CK_ULONG    slh_mech;  /* CKM_HASH_SLH_DSA_<hash>; 0: generic only */
     CK_ULONG    digest;    /* CKM_<hash>; 0: not nameable (SHAKE) */
     const char *md;        /* OpenSSL name */
     uint8_t     arc;       /* OID 2.16.840.1.101.3.4.2.<arc> */
@@ -5971,19 +5985,19 @@ typedef struct {
 } fhsm_hmldsa_t;
 
 static const fhsm_hmldsa_t HMLDSA[] = {
-    { 0x23UL, 0x255UL, "SHA2-224",      4, 28 },
-    { 0x24UL, 0x250UL, "SHA2-256",      1, 32 },
-    { 0x25UL, 0x260UL, "SHA2-384",      2, 48 },
-    { 0x26UL, 0x270UL, "SHA2-512",      3, 64 },
-    { 0,      0x048UL, "SHA2-512/224",  5, 28 },
-    { 0,      0x04CUL, "SHA2-512/256",  6, 32 },
-    { 0x27UL, 0x2B5UL, "SHA3-224",      7, 28 },
-    { 0x28UL, 0x2B0UL, "SHA3-256",      8, 32 },
-    { 0x29UL, 0x2C0UL, "SHA3-384",      9, 48 },
-    { 0x2AUL, 0x2D0UL, "SHA3-512",     10, 64 },
-    /* FIPS 204 §5.4: 256 and 512 bits of SHAKE output. */
-    { 0x2BUL, 0,       "SHAKE128",     11, 32 },
-    { 0x2CUL, 0,       "SHAKE256",     12, 64 },
+    { 0x23UL, 0x36UL, 0x255UL, "SHA2-224",      4, 28 },
+    { 0x24UL, 0x37UL, 0x250UL, "SHA2-256",      1, 32 },
+    { 0x25UL, 0x38UL, 0x260UL, "SHA2-384",      2, 48 },
+    { 0x26UL, 0x39UL, 0x270UL, "SHA2-512",      3, 64 },
+    { 0,      0,      0x048UL, "SHA2-512/224",  5, 28 },
+    { 0,      0,      0x04CUL, "SHA2-512/256",  6, 32 },
+    { 0x27UL, 0x3AUL, 0x2B5UL, "SHA3-224",      7, 28 },
+    { 0x28UL, 0x3BUL, 0x2B0UL, "SHA3-256",      8, 32 },
+    { 0x29UL, 0x3CUL, 0x2C0UL, "SHA3-384",      9, 48 },
+    { 0x2AUL, 0x3DUL, 0x2D0UL, "SHA3-512",     10, 64 },
+    /* FIPS 204 §5.4 and FIPS 205 §10.2.2: 256 and 512 bits of SHAKE. */
+    { 0x2BUL, 0x3EUL, 0,       "SHAKE128",     11, 32 },
+    { 0x2CUL, 0x3FUL, 0,       "SHAKE256",     12, 64 },
 };
 #define HMLDSA_N (sizeof HMLDSA / sizeof HMLDSA[0])
 
@@ -5998,12 +6012,28 @@ static const uint8_t HMLDSA_OID_PREFIX[] = {
  * mechanism is not one. */
 static int hmldsa_row_of_mech(CK_ULONG mech) {
     for (size_t i = 0; i < HMLDSA_N; ++i)
-        if (HMLDSA[i].mech && HMLDSA[i].mech == mech) return (int)i + 1;
+        if ((HMLDSA[i].mech && HMLDSA[i].mech == mech)
+            || (HMLDSA[i].slh_mech && HMLDSA[i].slh_mech == mech))
+            return (int)i + 1;
     return 0;
 }
 
+/* The generic mechanism of either family: given PH(M), single-part. */
+static int hm_generic(CK_ULONG mech) {
+    return mech == CKM_HASH_ML_DSA_OP || mech == CKM_HASH_SLH_DSA_OP;
+}
+
+/* HashSLH-DSA, generic or hash-specific. */
+static int hm_slh(CK_ULONG mech) {
+    if (mech == CKM_HASH_SLH_DSA_OP) return 1;
+    for (size_t i = 0; i < HMLDSA_N; ++i)
+        if (HMLDSA[i].slh_mech && HMLDSA[i].slh_mech == mech) return 1;
+    return 0;
+}
+
+/* HashML-DSA or HashSLH-DSA: the mechanisms that sign M'. */
 static int hmldsa_is(CK_ULONG mech) {
-    return mech == CKM_HASH_ML_DSA_OP || hmldsa_row_of_mech(mech) != 0;
+    return hm_generic(mech) || hmldsa_row_of_mech(mech) != 0;
 }
 
 /* Read CK_SIGN_ADDITIONAL_CONTEXT { hedgeVariant; pContext; ulContextLen }
@@ -6016,7 +6046,7 @@ static int hmldsa_is(CK_ULONG mech) {
  * (pq_ctx_toolong), as for CKM_ML_DSA: C_SignInit refuses it and
  * verification answers CKR_SIGNATURE_INVALID, per FIPS 204 Algorithms 4-5. */
 static fhsm_rv_t hmldsa_init(fhsm_op_t *op, const void *param, CK_ULONG param_len) {
-    const int generic = (op->mechanism == CKM_HASH_ML_DSA_OP);
+    const int generic = hm_generic(op->mechanism);
     op->hm_row = generic ? 0 : hmldsa_row_of_mech(op->mechanism);
     op->pq_ctx_have = 0;
     op->pq_ctx_len  = 0;
@@ -6070,7 +6100,7 @@ static fhsm_rv_t hmldsa_message(const fhsm_op_t *op, const uint8_t *data, size_t
     memcpy(mp + n, HMLDSA_OID_PREFIX, sizeof HMLDSA_OID_PREFIX);
     n += sizeof HMLDSA_OID_PREFIX;
     mp[n++] = r->arc;
-    if (op->mechanism == CKM_HASH_ML_DSA_OP || op->hm_prehashed) {
+    if (hm_generic(op->mechanism) || op->hm_prehashed) {
         if (data_len != r->out_len) return FHSM_RV_DATA_LEN_RANGE;
         memcpy(mp + n, data, data_len);
     } else {
@@ -9552,6 +9582,11 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x0027: case 0x0028: case 0x0029: case 0x002A: /* HASH_ML_DSA_SHA3_* */
         case 0x002B: case 0x002C:                           /* HASH_ML_DSA_SHAKE* */
             want = 0x4A; break;                             /* CKK_ML_DSA */
+        case 0x002E: case 0x0034:                           /* SLH_DSA, HASH_SLH_DSA */
+        case 0x0036: case 0x0037: case 0x0038: case 0x0039: /* HASH_SLH_DSA_SHA{224..512} */
+        case 0x003A: case 0x003B: case 0x003C: case 0x003D: /* HASH_SLH_DSA_SHA3_* */
+        case 0x003E: case 0x003F:                           /* HASH_SLH_DSA_SHAKE* */
+            want = 0x4B; break;                             /* CKK_SLH_DSA */
         case 0x1081: case 0x1082: case 0x1085: case 0x1086: /* AES ECB/CBC/CBC_PAD/CTR */
         case 0x1087: case 0x1088:                           /* AES GCM/CCM */
         case 0x108A: case 0x108E:                           /* AES CMAC/GMAC */
@@ -10709,6 +10744,10 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x23UL: case 0x24UL: case 0x25UL: case 0x26UL: /* CKM_HASH_ML_DSA_SHA{224..512} */
         case 0x27UL: case 0x28UL: case 0x29UL: case 0x2AUL: /* CKM_HASH_ML_DSA_SHA3_* */
         case 0x2BUL: case 0x2CUL:                           /* CKM_HASH_ML_DSA_SHAKE* */
+        case CKM_HASH_SLH_DSA_OP:
+        case 0x36UL: case 0x37UL: case 0x38UL: case 0x39UL: /* CKM_HASH_SLH_DSA_SHA{224..512} */
+        case 0x3AUL: case 0x3BUL: case 0x3CUL: case 0x3DUL: /* CKM_HASH_SLH_DSA_SHA3_* */
+        case 0x3EUL: case 0x3FUL:                           /* CKM_HASH_SLH_DSA_SHAKE* */
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
         case CKM_RSA_X_509:     /* raw RSA, no padding : all-mechanisms only */
@@ -10986,7 +11025,9 @@ static size_t fhsm_exact_sig_len(fhsm_token_t *t, fhsm_op_t *op) {
  * copies of it, which is the arrangement that only ever holds until someone
  * edits one. */
 static size_t sig_family_bound(uint32_t mech) {
-    if (mech == CKM_SLH_DSA_OP) return 65536u;
+    /* SLH-DSA-256f signs 49 856 bytes; HashSLH-DSA signs as SLH-DSA does, and
+     * is checked before hmldsa_is(), which would give it ML-DSA's bound. */
+    if (mech == CKM_SLH_DSA_OP || hm_slh(mech)) return 65536u;
     if (mech == CKM_ML_DSA_OP || hmldsa_is(mech)) return 8192u;
     return 512u;
 }
@@ -11397,6 +11438,10 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x23UL: case 0x24UL: case 0x25UL: case 0x26UL: /* CKM_HASH_ML_DSA_SHA{224..512} */
         case 0x27UL: case 0x28UL: case 0x29UL: case 0x2AUL: /* CKM_HASH_ML_DSA_SHA3_* */
         case 0x2BUL: case 0x2CUL:                           /* CKM_HASH_ML_DSA_SHAKE* */
+        case CKM_HASH_SLH_DSA_OP:
+        case 0x36UL: case 0x37UL: case 0x38UL: case 0x39UL: /* CKM_HASH_SLH_DSA_SHA{224..512} */
+        case 0x3AUL: case 0x3BUL: case 0x3CUL: case 0x3DUL: /* CKM_HASH_SLH_DSA_SHA3_* */
+        case 0x3EUL: case 0x3FUL:                           /* CKM_HASH_SLH_DSA_SHAKE* */
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
         case CKM_RSA_X_509:     /* raw RSA, no padding : all-mechanisms only */
@@ -12000,7 +12045,7 @@ static fhsm_rv_t composite_ph_final(fhsm_op_t *op, uint8_t *ph, size_t *ph_len) 
  * nothing proportional to the message is held. The generic one is
  * single-part (v3.2 Table 283) and its Update and Final are refused. */
 static fhsm_rv_t hmldsa_ph_update(fhsm_op_t *op, const uint8_t *part, size_t len) {
-    if (op->mechanism == CKM_HASH_ML_DSA_OP) return 0x00000054UL; /* CKR_FUNCTION_NOT_SUPPORTED */
+    if (hm_generic(op->mechanism)) return 0x00000054UL; /* CKR_FUNCTION_NOT_SUPPORTED */
     if (op->hm_row < 1 || (size_t)op->hm_row > HMLDSA_N || op->hm_prehashed)
         return FHSM_RV_FUNCTION_FAILED;
     if (!op->md_ctx) {
@@ -12024,7 +12069,7 @@ static fhsm_rv_t hmldsa_ph_update(fhsm_op_t *op, const uint8_t *part, size_t len
  * is no context and the buffer is empty: the empty message, hashed by
  * hmldsa_message() as the one-shot path does. */
 static fhsm_rv_t hmldsa_ph_finish(fhsm_op_t *op) {
-    if (op->mechanism == CKM_HASH_ML_DSA_OP) return 0x00000054UL; /* CKR_FUNCTION_NOT_SUPPORTED */
+    if (hm_generic(op->mechanism)) return 0x00000054UL; /* CKR_FUNCTION_NOT_SUPPORTED */
     if (!op->md_ctx) return FHSM_RV_OK;
     const fhsm_hmldsa_t *r = &HMLDSA[op->hm_row - 1];
     EVP_MD_CTX *c = (EVP_MD_CTX *)op->md_ctx;
