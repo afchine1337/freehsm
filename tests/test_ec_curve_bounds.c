@@ -100,17 +100,17 @@ int main(void) {
 
     /* Below the advertised minimum: refused in BOTH profiles. This is the
      * case that was accepted by all-mechanisms. */
-    ok(keygen(s, "\x06\x05\x2b\x81\x04\x00\x08", 7) != 0,
-       "secp160r1 (160 bits, below the advertised minimum) is refused");
+    ok(keygen(s, "\x06\x05\x2b\x81\x04\x00\x08", 7) == 0x140UL,
+       "secp160r1 (160 bits, below the advertised minimum): CKR_CURVE_NOT_SUPPORTED");
 
     /* In range but a binary field: refused in both. Nothing advertises F2m. */
-    ok(keygen(s, "\x06\x05\x2b\x81\x04\x00\x10", 7) != 0,
-       "sect283k1 (binary field) is refused");
+    ok(keygen(s, "\x06\x05\x2b\x81\x04\x00\x10", 7) == 0x140UL,
+       "sect283k1 (binary field): CKR_CURVE_NOT_SUPPORTED");
 
     /* SM2: prime and 256 bits, so the range check alone would let it through.
      * Excluded by name, in both profiles -- the module has no SM2 mechanism. */
-    ok(keygen(s, "\x06\x08\x2a\x81\x1c\xcf\x55\x01\x82\x2d", 10) != 0,
-       "SM2 is refused (no SM2 mechanism to use it with)");
+    ok(keygen(s, "\x06\x08\x2a\x81\x1c\xcf\x55\x01\x82\x2d", 10) == 0x140UL,
+       "SM2: CKR_CURVE_NOT_SUPPORTED (no SM2 mechanism to use it with)");
 
     /* Brainpool: the curve the fallback was written for. Present only in
      * all-mechanisms -- and there only where a loaded provider can build it.
@@ -125,8 +125,8 @@ int main(void) {
     else if (getenv("FHSM_INTEGRITY_ALLOW_UNSIGNED"))
         ok(bp == 0, "brainpoolP256r1 is accepted under all-mechanisms (default provider)");
     else
-        ok(bp == 0x13UL, "brainpoolP256r1 is refused as unsupported under the FIPS provider "
-                         "(CKR_ATTRIBUTE_VALUE_INVALID), not failed in key generation");
+        ok(bp == 0x140UL, "brainpoolP256r1 is refused as unsupported under the FIPS provider "
+                          "(CKR_CURVE_NOT_SUPPORTED), not failed in key generation");
 
     printf("\ntest_ec_curve_bounds : %s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;

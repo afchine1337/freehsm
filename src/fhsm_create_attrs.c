@@ -189,7 +189,7 @@ static fhsm_parse_rv_t parse_ec_pub(
 
     const char *group = ec_oid_to_group(
         (const uint8_t *)t[ip].pValue, (size_t)t[ip].ulValueLen);
-    if (!group) return FHSM_PARSE_ATTRIBUTE_VALUE_INVALID;
+    if (!group) return FHSM_PARSE_CURVE_NOT_IN_TABLE;
     attrs->ec_group = group;
 
     /* CKA_EC_POINT is a DER OCTET STRING wrapper around 0x04 || X || Y. */

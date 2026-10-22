@@ -156,6 +156,11 @@ typedef enum {
     /* FHSM_RV_ATTRIBUTE_VALUE_INVALID : an attribute value is malformed
      * (e.g. unknown curve OID, missing OCTET STRING wrapper, etc.). */
     FHSM_PARSE_ATTRIBUTE_VALUE_INVALID,
+    /* CKA_EC_PARAMS is not one of the curves this parser knows. Whether it
+     * names a curve at all (CKR_CURVE_NOT_SUPPORTED) or is malformed
+     * (CKR_ATTRIBUTE_VALUE_INVALID) takes OpenSSL's OID registry, which this
+     * file does not use; C_CreateObject decides. */
+    FHSM_PARSE_CURVE_NOT_IN_TABLE,
 } fhsm_parse_rv_t;
 
 /* Parse a C_CreateObject template into a typed `fhsm_create_attrs_t`.
