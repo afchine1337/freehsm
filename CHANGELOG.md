@@ -48,6 +48,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   operational for want of that answer. `tests/test_ec_curve_refusal.c`.
 
 ### Added
+* **Multipart AES-CMAC.** `CKM_AES_CMAC` through `C_SignUpdate` /
+  `C_SignFinal` and `C_VerifyUpdate` / `C_VerifyFinal`. It was accepted by
+  `C_SignInit` for the one-shot path and refused with
+  `CKR_MECHANISM_INVALID` at the first Update. HMAC and CMAC now share one
+  stream opener in the four multipart functions, which each built the HMAC
+  context themselves. `tests/test_aes_cmac_multipart.c` checks SP 800-38B's
+  examples for AES-128, -192 and -256, one-shot and multipart.
+  `CKM_AES_GMAC` stays one-shot.
 * **SLH-DSA against NIST's known answers.** `tests/test_slh_dsa_kat.c` runs
   vectors from NIST's ACVP SLH-DSA-sigGen-FIPS205 and sigVer-FIPS205 through
   the module: deterministic signatures for all twelve parameter sets, with

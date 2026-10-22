@@ -12065,9 +12065,70 @@ static fhsm_rv_t hmldsa_fail(fhsm_op_t *op, fhsm_rv_t rv) {
 static int mech_sign_is_buffered_multipart(uint32_t m) {
     fhsm_hash_t h; size_t n;
     if (m == CKM_COMPOSITE_MLDSA65_ED25519) return 0;  /* streams its own PH */
-    if (m == CKM_AES_CMAC || m == CKM_AES_GMAC) return 0;  /* still unimplemented */
+    if (m == CKM_AES_CMAC) return 0;                       /* streams via EVP_MAC */
+    if (m == CKM_AES_GMAC) return 0;                       /* multipart unimplemented */
     if (fhsm_hmac_hash_of(m, &h, &n)) return 0;            /* streams via EVP_MAC */
     return 1;
+}
+
+/* The length of the MAC a multipart sign or verify streams through EVP_MAC:
+ * the hash's for an HMAC, 16 bytes for AES-CMAC (SP 800-38B, and
+ * CKM_AES_CMAC has no length parameter). 0 for a mechanism that does not
+ * stream.
+ *
+ * AES-CMAC joined HMAC here on 2026-10-22. Multipart CMAC had been refused
+ * with CKR_MECHANISM_INVALID at the first C_SignUpdate while C_SignInit
+ * accepted it for the one-shot path -- "advertised but not operational" in
+ * pkcs11-check's TestMultipartSign, 4 xfails per profile. The four
+ * functions that stream a MAC each built the HMAC context themselves, so
+ * adding a MAC meant four edits; they now share mac_stream_open. */
+static size_t mac_stream_len(uint32_t m) {
+    fhsm_hash_t h; size_t n;
+    if (fhsm_hmac_hash_of(m, &h, &n)) return n;
+    if (m == CKM_AES_CMAC) return 16;
+    return 0;
+}
+
+/* Open op->mac_ctx for the operation's key: HMAC with the mechanism's
+ * digest, or CMAC with the AES-CBC cipher of the key's length -- the same
+ * construction aes_cmac() uses one-shot, so the two paths give one tag. */
+static fhsm_rv_t mac_stream_open(fhsm_token_t *t, fhsm_op_t *op) {
+    const uint8_t *kv = NULL; size_t kvl = 0;
+    uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) return rv;
+    char name[16];
+    const char *mac_name;
+    OSSL_PARAM params[2];
+    fhsm_hash_t h; size_t n;
+    if (fhsm_hmac_hash_of(op->mechanism, &h, &n)) {
+        const char *dn = hmac_digest_name(h);
+        if (!dn) return FHSM_RV_MECHANISM_INVALID;
+        snprintf(name, sizeof name, "%s", dn);
+        params[0] = OSSL_PARAM_construct_utf8_string("digest", name, 0);
+        mac_name = "HMAC";
+    } else if (op->mechanism == CKM_AES_CMAC) {
+        if (kt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        const char *cn = aes_mac_cipher_name(kvl, 1);
+        if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
+        snprintf(name, sizeof name, "%s", cn);
+        params[0] = OSSL_PARAM_construct_utf8_string("cipher", name, 0);
+        mac_name = "CMAC";
+    } else {
+        return FHSM_RV_MECHANISM_INVALID;
+    }
+    params[1] = OSSL_PARAM_construct_end();
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, mac_name, NULL);
+    if (!mac) return FHSM_RV_MECHANISM_INVALID;
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);
+    if (!ctx) return FHSM_RV_HOST_MEMORY;
+    if (EVP_MAC_init(ctx, kv, kvl, params) != 1) {
+        EVP_MAC_CTX_free(ctx);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    op->mac_ctx = ctx;
+    return FHSM_RV_OK;
 }
 
 CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
@@ -12124,40 +12185,11 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     /* cppcheck-suppress unreadVariable ; a safe default: every path that reads rv assigns it first */
     fhsm_rv_t rv = FHSM_RV_OK;
     if (!op->mac_ctx) {
-        const uint8_t *kv = NULL; size_t kvl = 0;
-        uint32_t cl = 0, kt = 0;
-        rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        /* HMAC (the digest from the mechanism, #125: it was hard-coded to
+         * SHA-256) or AES-CMAC; anything else C_SignInit accepted for the
+         * one-shot path is CKR_MECHANISM_INVALID here. */
+        rv = mac_stream_open(t, op);
         if (rv != FHSM_RV_OK) goto fail;
-        /* Select the digest from the mechanism (#125 : multipart HMAC was
-         * hard-coded to SHA-256, so SHA-384/512/SHA-3 produced a wrong
-         * MAC that did not match the one-shot path).
-         *
-         * A mechanism C_SignInit accepted but that is not an HMAC lands
-         * here: multipart signing is implemented for HMAC and for the
-         * composite mechanism only, while C_SignInit accepts every
-         * signature mechanism because C_Sign needs it to. That gap is a
-         * separate piece of work, not something to paper over here. */
-        fhsm_hash_t uhash; size_t umac;
-        if (!fhsm_hmac_hash_of(op->mechanism, &uhash, &umac)) {
-            rv = FHSM_RV_MECHANISM_INVALID; goto fail;
-        }
-        const char *dn = hmac_digest_name(uhash);
-        if (!dn) { rv = FHSM_RV_MECHANISM_INVALID; goto fail; }
-        EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-        if (!mac) { rv = FHSM_RV_MECHANISM_INVALID; goto fail; }
-        EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
-        EVP_MAC_free(mac);
-        if (!ctx) { rv = FHSM_RV_HOST_MEMORY; goto fail; }
-        OSSL_PARAM params[2];
-        char digest_name[16];
-        snprintf(digest_name, sizeof digest_name, "%s", dn);
-        params[0] = OSSL_PARAM_construct_utf8_string("digest", digest_name, 0);
-        params[1] = OSSL_PARAM_construct_end();
-        if (EVP_MAC_init(ctx, kv, kvl, params) != 1) {
-            EVP_MAC_CTX_free(ctx);
-            rv = FHSM_RV_FUNCTION_FAILED; goto fail;
-        }
-        op->mac_ctx = ctx;
     }
     if (EVP_MAC_update(op->mac_ctx, pPart, ulPartLen) != 1) {
         rv = FHSM_RV_FUNCTION_FAILED; goto fail;
@@ -12291,13 +12323,13 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
 
     /* Signature length is the MAC length of the mechanism's hash, not a
      * hard-coded 32 (#125 multipart HMAC for SHA-384/512/SHA-3). */
-    fhsm_hash_t fhash; size_t fmac;
-    /* Anything that is neither composite nor an HMAC is refused here. It used
-     * to fall back to SHA-256 and 32 bytes, which C_SignUpdate makes
+    /* Anything that is neither composite nor a streamed MAC is refused here.
+     * It used to fall back to SHA-256 and 32 bytes, which C_SignUpdate makes
      * unreachable today -- but a fallback that invents a mechanism is the
      * wrong shape of guard, and the next mechanism wired into Update would
      * have inherited it silently. */
-    if (!fhsm_hmac_hash_of(op->mechanism, &fhash, &fmac)) {
+    const size_t fmac = mac_stream_len(op->mechanism);
+    if (fmac == 0) {
         if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
         op->active = 0;
         return FHSM_RV_MECHANISM_INVALID;
@@ -12306,22 +12338,17 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
     if (*pulSigLen < fmac) { *pulSigLen = fmac; return 0x00000150UL; }
     size_t out_len = 0;
     fhsm_rv_t rv = FHSM_RV_OK;
+    /* No Update issued: the MAC of the empty message, through the same
+     * stream as any other, so HMAC and CMAC need no case of their own. */
     if (!op->mac_ctx) {
-        /* No Update issued ; HMAC of empty input. */
         fhsm_token_t *t = fhsm_session_token(hSession);
-        const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl=0, kt=0;
-        rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
-        if (rv == FHSM_RV_OK) {
-            out_len = *pulSigLen;
-            rv = fhsm_hmac(fhash, FHSM_SLICE(kv, kvl),
-                            FHSM_SLICE("", 0), pSig, &out_len);
-        }
-    } else {
-        if (EVP_MAC_final(op->mac_ctx, pSig, &out_len, *pulSigLen) != 1)
-            rv = FHSM_RV_FUNCTION_FAILED;
-        EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL;
+        rv = t ? mac_stream_open(t, op) : FHSM_RV_SESSION_HANDLE_INVALID;
     }
-    *pulSigLen = out_len;
+    if (rv == FHSM_RV_OK
+        && EVP_MAC_final(op->mac_ctx, pSig, &out_len, *pulSigLen) != 1)
+        rv = FHSM_RV_FUNCTION_FAILED;
+    if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
+    *pulSigLen = rv == FHSM_RV_OK ? out_len : 0;
     op->active = 0;
     return rv;
 }
@@ -12333,14 +12360,14 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
  * predicate that decides which mechanisms take it, so they cannot disagree
  * about what is supported.
  *
- * Covered: HMAC (streamed through EVP_MAC), the composite mechanism
- * (accumulates PH(M)), and the asymmetric families (accumulated and checked
- * at Final by verify_asymmetric). Not covered: CKM_AES_CMAC and
+ * Covered: HMAC and AES-CMAC (streamed through EVP_MAC, mac_stream_open),
+ * the composite mechanism (accumulates PH(M)), and the asymmetric families
+ * (accumulated and checked at Final by verify_asymmetric). Not covered:
  * CKM_AES_GMAC, which C_VerifyInit accepts for the one-shot path and which
- * still reach CKR_MECHANISM_INVALID here. That is the remaining instance of
- * the gap this pair of functions was closing.
+ * still reaches CKR_MECHANISM_INVALID here -- the remaining instance of the
+ * gap this pair of functions was closing.
  *
- * The HMAC compare uses fhsm_ct_memcmp for constant-time equality
+ * The MAC compare uses fhsm_ct_memcmp for constant-time equality
  * to avoid timing side channels on signature validation. */
 CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                      CK_ULONG ulPartLen) {
@@ -12387,39 +12414,12 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     /* cppcheck-suppress unreadVariable ; a safe default: every path that reads rv assigns it first */
     fhsm_rv_t rv = FHSM_RV_OK;
     if (!op->mac_ctx) {
-        const uint8_t *kv = NULL; size_t kvl = 0;
-        uint32_t cl = 0, kt = 0;
-        rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        /* The same stream C_SignUpdate opens. This path once kept the SHA-256
+         * that #125 removed from its sign neighbour -- a fix applied to one of
+         * two callers -- which a shared opener now rules out. What reaches
+         * here is HMAC, AES-CMAC, or CKR_MECHANISM_INVALID (AES-GMAC). */
+        rv = mac_stream_open(t, op);
         if (rv != FHSM_RV_OK) goto vfail;
-        /* Select the digest from the mechanism, as C_SignUpdate does. This
-         * path kept the SHA-256 that #125 removed from its sign neighbour,
-         * so multipart verify refused every other HMAC while multipart sign
-         * produced them: the fix had been applied to one of two callers.
-         * What reaches here now is a MAC mechanism or nothing: the
-         * asymmetric families were taken above, and CKM_AES_CMAC /
-         * CKM_AES_GMAC are still unimplemented for multipart and are
-         * refused by fhsm_hmac_hash_of() returning 0, not by being named. */
-        fhsm_hash_t uhash; size_t umac;
-        if (!fhsm_hmac_hash_of(op->mechanism, &uhash, &umac)) {
-            rv = FHSM_RV_MECHANISM_INVALID; goto vfail;
-        }
-        const char *dn = hmac_digest_name(uhash);
-        if (!dn) { rv = FHSM_RV_MECHANISM_INVALID; goto vfail; }
-        EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-        if (!mac) { rv = FHSM_RV_MECHANISM_INVALID; goto vfail; }
-        EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
-        EVP_MAC_free(mac);
-        if (!ctx) { rv = FHSM_RV_HOST_MEMORY; goto vfail; }
-        OSSL_PARAM params[2];
-        char digest_name[16];
-        snprintf(digest_name, sizeof digest_name, "%s", dn);
-        params[0] = OSSL_PARAM_construct_utf8_string("digest", digest_name, 0);
-        params[1] = OSSL_PARAM_construct_end();
-        if (EVP_MAC_init(ctx, kv, kvl, params) != 1) {
-            EVP_MAC_CTX_free(ctx);
-            rv = FHSM_RV_FUNCTION_FAILED; goto vfail;
-        }
-        op->mac_ctx = ctx;
     }
     if (EVP_MAC_update(op->mac_ctx, pPart, ulPartLen) != 1) {
         rv = FHSM_RV_FUNCTION_FAILED; goto vfail;
@@ -12490,8 +12490,8 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
      * C_SignFinal. This path carried mac[32] and FHSM_HASH_SHA256 in the
      * empty-input branch, so a SHA-384 or SHA-512 multipart verify could not
      * be expressed at all -- the counterpart of the C_VerifyUpdate gate. */
-    fhsm_hash_t fhash; size_t fmac;
-    if (!fhsm_hmac_hash_of(op->mechanism, &fhash, &fmac)) {
+    const size_t fmac = mac_stream_len(op->mechanism);
+    if (fmac == 0) {
         if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
         op->active = 0;
         return FHSM_RV_MECHANISM_INVALID;
@@ -12499,21 +12499,15 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
     uint8_t mac[EVP_MAX_MD_SIZE];
     size_t mac_len = 0;
     fhsm_rv_t rv = FHSM_RV_OK;
+    /* No Update issued: the MAC of the empty message, as in C_SignFinal. */
     if (!op->mac_ctx) {
-        /* No Update issued ; HMAC of empty input. */
         fhsm_token_t *t = fhsm_session_token(hSession);
-        const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl=0, kt=0;
-        rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
-        if (rv == FHSM_RV_OK) {
-            mac_len = sizeof(mac);
-            rv = fhsm_hmac(fhash, FHSM_SLICE(kv, kvl),
-                            FHSM_SLICE("", 0), mac, &mac_len);
-        }
-    } else {
-        if (EVP_MAC_final(op->mac_ctx, mac, &mac_len, sizeof(mac)) != 1)
-            rv = FHSM_RV_FUNCTION_FAILED;
-        EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL;
+        rv = t ? mac_stream_open(t, op) : FHSM_RV_SESSION_HANDLE_INVALID;
     }
+    if (rv == FHSM_RV_OK
+        && EVP_MAC_final(op->mac_ctx, mac, &mac_len, sizeof(mac)) != 1)
+        rv = FHSM_RV_FUNCTION_FAILED;
+    if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
     op->active = 0;
     if (rv != FHSM_RV_OK) { OPENSSL_cleanse(mac, sizeof mac); return rv; }
     /* Compare against the length the mechanism defines, not just against
