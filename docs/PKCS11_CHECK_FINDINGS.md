@@ -2818,3 +2818,28 @@ and are kept as reports/p11c-nist-1022-rerun.
 
 Left from the inventory: AES-CMAC multipart (4 xfails), a feature not yet
 written.
+
+## 2026-10-22 — AES-CMAC multipart and HashSLH-DSA, targeted runs
+
+    pkcs11-check 0.2.3 · unsigned module, nist-approved-only ·
+    reports/p11check-cmac-nist (FHSM_PKCS11CHECK_MATCH=multipart),
+    reports/p11check-hashslh-nist (FHSM_PKCS11CHECK_MATCH=hash_slh)
+
+**AES-CMAC multipart.** 151 passed, 36 skipped, 4 xfailed, no failure. The
+`AES_CMAC:multipart-sign` xfails are gone. What remains is expected:
+`AES_GMAC` (2), which is still one-shot only, and `HASH_ML_DSA` (2), the
+generic mechanism called without its required parameter
+(mingulov/pkcs11-check#51).
+
+**HashSLH-DSA.** 129 passed, 183 skipped, 5 xfailed, no failure. The ten
+hash-specific `CKM_HASH_SLH_DSA_<hash>` pass `TestHashSLHDSA*`, the registry
+round trip, tampering, multipart and the flag tests, and the generic one
+passes the missing and malformed parameter refusals (the registry asks
+those of it alone) -- tests that were all skipped before, the mechanisms
+not existing. The five xfails are the generic `CKM_HASH_SLH_DSA`,
+in the same two shapes as `CKM_HASH_ML_DSA`: `TestHashSLHDSAGeneric` signs
+the message where v3.2 Table 283 takes PH(M) (`CKR_DATA_LEN_RANGE`, 1), and
+`TestMechSignRoundtrip` / `TestMultipartSign` call it without
+`CK_HASH_SIGN_ADDITIONAL_CONTEXT` (`CKR_MECHANISM_PARAM_INVALID`, 4). Added
+to #51 the same day. The byte-for-byte check against NIST is
+`tests/test_hash_slh_dsa.c`, not the harness, which compares no signature.
