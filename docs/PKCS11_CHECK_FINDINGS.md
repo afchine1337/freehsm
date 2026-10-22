@@ -2843,3 +2843,28 @@ the message where v3.2 Table 283 takes PH(M) (`CKR_DATA_LEN_RANGE`, 1), and
 `CK_HASH_SIGN_ADDITIONAL_CONTEXT` (`CKR_MECHANISM_PARAM_INVALID`, 4). Added
 to #51 the same day. The byte-for-byte check against NIST is
 `tests/test_hash_slh_dsa.c`, not the harness, which compares no signature.
+
+## 2026-10-22 — the 2.5.0 commit, both profiles
+
+    pkcs11-check 0.2.3 · signed module, FIPS provider loaded ·
+    reports/p11c-nist-250, reports/p11c-all-250 · diffed by node-id against
+    reports/p11c-nist and reports/p11c-all-1022 (the same day, before
+    multipart GMAC and HashSLH-DSA)
+
+| profile | passed | failed | xfailed | skipped |
+|---|---|---|---|---|
+| nist-approved-only | 49 338 / 93 568 | 2, both known | 441 | 43 779 |
+| all-mechanisms | 49 793 / 93 699 | 3, all known | 449 | 43 446 |
+
+The same 321 moves in each profile, none backwards:
+
+| move | count | why |
+|---|---:|---|
+| xfailed → passed | 4 | multipart AES-CMAC and AES-GMAC (`TestMultipartSign`) |
+| skipped → passed | 41 | `TestHashSLHDSAVariants` for the ten hash-specific mechanisms, and the generic one's availability |
+| (new) → passed | 88 | per-mechanism tests generated for the eleven new mechanisms: flags, round trip, tampering, multipart |
+| (new) → skipped | 183 | registry tests that do not apply to them (no KAT entry, flag and key-type probes the registry does not run for these) |
+| (new) / skipped → xfailed | 5 | the generic `CKM_HASH_SLH_DSA`, called without `CK_HASH_SIGN_ADDITIONAL_CONTEXT` or on the message (#51) |
+
+The test count grows by 283 because pkcs11-check parametrizes per
+advertised mechanism. These are the figures in RELEASE_v2.5.0.md.

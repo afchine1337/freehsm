@@ -107,8 +107,40 @@ Test Case 1, for AES-128, -192 and -256.
 
 ## Measured
 
-*To be filled from the full runs on the release commit, both profiles,
-signed module.*
+pkcs11-check 0.2.3, full corpus, signed module, the 2.5.0 commit on
+2026-10-22: 49 338 passed of 93 568 in `nist-approved-only` and 49 793 of
+93 699 in `all-mechanisms`, with 2 and 3 failures, all of them the known
+ones listed in `tests/pkcs11_check_known_failures.txt` -- the async probes,
+fixed in the harness and not yet released, and in `all-mechanisms` the v1.5
+structured oracle.
+
+The passed count is lower than 2.4.0's 55 870 and 56 325, and the change is
+an accounting one. Diffed by node-id, every move is attributed in
+`docs/PKCS11_CHECK_FINDINGS.md` and none is a failure. What 2.5.0 itself
+moved:
+
+- 538 xfails passed: SLH-DSA key import (456), ECDSA at the point at
+  infinity (80), a 512-bit generic secret, `CKA_COPYABLE`;
+- 13 138 xfails became skips: curves the module does not take, now
+  `CKR_CURVE_NOT_SUPPORTED`;
+- 7 202 passes became skips: invalid ECDSA vectors on those curves, which
+  had passed because the key was refused before any signature was looked
+  at;
+- then, on the release commit, 321 moves in each profile, the same 321: 4
+  xfails passed (multipart AES-CMAC and AES-GMAC), 41 skips passed and 275
+  new tests appeared with the eleven HashSLH-DSA mechanisms (88 passed,
+  183 not applicable), and 5 xfails on the generic `CKM_HASH_SLH_DSA`,
+  which the harness calls without its required parameter or on the message
+  rather than PH(M) (mingulov/pkcs11-check#51).
+
+One test went from passed to xfailed: `test_ec_below_min_is_refused` does
+not count `CKR_CURVE_NOT_SUPPORTED` among the refusals it accepts, though the
+harness's Wycheproof tests read it as absence (mingulov/pkcs11-check#63).
+
+`make tests` passes, `tests/test_slh_dsa_kat`, `tests/test_hash_slh_dsa`,
+`tests/test_aes_cmac_multipart` and `tests/test_aes_gmac_multipart`
+included, and `tests/pkcs11_tool_pqc.sh` passes its 76 checks with OpenSC
+master's `pkcs11-tool`.
 
 ## Why minor and not patch
 
