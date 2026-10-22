@@ -12110,33 +12110,37 @@ static fhsm_rv_t hmldsa_fail(fhsm_op_t *op, fhsm_rv_t rv) {
 static int mech_sign_is_buffered_multipart(uint32_t m) {
     fhsm_hash_t h; size_t n;
     if (m == CKM_COMPOSITE_MLDSA65_ED25519) return 0;  /* streams its own PH */
-    if (m == CKM_AES_CMAC) return 0;                       /* streams via EVP_MAC */
-    if (m == CKM_AES_GMAC) return 0;                       /* multipart unimplemented */
+    if (m == CKM_AES_CMAC || m == CKM_AES_GMAC) return 0;  /* stream via EVP_MAC */
     if (fhsm_hmac_hash_of(m, &h, &n)) return 0;            /* streams via EVP_MAC */
     return 1;
 }
 
 /* The length of the MAC a multipart sign or verify streams through EVP_MAC:
  * the hash's for an HMAC, 16 bytes for AES-CMAC (SP 800-38B, and
- * CKM_AES_CMAC has no length parameter). 0 for a mechanism that does not
- * stream.
+ * CKM_AES_CMAC has no length parameter), and for AES-GMAC the tag length
+ * CK_GCM_PARAMS asked for -- the leftmost bytes of the 16-byte tag, SP
+ * 800-38D §5.2.1.2, as the one-shot path truncates. 0 for a mechanism that
+ * does not stream.
  *
- * AES-CMAC joined HMAC here on 2026-10-22. Multipart CMAC had been refused
- * with CKR_MECHANISM_INVALID at the first C_SignUpdate while C_SignInit
- * accepted it for the one-shot path -- "advertised but not operational" in
- * pkcs11-check's TestMultipartSign, 4 xfails per profile. The four
- * functions that stream a MAC each built the HMAC context themselves, so
- * adding a MAC meant four edits; they now share mac_stream_open. */
-static size_t mac_stream_len(uint32_t m) {
+ * AES-CMAC joined HMAC here on 2026-10-22, and AES-GMAC the same day.
+ * Multipart CMAC and GMAC had been refused with CKR_MECHANISM_INVALID at the
+ * first C_SignUpdate while C_SignInit accepted them for the one-shot path --
+ * "advertised but not operational" in pkcs11-check's TestMultipartSign. The
+ * four functions that stream a MAC each built the HMAC context themselves,
+ * so adding a MAC meant four edits; they now share mac_stream_open. */
+static size_t mac_stream_len(const fhsm_op_t *op) {
     fhsm_hash_t h; size_t n;
-    if (fhsm_hmac_hash_of(m, &h, &n)) return n;
-    if (m == CKM_AES_CMAC) return 16;
+    if (fhsm_hmac_hash_of(op->mechanism, &h, &n)) return n;
+    if (op->mechanism == CKM_AES_CMAC) return 16;
+    if (op->mechanism == CKM_AES_GMAC)
+        return (op->gcm_tag_len && op->gcm_tag_len <= 16) ? op->gcm_tag_len : 16;
     return 0;
 }
 
 /* Open op->mac_ctx for the operation's key: HMAC with the mechanism's
- * digest, or CMAC with the AES-CBC cipher of the key's length -- the same
- * construction aes_cmac() uses one-shot, so the two paths give one tag. */
+ * digest, CMAC with the AES-CBC cipher of the key's length, or GMAC with the
+ * AES-GCM cipher and the IV C_SignInit captured -- the constructions
+ * aes_cmac() and aes_gmac() use one-shot, so the two paths give one tag. */
 static fhsm_rv_t mac_stream_open(fhsm_token_t *t, fhsm_op_t *op) {
     const uint8_t *kv = NULL; size_t kvl = 0;
     uint32_t cl = 0, kt = 0;
@@ -12144,25 +12148,31 @@ static fhsm_rv_t mac_stream_open(fhsm_token_t *t, fhsm_op_t *op) {
     if (rv != FHSM_RV_OK) return rv;
     char name[16];
     const char *mac_name;
-    OSSL_PARAM params[2];
+    OSSL_PARAM params[3];
+    int np = 0;
     fhsm_hash_t h; size_t n;
     if (fhsm_hmac_hash_of(op->mechanism, &h, &n)) {
         const char *dn = hmac_digest_name(h);
         if (!dn) return FHSM_RV_MECHANISM_INVALID;
         snprintf(name, sizeof name, "%s", dn);
-        params[0] = OSSL_PARAM_construct_utf8_string("digest", name, 0);
+        params[np++] = OSSL_PARAM_construct_utf8_string("digest", name, 0);
         mac_name = "HMAC";
-    } else if (op->mechanism == CKM_AES_CMAC) {
+    } else if (op->mechanism == CKM_AES_CMAC || op->mechanism == CKM_AES_GMAC) {
+        const int gmac = (op->mechanism == CKM_AES_GMAC);
         if (kt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
-        const char *cn = aes_mac_cipher_name(kvl, 1);
+        /* GMAC without an IV is refused, as on the one-shot path. */
+        if (gmac && (!op->gcm_have || op->gcm_iv_len == 0)) return FHSM_RV_ARGUMENTS_BAD;
+        const char *cn = aes_mac_cipher_name(kvl, gmac ? 0 : 1);
         if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
         snprintf(name, sizeof name, "%s", cn);
-        params[0] = OSSL_PARAM_construct_utf8_string("cipher", name, 0);
-        mac_name = "CMAC";
+        params[np++] = OSSL_PARAM_construct_utf8_string("cipher", name, 0);
+        if (gmac)
+            params[np++] = OSSL_PARAM_construct_octet_string("iv", op->gcm_iv, op->gcm_iv_len);
+        mac_name = gmac ? "GMAC" : "CMAC";
     } else {
         return FHSM_RV_MECHANISM_INVALID;
     }
-    params[1] = OSSL_PARAM_construct_end();
+    params[np] = OSSL_PARAM_construct_end();
     EVP_MAC *mac = EVP_MAC_fetch(NULL, mac_name, NULL);
     if (!mac) return FHSM_RV_MECHANISM_INVALID;
     EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
@@ -12373,7 +12383,7 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
      * unreachable today -- but a fallback that invents a mechanism is the
      * wrong shape of guard, and the next mechanism wired into Update would
      * have inherited it silently. */
-    const size_t fmac = mac_stream_len(op->mechanism);
+    const size_t fmac = mac_stream_len(op);
     if (fmac == 0) {
         if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
         op->active = 0;
@@ -12381,19 +12391,25 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
     }
     if (pSig == NULL) { *pulSigLen = fmac; return FHSM_RV_OK; }
     if (*pulSigLen < fmac) { *pulSigLen = fmac; return 0x00000150UL; }
+    uint8_t full[EVP_MAX_MD_SIZE];
     size_t out_len = 0;
     fhsm_rv_t rv = FHSM_RV_OK;
     /* No Update issued: the MAC of the empty message, through the same
-     * stream as any other, so HMAC and CMAC need no case of their own. */
+     * stream as any other, so no MAC needs a case of its own. */
     if (!op->mac_ctx) {
         fhsm_token_t *t = fhsm_session_token(hSession);
         rv = t ? mac_stream_open(t, op) : FHSM_RV_SESSION_HANDLE_INVALID;
     }
+    /* Finished into a local buffer, then the mechanism's length copied out:
+     * GMAC computes 16 bytes and a shorter tag is their prefix. */
     if (rv == FHSM_RV_OK
-        && EVP_MAC_final(op->mac_ctx, pSig, &out_len, *pulSigLen) != 1)
+        && (EVP_MAC_final(op->mac_ctx, full, &out_len, sizeof full) != 1
+            || out_len < fmac))
         rv = FHSM_RV_FUNCTION_FAILED;
+    if (rv == FHSM_RV_OK) memcpy(pSig, full, fmac);
+    OPENSSL_cleanse(full, sizeof full);
     if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
-    *pulSigLen = rv == FHSM_RV_OK ? out_len : 0;
+    *pulSigLen = rv == FHSM_RV_OK ? fmac : 0;
     op->active = 0;
     return rv;
 }
@@ -12405,12 +12421,12 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
  * predicate that decides which mechanisms take it, so they cannot disagree
  * about what is supported.
  *
- * Covered: HMAC and AES-CMAC (streamed through EVP_MAC, mac_stream_open),
- * the composite mechanism (accumulates PH(M)), and the asymmetric families
- * (accumulated and checked at Final by verify_asymmetric). Not covered:
- * CKM_AES_GMAC, which C_VerifyInit accepts for the one-shot path and which
- * still reaches CKR_MECHANISM_INVALID here -- the remaining instance of the
- * gap this pair of functions was closing.
+ * Covered: HMAC, AES-CMAC and AES-GMAC (streamed through EVP_MAC,
+ * mac_stream_open), the composite mechanism (accumulates PH(M)), and the
+ * asymmetric families (accumulated and checked at Final by
+ * verify_asymmetric). With GMAC, every MAC C_VerifyInit accepts for the
+ * one-shot path also streams, which closes the gap this pair of functions
+ * was written for.
  *
  * The MAC compare uses fhsm_ct_memcmp for constant-time equality
  * to avoid timing side channels on signature validation. */
@@ -12462,7 +12478,7 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
         /* The same stream C_SignUpdate opens. This path once kept the SHA-256
          * that #125 removed from its sign neighbour -- a fix applied to one of
          * two callers -- which a shared opener now rules out. What reaches
-         * here is HMAC, AES-CMAC, or CKR_MECHANISM_INVALID (AES-GMAC). */
+         * here is HMAC, AES-CMAC or AES-GMAC. */
         rv = mac_stream_open(t, op);
         if (rv != FHSM_RV_OK) goto vfail;
     }
@@ -12535,7 +12551,7 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
      * C_SignFinal. This path carried mac[32] and FHSM_HASH_SHA256 in the
      * empty-input branch, so a SHA-384 or SHA-512 multipart verify could not
      * be expressed at all -- the counterpart of the C_VerifyUpdate gate. */
-    const size_t fmac = mac_stream_len(op->mechanism);
+    const size_t fmac = mac_stream_len(op);
     if (fmac == 0) {
         if (op->mac_ctx) { EVP_MAC_CTX_free(op->mac_ctx); op->mac_ctx = NULL; }
         op->active = 0;
@@ -12557,9 +12573,11 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
     if (rv != FHSM_RV_OK) { OPENSSL_cleanse(mac, sizeof mac); return rv; }
     /* Compare against the length the mechanism defines, not just against
      * whatever came out: a caller that presents a truncated signature must
-     * not be able to have it accepted on a short compare. */
-    int ok = (ulSigLen == mac_len) && (mac_len == fmac) &&
-             (fhsm_ct_memcmp(mac, pSig, mac_len) == 0);
+     * not be able to have it accepted on a short compare. GMAC's defined
+     * length may be shorter than the 16 bytes computed; the tag is then
+     * their prefix, and only that length is accepted. */
+    int ok = (ulSigLen == fmac) && (mac_len >= fmac) &&
+             (fhsm_ct_memcmp(mac, pSig, fmac) == 0);
     OPENSSL_cleanse(mac, sizeof mac);
     return ok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
 }

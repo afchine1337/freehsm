@@ -60,14 +60,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
   NIST's ACVP preHash vectors deterministically for all twelve hashes and
   compares byte for byte, and checks NIST's sigVer verdicts; the subset is
   extracted by `scripts/extract_hash_slh_dsa_kat.py`.
-* **Multipart AES-CMAC.** `CKM_AES_CMAC` through `C_SignUpdate` /
-  `C_SignFinal` and `C_VerifyUpdate` / `C_VerifyFinal`. It was accepted by
-  `C_SignInit` for the one-shot path and refused with
-  `CKR_MECHANISM_INVALID` at the first Update. HMAC and CMAC now share one
-  stream opener in the four multipart functions, which each built the HMAC
-  context themselves. `tests/test_aes_cmac_multipart.c` checks SP 800-38B's
-  examples for AES-128, -192 and -256, one-shot and multipart.
-  `CKM_AES_GMAC` stays one-shot.
+* **Multipart AES-CMAC and AES-GMAC.** `CKM_AES_CMAC` and `CKM_AES_GMAC`
+  through `C_SignUpdate` / `C_SignFinal` and `C_VerifyUpdate` /
+  `C_VerifyFinal`. Both were accepted by `C_SignInit` for the one-shot path
+  and refused with `CKR_MECHANISM_INVALID` at the first Update. HMAC, CMAC
+  and GMAC now share one stream opener in the four multipart functions,
+  which each built the HMAC context themselves; a GMAC tag shorter than 16
+  bytes (`CK_GCM_PARAMS.ulTagBits`) is the prefix of the full one, as on the
+  one-shot path. `tests/test_aes_cmac_multipart.c` checks SP 800-38B's
+  examples, `tests/test_aes_gmac_multipart.c` OpenSSL's GMAC and the GCM
+  specification's Test Case 1, for AES-128, -192 and -256.
 * **SLH-DSA against NIST's known answers.** `tests/test_slh_dsa_kat.c` runs
   vectors from NIST's ACVP SLH-DSA-sigGen-FIPS205 and sigVer-FIPS205 through
   the module: deterministic signatures for all twelve parameter sets, with
