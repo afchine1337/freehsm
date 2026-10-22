@@ -2951,6 +2951,16 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
              * ordinary 20- or 64-byte secret. */
             if (req == 0 || req > FHSM_PBKDF2_MAX_OUT)
                 return FHSM_RV_KEY_SIZE_RANGE;
+        } else if (key_type == CKK_GENERIC_SECRET) {
+            /* A generic secret has no block size either -- an HMAC key is
+             * as long as the caller needs. The 16/24/32 rule refused a
+             * 64-byte one that C_GetMechanismInfo advertises (GENERIC, 1 to
+             * 64 bytes): pkcs11-check's TestGenericSecretKeyGen asked for
+             * 512 bits and got CKR_KEY_SIZE_RANGE. The bounds are the ones
+             * advertised, read from the same function. */
+            CK_ULONG mn = 0, mx = 0;
+            fhsm_mech_keysizes_for("GENERIC", &mn, &mx);
+            if (req < mn || req > mx) return FHSM_RV_KEY_SIZE_RANGE;
         } else if (req != 16 && req != 24 && req != 32) {
             return FHSM_RV_KEY_SIZE_RANGE;
         }
@@ -3069,6 +3079,11 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
 static const char *match_curve(const uint8_t *der, size_t len);
 static const char *match_ed_curve(const uint8_t *der, size_t len);
 static const char *match_ecm_curve(const uint8_t *der, size_t len);
+#ifndef CKR_CURVE_NOT_SUPPORTED
+#define CKR_CURVE_NOT_SUPPORTED 0x00000140UL  /* PKCS#11 v3.0 */
+#endif
+static CK_RV fhsm_ec_curve_refusal(const uint8_t *der, size_t len);
+static const char *match_curve_ex(const uint8_t *der, size_t len, int *non_approved);
 static EVP_PKEY *fhsm_ec_priv_from_scalar(const char *curve,
                                            const uint8_t *d, size_t d_len);
 
@@ -3100,6 +3115,9 @@ static CK_RV map_parse_rv(fhsm_parse_rv_t rv) {
         case FHSM_PARSE_TEMPLATE_INCOMPLETE:         return CKR_TEMPLATE_INCOMPLETE;
         case FHSM_PARSE_TEMPLATE_INCONSISTENT:       return CKR_TEMPLATE_INCONSISTENT;
         case FHSM_PARSE_ATTRIBUTE_VALUE_INVALID:     return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        /* Resolved by the caller, which has the template; reached here only
+         * if a caller forgets, and then the old answer is the safe one. */
+        case FHSM_PARSE_CURVE_NOT_IN_TABLE:          return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     }
     return FHSM_RV_FUNCTION_FAILED;
 }
@@ -3575,8 +3593,17 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * The CK_ATTRIBUTE layout is bit-identical to fhsm_attr_t (see
      * include/fhsm_attr_utils.h) ; the cast below is therefore safe. */
     fhsm_create_attrs_t a;
-    CK_RV rv_parse = map_parse_rv(fhsm_parse_create_attrs(
-        (const fhsm_attr_t *)pTemplate, ulCount, &a));
+    fhsm_parse_rv_t prv = fhsm_parse_create_attrs(
+        (const fhsm_attr_t *)pTemplate, ulCount, &a);
+    if (prv == FHSM_PARSE_CURVE_NOT_IN_TABLE) {
+        /* An EC public key on a curve outside the parser's table: a curve
+         * the module does not take for import, or no curve at all. */
+        long pi = find_attr(pTemplate, ulCount, CKA_EC_PARAMS);
+        return pi < 0 ? CKR_TEMPLATE_INCOMPLETE
+                      : fhsm_ec_curve_refusal(pTemplate[pi].pValue,
+                                              pTemplate[pi].ulValueLen);
+    }
+    CK_RV rv_parse = map_parse_rv(prv);
     if (rv_parse != FHSM_RV_OK) return rv_parse;
 
     /* CKA_PARAMETER_SET on an ML-KEM, ML-DSA or SLH-DSA key. PKCS#11 v3.2
@@ -3671,7 +3698,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                 if (pi < 0 || !pTemplate[pi].pValue) return CKR_TEMPLATE_INCOMPLETE;
                 const char *curve = match_curve(pTemplate[pi].pValue,
                                                  pTemplate[pi].ulValueLen);
-                if (!curve) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                if (!curve) return fhsm_ec_curve_refusal(pTemplate[pi].pValue,
+                                                         pTemplate[pi].ulValueLen);
                 ipk = fhsm_ec_priv_from_scalar(curve, a.value_data, a.value_len);
                 from_raw = 1;
             } else if (a.ckk == CKK_ML_KEM || a.ckk == CKK_ML_DSA
@@ -3719,7 +3747,14 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                 const char *alg = (a.ckk == CKK_EC_EDWARDS_CREATEOBJECT)
                     ? match_ed_curve(pTemplate[pi].pValue, pTemplate[pi].ulValueLen)
                     : match_ecm_curve(pTemplate[pi].pValue, pTemplate[pi].ulValueLen);
-                if (!alg) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                if (!alg) return fhsm_ec_curve_refusal(pTemplate[pi].pValue,
+                                                       pTemplate[pi].ulValueLen);
+                /* A signed module loads the FIPS provider, which has no
+                 * X25519 or X448 (fhsm_ecm_available). The curve is named
+                 * correctly; it is not served. Said so here rather than as a
+                 * failed key build, which read as an invalid value. */
+                if (a.ckk == CKK_EC_MONTGOMERY_KT && !fhsm_ecm_available())
+                    return CKR_CURVE_NOT_SUPPORTED;
                 ipk = EVP_PKEY_new_raw_private_key_ex(NULL, alg, NULL,
                                                        a.value_data, a.value_len);
                 from_raw = 1;
@@ -6311,6 +6346,43 @@ static const char *match_curve(const uint8_t *der, size_t len) {
     return name;
 }
 
+/* The answer for a CKA_EC_PARAMS this module will not take.
+ *
+ * Every refusal of a curve used to be CKR_ATTRIBUTE_VALUE_INVALID: "the
+ * value is wrong". For brainpool, secp256k1 or P-224 it is not wrong -- it
+ * names a curve OpenSSL knows, which this build, this profile or the loaded
+ * provider does not serve. PKCS#11 v3.0 added CKR_CURVE_NOT_SUPPORTED for
+ * exactly that, and a caller deciding whether to try another curve needs to
+ * tell the two apart. pkcs11-check does: the 2.4.0 reports held about
+ * 13 100 Wycheproof ECDSA, ECDH and X25519/X448 vectors per profile as
+ * "advertised but not operational" xfails, which are absences it would have
+ * skipped had the module said so (docs/PKCS11_CHECK_FINDINGS.md,
+ * 2026-10-21).
+ *
+ * So: a DER OBJECT IDENTIFIER that OpenSSL resolves to an elliptic curve is
+ * CKR_CURVE_NOT_SUPPORTED; anything else -- not an OID, an OID naming no
+ * curve -- stays CKR_ATTRIBUTE_VALUE_INVALID. Called only once a curve has
+ * been refused, so it never decides whether a curve is accepted. */
+static CK_RV fhsm_ec_curve_refusal(const uint8_t *der, size_t len) {
+    if (!der || len == 0 || len > 64) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    const uint8_t *p = der;
+    ERR_set_mark();
+    ASN1_OBJECT *obj = d2i_ASN1_OBJECT(NULL, &p, (long)len);
+    int nid = obj ? OBJ_obj2nid(obj) : NID_undef;
+    ASN1_OBJECT_free(obj);
+    int curve = 0;
+    if (nid == NID_X25519 || nid == NID_X448
+        || nid == NID_ED25519 || nid == NID_ED448) {
+        curve = 1;
+    } else if (nid != NID_undef && (size_t)(p - der) == len) {
+        EC_GROUP *g = EC_GROUP_new_by_curve_name(nid);
+        curve = (g != NULL);
+        EC_GROUP_free(g);
+    }
+    ERR_pop_to_mark();
+    return curve ? CKR_CURVE_NOT_SUPPORTED : FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+}
+
 /* Validate a CKA_PARAMETER_SET value against the known PQC parameter-set
  * names. A CK_ULONG-sized or otherwise malformed value is rejected
  * (#125 TestGenerateKeyPairErrors : over/underlong CKA_PARAMETER_SET). */
@@ -6521,7 +6593,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         long i = find_attr(pPub, ulPub, CKA_EC_PARAMS);
         if (i >= 0 && pPub[i].pValue) {
             const char *m = match_curve(pPub[i].pValue, pPub[i].ulValueLen);
-            if (!m) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            if (!m) return fhsm_ec_curve_refusal(pPub[i].pValue, pPub[i].ulValueLen);
             curve = m;
         }
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, "EC", curve);
@@ -7680,6 +7752,24 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
                 f2_touched = 1;
                 break;
             }
+            case CKA_COPYABLE_ATTR: {
+                /* One-way the other way: PKCS#11 v3.0 §4.4 lets CKA_COPYABLE
+                 * go from CK_TRUE to CK_FALSE and not back, since an object
+                 * that could be made copyable again would make the FALSE
+                 * meaningless. It was CKR_ATTRIBUTE_READ_ONLY both ways, a
+                 * stated limitation (pkcs11-check TestCopyableOneWay). The flag
+                 * C_CopyObject consults already existed. */
+                if (a->ulValueLen != 1 || !a->pValue)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                uint8_t want = *(const uint8_t *)a->pValue ? 1 : 0;
+                uint8_t is_now = (f2_new & FHSM_OBJF2_NOT_COPYABLE) ? 0 : 1;
+                if (want == is_now) break;          /* no-op */
+                if (want == 1)
+                    return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
+                f2_new |= FHSM_OBJF2_NOT_COPYABLE;
+                f2_touched = 1;
+                break;
+            }
             case CKA_EXTRACTABLE: {
                 if (a->ulValueLen != 1 || !a->pValue)
                     return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
@@ -7720,17 +7810,16 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
              * record provenance, and a settable provenance attribute is
              * exactly the CKA_LOCAL lie fixed earlier in this series.
              *
-             * CKA_MODIFIABLE / CKA_DESTROYABLE / CKA_COPYABLE are settable
-             * TRUE->FALSE per spec; we do not implement the transition, so
-             * READ_ONLY is a stated limitation rather than a false claim
-             * about the attribute's existence. */
+             * CKA_MODIFIABLE and CKA_DESTROYABLE: the transition is not
+             * implemented, so READ_ONLY is a stated limitation rather than a
+             * false claim about the attribute's existence. CKA_COPYABLE's
+             * TRUE->FALSE is handled above. */
             case CKA_TOKEN:
             case CKA_PRIVATE:
             case CKA_LOCAL_ATTR:
             case CKA_ALWAYS_SENSITIVE_ATTR:
             case CKA_NEVER_EXTRACTABLE_ATTR:
             case CKA_MODIFIABLE_ATTR:
-            case CKA_COPYABLE_ATTR:
             case CKA_DESTROYABLE_ATTR:
             case CKA_ALWAYS_AUTH_ATTR:
                 return 0x00000010UL;                 /* CKR_ATTRIBUTE_READ_ONLY */
@@ -11623,7 +11712,11 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
         int vrv = EVP_PKEY_verify(pkctx_raw, sig_to_verify, sig_to_verify_len,
                                     pData, ulDataLen);
         verify_ok = (vrv == 1);
-        if (vrv < 0) {
+        if (vrv < 0 && fhsm_mech_is_ecdsa(op->mechanism)) {
+            /* See the hashed path below: an ECDSA arithmetic error here is
+             * the signature failing, not the module. */
+            ERR_clear_error();
+        } else if (vrv < 0) {
             if (der_buf) OPENSSL_free(der_buf);
             EVP_PKEY_CTX_free(pkctx_raw);
             EVP_PKEY_free(pkey);
@@ -11654,7 +11747,19 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
             int vrv = EVP_DigestVerify(mdctx, sig_to_verify, sig_to_verify_len,
                                         pData, ulDataLen);
             verify_ok = (vrv == 1);
-            if (vrv < 0) {
+            /* ECDSA: OpenSSL answers -1, not 0, when the verification
+             * arithmetic of the given (r, s) reaches the point at infinity --
+             * what Wycheproof's "point at infinity during verify", "duplication
+             * bug" and "comparison with point at infinity" vectors are built
+             * to do. The key is loaded and the signature well formed by this
+             * point, so the only input that can make the computation fail is
+             * the signature: CKR_SIGNATURE_INVALID, not CKR_FUNCTION_FAILED.
+             * pkcs11-check scored 80 such vectors per profile as a non-clean
+             * rejection (PKCS11_CHECK_FINDINGS, 2026-10-21). RSA keeps the old
+             * answer: there a negative return has other causes. */
+            if (vrv < 0 && fhsm_mech_is_ecdsa(op->mechanism)) {
+                ERR_clear_error();
+            } else if (vrv < 0) {
                 if (der_buf) OPENSSL_free(der_buf);
                 EVP_MD_CTX_free(mdctx);
                 EVP_PKEY_free(pkey);

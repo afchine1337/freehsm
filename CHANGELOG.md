@@ -8,6 +8,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+* **An ECDSA signature whose verification reaches the point at infinity
+  answered `CKR_FUNCTION_FAILED`.** OpenSSL returns -1 rather than 0 when
+  the verification arithmetic of (r, s) fails, and the module reported it
+  as its own failure. It is now `CKR_SIGNATURE_INVALID`, one-shot and
+  multipart; RSA keeps the old answer, since there a negative return has
+  other causes. Found from 80 Wycheproof vectors per profile that
+  pkcs11-check scored as non-clean rejections.
+  `tests/test_ecdsa_verify_edge.c`.
+* **`CKM_GENERIC_SECRET_KEY_GEN` refused lengths it advertises.** Key
+  generation applied the AES rule (16, 24 or 32 bytes) to generic secrets,
+  so a 64-byte HMAC key, inside the 1 to 64 bytes `C_GetMechanismInfo`
+  reports, was `CKR_KEY_SIZE_RANGE`. It now takes the advertised range.
+  `tests/test_generic_secret_len.c`.
+* **`CKA_COPYABLE` could not be cleared.** `C_SetAttributeValue` answered
+  `CKR_ATTRIBUTE_READ_ONLY` both ways; PKCS#11 v3.0 §4.4 allows CK_TRUE to
+  CK_FALSE, and that is now accepted, after which `C_CopyObject` refuses the
+  object. The way back stays read-only. `tests/test_copyable_oneway.c`.
 * **SLH-DSA keys could not be imported.** `C_CreateObject` refused every
   SLH-DSA public key with `CKR_TEMPLATE_INCONSISTENT`: no parser branch took
   the key type. A raw SLH-DSA private key was accepted, stored as sent, and
@@ -16,6 +33,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
   can name it: 32, 48 or 64 bytes of public key, 64, 96 or 128 of private
   key, is four sets each. The `CKP_` selector is read in the key type's own
   table; SLH-DSA's `1` had been read as ML-DSA-44.
+
+### Changed
+* **A curve the module does not take is `CKR_CURVE_NOT_SUPPORTED`.**
+  `C_CreateObject` and `C_GenerateKeyPair` answered
+  `CKR_ATTRIBUTE_VALUE_INVALID` for every refused `CKA_EC_PARAMS`, so
+  "this token does not do brainpool" read as "your value is malformed". A
+  value that names a curve OpenSSL knows -- outside P-256, P-384 and P-521,
+  not approved in this profile, or not served by the loaded provider, as
+  X25519 and X448 are not under the FIPS provider -- now answers
+  `CKR_CURVE_NOT_SUPPORTED` (PKCS#11 v3.0); a value that names no curve
+  still answers `CKR_ATTRIBUTE_VALUE_INVALID`. pkcs11-check had counted
+  some 13 100 Wycheproof vectors per profile as advertised but not
+  operational for want of that answer. `tests/test_ec_curve_refusal.c`.
 
 ### Added
 * **SLH-DSA against NIST's known answers.** `tests/test_slh_dsa_kat.c` runs

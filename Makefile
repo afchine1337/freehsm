@@ -850,6 +850,24 @@ tests/test_slh_dsa_sets: tests/test_slh_dsa_sets.c $(LIB)
 tests/test_slh_dsa_kat: tests/test_slh_dsa_kat.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# A curve the module does not take is CKR_CURVE_NOT_SUPPORTED, an EC_PARAMS
+# that names no curve CKR_ATTRIBUTE_VALUE_INVALID, at import and keygen.
+tests/test_ec_curve_refusal: tests/test_ec_curve_refusal.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
+# ECDSA verification reaching the point at infinity is CKR_SIGNATURE_INVALID
+# (Wycheproof P-256 tc392, tc431), one-shot and multipart.
+tests/test_ecdsa_verify_edge: tests/test_ecdsa_verify_edge.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
+# CKA_COPYABLE TRUE -> FALSE through C_SetAttributeValue, and not back.
+tests/test_copyable_oneway: tests/test_copyable_oneway.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
+# CKM_GENERIC_SECRET_KEY_GEN makes every length C_GetMechanismInfo advertises.
+tests/test_generic_secret_len: tests/test_generic_secret_len.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # CKA_PARAMETER_SET read back on PQC keys, and a decapsulation ciphertext of
 # the wrong size refused as such. Both found with OpenSC pkcs11-tool.
 tests/test_pqc_params: tests/test_pqc_params.c $(LIB)
@@ -1182,6 +1200,10 @@ TEST_BINS = \
 	tests/test_hash_ml_dsa \
 	tests/test_slh_dsa_sets \
 	tests/test_slh_dsa_kat \
+	tests/test_ec_curve_refusal \
+	tests/test_ecdsa_verify_edge \
+	tests/test_copyable_oneway \
+	tests/test_generic_secret_len \
 	tests/test_pqc_params \
 	tests/test_aes_sizes \
 	tests/test_rsa_oaep \
@@ -1295,6 +1317,14 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_slh_dsa_sets
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_slh_dsa_kat
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_ec_curve_refusal
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_ecdsa_verify_edge
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_copyable_oneway
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_generic_secret_len
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_pqc_params
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
