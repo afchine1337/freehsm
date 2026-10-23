@@ -199,6 +199,16 @@ EXPECTED_VERSION="${FHSM_PKCS11CHECK_EXPECT:-$WORKFLOW_PIN}"
 # the time can settle which. The module digest is here for the same reason --
 # "v2.0.3" names a version, not a build.
 OPENSSL_VERSION="$(openssl version 2>/dev/null || echo unknown)"
+# The distribution's package revision, which `openssl version` does not show.
+# Debian keeps the upstream number and backports the fixes: 3.5.7-1~deb13u2
+# and 3.5.7-1~deb13u3 both print "OpenSSL 3.5.7", and only the second has the
+# fixes of upstream 3.5.8 and 3.5.9 (checked 2026-10-23). The provider is
+# listed too, since the signed module runs on it. "n/a" where dpkg is absent.
+if command -v dpkg-query >/dev/null 2>&1; then
+    OPENSSL_PACKAGES="$(dpkg-query -W -f '${Package}=${Version} ' \
+        libssl3t64 openssl-provider-fips 2>/dev/null | sed 's/ $//')"
+fi
+OPENSSL_PACKAGES="${OPENSSL_PACKAGES:-n/a}"
 MODULE_SHA="$(sha256sum "$MODULE" 2>/dev/null | awk '{print $1}')"
 [ -n "$MODULE_SHA" ] || MODULE_SHA="unknown"
 
@@ -288,6 +298,7 @@ MODULE_PROFILE="$(module_profile "$MODULE")"
 {
     echo "pkcs11-check $HARNESS_VERSION"
     echo "openssl      $OPENSSL_VERSION"
+    echo "openssl-pkgs $OPENSSL_PACKAGES"
     echo "module       $MODULE"
     echo "module-sha256 $MODULE_SHA"
     # The profile belongs in the archived record, not only on stdout: on
@@ -306,6 +317,7 @@ if [ "$EXPECTED_VERSION" != "$WORKFLOW_PIN" ]; then
     echo "         comparison. The workflow pin above is unchanged."
 fi
 echo "  openssl      : $OPENSSL_VERSION"
+echo "  packages     : $OPENSSL_PACKAGES"
 echo "  module       : $MODULE"
 echo "  profile      : $MODULE_PROFILE   (read from the module, not the tree)"
 if [ -n "${FHSM_EXPECT_PROFILE:-}" ] && [ "$MODULE_PROFILE" != "$FHSM_EXPECT_PROFILE" ]; then
