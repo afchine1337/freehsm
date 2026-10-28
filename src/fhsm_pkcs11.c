@@ -5227,9 +5227,14 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * deliberate. This function has 28 return statements, about twenty of them
      * after this point; a heap allocation would need a free on every one, and
      * one missed path leaks plaintext key material. The heap version is worth
-     * doing with the function restructured around a single exit -- as is
-     * zeroising this buffer, which today's code does not do either. Neither is
-     * a change to make alongside four others.
+     * doing with the function restructured around a single exit.
+     *
+     * The buffer is zeroised on every exit after a decrypt has written it:
+     * the checks between the decrypt and the import jump to one place that
+     * clears it (#27, AlexLaroche: three of them returned with the whole key
+     * still here, on the caller's stack). The decrypt failures clear it too,
+     * although OpenSSL and the RSA helpers leave nothing there when they
+     * fail -- a rule with exceptions is one the next check gets wrong.
      *
      * 4 KiB covers every AES-KW vector in the corpus and a DER-encoded RSA-4096
      * private key, with room to spare against an 8 MiB default stack. */
@@ -5295,6 +5300,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (EVP_DecryptUpdate(ctx, pt, &outl, pWrappedKey, (int)ulWrappedKeyLen) != 1
             || EVP_DecryptFinal_ex(ctx, pt + outl, &finl) != 1) {
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            fhsm_zeroize(pt, sizeof(pt));
             return 0x00000110UL;  /* CKR_WRAPPED_KEY_INVALID (0x69 is KEY_NOT_WRAPPABLE) */
         }
         pt_len = (size_t)(outl + finl);
@@ -5310,7 +5316,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         fhsm_rv_t orv = fhsm_rsa_oaep_unwrap(ukv, ukl, pMechanism,
                                               pWrappedKey, ulWrappedKeyLen,
                                               pt, &pt_len);
-        if (orv != FHSM_RV_OK) return orv;
+        if (orv != FHSM_RV_OK) { fhsm_zeroize(pt, sizeof(pt)); return orv; }
     } else if (pMechanism->mechanism == CKM_RSA_PKCS
                || pMechanism->mechanism == CKM_RSA_X_509) {
         /* PKCS#1 v1.5 / raw RSA key transport. Non-FIPS: all-mechanisms only.
@@ -5323,12 +5329,14 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                             ukv, ukl,
                             pMechanism->mechanism == CKM_RSA_X_509,
                             pWrappedKey, ulWrappedKeyLen, pt, &pt_len);
-        if (vrv != FHSM_RV_OK) return vrv;
+        if (vrv != FHSM_RV_OK) { fhsm_zeroize(pt, sizeof(pt)); return vrv; }
     } else {
         return FHSM_RV_MECHANISM_INVALID;
     }
 
-    /* Import the decrypted bytes as a fresh secret-key object. */
+    /* Import the decrypted bytes as a fresh secret-key object. From here to
+     * the import, every exit goes through pt_done, which clears pt. */
+    uint32_t handle = 0;
     char label[64] = "";
     uint32_t key_type = CKK_AES;
     uint8_t obj_flags = FHSM_OBJF_SENSITIVE;
@@ -5368,8 +5376,10 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * one breaks legitimate round-trips (see the reverted attempt). */
         uint8_t uwf = 0;
         (void)fhsm_token_object_get_flags(t, (uint32_t)hUnwrappingKey, &uwf);
-        if (uwf & FHSM_OBJF_UNWRAP_SENS)
-            return 0x00000010UL;   /* CKR_ATTRIBUTE_READ_ONLY */
+        if (uwf & FHSM_OBJF_UNWRAP_SENS) {
+            rv = 0x00000010UL;   /* CKR_ATTRIBUTE_READ_ONLY */
+            goto pt_done;
+        }
         obj_flags &= (uint8_t)~FHSM_OBJF_SENSITIVE;
     }
     li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
@@ -5382,21 +5392,28 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * the claimed CKA_KEY_TYPE, otherwise a blob wrapped as one key type is
      * being reinterpreted as an incompatible one. A CKA_VALUE_LEN in the
      * template must also match the recovered length. */
-    if (key_type == CKK_AES && pt_len != 16 && pt_len != 24 && pt_len != 32)
-        return FHSM_RV_KEY_TYPE_INCONSISTENT;
-    if (key_type == 0x15 /* CKK_DES3 */ && pt_len != 24)
-        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (key_type == CKK_AES && pt_len != 16 && pt_len != 24 && pt_len != 32) {
+        rv = FHSM_RV_KEY_TYPE_INCONSISTENT;
+        goto pt_done;
+    }
+    if (key_type == 0x15 /* CKK_DES3 */ && pt_len != 24) {
+        rv = FHSM_RV_KEY_TYPE_INCONSISTENT;
+        goto pt_done;
+    }
     { long vli = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
       if (vli >= 0 && pTemplate[vli].pValue
           && pTemplate[vli].ulValueLen == sizeof(CK_ULONG)) {
           CK_ULONG want_len = *(CK_ULONG*)pTemplate[vli].pValue;
-          if (want_len != pt_len) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+          if (want_len != pt_len) {
+              rv = FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+              goto pt_done;
+          }
       }
     }
 
-    uint32_t handle = 0;
     rv = fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
                                 pt, pt_len, NULL, 0, obj_flags, &handle);
+pt_done:
     fhsm_zeroize(pt, sizeof(pt));
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
