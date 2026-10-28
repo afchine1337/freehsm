@@ -7,6 +7,42 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+* **Public objects before a login.** `C_FindObjectsInit` answered
+  `CKR_USER_NOT_LOGGED_IN` in a session that was not logged in, because
+  every object lived in the encrypted blob. The token file now carries a
+  public section after the blob: the public keys and certificates, in clear,
+  read when the token is loaded, so that a public session finds them and
+  reads their attributes, as PKCS#11 provides. Secret and private keys stay
+  in the blob only. The blob remains the store: a login replaces the view
+  with it, and the view cannot be changed. A file written before this has no
+  section and answers as before until its next login.
+  `docs/TOKEN_STORE_FORMAT.md`, "The public section";
+  `tests/test_public_objects.c`.
+
+### Security
+* **`C_UnwrapKey` left the unwrapped key on the stack when it refused it**
+  (#27, reported by AlexLaroche). Three checks after a successful decrypt --
+  `CKK_AES` with a length other than 16, 24 or 32, `CKK_DES3` with a length
+  other than 24, a `CKA_VALUE_LEN` that does not match -- returned without
+  clearing the 4 KiB stack buffer holding the key, which then stayed in the
+  caller's stack until overwritten. Every exit after the decrypt now goes
+  through one place that clears it, and the decrypt failures clear it as
+  well. Low impact: reading the residue takes a separate memory disclosure,
+  a core dump or swap, and the caller could already unwrap that blob.
+
+### Fixed
+* **After a `C_Logout`, `CKA_ALLOWED_MECHANISMS` was not enforced (2.5.1).**
+  2.5.1 made every store function that guarded on the DEK buffer ask whether
+  the DEK is live, and that took in four that only read: the mechanism check
+  and the three policy getters. After a logout the check answered
+  "permitted" for any object, so a public key -- the only kind a session
+  that is not logged in can use -- was usable with mechanisms its list
+  excluded, and `C_GetAttributeValue` could not read the policy attributes.
+  Reading needs the store, not the DEK; they now ask for that. Introduced in
+  2.5.1 only. `tests/test_public_objects.c` covers the check before a
+  login.
+
 ## [2.5.1] --- 2026-10-28
 
 *Patch: security fixes. A wrong PIN could re-encrypt the object store under

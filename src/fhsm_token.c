@@ -235,6 +235,11 @@ struct fhsm_token_s {
     uint32_t       next_handle;
     int            objects_dirty;
     int            objects_loaded;   /* 1 after first successful load */
+    /* 1 while objects[] holds only the public view, read in clear from the
+     * public section at load time, before any login. Readable, never
+     * written: every mutation asks objects_loaded, which stays 0 until the
+     * encrypted store replaces this view at login. */
+    int            objects_public;
 };
 
 #define DEK_LEN   32
@@ -470,6 +475,34 @@ _Static_assert(FHSM_POLICY_ENTRY_SZ == 8u + FHSM_POLICY_VALUE_MAX,
 #define FHSM_OBJ_BLOB_MAX \
     (12u + (uint32_t)FHSM_MAX_OBJECTS * (4u + FHSM_OBJ_REC_V4_FIXED + FHSM_OBJ_VALUE_MAX))
 
+/* The public section, after the encrypted blob: the token's public objects
+ * in clear, so that C_FindObjects and C_GetAttributeValue answer for them
+ * before a login, as PKCS#11 asks of a public session.
+ *
+ *   u32  magic = FHSM_PUB_MAGIC
+ *   u32  len
+ *   u8   v4 blob plaintext[len]   (the public objects only)
+ *
+ * Public means CKA_PRIVATE=FALSE as C_GetAttributeValue reports it: public
+ * keys and certificates, never sensitive. Nothing else is written there, and
+ * the reader refuses a section holding anything else.
+ *
+ * The section is a copy. The encrypted blob stays the store: a login drops
+ * this view and loads the blob, and every write that re-encrypts the blob
+ * writes the section afresh from it. A build that predates the section reads
+ * the blob by its own length and never looks past it, and drops the section
+ * at its next write -- after which the token simply has no view before login,
+ * as it had none before. */
+#define FHSM_PUB_MAGIC        0xF5B5B001u
+#define FHSM_CKO_CERTIFICATE  0x01u
+#define FHSM_CKO_PUBLIC_KEY   0x02u
+
+static int obj_is_public(const fhsm_object_t *o) {
+    return o->owner_session == 0
+        && (o->class == FHSM_CKO_PUBLIC_KEY || o->class == FHSM_CKO_CERTIFICATE)
+        && !(o->flags & FHSM_OBJF_SENSITIVE);
+}
+
 /* #125 large-object storage helpers. The per-object value is heap-owned;
  * these keep ownership sane across the struct-copy compaction pattern. */
 /*
@@ -553,7 +586,23 @@ static size_t put_policy_tmpl(uint8_t *p, uint8_t count,
     return off;
 }
 
-static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
+/* Does `o` go into this serialization? Every token object for the encrypted
+ * blob; only the public ones for the public section. */
+static int obj_serialized(const fhsm_object_t *o, int public_only) {
+    return public_only ? obj_is_public(o) : o->owner_session == 0;
+}
+
+/* Bytes serialize_objects() will write for the same arguments. */
+static size_t serialized_size(const fhsm_token_t *t, int public_only) {
+    size_t sz = 12;   /* magic + count + next_handle */
+    for (uint32_t i = 0; i < t->object_count; ++i)
+        if (obj_serialized(&t->objects[i], public_only))
+            sz += 4 + FHSM_OBJ_REC_V4_FIXED + t->objects[i].value_len;
+    return sz;
+}
+
+static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out,
+                                int public_only) {
     /* v4 writer. Returns the number of bytes written. */
     put_u32_le(out + 0, FHSM_OBJ_BLOB_V4_MAGIC);
     /* Persist only token objects (owner_session == 0) ; session objects
@@ -561,13 +610,13 @@ static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out) {
      * written to disk. Count them first for the header. */
     uint32_t token_count = 0;
     for (uint32_t i = 0; i < t->object_count; ++i)
-        if (t->objects[i].owner_session == 0) token_count++;
+        if (obj_serialized(&t->objects[i], public_only)) token_count++;
     put_u32_le(out + 4, token_count);
     put_u32_le(out + 8, t->next_handle);
     size_t off = 12;
     for (uint32_t i = 0; i < t->object_count; ++i) {
         const fhsm_object_t *o = &t->objects[i];
-        if (o->owner_session != 0) continue;   /* session object : skip */
+        if (!obj_serialized(o, public_only)) continue;
         uint32_t rec_len = FHSM_OBJ_REC_V4_FIXED + o->value_len;
         put_u32_le(out + off, rec_len); off += 4;
         put_u32_le(out + off + 0,  o->handle);
@@ -893,6 +942,7 @@ static fhsm_rv_t parse_objects(fhsm_token_t *t, const uint8_t *buf, size_t len) 
 static fhsm_rv_t objects_decrypt_load(fhsm_token_t *t) {
     if (!t->dek_live) return FHSM_RV_USER_NOT_LOGGED_IN;
     objects_free_all(t);   /* reclaim any values from a prior login (#125) */
+    t->objects_public = 0; /* the public view gives way to the store */
     int fd = open(t->path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return FHSM_RV_TOKEN_NOT_PRESENT;
     struct stat st;
@@ -976,7 +1026,8 @@ static fhsm_rv_t read_existing_blob(const char *path, uint8_t **out, size_t *out
     if (fstat(fd, &st) < 0) { close(fd); return FHSM_RV_FUNCTION_FAILED; }
     if ((size_t)st.st_size <= FHSM_TOK_FILE_SZ) { close(fd); return FHSM_RV_OK; }
     size_t n = (size_t)st.st_size - FHSM_TOK_FILE_SZ;
-    if (n > (size_t)FHSM_OBJ_BLOB_MAX + 32) { close(fd); return FHSM_RV_FUNCTION_FAILED; }
+    /* The blob with its header and tag, then the public section with its. */
+    if (n > 2 * ((size_t)FHSM_OBJ_BLOB_MAX + 32)) { close(fd); return FHSM_RV_FUNCTION_FAILED; }
     uint8_t *b = malloc(n);
     if (!b) { close(fd); return FHSM_RV_HOST_MEMORY; }
     if (pread(fd, b, n, FHSM_TOK_FILE_SZ) != (ssize_t)n) {
@@ -985,6 +1036,57 @@ static fhsm_rv_t read_existing_blob(const char *path, uint8_t **out, size_t *out
     close(fd);
     *out = b; *out_len = n;
     return FHSM_RV_OK;
+}
+
+/* Load the public section into an empty store as the view before login.
+ *
+ * A token with no objects at all has no blob and no section, and its view is
+ * empty: a search before login finds nothing, correctly. A token whose blob
+ * has no section after it was written by a build that predates the section;
+ * its public objects are unknown until a login, and the view stays unloaded,
+ * so a search answers CKR_USER_NOT_LOGGED_IN as it did there, rather than
+ * "none". The login's write adds the section. Anything amiss in a section --
+ * an unknown magic, a length that does not end the file, a record that does
+ * not parse, an object that is not public -- is treated the same way: the
+ * encrypted blob, which a login reads, is not touched by any of it.
+ *
+ * The section is not authenticated; before a login there is no key to
+ * authenticate it with. Whoever can write the token file could put objects in
+ * it -- and could equally replace the whole file with a token of their own,
+ * which a caller cannot tell apart before a login either. A login discards
+ * the view. */
+static void public_view_load(fhsm_token_t *t) {
+    int fd = open(t->path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    struct stat st;
+    uint8_t *pt = NULL;
+    if (fstat(fd, &st) < 0) goto out;
+    if ((size_t)st.st_size == FHSM_TOK_FILE_SZ) {   /* no object at all */
+        t->objects_public = 1;
+        goto out;
+    }
+    if ((size_t)st.st_size <= FHSM_TOK_FILE_SZ + 16) goto out;
+    uint8_t bh[4];
+    if (pread(fd, bh, 4, FHSM_TOK_FILE_SZ) != 4) goto out;
+    uint32_t ct_len = get_u32_le(bh);
+    if (ct_len == 0 || ct_len > FHSM_OBJ_BLOB_MAX) goto out;
+    size_t pub_off = FHSM_TOK_FILE_SZ + 16 + (size_t)ct_len + 16;
+    if ((size_t)st.st_size < pub_off + 8) goto out;
+    uint8_t ph[8];
+    if (pread(fd, ph, 8, (off_t)pub_off) != 8) goto out;
+    uint32_t len = get_u32_le(ph + 4);
+    if (get_u32_le(ph) != FHSM_PUB_MAGIC || len < 12 || len > FHSM_OBJ_BLOB_MAX
+        || pub_off + 8 + len != (size_t)st.st_size) goto out;
+    pt = malloc(len);
+    if (!pt || pread(fd, pt, len, (off_t)(pub_off + 8)) != (ssize_t)len) goto out;
+    if (get_u32_le(pt) != FHSM_OBJ_BLOB_V4_MAGIC) goto out;
+    if (parse_objects(t, pt, len) != FHSM_RV_OK) { objects_free_all(t); goto out; }
+    for (uint32_t i = 0; i < t->object_count; ++i)
+        if (!obj_is_public(&t->objects[i])) { objects_free_all(t); goto out; }
+    t->objects_public = 1;
+out:
+    free(pt);
+    close(fd);
 }
 
 static fhsm_rv_t write_atomic(const fhsm_token_t *t) {
@@ -1041,19 +1143,32 @@ static fhsm_rv_t write_atomic(const fhsm_token_t *t) {
     uint8_t  blob_tag[16];
     uint8_t *kept = NULL;
     size_t   kept_len = 0;
+    uint8_t *pub = NULL;      /* the public section, header included */
+    size_t   pub_len = 0;
     if (!(t->dek_live && t->objects_loaded)) {
+        /* The blob and the public section after it, both as they are. */
         fhsm_rv_t kr = read_existing_blob(t->path, &kept, &kept_len);
         if (kr != FHSM_RV_OK) return kr;
     } else if (t->object_count > 0) {
-        size_t pt_sz = 12;   /* magic + count + next_handle */
-        for (uint32_t i = 0; i < t->object_count; ++i)
-            pt_sz += 4 + FHSM_OBJ_REC_V4_FIXED + t->objects[i].value_len;
+        size_t pt_sz = serialized_size(t, 0);
         uint8_t *pt = malloc(pt_sz);
         if (!pt) return FHSM_RV_HOST_MEMORY;
-        serialize_objects(t, pt);
+        serialize_objects(t, pt, 0);
+        /* The public section, from the same store, in the same write --
+         * also when it holds no object, so that a reader can tell "no public
+         * object" from "written by a build without the section". */
+        size_t pub_sz = serialized_size(t, 1);
+        {
+            pub = malloc(8 + pub_sz);
+            if (!pub) { fhsm_zeroize(pt, pt_sz); free(pt); return FHSM_RV_HOST_MEMORY; }
+            put_u32_le(pub, FHSM_PUB_MAGIC);
+            put_u32_le(pub + 4, (uint32_t)pub_sz);
+            serialize_objects(t, pub + 8, 1);
+            pub_len = 8 + pub_sz;
+        }
         fhsm_rng_bytes(blob_nonce, sizeof(blob_nonce));
         blob_ct = malloc(pt_sz);
-        if (!blob_ct) { fhsm_zeroize(pt, pt_sz); free(pt); return FHSM_RV_HOST_MEMORY; }
+        if (!blob_ct) { fhsm_zeroize(pt, pt_sz); free(pt); free(pub); return FHSM_RV_HOST_MEMORY; }
         size_t ct_sz = pt_sz;
         fhsm_rv_t rv = fhsm_aes_gcm_encrypt(
                 FHSM_SLICE(t->dek, DEK_LEN),
@@ -1062,36 +1177,33 @@ static fhsm_rv_t write_atomic(const fhsm_token_t *t) {
                 FHSM_SLICE(pt, pt_sz),
                 blob_ct, &ct_sz, blob_tag);
         fhsm_zeroize(pt, pt_sz); free(pt);
-        if (rv != FHSM_RV_OK) { free(blob_ct); return rv; }
+        if (rv != FHSM_RV_OK) { free(blob_ct); free(pub); return rv; }
         blob_ct_len = (uint32_t)ct_sz;
     }
 
     char tmp[600]; snprintf(tmp, sizeof(tmp), "%s.tmp", t->path);
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) { free(blob_ct); free(kept); return FHSM_RV_FUNCTION_FAILED; }
+    if (fd < 0) { free(blob_ct); free(kept); free(pub); return FHSM_RV_FUNCTION_FAILED; }
 
-    if (write(fd, hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr)) {
-        close(fd); unlink(tmp); free(blob_ct); free(kept);
-        return FHSM_RV_FUNCTION_FAILED;
-    }
-    if (kept_len > 0 && write(fd, kept, kept_len) != (ssize_t)kept_len) {
-        close(fd); unlink(tmp); free(kept);
-        return FHSM_RV_FUNCTION_FAILED;
-    }
-    free(kept);
-    if (blob_ct_len > 0) {
+    int ok = write(fd, hdr, sizeof(hdr)) == (ssize_t)sizeof(hdr);
+    if (ok && kept_len > 0)
+        ok = write(fd, kept, kept_len) == (ssize_t)kept_len;
+    if (ok && blob_ct_len > 0) {
         uint8_t blob_hdr[16];
         put_u32_le(blob_hdr, blob_ct_len);
         memcpy(blob_hdr + 4, blob_nonce, 12);
-        if (write(fd, blob_hdr, sizeof(blob_hdr)) != (ssize_t)sizeof(blob_hdr) ||
-            write(fd, blob_ct, blob_ct_len)        != (ssize_t)blob_ct_len   ||
-            write(fd, blob_tag, sizeof(blob_tag))  != (ssize_t)sizeof(blob_tag)) {
-            close(fd); unlink(tmp); free(blob_ct);
-            return FHSM_RV_FUNCTION_FAILED;
-        }
+        ok = write(fd, blob_hdr, sizeof(blob_hdr)) == (ssize_t)sizeof(blob_hdr)
+          && write(fd, blob_ct, blob_ct_len)        == (ssize_t)blob_ct_len
+          && write(fd, blob_tag, sizeof(blob_tag))  == (ssize_t)sizeof(blob_tag);
+    }
+    if (ok && pub_len > 0)
+        ok = write(fd, pub, pub_len) == (ssize_t)pub_len;
+    free(kept); free(blob_ct); free(pub);
+    if (!ok) {
+        close(fd); unlink(tmp);
+        return FHSM_RV_FUNCTION_FAILED;
     }
     fsync(fd); close(fd);
-    free(blob_ct);
     if (rename(tmp, t->path) != 0) return FHSM_RV_FUNCTION_FAILED;
     return FHSM_RV_OK;
 }
@@ -1236,6 +1348,8 @@ fhsm_rv_t fhsm_token_load(const char *path, fhsm_token_t **out) {
     /* Live DEK buffer is allocated lazily at login. */
     t->dek = NULL;
     t->logged_in = FHSM_ROLE_NONE;
+    /* The public objects, readable before a login. */
+    public_view_load(t);
     *out = t;
     return FHSM_RV_OK;
 }
@@ -1737,6 +1851,7 @@ fhsm_rv_t fhsm_token_reinit(fhsm_token_t *t, const char *new_so_pin,
      * being written, under the new DEK, by the next write; the store is
      * emptied here so that the write below starts the token with none. */
     objects_free_all(t);
+    t->objects_public = 0;
     t->object_count   = 0;
     t->next_handle    = 1;
     t->objects_loaded = 1;
@@ -1832,7 +1947,7 @@ fhsm_rv_t fhsm_token_object_get(fhsm_token_t *t, uint32_t handle,
                                  uint32_t *out_class, uint32_t *out_key_type) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->objects_loaded) {
+    if (!t->objects_loaded && !t->objects_public) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -1858,6 +1973,12 @@ fhsm_rv_t fhsm_token_object_set_usage(fhsm_token_t *t, uint32_t handle,
                                       uint8_t usage_flags) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
+    /* A change needs the store, and the DEK to write it: not the public view
+     * read before login, not the store left in memory after a logout. */
+    if (!t->dek_live || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
             t->objects[i].usage_flags = usage_flags;
@@ -1890,6 +2011,12 @@ fhsm_rv_t fhsm_token_object_mark_session(fhsm_token_t *t, uint32_t handle,
                                          uint32_t owner_session) {
     if (!t || owner_session == 0) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
+    /* A change needs the store, and the DEK to write it: not the public view
+     * read before login, not the store left in memory after a logout. */
+    if (!t->dek_live || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
             t->objects[i].owner_session = owner_session;
@@ -1941,7 +2068,7 @@ fhsm_rv_t fhsm_token_object_find(fhsm_token_t *t,
                                   size_t *count_out) {
     if (!t || !count_out) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->objects_loaded) {
+    if (!t->objects_loaded && !t->objects_public) {
         *count_out = 0;
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
@@ -1989,6 +2116,12 @@ fhsm_rv_t fhsm_token_object_set_meta(fhsm_token_t *t, uint32_t handle,
     if (start_len > 8 || end_len > 8 || app_len > FHSM_OBJ_LABEL_LEN)
         return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     pthread_mutex_lock(&t->mu);
+    /* A change needs the store, and the DEK to write it: not the public view
+     * read before login, not the store left in memory after a logout. */
+    if (!t->dek_live || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
             fhsm_object_t *o = &t->objects[i];
@@ -2151,7 +2284,7 @@ fhsm_rv_t fhsm_token_object_get_allowed_mechs(fhsm_token_t *t, uint32_t handle,
                                                uint32_t *out, uint8_t *io_count) {
     if (!t || !io_count) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
+    if (!t->objects_loaded && !t->objects_public) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2191,7 +2324,7 @@ fhsm_rv_t fhsm_token_object_mech_allowed(fhsm_token_t *t, uint32_t handle,
                                           uint32_t mech) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
+    if (!t->objects_loaded && !t->objects_public) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_OK;
     }
@@ -2287,7 +2420,7 @@ fhsm_rv_t fhsm_token_object_get_tmpl(fhsm_token_t *t, uint32_t handle,
     if (!t || !io_count) return FHSM_RV_ARGUMENTS_BAD;
     if (!tmpl_present_bit(which)) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
+    if (!t->objects_loaded && !t->objects_public) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2327,7 +2460,7 @@ fhsm_rv_t fhsm_token_object_get_policy_counts(fhsm_token_t *t, uint32_t handle,
                                                uint8_t *out_derive) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
+    if (!t->objects_loaded && !t->objects_public) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }

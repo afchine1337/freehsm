@@ -26,6 +26,7 @@ round-trips, and minimal parser attack surface per CC EAL4+ ADV_TDS.3
 ```
 [ 317-byte fixed header ]
 [ optional encrypted objects section ]
+[ optional public section, in clear ]   (since 2.6.0; see "The public section")
 ```
 
 ### Fixed header (317 bytes)
@@ -141,12 +142,14 @@ sealing.
 
 ## Invariants an auditor can check
 
-1. File size is exactly 317, or 317 + 16 + `ct_len` + 16… i.e.
-   `317 + 4 + 12 + ct_len + 16` bytes; anything else is corruption.
+1. File size is exactly 317, or `317 + 4 + 12 + ct_len + 16` bytes, or that
+   plus `8 + len` for the public section; anything else is corruption.
 2. `ct_len` ≡ 8 + k × 5 620 for some 1 ≤ k ≤ 64.
 3. Every write path goes through `write_atomic()` (single rename).
-4. No plaintext key material ever touches the file: `value` fields exist
-   only inside the GCM-protected blob.
+4. No secret ever touches the file in clear: secret and private keys, and
+   any object flagged sensitive, exist only inside the GCM-protected blob.
+   The public section holds public keys and certificates, and its reader
+   refuses anything else.
 5. `objects_blob` absent ⇒ `object_count = 0` (fresh or re-initialized
    token). `fhsm_token_init` and `fhsm_token_reinit` write a token without
    one; `fhsm_token_reinit` empties the store in memory first.
@@ -154,6 +157,48 @@ sealing.
    successful login, `fhsm_token_init` or `fhsm_token_reinit`) and the store
    loaded. Any other write -- a failure counter before a login, after a
    logout, after a wrong PIN -- copies the blob on disk byte for byte.
+
+7. The public section is written only by the write that re-encrypts the
+   blob, from the same store, and copied byte for byte by every other write,
+   so it never describes a store other than the blob beside it.
+
+## The public section (2.6.0)
+
+PKCS#11 lets a session that is not logged in find a token's public objects
+and read their attributes. Every object lived in the encrypted blob, so
+before a login the store was empty and `C_FindObjectsInit` answered
+`CKR_USER_NOT_LOGGED_IN`. The public objects are now written a second time,
+in clear, after the blob:
+
+```
+u32  magic = 0xF5B5B001
+u32  len
+u8   plaintext[len]        a v4 blob plaintext holding the public objects only
+```
+
+* **What is public.** `CKA_PRIVATE` is derived from the class, and
+  `C_GetAttributeValue` reports it FALSE for public keys and certificates.
+  Those, and only those not flagged sensitive, go into the section; the
+  reader refuses a section holding any other object, and loads nothing.
+* **The blob is the store.** A login drops the view and loads the blob. The
+  write that re-encrypts the blob writes the section afresh from the same
+  store; every other write copies both as they are. The view itself cannot be
+  changed: every mutation needs the DEK and the loaded store.
+* **Written even when empty.** A token holding objects but no public one has
+  a section with a count of zero, so that a reader can tell "no public
+  object" from a file written by a build without the section. A token with
+  no object at all has neither blob nor section, and its view is empty.
+* **Older files.** A blob without a section after it was written before the
+  section existed. Its public objects are unknown until a login, so a search
+  before login still answers `CKR_USER_NOT_LOGGED_IN` rather than "none"; the
+  login's write adds the section. Older builds read the blob by its own
+  length and never look past it, and drop the section at their next write.
+* **Not authenticated.** Before a login there is no key to authenticate it
+  with. Whoever can write the token file could put objects in it, and could
+  equally replace the whole file with a token of their own, which a caller
+  cannot tell apart before a login either. A login discards the view.
+
+`tests/test_public_objects.c` checks it from the file.
 
 ## Regression note: a wrong PIN and the blob (2.5.1)
 
