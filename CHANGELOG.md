@@ -7,6 +7,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.6.0] --- 2026-11-04
+
+*Minor: public objects can be found and read before a login, from a new
+public section in the token file. `CKA_START_DATE`, `CKA_END_DATE` and a
+data object's `CKA_APPLICATION` are settable; `C_InitToken` answers
+`CKR_SESSION_EXISTS`. Two low-severity fixes: the unwrap buffer is cleared
+on every exit (#27), and `CKA_ALLOWED_MECHANISMS` holds again after a
+logout, which 2.5.1 had broken. No security advisory.
+`RELEASE_v2.6.0.md` has the release notes.*
+
 ### Added
 * **Public objects before a login.** `C_FindObjectsInit` answered
   `CKR_USER_NOT_LOGGED_IN` in a session that was not logged in, because
@@ -31,6 +41,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   well. Low impact: reading the residue takes a separate memory disclosure,
   a core dump or swap, and the caller could already unwrap that blob.
 
+* **After a `C_Logout`, `CKA_ALLOWED_MECHANISMS` was not enforced (2.5.1).**
+  2.5.1 made every store function that guarded on the DEK buffer ask whether
+  the DEK is live, and that took in four that only read: the mechanism check
+  and the three policy getters. After a logout the check answered
+  "permitted" for any object, so a public key -- the only kind a session
+  that is not logged in can use -- was usable with mechanisms its list
+  excluded, and `C_GetAttributeValue` could not read the policy attributes.
+  Reading needs the store, not the DEK; they now ask for that. Introduced in
+  2.5.1 only. `tests/test_public_objects.c` covers the check before a
+  login.
+
 ### Fixed
 * **`C_InitToken` re-initialized a token with sessions open on it.**
   PKCS#11 answers `CKR_SESSION_EXISTS`; the module destroyed the objects and
@@ -49,16 +70,6 @@ project adheres to [Semantic Versioning](https://semver.org/).
   A data object's `CKA_APPLICATION` likewise: settable, at most 64 bytes,
   refused on keys and certificates, which do not have it.
   `tests/test_set_dates.c`.
-* **After a `C_Logout`, `CKA_ALLOWED_MECHANISMS` was not enforced (2.5.1).**
-  2.5.1 made every store function that guarded on the DEK buffer ask whether
-  the DEK is live, and that took in four that only read: the mechanism check
-  and the three policy getters. After a logout the check answered
-  "permitted" for any object, so a public key -- the only kind a session
-  that is not logged in can use -- was usable with mechanisms its list
-  excluded, and `C_GetAttributeValue` could not read the policy attributes.
-  Reading needs the store, not the DEK; they now ask for that. Introduced in
-  2.5.1 only. `tests/test_public_objects.c` covers the check before a
-  login.
 
 ## [2.5.1] --- 2026-10-28
 

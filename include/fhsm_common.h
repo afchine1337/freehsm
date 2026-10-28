@@ -117,17 +117,23 @@ extern "C" {
  * 2.5.1, PATCH: security fixes, nothing added. A wrong PIN no longer touches
  * the object store, C_InitToken on an initialized token takes its SO PIN, and
  * a PIN attempt inside the throttle waits instead of failing. Calls answer
- * differently only where they answered wrongly. */
+ * differently only where they answered wrongly.
+ *
+ * 2.6.0, MINOR: the token file gains a public section, so public objects
+ * are found and read before a login; three attributes become settable. A
+ * public session that got CKR_USER_NOT_LOGGED_IN from C_FindObjectsInit now
+ * gets its public objects, and C_InitToken answers CKR_SESSION_EXISTS with
+ * a session open -- answers that change for callers that meet them. */
 #define FHSM_VERSION_MAJOR   2
-#define FHSM_VERSION_MINOR   5
-#define FHSM_VERSION_PATCH   1
+#define FHSM_VERSION_MINOR   6
+#define FHSM_VERSION_PATCH   0
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
  * a certification this project does not hold. The profile a
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
-#define FHSM_VERSION_STRING  "2.5.1"
+#define FHSM_VERSION_STRING  "2.6.0"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including

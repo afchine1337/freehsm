@@ -470,7 +470,8 @@ object-store defect above, which goes through the same function.
 
 | Version | Supported |
 |---|---|
-| `2.5.1` | ✅ — active development. First version carrying the object-store and `C_InitToken` fixes described above |
+| `2.6.x` | ✅ — active development |
+| `2.5.1` | ✅ — supported. First version carrying the object-store and `C_InitToken` fixes described above. After a `C_Logout` it does not enforce a public key's `CKA_ALLOWED_MECHANISMS` (low; fixed in 2.6.0, see the CHANGELOG) |
 | `2.2.0` – `2.5.0` | ⚠️ — **affected by the wrong-PIN object-store defect** and the `C_InitToken` check; upgrade to v2.5.1 |
 | `2.1.x` | ⚠️ — affected by the above, and by the `C_DecryptFinal` out-of-bounds write; upgrade to v2.5.1 |
 | `2.0.x` | ⚠️ — affected by the above, the `C_DecryptFinal` write and the `C_UnwrapKey` stack overflow; upgrade to v2.5.1 |
