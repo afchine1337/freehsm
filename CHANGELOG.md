@@ -32,6 +32,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
   a core dump or swap, and the caller could already unwrap that blob.
 
 ### Fixed
+* **`CKA_START_DATE` and `CKA_END_DATE` could not be changed.** Stored since
+  the v3 object record and accepted at creation, they had no arm in
+  `C_SetAttributeValue`, which answered `CKR_ATTRIBUTE_TYPE_INVALID`.
+  PKCS#11 lets a key's or a certificate's validity period change after
+  creation; they are now settable, shape-checked as at creation
+  (`CKR_ATTRIBUTE_VALUE_INVALID` otherwise), cleared by an empty value, and
+  refused on a data object, which has no dates. Still informational: the
+  module stores them and enforces nothing. The setter now writes the token
+  itself; at creation the write that followed it had been doing so.
+  `tests/test_set_dates.c`.
 * **After a `C_Logout`, `CKA_ALLOWED_MECHANISMS` was not enforced (2.5.1).**
   2.5.1 made every store function that guarded on the DEK buffer ask whether
   the DEK is live, and that took in four that only read: the mechanism check

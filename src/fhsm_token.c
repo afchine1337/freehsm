@@ -2106,8 +2106,11 @@ fhsm_rv_t fhsm_token_object_get_label(fhsm_token_t *t, uint32_t handle,
     return FHSM_RV_KEY_HANDLE_INVALID;
 }
 
-/* CK_DATE / CKA_APPLICATION accessors. See the note on the struct fields:
- * these live in memory only until the v3 record lands. */
+/* CK_DATE / CKA_APPLICATION accessors. Persisted by the v3 record.
+ *
+ * The setter writes the token. At creation it did not need to: the call
+ * that follows it, set_usage, wrote the file. C_SetAttributeValue has no such
+ * follower, and a date set there would have lived until the process ended. */
 fhsm_rv_t fhsm_token_object_set_meta(fhsm_token_t *t, uint32_t handle,
                                      const uint8_t *start, size_t start_len,
                                      const uint8_t *end,   size_t end_len,
@@ -2131,8 +2134,10 @@ fhsm_rv_t fhsm_token_object_set_meta(fhsm_token_t *t, uint32_t handle,
                          o->end_date_len = (uint8_t)end_len; }
             if (app)   { memcpy(o->application, app, app_len);
                          o->application_len = (uint8_t)app_len; }
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
             pthread_mutex_unlock(&t->mu);
-            return FHSM_RV_OK;
+            return rv;
         }
     }
     pthread_mutex_unlock(&t->mu);

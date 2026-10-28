@@ -7751,6 +7751,9 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     (void)fhsm_token_object_get_flags2(t, (uint32_t)hObject, &f2_now);
     uint8_t f2_new = f2_now;
     int f2_touched = 0;
+    /* The class decides whether the object has dates at all. */
+    uint32_t obj_class = 0;
+    (void)fhsm_token_object_get(t, (uint32_t)hObject, NULL, NULL, &obj_class, NULL);
 
     /* Two passes: validate everything, then apply. A single loop that
      * validated and applied as it went left a partial mutation behind on
@@ -7834,6 +7837,22 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
                 flags_touched = 1;
                 break;
             }
+            case CKA_START_DATE_ATTR:
+            case CKA_END_DATE_ATTR:
+                /* Keys and certificates carry them, and PKCS#11 v3.2 lets
+                 * both be changed after creation: a key's validity period is
+                 * renewed without re-creating the key. They were stored since
+                 * the v3 record and settable only at creation; this arm was
+                 * missing, so they came back CKR_ATTRIBUTE_TYPE_INVALID. A
+                 * data object has no dates. Informational, as at creation --
+                 * see fhsm_apply_obj_meta: shape-checked, stored, never
+                 * enforced. */
+                if (obj_class == CKO_DATA)
+                    return 0x00000012UL;             /* CKR_ATTRIBUTE_TYPE_INVALID */
+                if ((a->ulValueLen && !a->pValue)
+                    || !fhsm_date_wellformed((const uint8_t *)a->pValue, a->ulValueLen))
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                break;
             case CKA_CLASS:
             case CKA_KEY_TYPE:
             case CKA_VALUE:
@@ -7883,9 +7902,21 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     /* Pass 2: every row was accepted, so apply. The setters can still fail on
      * a storage error; that is a device-level failure, not a template one, and
      * is the one case where a partial write remains possible. */
+    /* The dates go to the store in one call after the loop, as the flags do;
+     * a NULL pointer leaves that date as it is, so an empty value -- "no
+     * date", which PKCS#11 encodes as length 0 -- is passed as `empty`. */
+    static const uint8_t empty[1] = { 0 };
+    const uint8_t *sd = NULL, *ed = NULL;
+    size_t sl = 0, el = 0;
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         CK_ATTRIBUTE *a = &pTemplate[i];
-        if (a->type == CKA_LABEL) {
+        if (a->type == CKA_START_DATE_ATTR) {
+            sd = a->ulValueLen ? (const uint8_t *)a->pValue : empty;
+            sl = (size_t)a->ulValueLen;
+        } else if (a->type == CKA_END_DATE_ATTR) {
+            ed = a->ulValueLen ? (const uint8_t *)a->pValue : empty;
+            el = (size_t)a->ulValueLen;
+        } else if (a->type == CKA_LABEL) {
             char buf[64];
             size_t n = a->ulValueLen;
             if (n >= sizeof(buf)) n = sizeof(buf) - 1;
@@ -7909,6 +7940,11 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     }
     if (f2_touched) {
         fhsm_rv_t r = fhsm_token_object_set_flags2(t, (uint32_t)hObject, f2_new);
+        if (r != FHSM_RV_OK) return r;
+    }
+    if (sd || ed) {
+        fhsm_rv_t r = fhsm_token_object_set_meta(t, (uint32_t)hObject,
+                                                 sd, sl, ed, el, NULL, 0);
         if (r != FHSM_RV_OK) return r;
     }
 
