@@ -92,6 +92,17 @@ fhsm_rv_t fhsm_session_close(unsigned long h) {
     return FHSM_RV_OK;
 }
 
+/* 1 if any session is open on `slot`, whether or not a token is attached to
+ * it yet. C_InitToken is refused while one is (CKR_SESSION_EXISTS). */
+int fhsm_session_exists_on_slot(unsigned long slot) {
+    int found = 0;
+    pthread_mutex_lock(&g_sess_mu);
+    for (size_t i = 1; i < FHSM_MAX_SESSIONS && !found; ++i)
+        found = g_sessions[i].in_use && g_sessions[i].slot == slot;
+    pthread_mutex_unlock(&g_sess_mu);
+    return found;
+}
+
 /* 1 if a read-only session is open on token t. CKF_RW_SESSION is 0x2. */
 int fhsm_session_ro_exists(const fhsm_token_t *t) {
     int found = 0;

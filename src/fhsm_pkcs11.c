@@ -1689,6 +1689,12 @@ CK_RV C_InitToken(CK_SLOT_ID slotID, CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen,
     if (fhsm_pin_has_embedded_nul(pPin, ulPinLen)) return 0x000000A1UL; /* CKR_PIN_INVALID */
     if (!pLabel) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_slot_table_init_once();
+    /* PKCS#11 v3.2 C_InitToken: CKR_SESSION_EXISTS while any session is open
+     * with the token. A re-initialization destroys every object and resets
+     * both PINs under sessions that would carry on holding handles and a
+     * login state that no longer exist. Checked before the SO PIN, so that a
+     * refusal here costs no attempt. */
+    if (fhsm_session_exists_on_slot(slotID)) return FHSM_RV_SESSION_EXISTS;
 
     char pin[128]; if (fhsm_copy_to_cstr(pin, sizeof(pin), pPin, ulPinLen) < 0)
         return FHSM_RV_ARGUMENTS_BAD;

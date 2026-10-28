@@ -45,6 +45,10 @@ fhsm_role_t   fhsm_session_role(unsigned long h);
  * is refused while one exists (CKR_SESSION_READ_ONLY_EXISTS). */
 int fhsm_session_ro_exists(const fhsm_token_t *t);
 
+/* 1 if any session is open on `slot`. C_InitToken is refused while one
+ * exists (CKR_SESSION_EXISTS). */
+int fhsm_session_exists_on_slot(unsigned long slot);
+
 /* Drop every session without touching the tokens they point at. Used by the
  * post-fork reset in C_Initialize: a forked child inherits the parent's whole
  * session table -- handles, roles, token pointers -- and must not keep using

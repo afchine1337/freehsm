@@ -32,6 +32,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
   a core dump or swap, and the caller could already unwrap that blob.
 
 ### Fixed
+* **`C_InitToken` re-initialized a token with sessions open on it.**
+  PKCS#11 answers `CKR_SESSION_EXISTS`; the module destroyed the objects and
+  reset both PINs under sessions that went on holding handles and a login
+  state that no longer existed. Refused now, before the SO PIN is looked
+  at, so the refusal costs no attempt. `tests/test_init_token_session.c`.
 * **`CKA_START_DATE` and `CKA_END_DATE` could not be changed.** Stored since
   the v3 object record and accepted at creation, they had no arm in
   `C_SetAttributeValue`, which answered `CKR_ATTRIBUTE_TYPE_INVALID`.
