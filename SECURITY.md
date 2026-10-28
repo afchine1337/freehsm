@@ -382,7 +382,8 @@ disclosure.
 
 ## Self-disclosed object-store defect — a wrong PIN (2026-10-28)
 
-**Advisory:** *(published with v2.5.1)* · High · CWE-321 · no CVE requested
+**Advisory:** [GHSA-fv8x-qmqp-f7j5](https://github.com/afchine1337/freehsm/security/advisories/GHSA-fv8x-qmqp-f7j5)
+· High · CWE-321 · no CVE requested
 
 **A wrong PIN could re-encrypt the token's object store under a key of 32
 zero bytes, or remove it from the token file.** Affects every published
@@ -441,7 +442,8 @@ Found, confirmed, fixed and released on 2026-10-28.
 
 ## Self-disclosed missing SO PIN check — `C_InitToken` (2026-10-28)
 
-**Advisory:** *(published with v2.5.1)* · Moderate · CWE-306 · no CVE requested
+**Advisory:** [GHSA-p69v-2p5f-hx6q](https://github.com/afchine1337/freehsm/security/advisories/GHSA-p69v-2p5f-hx6q)
+· Moderate · CWE-306 · no CVE requested
 
 **`C_InitToken` re-initialized an existing token without its SO PIN.**
 Affects every published release, v1.1.0 to v2.5.0. Fixed in v2.5.1.
