@@ -2,8 +2,8 @@
  * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
  * SPDX-License-Identifier: Apache-2.0
  * ===========================================================================
- * test_set_dates.c --- CKA_START_DATE / CKA_END_DATE through
- * C_SetAttributeValue.
+ * test_set_dates.c --- CKA_START_DATE / CKA_END_DATE, and a data object's
+ * CKA_APPLICATION, through C_SetAttributeValue.
  *
  * Both were stored since the v3 object record and settable at creation, but
  * C_SetAttributeValue had no arm for them and answered
@@ -31,12 +31,15 @@ typedef struct { CK_ULONG mechanism; void *p; CK_ULONG l; } CK_MECHANISM;
 #define CKA_START_DATE  0x110UL
 #define CKA_END_DATE    0x111UL
 #define CKA_VALUE_LEN   0x161UL
+#define CKA_APPLICATION 0x010UL
 
 static CK_RV (*GA)(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE*, CK_ULONG);
 static CK_RV (*SA)(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE*, CK_ULONG);
 static int fails = 0;
 static char D_2026[] = "20261101", D_2027[] = "20271101", D_2030[] = "20300101",
-            D_BAD[] = "2026-11-", HELLO[] = "hello";
+            D_BAD[] = "2026-11-", HELLO[] = "hello", APP[] = "billing-service",
+            APPDATA[] = "appdata", LONG65[66] =
+            "0123456789012345678901234567890123456789012345678901234567890123X";
 
 static void ok(int cond, const char *what) {
     printf("  %-62s %s\n", what, cond ? "OK" : "FAIL");
@@ -46,7 +49,7 @@ static void ok(int cond, const char *what) {
 /* Does `a` on `k` read back as exactly `want` (n bytes, n may be 0)? */
 static int reads(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE k, CK_ULONG a,
                  const char *want, size_t n) {
-    CK_BYTE buf[16]; CK_ATTRIBUTE t = { a, buf, sizeof buf };
+    CK_BYTE buf[80]; CK_ATTRIBUTE t = { a, buf, sizeof buf };
     if (GA(s, k, &t, 1) != 0 || t.ulValueLen != n) return 0;
     return n == 0 || memcmp(buf, want, n) == 0;
 }
@@ -119,6 +122,19 @@ int main(void) {
     CK_ATTRIBUTE dd = { CKA_START_DATE, D_2026, 8 };
     ok(SA(s, d, &dd, 1) == 0x12UL, "a data object has no dates: CKR_ATTRIBUTE_TYPE_INVALID");
 
+    /* CKA_APPLICATION: a data object's, settable; a key has none. */
+    CK_ATTRIBUTE pt_[] = { {CKA_CLASS,&dcls,8}, {CKA_TOKEN,&T,1}, {CKA_VALUE,HELLO,5},
+                           {CKA_LABEL,APPDATA,sizeof APPDATA - 1} };
+    CK_OBJECT_HANDLE pd = 0;
+    if (CO(s, pt_, 4, &pd) != 0) { fprintf(stderr, "FAIL token data object\n"); return 1; }
+    CK_ATTRIBUTE app = { CKA_APPLICATION, APP, sizeof APP - 1 };
+    ok(SA(s, pd, &app, 1) == 0 && reads(s, pd, CKA_APPLICATION, APP, sizeof APP - 1),
+       "a data object's CKA_APPLICATION is set and reads back");
+    CK_ATTRIBUTE toolong = { CKA_APPLICATION, LONG65, 65 };
+    ok(SA(s, pd, &toolong, 1) == 0x13UL && reads(s, pd, CKA_APPLICATION, APP, sizeof APP - 1),
+       "65 bytes: CKR_ATTRIBUTE_VALUE_INVALID, value unchanged");
+    ok(SA(s, k, &app, 1) == 0x12UL, "a key has no CKA_APPLICATION: CKR_ATTRIBUTE_TYPE_INVALID");
+
     /* The change is on disk, not only in this process's memory. */
     F(NULL); I(NULL);
     OS(0, 6, NULL, NULL, &s);
@@ -129,6 +145,13 @@ int main(void) {
     ok(nf == 1 && reads(s, found, CKA_START_DATE, "20261101", 8)
               && reads(s, found, CKA_END_DATE, NULL, 0),
        "after C_Finalize and C_Initialize, the dates are as set");
+    CK_ATTRIBUTE fa = { CKA_LABEL, APPDATA, sizeof APPDATA - 1 };
+    nf = 0; FI(s, &fa, 1); FO(s, &found, 1, &nf); FF(s);
+    ok(nf == 1 && reads(s, found, CKA_APPLICATION, APP, sizeof APP - 1),
+       "and so is CKA_APPLICATION");
+    CK_ATTRIBUTE noapp = { CKA_APPLICATION, NULL, 0 };
+    ok(nf == 1 && SA(s, found, &noapp, 1) == 0 && reads(s, found, CKA_APPLICATION, NULL, 0),
+       "an empty CKA_APPLICATION clears it");
     F(NULL);
 
     printf("\n%s : %d failure(s)\n", fails ? "FAIL" : "PASS", fails);

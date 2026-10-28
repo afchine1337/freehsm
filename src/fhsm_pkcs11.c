@@ -7859,6 +7859,16 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
                     || !fhsm_date_wellformed((const uint8_t *)a->pValue, a->ulValueLen))
                     return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 break;
+            case CKA_APPLICATION_ATTR:
+                /* The data object's description of the application that
+                 * manages it; PKCS#11 v3.2 lets it change after creation, and
+                 * keys and certificates do not have it. Bounded at 64 bytes,
+                 * as at creation (fhsm_apply_obj_meta) and in the v3 record. */
+                if (obj_class != CKO_DATA)
+                    return 0x00000012UL;             /* CKR_ATTRIBUTE_TYPE_INVALID */
+                if ((a->ulValueLen && !a->pValue) || a->ulValueLen > 64)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                break;
             case CKA_CLASS:
             case CKA_KEY_TYPE:
             case CKA_VALUE:
@@ -7908,15 +7918,19 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     /* Pass 2: every row was accepted, so apply. The setters can still fail on
      * a storage error; that is a device-level failure, not a template one, and
      * is the one case where a partial write remains possible. */
-    /* The dates go to the store in one call after the loop, as the flags do;
-     * a NULL pointer leaves that date as it is, so an empty value -- "no
-     * date", which PKCS#11 encodes as length 0 -- is passed as `empty`. */
+    /* The dates and CKA_APPLICATION go to the store in one call after the
+     * loop, as the flags do; a NULL pointer leaves that field as it is, so an
+     * empty value -- which PKCS#11 encodes as length 0 -- is passed as
+     * `empty`. */
     static const uint8_t empty[1] = { 0 };
-    const uint8_t *sd = NULL, *ed = NULL;
-    size_t sl = 0, el = 0;
+    const uint8_t *sd = NULL, *ed = NULL, *ap = NULL;
+    size_t sl = 0, el = 0, al = 0;
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         CK_ATTRIBUTE *a = &pTemplate[i];
-        if (a->type == CKA_START_DATE_ATTR) {
+        if (a->type == CKA_APPLICATION_ATTR) {
+            ap = a->ulValueLen ? (const uint8_t *)a->pValue : empty;
+            al = (size_t)a->ulValueLen;
+        } else if (a->type == CKA_START_DATE_ATTR) {
             sd = a->ulValueLen ? (const uint8_t *)a->pValue : empty;
             sl = (size_t)a->ulValueLen;
         } else if (a->type == CKA_END_DATE_ATTR) {
@@ -7948,9 +7962,9 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
         fhsm_rv_t r = fhsm_token_object_set_flags2(t, (uint32_t)hObject, f2_new);
         if (r != FHSM_RV_OK) return r;
     }
-    if (sd || ed) {
+    if (sd || ed || ap) {
         fhsm_rv_t r = fhsm_token_object_set_meta(t, (uint32_t)hObject,
-                                                 sd, sl, ed, el, NULL, 0);
+                                                 sd, sl, ed, el, ap, al);
         if (r != FHSM_RV_OK) return r;
     }
 

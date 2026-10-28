@@ -46,6 +46,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   refused on a data object, which has no dates. Still informational: the
   module stores them and enforces nothing. The setter now writes the token
   itself; at creation the write that followed it had been doing so.
+  A data object's `CKA_APPLICATION` likewise: settable, at most 64 bytes,
+  refused on keys and certificates, which do not have it.
   `tests/test_set_dates.c`.
 * **After a `C_Logout`, `CKA_ALLOWED_MECHANISMS` was not enforced (2.5.1).**
   2.5.1 made every store function that guarded on the DEK buffer ask whether
