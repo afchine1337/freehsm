@@ -159,7 +159,14 @@ jobs:
           # probes that never reach the module and the Ed448 NULL-params
           # question (mingulov#49), and the v1.5 structured oracle (#37, #49).
           # The EDDSA #23 pair and test_decrypt_garbage no longer fail.
-          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.3'
+          #
+          # pytest is held below 9.2. pytest 9.2.0 (2026-10-27) dropped
+          # Node._nodeid, which pytest-benchmark 5.3.0 reads when it builds its
+          # fixture, so all eight test_benchmark.py tests errored at setup in
+          # both profiles from the next run on -- the harness, not the module.
+          # pkcs11-check asks only pytest>=8.0. Lift the bound when a
+          # pytest-benchmark release reads `nodeid`.
+          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.3' 'pytest<9.2'
           ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
           ln -sf /opt/p11check/bin/pkcs11-check-report /usr/local/bin/pkcs11-check-report
           pkcs11-check version
@@ -313,8 +320,8 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq opensc python3-pip python3-venv
           python3 -m venv /opt/p11check
-          # Same pin as the job above; see the note there before changing it.
-          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.3'
+          # Same pins as the job above; see the note there before changing them.
+          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.3' 'pytest<9.2'
           ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
           ln -sf /opt/p11check/bin/pkcs11-check-report /usr/local/bin/pkcs11-check-report
           pkcs11-check version
