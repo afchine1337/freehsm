@@ -164,9 +164,9 @@ had recorded each of these as an xfail; two of its tests read
 `CKR_CURVE_NOT_SUPPORTED` and the generic hash-sign mechanisms differently
 from the rest of the harness, and are reported upstream
 (mingulov/pkcs11-check#51, #63). OpenSC's `pkcs11-tool`, maintained by Jakub
-Jelen and the OpenSC team, exercises HashSLH-DSA here, and its proposed
-`--encapsulate` / `--decapsulate` (OpenSC#3894) is tested against this
-module and against kryoptic. `ACKNOWLEDGEMENTS.md` records who found what.
+Jelen and the OpenSC team, exercises HashSLH-DSA here, and its new
+`--encapsulate` / `--decapsulate` (OpenSC#3894, merged on 2026-10-28) is
+tested against this module and against kryoptic. `ACKNOWLEDGEMENTS.md` records who found what.
 
 ## Verifying this release
 
