@@ -158,11 +158,17 @@ Check what your installed p11-kit carries rather than relying on this table;
 
 ### 4.2 Throttle handling (transient delay)
 
-Between attempts, `C_Login` may return `FHSM_RV_PIN_THROTTLED (0x80000004)` with a wait time exposed via the `pinStatus.throttle_*_remaining` fields of `C_GetTokenInfo`. The client SHOULD :
+After a failure, the next PIN attempt --- `C_Login`, `C_InitToken` on an
+initialized token, or a `CKU_CONTEXT_SPECIFIC` re-authentication --- waits
+until the delay has passed (500 ms, doubling with each further failure, at most
+60 s), then examines the PIN. The call takes longer; it does not fail.
 
-1. Display the wait time to the human operator.
-2. Sleep for the indicated number of milliseconds.
-3. Retry exactly once.
+Up to 2.5.0 such an attempt returned `FHSM_RV_PIN_THROTTLED (0x80000004)`
+instead, and the client was expected to sleep and retry. Since the delay is
+re-imposed each time the token is loaded, a command-line client, which loads
+the token and presents the PIN a few milliseconds later, was refused every
+time: after one wrong PIN the correct one no longer worked in a new process.
+The code is no longer returned by a PIN attempt.
 
 Repeatedly hammering through the throttle does not change the outcome. The
 failure **count** is persisted in the token file, so a restart does not reset

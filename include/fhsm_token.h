@@ -37,7 +37,8 @@
  *    --- Failed login attempts increment per-role counter (failed_so /
  *        failed_user). After FHSM_PIN_MAX_FAILED, the role is locked
  *        (FHSM_RV_PIN_LOCKED). Between attempts, exponential throttle
- *        is enforced (FHSM_RV_PIN_THROTTLED with delay).
+ *        is enforced: an attempt inside the delay waits for its end
+ *        (at most FHSM_PIN_THROTTLE_MAX_MS) before the PIN is examined.
  *
  *  Optional sealing backends:
  *    The DEK can be additionally sealed to a TPM 2.0 before being
@@ -116,8 +117,8 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
  * FHSM_RV_USER_ALREADY_LOGGED_IN before examining the PIN.
  *
  * Same failure counters and throttle as fhsm_token_login, so this is not an
- * unthrottled PIN oracle. Returns FHSM_RV_OK, FHSM_RV_PIN_INCORRECT,
- * FHSM_RV_PIN_LOCKED or FHSM_RV_PIN_THROTTLED. `pin` is pin_len bytes and is
+ * unthrottled PIN oracle; it waits out the throttle as login does. Returns
+ * FHSM_RV_OK, FHSM_RV_PIN_INCORRECT or FHSM_RV_PIN_LOCKED. `pin` is pin_len bytes and is
  * not a C string, as everywhere else. */
 fhsm_rv_t fhsm_token_verify_pin(fhsm_token_t *t, fhsm_role_t role,
                                  const char *pin, size_t pin_len);

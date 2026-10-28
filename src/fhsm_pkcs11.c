@@ -1699,12 +1699,17 @@ CK_RV C_InitToken(CK_SLOT_ID slotID, CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen,
     memcpy(label, pLabel, 32); label[32] = '\0';
     for (int i = 31; i >= 0 && label[i] == ' '; --i) label[i] = '\0';
 
-    /* If a token already exists, re-initialize via fhsm_token_reinit. */
+    /* If a token already exists, re-initialize via fhsm_token_reinit -- but
+     * only for the holder of the current SO PIN: PKCS#11 checks pPin against
+     * it and answers CKR_PIN_INCORRECT. Up to 2.5.0 any caller could destroy
+     * the objects. fhsm_token_verify_pin counts and throttles the failures,
+     * as C_Login does. */
     fhsm_rv_t rv;
     if (g_slots[slotID].present) {
         fhsm_token_t *t = fhsm_slot_token(slotID);
         if (!t) { fhsm_zeroize(pin, sizeof(pin)); return FHSM_RV_FUNCTION_FAILED; }
-        rv = fhsm_token_reinit(t, pin, label);
+        rv = fhsm_token_verify_pin(t, FHSM_ROLE_SO, pin, ulPinLen);
+        if (rv == FHSM_RV_OK) rv = fhsm_token_reinit(t, pin, label);
     } else {
         fhsm_token_t *t = NULL;
         rv = fhsm_token_init(g_slots[slotID].path, pin, label, &t);

@@ -39,9 +39,12 @@ The PIN throttle check happens **before** the PBKDF2 derivation in `fhsm_token_l
 
 ```c
 if (*fails >= FHSM_PIN_MAX_FAILED) return FHSM_RV_PIN_LOCKED;
-if (now < *until) return FHSM_RV_PIN_THROTTLED;
+if (now < *until) { throttle_sleep(t, *until - now); goto again; }
 /* ... then PBKDF2 derivation ~100 ms ... */
 ```
+
+Since 2.5.1 an attempt inside the throttle waits for its end, with the
+token's mutex released, instead of returning `FHSM_RV_PIN_THROTTLED`.
 
 This prevents an attacker from observing whether PBKDF2 ran or not (which would leak whether the throttle was active).
 

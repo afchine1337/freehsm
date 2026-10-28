@@ -217,6 +217,14 @@ struct fhsm_token_s {
 
     /* Live --- DEK is in the secure heap and is zeroized on logout. */
     uint8_t *dek;       /* fhsm_secure_malloc, 32 bytes when logged-in */
+    /* 1 while `dek` holds the token's key. The buffer outlives the key: a
+     * logout and a wrong PIN zeroize it in place and leave it allocated, so
+     * `dek != NULL` says nothing about its content. write_atomic() read it
+     * that way, and a wrong PIN after a logout re-encrypted the object store
+     * under 32 zero bytes; in a fresh process the same write dropped the
+     * store (tests/test_wrong_pin_store.c). Everything that encrypts with the
+     * DEK or changes the store asks this, not the pointer. */
+    int      dek_live;
     fhsm_role_t logged_in;
 
     /* Object store. Populated by fhsm_token_objects_load after login.
@@ -248,6 +256,23 @@ static uint64_t throttle_delay_ms(uint32_t fails) {
         d *= 2;
     }
     return d > FHSM_PIN_THROTTLE_MAX_MS ? FHSM_PIN_THROTTLE_MAX_MS : d;
+}
+
+/* Sleep `ms` with t->mu released; the caller holds it before and after, and
+ * must look at the token again since anything may have changed meanwhile.
+ *
+ * A PIN attempt inside the throttle waits instead of being refused. Up to
+ * 2.5.0 it got FHSM_RV_PIN_THROTTLED; but a load re-imposes the delay from
+ * the failure count, so a process that loads the token and presents the PIN
+ * a few ms later -- pkcs11-tool, every command-line client -- found the
+ * throttle running every time, and after a single wrong PIN the correct one
+ * was refused in every new process, for good. Waiting keeps one attempt per
+ * delay, and a restart still does not skip it. */
+static void throttle_sleep(fhsm_token_t *t, uint64_t ms) {
+    pthread_mutex_unlock(&t->mu);
+    struct timespec ts = { (time_t)(ms / 1000), (long)(ms % 1000) * 1000000L };
+    while (nanosleep(&ts, &ts) != 0) { }
+    pthread_mutex_lock(&t->mu);
 }
 
 /* ---------------------------------------------------------------------------
@@ -866,7 +891,7 @@ static fhsm_rv_t parse_objects(fhsm_token_t *t, const uint8_t *buf, size_t len) 
  * with object_count=0.
  * ----------------------------------------------------------------------- */
 static fhsm_rv_t objects_decrypt_load(fhsm_token_t *t) {
-    if (!t->dek) return FHSM_RV_USER_NOT_LOGGED_IN;
+    if (!t->dek_live) return FHSM_RV_USER_NOT_LOGGED_IN;
     objects_free_all(t);   /* reclaim any values from a prior login (#125) */
     int fd = open(t->path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return FHSM_RV_TOKEN_NOT_PRESENT;
@@ -909,6 +934,23 @@ static fhsm_rv_t objects_decrypt_load(fhsm_token_t *t) {
             FHSM_SLICE(ct, ct_len),
             ct + ct_len,            /* tag */
             pt, &pt_len);
+    if (rv != FHSM_RV_OK) {
+        /* Up to 2.5.0 a wrong PIN after a logout re-encrypted this blob under
+         * a DEK of 32 zero bytes (see dek_live). Such a store is readable by
+         * anyone and by nobody else; it is read here once more so that the
+         * owner gets the objects back, and the write that follows the login
+         * puts them back under the real DEK. A tag that verifies under the
+         * zero key is the mark of that defect and of nothing else. */
+        static const uint8_t zero_dek[DEK_LEN];
+        pt_len = ct_len;
+        rv = fhsm_aes_gcm_decrypt(
+                FHSM_SLICE(zero_dek, DEK_LEN),
+                FHSM_SLICE(nonce, 12),
+                FHSM_SLICE(t->serial, strlen(t->serial)),
+                FHSM_SLICE(ct, ct_len),
+                ct + ct_len,
+                pt, &pt_len);
+    }
     free(ct);
     if (rv == FHSM_RV_OK) {
         rv = parse_objects(t, pt, pt_len);
@@ -920,6 +962,29 @@ static fhsm_rv_t objects_decrypt_load(fhsm_token_t *t) {
     fhsm_zeroize(pt, ct_len);
     free(pt);
     return rv;
+}
+
+/* Everything after the header in the file at `path`, as it is: the encrypted
+ * blob, which this side of a login cannot read and must not rewrite. No file,
+ * or a header with nothing after it, is an empty result. The blob is bounded
+ * as objects_decrypt_load bounds it. */
+static fhsm_rv_t read_existing_blob(const char *path, uint8_t **out, size_t *out_len) {
+    *out = NULL; *out_len = 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return FHSM_RV_OK;
+    struct stat st;
+    if (fstat(fd, &st) < 0) { close(fd); return FHSM_RV_FUNCTION_FAILED; }
+    if ((size_t)st.st_size <= FHSM_TOK_FILE_SZ) { close(fd); return FHSM_RV_OK; }
+    size_t n = (size_t)st.st_size - FHSM_TOK_FILE_SZ;
+    if (n > (size_t)FHSM_OBJ_BLOB_MAX + 32) { close(fd); return FHSM_RV_FUNCTION_FAILED; }
+    uint8_t *b = malloc(n);
+    if (!b) { close(fd); return FHSM_RV_HOST_MEMORY; }
+    if (pread(fd, b, n, FHSM_TOK_FILE_SZ) != (ssize_t)n) {
+        free(b); close(fd); return FHSM_RV_FUNCTION_FAILED;
+    }
+    close(fd);
+    *out = b; *out_len = n;
+    return FHSM_RV_OK;
 }
 
 static fhsm_rv_t write_atomic(const fhsm_token_t *t) {
@@ -959,16 +1024,27 @@ static fhsm_rv_t write_atomic(const fhsm_token_t *t) {
     put_u64_le(hdr + 301, 0);
     put_u64_le(hdr + 309, 0);
 
-    /* Encrypted objects blob : only append if we have the DEK in memory
-     * (logged in) and at least one object exists. Otherwise the previous
-     * blob is intentionally dropped --- which is correct because the only
-     * code path that drops the blob is fhsm_token_reinit, which wants
-     * exactly that. */
+    /* The objects blob. With the DEK live and the objects loaded, the store
+     * in memory is the store, and it is encrypted afresh -- or omitted when
+     * it is empty, which is how fhsm_token_init and fhsm_token_reinit start
+     * a token with none.
+     *
+     * Without them -- before the first login, after a logout, after a wrong
+     * PIN -- this write is only carrying the header (a failure counter, as a
+     * rule), and the blob on disk is copied across byte for byte. It used to
+     * be dropped here on the theory that only a reinit got this far without
+     * a DEK; a wrong PIN in a fresh process got this far too, and emptied the
+     * token. */
     uint8_t *blob_ct = NULL;
     uint32_t blob_ct_len = 0;
     uint8_t  blob_nonce[12];
     uint8_t  blob_tag[16];
-    if (t->dek && t->objects_loaded && t->object_count > 0) {
+    uint8_t *kept = NULL;
+    size_t   kept_len = 0;
+    if (!(t->dek_live && t->objects_loaded)) {
+        fhsm_rv_t kr = read_existing_blob(t->path, &kept, &kept_len);
+        if (kr != FHSM_RV_OK) return kr;
+    } else if (t->object_count > 0) {
         size_t pt_sz = 12;   /* magic + count + next_handle */
         for (uint32_t i = 0; i < t->object_count; ++i)
             pt_sz += 4 + FHSM_OBJ_REC_V4_FIXED + t->objects[i].value_len;
@@ -992,12 +1068,17 @@ static fhsm_rv_t write_atomic(const fhsm_token_t *t) {
 
     char tmp[600]; snprintf(tmp, sizeof(tmp), "%s.tmp", t->path);
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) { free(blob_ct); return FHSM_RV_FUNCTION_FAILED; }
+    if (fd < 0) { free(blob_ct); free(kept); return FHSM_RV_FUNCTION_FAILED; }
 
     if (write(fd, hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr)) {
-        close(fd); unlink(tmp); free(blob_ct);
+        close(fd); unlink(tmp); free(blob_ct); free(kept);
         return FHSM_RV_FUNCTION_FAILED;
     }
+    if (kept_len > 0 && write(fd, kept, kept_len) != (ssize_t)kept_len) {
+        close(fd); unlink(tmp); free(kept);
+        return FHSM_RV_FUNCTION_FAILED;
+    }
+    free(kept);
     if (blob_ct_len > 0) {
         uint8_t blob_hdr[16];
         put_u32_le(blob_hdr, blob_ct_len);
@@ -1044,6 +1125,12 @@ fhsm_rv_t fhsm_token_init(const char *path, const char *so_pin,
     t->dek = fhsm_secure_zalloc(DEK_LEN);
     if (!t->dek) { free(t); return FHSM_RV_HOST_MEMORY; }
     fhsm_rng_bytes(t->dek, DEK_LEN);
+    t->dek_live = 1;
+    /* A new token has a store, and it is empty: loaded, not unknown. The
+     * first write then replaces whatever an earlier file at this path held
+     * rather than carrying its blob over. */
+    t->objects_loaded = 1;
+    t->next_handle    = 1;
 
     /* Wrap the DEK under the SO PIN. */
     uint8_t kek[32];
@@ -1166,6 +1253,7 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
                             const char *pin, size_t pin_len) {
     if (!t || !pin) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
+again:
 
     /* Already authenticated as this role : a re-login is not a
      * brute-force attempt, so return CKR_USER_ALREADY_LOGGED_IN before
@@ -1198,8 +1286,8 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
         return FHSM_RV_PIN_LOCKED;
     }
     if (now < *until) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_PIN_THROTTLED;
+        throttle_sleep(t, *until - now);   /* then look again from the top */
+        goto again;
     }
     if (role == FHSM_ROLE_USER && !t->user_initialized) {
         pthread_mutex_unlock(&t->mu);
@@ -1321,6 +1409,7 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
         *fails = 0;
         *until = 0;
         t->logged_in = role;
+        t->dek_live  = 1;
         /* Decrypt and parse the objects blob (if any). On failure we
          * keep the empty store rather than failing login. */
         if (!t->objects_loaded) {
@@ -1331,8 +1420,10 @@ fhsm_rv_t fhsm_token_login(fhsm_token_t *t, fhsm_role_t role,
         return FHSM_RV_OK;
     }
 
-    /* Wrong PIN : zero out partial DEK, bump counter, throttle. */
+    /* Wrong PIN : zero out partial DEK, bump counter, throttle. The write
+     * below carries the counter and leaves the store as it is on disk. */
     fhsm_zeroize(t->dek, DEK_LEN);
+    t->dek_live = 0;
     (*fails)++;
     *until = now + throttle_delay_ms(*fails);
     write_atomic(t);
@@ -1369,8 +1460,9 @@ fhsm_rv_t fhsm_token_verify_pin(fhsm_token_t *t, fhsm_role_t role,
     if (role != FHSM_ROLE_SO && role != FHSM_ROLE_USER)
         return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
+again: ;   /* a label must precede a statement, not the declaration below */
 
-    /* Throttle before PBKDF2, as in fhsm_token_login. */
+    /* Throttle before PBKDF2, as in fhsm_token_login; waited out, as there. */
     uint64_t now = now_ms();
     uint64_t *until = (role == FHSM_ROLE_SO) ? &t->throttle_so_until_ms
                                               : &t->throttle_user_until_ms;
@@ -1380,8 +1472,8 @@ fhsm_rv_t fhsm_token_verify_pin(fhsm_token_t *t, fhsm_role_t role,
         return FHSM_RV_PIN_LOCKED;
     }
     if (now < *until) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_PIN_THROTTLED;
+        throttle_sleep(t, *until - now);
+        goto again;
     }
     if (role == FHSM_ROLE_USER && !t->user_initialized) {
         pthread_mutex_unlock(&t->mu);
@@ -1442,6 +1534,7 @@ void fhsm_token_logout(fhsm_token_t *t) {
     /* DEK is kept resident only between login and logout; zeroize the
      * 32-byte buffer in place (it remains allocated for the next login). */
     if (t->dek) fhsm_zeroize(t->dek, DEK_LEN);
+    t->dek_live  = 0;
     t->logged_in = FHSM_ROLE_NONE;
     pthread_mutex_unlock(&t->mu);
 }
@@ -1508,7 +1601,7 @@ fhsm_rv_t fhsm_token_init_user_pin(fhsm_token_t *t, const char *user_pin) {
     if (!t || !user_pin) return FHSM_RV_ARGUMENTS_BAD;
     if (strlen(user_pin) < 4) return FHSM_RV_PIN_INCORRECT;
     pthread_mutex_lock(&t->mu);
-    if (t->logged_in != FHSM_ROLE_SO || !t->dek) {
+    if (t->logged_in != FHSM_ROLE_SO || !t->dek_live) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -1638,6 +1731,16 @@ fhsm_rv_t fhsm_token_reinit(fhsm_token_t *t, const char *new_so_pin,
         if (!t->dek) { pthread_mutex_unlock(&t->mu); return FHSM_RV_HOST_MEMORY; }
     }
     fhsm_rng_bytes(t->dek, DEK_LEN);
+    t->dek_live = 1;
+
+    /* C_InitToken destroys every object. The ones loaded in memory went on
+     * being written, under the new DEK, by the next write; the store is
+     * emptied here so that the write below starts the token with none. */
+    objects_free_all(t);
+    t->object_count   = 0;
+    t->next_handle    = 1;
+    t->objects_loaded = 1;
+    t->objects_dirty  = 0;
 
     /* Wrap with new SO PIN. */
     uint8_t kek[32];
@@ -1686,7 +1789,7 @@ fhsm_rv_t fhsm_token_object_add(fhsm_token_t *t, uint32_t cko_class,
     if (value_len > FHSM_OBJ_VALUE_MAX) return FHSM_RV_KEY_SIZE_RANGE;
     if (id_len > 32) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2016,7 +2119,7 @@ fhsm_rv_t fhsm_token_object_set_allowed_mechs(fhsm_token_t *t, uint32_t handle,
     if (!t || (count > 0 && !mechs)) return FHSM_RV_ARGUMENTS_BAD;
     if (count > FHSM_POLICY_MECH_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2048,7 +2151,7 @@ fhsm_rv_t fhsm_token_object_get_allowed_mechs(fhsm_token_t *t, uint32_t handle,
                                                uint32_t *out, uint8_t *io_count) {
     if (!t || !io_count) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2088,7 +2191,7 @@ fhsm_rv_t fhsm_token_object_mech_allowed(fhsm_token_t *t, uint32_t handle,
                                           uint32_t mech) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_OK;
     }
@@ -2153,7 +2256,7 @@ fhsm_rv_t fhsm_token_object_set_tmpl(fhsm_token_t *t, uint32_t handle,
             return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     }
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2184,7 +2287,7 @@ fhsm_rv_t fhsm_token_object_get_tmpl(fhsm_token_t *t, uint32_t handle,
     if (!t || !io_count) return FHSM_RV_ARGUMENTS_BAD;
     if (!tmpl_present_bit(which)) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2224,7 +2327,7 @@ fhsm_rv_t fhsm_token_object_get_policy_counts(fhsm_token_t *t, uint32_t handle,
                                                uint8_t *out_derive) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2246,7 +2349,7 @@ fhsm_rv_t fhsm_token_object_set_label(fhsm_token_t *t, uint32_t handle,
                                        const char *label) {
     if (!t || !label) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2278,7 +2381,7 @@ fhsm_rv_t fhsm_token_object_set_id(fhsm_token_t *t, uint32_t handle,
     }
     if (id_len > 0 && !id) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2301,7 +2404,7 @@ fhsm_rv_t fhsm_token_object_set_flags(fhsm_token_t *t, uint32_t handle,
                                        uint8_t flags) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2359,7 +2462,7 @@ fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
                                         uint8_t flags2) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2397,7 +2500,7 @@ fhsm_rv_t fhsm_token_object_set_flags3(fhsm_token_t *t, uint32_t handle,
                                         uint8_t flags3) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }
@@ -2417,7 +2520,7 @@ fhsm_rv_t fhsm_token_object_set_flags3(fhsm_token_t *t, uint32_t handle,
 fhsm_rv_t fhsm_token_object_destroy(fhsm_token_t *t, uint32_t handle) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek || !t->objects_loaded) {
+    if (!t->dek_live || !t->objects_loaded) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
     }

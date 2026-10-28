@@ -122,8 +122,8 @@ color_info ""
 color_info "[1/14] C_Initialize + C_GetInfo"
 out=$(run_p11 --show-info)
 assert "Cryptoki version 3.2"               "Cryptoki version 3.2"      "$out"
-assert "Manufacturer = FreeHSM C"            "FreeHSM C"                 "$out"
-assert "Library description present"         "libfreehsm.so"        "$out"
+assert "Manufacturer = Simorgh Labs"         "Simorgh Labs"              "$out"
+assert "Library description present"         "FreeHSM C"                 "$out"
 
 # ---- 2. C_GetSlotList (tokenPresent=0 should yield 4 configured slots) ---
 
@@ -161,8 +161,8 @@ color_info ""
 color_info "[5/14] C_GetTokenInfo"
 out=$(run_p11 --slot 0 --list-token-slots)
 assert "Token label matches"                  "$LABEL"                    "$out"
-assert "Manufacturer reported"                "FreeHSM C"                 "$out"
-assert "Model reported"                       "FreeHSM-C-v1"              "$out"
+assert "Manufacturer reported"                "Simorgh Labs"              "$out"
+assert "Model reported"                       "token model        : FreeHSM-" "$out"
 
 # ---- 6. C_GetMechanismList -----------------------------------------------
 
@@ -193,6 +193,11 @@ color_info ""
 color_info "[9/14] C_Login(USER) with WRONG pin"
 out=$(run_p11 --slot 0 --login --pin "0000WRONG" --list-token-slots)
 assert "Wrong PIN rejected"                   "CKR_PIN_INCORRECT"         "$out"
+# A new process re-imposes the delay the failure earned, and the attempt
+# waits it out. Up to 2.5.0 it got PIN_THROTTLED (0x80000004), in every new
+# process, so the correct PIN never worked again from the command line.
+out=$(run_p11 --slot 0 --login --pin "$USER_PIN" --list-token-slots)
+assert "Correct PIN accepted after a wrong one" "$LABEL"                  "$out"
 
 # ---- 10. SO can re-init token (destroys objects) -------------------------
 
@@ -200,6 +205,13 @@ color_info ""
 color_info "[10/14] C_InitToken with different label (re-init)"
 out=$(run_p11 --slot 0 --init-token --label "freehsm-prod" --so-pin "$SO_PIN")
 assert "Re-init succeeded"                    "Token successfully initialized" "$out"
+# Re-initializing an existing token takes its current SO PIN (PKCS#11
+# C_InitToken). Up to 2.5.0 any PIN was accepted.
+out=$(run_p11 --slot 0 --init-token --label "freehsm-stolen" --so-pin "0000WRONG")
+assert "Re-init with a wrong SO PIN rejected" "CKR_PIN_INCORRECT"         "$out"
+# ...and the SO PIN still works afterwards, in a new process.
+out=$(run_p11 --slot 0 --init-token --label "freehsm-prod" --so-pin "$SO_PIN")
+assert "Re-init with the SO PIN after a wrong one" "Token successfully initialized" "$out"
 
 # ---- 11. Final cleanup-friendly slot list -------------------------------
 

@@ -380,15 +380,99 @@ disclosure.
 
 ---
 
+## Self-disclosed object-store defect — a wrong PIN (2026-10-28)
+
+**Advisory:** *(published with v2.5.1)* · High · CWE-321 · no CVE requested
+
+**A wrong PIN could re-encrypt the token's object store under a key of 32
+zero bytes, or remove it from the token file.** Affects every published
+release, v1.1.0 to v2.5.0. Fixed in v2.5.1.
+
+**Cause.** Every PIN attempt writes the token file, to persist the failure
+counter. That write re-encrypted the object store whenever the DEK buffer
+existed and the objects were loaded, and wrote the file without a store
+otherwise. A wrong PIN zeroizes the DEK buffer in place but keeps it
+allocated, so:
+
+- **in a process that had logged in before** — a service that logs out and
+  in again, a `p11-kit server`, any long-lived application — a wrong PIN
+  re-encrypted the store under 32 zero bytes. The private and secret keys in
+  the token file could then be decrypted by anyone able to read that file,
+  and no longer with the token's own DEK;
+- **as the first attempt of a process** — `pkcs11-tool --login` with a
+  mistyped PIN, any short-lived client — the objects were not loaded yet, and
+  the file was rewritten without them: the token kept its PINs and lost
+  every object.
+
+**Effect.** The first case is a disclosure to whoever can read the token
+file: by default its owner only (mode 0600), but also backups, copies and
+any other account or process that can read it. The second is a loss of
+every token object, caused by an ordinary typing mistake.
+
+**Fixed.** The store is re-encrypted only while the DEK is actually known and
+the objects loaded; otherwise the encrypted store on disk is copied as it is.
+Changing an object after a logout is refused with `CKR_USER_NOT_LOGGED_IN`,
+as before the first login. `tests/test_wrong_pin_store.c` checks both cases
+from the file; it fails three times without the fix.
+
+**If you ran an affected version.**
+
+- A store re-encrypted under the zero key is read by v2.5.1 at the next
+  correct login and re-encrypted at once under the token's DEK. Log in once
+  after upgrading. Any copy of the token file taken while it was in that
+  state — a backup, a snapshot, a file copied elsewhere — still opens with
+  the zero key: if such copies may have left your control, treat the keys
+  in it as exposed and replace them.
+- A store removed by a wrong PIN cannot be recovered from the token file. A
+  backup of the file taken before that attempt holds the objects, encrypted
+  under the token's DEK as usual.
+- A token that answers `C_FindObjects` with nothing after a correct login,
+  when it held objects, was emptied this way.
+
+**Found by** reading the token store while designing `C_FindObjectsInit`
+for public objects before login: the store's notion of "the DEK is known"
+did not match the login state. Confirmed by `tests/test_wrong_pin_store.c`
+on v2.5.0.
+
+**Timeline.** Present since v1.1.0 (2026-06-11), the first public release.
+Found, confirmed, fixed and released on 2026-10-28.
+
+---
+
+## Self-disclosed missing SO PIN check — `C_InitToken` (2026-10-28)
+
+**Advisory:** *(published with v2.5.1)* · Moderate · CWE-306 · no CVE requested
+
+**`C_InitToken` re-initialized an existing token without its SO PIN.**
+Affects every published release, v1.1.0 to v2.5.0. Fixed in v2.5.1.
+
+PKCS#11 checks `pPin` against the token's current SO PIN when the token is
+already initialized, and answers `CKR_PIN_INCORRECT` when it does not match.
+FreeHSM accepted any PIN and re-initialized the token: new SO PIN, user PIN
+reset, every object destroyed.
+
+**Effect.** Anything able to call the module could destroy the token's
+objects and take over its SO role. No object was disclosed: the
+re-initialization creates a new DEK and starts from an empty store.
+
+**Fixed.** The PIN is verified against the current SO PIN first, with the
+same failure counter and throttle as `C_Login`. `tests/integration_pkcs11.sh`,
+step 10.
+
+**Timeline.** Present since v1.1.0. Found on 2026-10-28 while fixing the
+object-store defect above, which goes through the same function.
+
+---
+
 ## Supported versions
 
 | Version | Supported |
 |---|---|
-| `2.3.x` | ✅ — active development |
-| `2.2.x` | ✅ — supported. First version carrying the `C_DecryptFinal` output bound described above |
-| `2.1.x` | ⚠️ — **affected by the `C_DecryptFinal` out-of-bounds write**; upgrade to v2.2.0. Carries the `C_UnwrapKey` bound |
-| `2.0.x` | ⚠️ — affected by **both** the `C_DecryptFinal` write and the `C_UnwrapKey` stack overflow; upgrade to v2.2.0 |
-| `1.5.x` – `1.6.x` | ⚠️ — affected by both; no backports planned, upgrade |
+| `2.5.1` | ✅ — active development. First version carrying the object-store and `C_InitToken` fixes described above |
+| `2.2.0` – `2.5.0` | ⚠️ — **affected by the wrong-PIN object-store defect** and the `C_InitToken` check; upgrade to v2.5.1 |
+| `2.1.x` | ⚠️ — affected by the above, and by the `C_DecryptFinal` out-of-bounds write; upgrade to v2.5.1 |
+| `2.0.x` | ⚠️ — affected by the above, the `C_DecryptFinal` write and the `C_UnwrapKey` stack overflow; upgrade to v2.5.1 |
+| `1.5.x` – `1.6.x` | ⚠️ — affected by all of them; no backports planned, upgrade |
 | `1.4.0` | ❌ — **published unsigned** (see above); unusable as shipped, do not work around it |
 | `1.1.x` – `1.3.x` | ❌ — end of life. Affected by the `C_DecryptFinal` write, and all `1.1.x` additionally by the integrity self-test defect |
 | `< 1.0` | ❌ — end of life (Python proof of concept) |
@@ -401,8 +485,11 @@ The `-FIPS` suffix was dropped from version strings in v2.0.0: it asserted in
 the version number a certification this project does not hold.
 Older tags carry it; it means nothing beyond the name they were released under.
 
+The wrong-PIN object-store defect and the `C_InitToken` check also reach
+every row from `1.1.x` upward. v2.5.1 is the first version without them.
+
 This table was last accurate at v1.2.1, corrected when the `C_UnwrapKey` entry
-was written, and corrected again here for v2.2.0 — a supported-versions table
+was written, corrected again for v2.2.0, and again for v2.5.1 — a supported-versions table
 that lags is the one place a reader checks to find out whether an advisory
 concerns them, so it is updated in the same commit as the advisory rather than
 in a tidying pass afterwards.

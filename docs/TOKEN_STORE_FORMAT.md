@@ -148,7 +148,30 @@ sealing.
 4. No plaintext key material ever touches the file: `value` fields exist
    only inside the GCM-protected blob.
 5. `objects_blob` absent ⇒ `object_count = 0` (fresh or re-initialized
-   token). `fhsm_token_reinit` intentionally drops the blob.
+   token). `fhsm_token_init` and `fhsm_token_reinit` write a token without
+   one; `fhsm_token_reinit` empties the store in memory first.
+6. The blob is re-encrypted only with the DEK live (`dek_live`: after a
+   successful login, `fhsm_token_init` or `fhsm_token_reinit`) and the store
+   loaded. Any other write -- a failure counter before a login, after a
+   logout, after a wrong PIN -- copies the blob on disk byte for byte.
+
+## Regression note: a wrong PIN and the blob (2.5.1)
+
+Up to 2.5.0, `write_atomic()` took `t->dek != NULL` to mean "the DEK is
+known". A logout and a wrong PIN zeroize the DEK buffer in place and keep it
+allocated, so a wrong PIN, which writes the failure counter:
+
+- after a logout, with the objects still loaded, re-encrypted the blob
+  under a DEK of 32 zero bytes: readable by anyone who reads the file, and
+  no longer readable with the real DEK;
+- in a fresh process, before any login, dropped the blob, emptying the
+  token.
+
+`tests/test_wrong_pin_store.c` reproduces both from the file. The loader
+still accepts a blob whose tag verifies under the zero DEK, so that a store
+damaged by the first case comes back at the owner's next login and is
+re-encrypted under the real DEK; a store emptied by the second case cannot
+be recovered.
 
 ## Regression note (found while writing this document)
 

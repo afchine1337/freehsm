@@ -7,6 +7,53 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.5.1] --- 2026-10-28
+
+*Patch: security fixes. A wrong PIN could re-encrypt the object store under
+a zero key or empty the token; `C_InitToken` re-initialized an existing
+token without its SO PIN; after one wrong PIN, a command-line client could
+no longer log in. `RELEASE_v2.5.1.md` has the release notes; `SECURITY.md`
+has the advisories.*
+
+### Security
+* **A wrong PIN could rewrite the object store under a zero key, or drop
+  it.** The token file's object blob is re-encrypted on every write while
+  the DEK is known, and the store took a DEK buffer that existed for a DEK
+  that was known. `C_Logout` and a wrong PIN zeroize that buffer in place
+  and keep it. So a wrong PIN, which writes the failure counter, re-encrypted
+  the store under 32 zero bytes when it followed a logout in the same
+  process -- the private and secret keys on disk then opened with a key
+  anyone has, and no longer with the token's -- and dropped the store when
+  it came first in a process, emptying the token. A write now re-encrypts
+  only with the DEK live and the store loaded, and otherwise copies the blob
+  on disk as it is; changing an object after a logout is
+  `CKR_USER_NOT_LOGGED_IN`, as it was before the first login. A store
+  already written under the zero key is read at the owner's next login and
+  re-encrypted under the token's DEK; a store already dropped cannot be
+  recovered. `tests/test_wrong_pin_store.c`.
+* **`C_InitToken` re-initialized an existing token without its SO PIN.**
+  PKCS#11 checks `pPin` against the current SO PIN and answers
+  `CKR_PIN_INCORRECT`; FreeHSM accepted any PIN, so any caller of the
+  module could destroy the token's objects (none was disclosed). The PIN is
+  now verified first, counted and throttled as at `C_Login`.
+  `tests/integration_pkcs11.sh`, step 10.
+
+### Changed
+* **A PIN attempt inside the throttle waits instead of failing.** After one
+  wrong PIN, the correct one was refused with `FHSM_RV_PIN_THROTTLED`
+  (`0x80000004`) in every new process: loading the token re-imposes the
+  delay the failure earned, and a command-line client such as `pkcs11-tool`
+  presents the PIN a few milliseconds after the load. `C_Login`,
+  `C_InitToken` and the `CKU_CONTEXT_SPECIFIC` re-authentication now sleep
+  until the delay has passed, with the token's mutex released, then examine
+  the PIN; one attempt per delay, as before, and a restart still does not
+  skip it. `tests/integration_pkcs11.sh`, steps 9 and 10.
+
+### Fixed
+* **`C_InitToken` on an initialized token kept the objects loaded in
+  memory.** They were written to the new token under its new DEK at the next
+  write. The store is now emptied before the token is rewritten.
+
 ## [2.5.0] --- 2026-10-28
 
 *Minor: HashSLH-DSA, multipart AES-CMAC and AES-GMAC, SLH-DSA and

@@ -157,11 +157,9 @@ tableau ; `docs/P11_KIT_REMOTING.md` contient la mesure et la mise en place.
 
 ### 4.2 Gestion du throttle
 
-Entre tentatives, `C_Login` peut retourner `FHSM_RV_PIN_THROTTLED (0x80000004)`. Le client DEVRAIT :
+Après un échec, la tentative suivante --- `C_Login`, `C_InitToken` sur un token initialisé, ou une ré-authentification `CKU_CONTEXT_SPECIFIC` --- attend la fin du délai (500 ms, doublé à chaque nouvel échec, 60 s au plus), puis examine le PIN. L'appel dure plus longtemps ; il n'échoue pas.
 
-1. Afficher le temps d'attente à l'opérateur humain.
-2. Sleep pour le nombre de millisecondes indiqué.
-3. Réessayer exactement une fois.
+Jusqu'à la 2.5.0, une telle tentative retournait `FHSM_RV_PIN_THROTTLED (0x80000004)` et le client devait attendre puis réessayer. Le délai étant ré-imposé à chaque chargement du token, un client en ligne de commande, qui charge le token et présente le PIN quelques millisecondes plus tard, était refusé à chaque fois : après un mauvais PIN, le bon ne passait plus dans un nouveau processus. Une tentative de PIN ne retourne plus ce code.
 
 Marteler à travers le throttle ne change pas le résultat ; le cooldown survit au redémarrage du processus.
 
