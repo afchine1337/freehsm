@@ -160,8 +160,8 @@ or mode does not offer a mechanism. OpenSC's `pkcs11-tool` scripts and `p11test`
 pass against an `all-mechanisms` build, apart from its KEM script, which
 encapsulates without a login.
 
-pkcs11-check 0.2.3 in CI, signed module: 5 011 tests and 2 failures in
-`nist-approved-only`, 5 142 and 3 in `all-mechanisms`, all of them listed in
+pkcs11-check 0.2.3 in CI, signed module: 5 036 tests and 2 failures in
+`nist-approved-only`, 5 240 and 3 in `all-mechanisms`, all of them listed in
 `tests/pkcs11_check_known_failures.txt`. The release commit is measured
 again by CI.
 
