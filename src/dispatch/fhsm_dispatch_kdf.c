@@ -20,7 +20,6 @@
  *
  *  - PBKDF2 (CKM_PKCS5_PBKD2)             SP 800-132
  *  - HKDF   (CKM_HKDF_DERIVE/DATA/KEYGEN) SP 800-56C rev. 2
- *  - SP 800-108 PRF KDF (CKM_NIST_PRF_KDF, stub)
  *  - Generic secret keygen                SP 800-133 rev. 2
  *
  *  Common TLV inputs (varies per mechanism):

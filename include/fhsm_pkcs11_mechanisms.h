@@ -151,6 +151,11 @@ extern "C" {
 /* --- PBKDF2 --- */
 #define CKM_PKCS5_PBKD2                      0x000003B0u
 
+/* --- SP800-108 --- */
+#define CKM_SP800_108_COUNTER_KDF            0x000003ACu
+#define CKM_SP800_108_FEEDBACK_KDF           0x000003ADu
+#define CKM_SP800_108_DOUBLE_PIPELINE_KDF    0x000003AEu
+
 /* --- GENERIC --- */
 #define CKM_GENERIC_SECRET_KEY_GEN           0x00000350u
 
@@ -280,6 +285,7 @@ extern fhsm_rv_t dispatch_hkdf(unsigned long, unsigned long, const void*, size_t
 extern fhsm_rv_t dispatch_hkdf_data(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_hkdf_keygen(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_pbkdf2(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_sp800_108(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_generic_secret_keygen(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_concat_base_and_key(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_concat_base_and_data(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);

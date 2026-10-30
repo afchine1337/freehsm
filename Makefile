@@ -927,6 +927,9 @@ tests/test_ecdh_peer_point: tests/test_ecdh_peer_point.c $(LIB)
 tests/test_derive_hkdf: tests/test_derive_hkdf.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl $(LDFLAGS)
 
+tests/test_sp800_108: tests/test_sp800_108.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl $(LDFLAGS)
+
 # ECDH end to end on each supported curve: generate, read the public point,
 # derive, then import a private key the standards-conforming way (X9.62 d +
 # CKA_EC_PARAMS) and derive with that. The import half is what 7,185
@@ -1250,6 +1253,7 @@ TEST_BINS = \
 	tests/test_derive_concat \
 	tests/test_ecdh_peer_point \
 	tests/test_derive_hkdf \
+	tests/test_sp800_108 \
 	tests/probe_ecdh_curves \
 	tests/probe_hkdf_data \
 	tests/test_pbkd2 \
@@ -1391,6 +1395,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_ecdh_peer_point
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_derive_hkdf
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_sp800_108
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/probe_ecdh_curves
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

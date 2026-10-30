@@ -19,6 +19,11 @@ logout, which 2.5.1 had broken. No security advisory.
 `RELEASE_v2.6.0.md` has the release notes.*
 
 ### Added
+* **SP 800-108 key derivation (#28).** `CKM_SP800_108_COUNTER_KDF`,
+  `CKM_SP800_108_FEEDBACK_KDF` and `CKM_SP800_108_DOUBLE_PIPELINE_KDF` in both
+  profiles, with an HMAC or AES-CMAC PRF, additional derived keys, and the
+  fields of the PRF input in the caller's order, which covers SCP03.
+  `tests/test_sp800_108.c`.
 * **Public objects before a login.** `C_FindObjectsInit` answered
   `CKR_USER_NOT_LOGGED_IN` in a session that was not logged in, because
   every object lived in the encrypted blob. The token file now carries a

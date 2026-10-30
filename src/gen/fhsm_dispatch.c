@@ -856,6 +856,16 @@ __attribute__((weak)) fhsm_rv_t dispatch_slh_dsa_keypair(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
+__attribute__((weak)) fhsm_rv_t dispatch_sp800_108(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
 __attribute__((weak)) fhsm_rv_t dispatch_xor_base_and_data(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
@@ -950,6 +960,9 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00000362u, "CKM_CONCATENATE_BASE_AND_DATA", "KDF-concat", "derive", 1, dispatch_concat_base_and_data },
     { 0x00000363u, "CKM_CONCATENATE_DATA_AND_BASE", "KDF-concat", "derive", 1, dispatch_concat_data_and_base },
     { 0x00000364u, "CKM_XOR_BASE_AND_DATA", "KDF-concat", "derive", 1, dispatch_xor_base_and_data },
+    { 0x000003ACu, "CKM_SP800_108_COUNTER_KDF", "SP800-108", "derive", 1, dispatch_sp800_108 },
+    { 0x000003ADu, "CKM_SP800_108_FEEDBACK_KDF", "SP800-108", "derive", 1, dispatch_sp800_108 },
+    { 0x000003AEu, "CKM_SP800_108_DOUBLE_PIPELINE_KDF", "SP800-108", "derive", 1, dispatch_sp800_108 },
     { 0x000003B0u, "CKM_PKCS5_PBKD2", "PBKDF2", "keygen", 1, dispatch_pbkdf2 },
     { 0x00001040u, "CKM_EC_KEY_PAIR_GEN", "EC", "keypair", 1, dispatch_ec_keypair },
     { 0x00001041u, "CKM_ECDSA", "EC", "sign", 1, dispatch_ecdsa },

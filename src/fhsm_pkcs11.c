@@ -1629,7 +1629,8 @@ static void fhsm_mech_keysizes_for(const char *fam,
     if (!strcmp(fam, "RSA"))     { *mn = rsa_min_bits(); *mx = 4096; return; }
     if (!strcmp(fam, "EC") || !strcmp(fam, "EdDSA") || !strcmp(fam, "ECM"))
                                  { *mn = FHSM_EC_MIN_BITS; *mx = FHSM_EC_MAX_BITS; return; }
-    if (!strcmp(fam, "HMAC") || !strcmp(fam, "KMAC") || !strcmp(fam, "GENERIC"))
+    if (!strcmp(fam, "HMAC") || !strcmp(fam, "KMAC") || !strcmp(fam, "GENERIC")
+        || !strcmp(fam, "SP800-108"))
                                  { *mn = 1;    *mx = 64;   return; }
 }
 
@@ -4315,6 +4316,399 @@ typedef struct CK_HKDF_PARAMS_s {
  * meaningless -- a nonsensical length still gets refused. */
 #define FHSM_ECDH_Z_MAX 128u
 
+/* SP 800-108 (PKCS#11 v3.1 §6.42). The caller lays out the PRF's input field
+ * by field, in any order -- SCP03 puts the counter between the length and the
+ * context -- which OpenSSL's KBKDF, with its one fixed layout, cannot express.
+ * So the loop is here and only the PRF is OpenSSL's, through EVP_MAC. */
+#define CKM_SP800_108_COUNTER_KDF_OP         0x000003ACUL
+#define CKM_SP800_108_FEEDBACK_KDF_OP        0x000003ADUL
+#define CKM_SP800_108_DOUBLE_PIPELINE_KDF_OP 0x000003AEUL
+
+#define CK_SP800_108_ITERATION_VARIABLE 0x00000001UL
+#define CK_SP800_108_OPTIONAL_COUNTER   0x00000002UL
+#define CK_SP800_108_DKM_LENGTH         0x00000003UL
+#define CK_SP800_108_BYTE_ARRAY         0x00000004UL
+#define CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS     0x00000001UL
+#define CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS 0x00000002UL
+
+typedef struct CK_PRF_DATA_PARAM_s {
+    CK_ULONG  type;
+    void     *pValue;
+    CK_ULONG  ulValueLen;
+} CK_PRF_DATA_PARAM;
+
+typedef struct CK_SP800_108_COUNTER_FORMAT_s {
+    unsigned char bLittleEndian;
+    CK_ULONG      ulWidthInBits;
+} CK_SP800_108_COUNTER_FORMAT;
+
+typedef struct CK_SP800_108_DKM_LENGTH_FORMAT_s {
+    CK_ULONG      dkmLengthMethod;
+    unsigned char bLittleEndian;
+    CK_ULONG      ulWidthInBits;
+} CK_SP800_108_DKM_LENGTH_FORMAT;
+
+typedef struct CK_DERIVED_KEY_s {
+    CK_ATTRIBUTE     *pTemplate;
+    CK_ULONG          ulAttributeCount;
+    CK_OBJECT_HANDLE *phKey;
+} CK_DERIVED_KEY;
+
+typedef struct CK_SP800_108_KDF_PARAMS_s {
+    CK_ULONG           prfType;
+    CK_ULONG           ulNumberOfDataParams;
+    CK_PRF_DATA_PARAM *pDataParams;
+    CK_ULONG           ulAdditionalDerivedKeys;
+    CK_DERIVED_KEY    *pAdditionalDerivedKeys;
+} CK_SP800_108_KDF_PARAMS;
+
+typedef struct CK_SP800_108_FEEDBACK_KDF_PARAMS_s {
+    CK_ULONG           prfType;
+    CK_ULONG           ulNumberOfDataParams;
+    CK_PRF_DATA_PARAM *pDataParams;
+    CK_ULONG           ulIVLen;
+    unsigned char     *pIV;
+    CK_ULONG           ulAdditionalDerivedKeys;
+    CK_DERIVED_KEY    *pAdditionalDerivedKeys;
+} CK_SP800_108_FEEDBACK_KDF_PARAMS;
+
+/* The standard sets no limits; these keep a caller's lengths from becoming
+ * this process's work. 1 MiB of keying material is far past any key. */
+#define FHSM_KBKDF_MAX_DATA_PARAMS 64u
+#define FHSM_KBKDF_MAX_FIELD       65536u
+#define FHSM_KBKDF_MAX_KEYS        32u
+#define FHSM_KBKDF_MAX_DKM         (1024u * 1024u)
+#define FHSM_KBKDF_MAX_PRF_LEN     64u
+
+static int fhsm_hmac_hash_of(uint32_t mech, fhsm_hash_t *hash, size_t *maclen);
+static const char *hmac_digest_name(fhsm_hash_t h);
+
+/* The shape of the data fields, per the tables of §6.42.3 to §6.42.5. */
+static CK_RV kbkdf_check_fields(CK_ULONG mech, const CK_PRF_DATA_PARAM *dp,
+                                CK_ULONG n) {
+    int iter = 0, counter = 0, dkm = 0;
+    if (!dp || n == 0 || n > FHSM_KBKDF_MAX_DATA_PARAMS)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    for (CK_ULONG i = 0; i < n; ++i) {
+        switch (dp[i].type) {
+        case CK_SP800_108_ITERATION_VARIABLE:
+            if (iter++) return FHSM_RV_MECHANISM_PARAM_INVALID;
+            if (mech != CKM_SP800_108_COUNTER_KDF_OP) {
+                if (dp[i].pValue || dp[i].ulValueLen)
+                    return FHSM_RV_MECHANISM_PARAM_INVALID;
+                break;
+            }
+            /* In counter mode it is the counter, with a format. */
+            /* fall through */
+        case CK_SP800_108_OPTIONAL_COUNTER: {
+            CK_SP800_108_COUNTER_FORMAT f;
+            if (dp[i].type == CK_SP800_108_OPTIONAL_COUNTER
+                && (mech == CKM_SP800_108_COUNTER_KDF_OP || counter++))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            if (!dp[i].pValue || dp[i].ulValueLen != sizeof(f))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            memcpy(&f, dp[i].pValue, sizeof(f));
+            if (f.ulWidthInBits == 0 || f.ulWidthInBits > 32
+                || f.ulWidthInBits % 8 != 0)
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            break;
+        }
+        case CK_SP800_108_DKM_LENGTH: {
+            CK_SP800_108_DKM_LENGTH_FORMAT f;
+            if (dkm++ || !dp[i].pValue || dp[i].ulValueLen != sizeof(f))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            memcpy(&f, dp[i].pValue, sizeof(f));
+            if (f.dkmLengthMethod != CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS
+                && f.dkmLengthMethod != CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS)
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            if (f.ulWidthInBits == 0 || f.ulWidthInBits > 64
+                || f.ulWidthInBits % 8 != 0)
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            break;
+        }
+        case CK_SP800_108_BYTE_ARRAY:
+            if (!dp[i].pValue || dp[i].ulValueLen == 0
+                || dp[i].ulValueLen > FHSM_KBKDF_MAX_FIELD)
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            break;
+        default:
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        }
+    }
+    return iter == 1 ? FHSM_RV_OK : FHSM_RV_MECHANISM_PARAM_INVALID;
+}
+
+/* The values must fit the widths they were given: a counter that wraps repeats
+ * a segment, and a length that is cut says something else. */
+static CK_RV kbkdf_check_ranges(const CK_PRF_DATA_PARAM *dp, CK_ULONG n,
+                                uint64_t segments, uint64_t keys_bits,
+                                uint64_t segs_bits) {
+    for (CK_ULONG i = 0; i < n; ++i) {
+        CK_ULONG width = 0;
+        uint64_t value = 0;
+        if ((dp[i].type == CK_SP800_108_ITERATION_VARIABLE && dp[i].pValue)
+            || dp[i].type == CK_SP800_108_OPTIONAL_COUNTER) {
+            CK_SP800_108_COUNTER_FORMAT f;
+            memcpy(&f, dp[i].pValue, sizeof(f));
+            width = f.ulWidthInBits; value = segments;
+        } else if (dp[i].type == CK_SP800_108_DKM_LENGTH) {
+            CK_SP800_108_DKM_LENGTH_FORMAT f;
+            memcpy(&f, dp[i].pValue, sizeof(f));
+            width = f.ulWidthInBits;
+            value = f.dkmLengthMethod == CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS
+                  ? keys_bits : segs_bits;
+        }
+        if (width && width < 64 && (value >> width) != 0)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+    }
+    return FHSM_RV_OK;
+}
+
+static int kbkdf_update_int(EVP_MAC_CTX *ctx, uint64_t v, CK_ULONG bits, int le) {
+    uint8_t b[8];
+    size_t n = bits / 8;
+    for (size_t i = 0; i < n; ++i)
+        b[i] = (uint8_t)(v >> ((le ? i : n - 1 - i) * 8));
+    return EVP_MAC_update(ctx, b, n);
+}
+
+/* One PRF input, the fields concatenated in the caller's order. `iter` is
+ * K(i-1) in feedback mode, A(i) in double pipeline, and unused in counter mode.
+ * With `for_iv`, the double pipeline's A(0): every field but the two that vary
+ * (§6.42.5). */
+static int kbkdf_input(EVP_MAC_CTX *ctx, CK_ULONG mech,
+                       const CK_PRF_DATA_PARAM *dp, CK_ULONG n, uint64_t i_,
+                       const uint8_t *iter, size_t iter_len, int for_iv,
+                       uint64_t keys_bits, uint64_t segs_bits) {
+    for (CK_ULONG i = 0; i < n; ++i) {
+        switch (dp[i].type) {
+        case CK_SP800_108_ITERATION_VARIABLE:
+            if (for_iv) break;
+            if (mech != CKM_SP800_108_COUNTER_KDF_OP) {
+                if (iter_len && EVP_MAC_update(ctx, iter, iter_len) != 1) return 0;
+                break;
+            }
+            /* fall through */
+        case CK_SP800_108_OPTIONAL_COUNTER: {
+            CK_SP800_108_COUNTER_FORMAT f;
+            if (for_iv) break;
+            memcpy(&f, dp[i].pValue, sizeof(f));
+            if (kbkdf_update_int(ctx, i_, f.ulWidthInBits, f.bLittleEndian) != 1)
+                return 0;
+            break;
+        }
+        case CK_SP800_108_DKM_LENGTH: {
+            CK_SP800_108_DKM_LENGTH_FORMAT f;
+            memcpy(&f, dp[i].pValue, sizeof(f));
+            if (kbkdf_update_int(ctx,
+                    f.dkmLengthMethod == CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS
+                        ? keys_bits : segs_bits,
+                    f.ulWidthInBits, f.bLittleEndian) != 1)
+                return 0;
+            break;
+        }
+        default: /* CK_SP800_108_BYTE_ARRAY: kbkdf_check_fields left no other */
+            if (EVP_MAC_update(ctx, dp[i].pValue, dp[i].ulValueLen) != 1) return 0;
+            break;
+        }
+    }
+    return 1;
+}
+
+/* `out` receives `segments` segments of h bytes. */
+static int kbkdf_run(EVP_MAC_CTX *ctx, const uint8_t *key, size_t key_len,
+                     const OSSL_PARAM *mp, CK_ULONG mech,
+                     const CK_PRF_DATA_PARAM *dp, CK_ULONG n,
+                     const uint8_t *iv, size_t iv_len, size_t h,
+                     uint64_t segments, uint64_t keys_bits, uint64_t segs_bits,
+                     uint8_t *out) {
+    uint8_t a[FHSM_KBKDF_MAX_PRF_LEN];
+    int ok = 0;
+    for (uint64_t i = 1; i <= segments; ++i) {
+        const uint8_t *iter = NULL;
+        size_t iter_len = 0, l = 0;
+        uint8_t *seg = out + (i - 1) * h;
+        if (mech == CKM_SP800_108_DOUBLE_PIPELINE_KDF_OP) {
+            /* A(i) = PRF(KI, A(i-1)), with A(0) the fixed fields. */
+            if (EVP_MAC_init(ctx, key, key_len, mp) != 1) goto done;
+            if (i == 1) {
+                if (!kbkdf_input(ctx, mech, dp, n, 0, NULL, 0, 1,
+                                 keys_bits, segs_bits)) goto done;
+            } else if (EVP_MAC_update(ctx, a, h) != 1) {
+                goto done;
+            }
+            if (EVP_MAC_final(ctx, a, &l, h) != 1 || l != h) goto done;
+            iter = a; iter_len = h;
+        } else if (mech == CKM_SP800_108_FEEDBACK_KDF_OP) {
+            iter = i == 1 ? iv : seg - h;
+            iter_len = i == 1 ? iv_len : h;
+        }
+        if (EVP_MAC_init(ctx, key, key_len, mp) != 1
+            || !kbkdf_input(ctx, mech, dp, n, i, iter, iter_len, 0,
+                            keys_bits, segs_bits)
+            || EVP_MAC_final(ctx, seg, &l, h) != 1 || l != h)
+            goto done;
+    }
+    ok = 1;
+done:
+    OPENSSL_cleanse(a, sizeof(a));
+    return ok;
+}
+
+/* What every derive template gets from C_DeriveKey's own checks, for those in
+ * the mechanism parameter, and the key's length. */
+static CK_RV kbkdf_check_template(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
+                                  CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *tmpl,
+                                  CK_ULONG n, size_t *len) {
+    CK_RV r;
+    if ((r = fhsm_check_template(tmpl, n)) != FHSM_RV_OK) return r;
+    if ((r = fhsm_check_trusted_attr(hSession, tmpl, n)) != FHSM_RV_OK) return r;
+    if ((r = fhsm_check_bool_attr_lengths(tmpl, n)) != FHSM_RV_OK) return r;
+    if ((r = fhsm_check_ulong_attr_lengths(tmpl, n)) != FHSM_RV_OK) return r;
+    if ((r = fhsm_check_ro_token(hSession, tmpl, n)) != FHSM_RV_OK) return r;
+    if ((r = fhsm_check_nested_tmpl(t, hBaseKey, FHSM_TMPL_DERIVE, tmpl, n)) != FHSM_RV_OK)
+        return r;
+    long ci = find_attr(tmpl, n, CKA_CLASS);
+    if (ci >= 0 && tmpl[ci].pValue && tmpl[ci].ulValueLen == sizeof(CK_ULONG)) {
+        CK_ULONG cls = 0; memcpy(&cls, tmpl[ci].pValue, sizeof(cls));
+        if (cls != CKO_SECRET_KEY) return CKR_TEMPLATE_INCONSISTENT;
+    }
+    long vi = find_attr(tmpl, n, CKA_VALUE_LEN);
+    if (vi < 0 || !tmpl[vi].pValue || tmpl[vi].ulValueLen != sizeof(CK_ULONG))
+        return CKR_TEMPLATE_INCOMPLETE;
+    CK_ULONG req = 0; memcpy(&req, tmpl[vi].pValue, sizeof(req));
+    if (req == 0 || req > FHSM_KBKDF_MAX_DKM) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    long ki = find_attr(tmpl, n, 0x100 /* CKA_KEY_TYPE */);
+    if (ki >= 0 && tmpl[ki].pValue && tmpl[ki].ulValueLen == sizeof(CK_ULONG)) {
+        CK_ULONG kt = 0; memcpy(&kt, tmpl[ki].pValue, sizeof(kt));
+        if (kt == 0x1FUL /* CKK_AES */ && req != 16 && req != 24 && req != 32)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    }
+    *len = (size_t)req;
+    return FHSM_RV_OK;
+}
+
+static CK_RV kbkdf_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                          const CK_MECHANISM *pMechanism,
+                          CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
+                          CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
+    const CK_ULONG mech = pMechanism->mechanism;
+    CK_ULONG prf, ndp, nadd;
+    const CK_PRF_DATA_PARAM *dp;
+    CK_DERIVED_KEY *add;
+    const uint8_t *iv = NULL; size_t iv_len = 0;
+
+    if (!pMechanism->pParameter) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (mech == CKM_SP800_108_FEEDBACK_KDF_OP) {
+        CK_SP800_108_FEEDBACK_KDF_PARAMS p;
+        if (pMechanism->ulParameterLen != sizeof(p))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        memcpy(&p, pMechanism->pParameter, sizeof(p));
+        if ((p.pIV == NULL) != (p.ulIVLen == 0) || p.ulIVLen > FHSM_KBKDF_MAX_FIELD)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        prf = p.prfType; ndp = p.ulNumberOfDataParams; dp = p.pDataParams;
+        nadd = p.ulAdditionalDerivedKeys; add = p.pAdditionalDerivedKeys;
+        iv = p.pIV; iv_len = (size_t)p.ulIVLen;
+    } else {
+        CK_SP800_108_KDF_PARAMS p;
+        if (pMechanism->ulParameterLen != sizeof(p))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        memcpy(&p, pMechanism->pParameter, sizeof(p));
+        prf = p.prfType; ndp = p.ulNumberOfDataParams; dp = p.pDataParams;
+        nadd = p.ulAdditionalDerivedKeys; add = p.pAdditionalDerivedKeys;
+    }
+    if ((add == NULL) != (nadd == 0) || nadd > FHSM_KBKDF_MAX_KEYS)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    for (CK_ULONG i = 0; i < nadd; ++i)
+        if (!add[i].phKey) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    { CK_RV r = kbkdf_check_fields(mech, dp, ndp); if (r != FHSM_RV_OK) return r; }
+
+    /* The base key: §6.42 asks CKK_AES of the AES-CMAC PRF. CKM_DES3_CMAC is
+     * in its table and not here: nothing asked for it, and it is not approved. */
+    const uint8_t *key = NULL; size_t key_len = 0;
+    uint32_t kcl = 0, kkt = 0;
+    { fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hBaseKey, &key, &key_len,
+                                          &kcl, &kkt);
+      if (r != FHSM_RV_OK) return r; }
+    if (kcl != CKO_SECRET_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+
+    const char *mac_name, *sub_param, *sub_name;
+    size_t h;
+    if (prf == 0x0000108AUL /* CKM_AES_CMAC */) {
+        if (kkt != 0x1FU /* CKK_AES */) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        if (key_len != 16 && key_len != 24 && key_len != 32)
+            return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        mac_name = "CMAC"; sub_param = "cipher"; h = 16;
+        sub_name = key_len == 16 ? "AES-128-CBC"
+                 : key_len == 24 ? "AES-192-CBC" : "AES-256-CBC";
+    } else {
+        fhsm_hash_t hh;
+        if (prf > 0xFFFFFFFFUL || !fhsm_hmac_hash_of((uint32_t)prf, &hh, &h))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        mac_name = "HMAC"; sub_param = "digest"; sub_name = hmac_digest_name(hh);
+    }
+
+    /* Every template before any computation, so that a bad one creates
+     * nothing and names itself through its phKey (§6.42.6). */
+    size_t lens[1 + FHSM_KBKDF_MAX_KEYS];
+    CK_OBJECT_HANDLE handles[1 + FHSM_KBKDF_MAX_KEYS];
+    uint64_t segments = 0, keys_bits = 0;
+    for (CK_ULONG i = 0; i <= nadd; ++i) {
+        CK_ATTRIBUTE *tmpl = i ? add[i - 1].pTemplate : pTemplate;
+        CK_ULONG cnt = i ? add[i - 1].ulAttributeCount : ulCount;
+        CK_RV r = kbkdf_check_template(hSession, t, hBaseKey, tmpl, cnt, &lens[i]);
+        if (r != FHSM_RV_OK) {
+            *(i ? add[i - 1].phKey : phKey) = 0; /* CK_INVALID_HANDLE */
+            return r;
+        }
+        /* No key shares a segment with another: each starts on a new one. */
+        segments += (lens[i] + h - 1) / h;
+        keys_bits += (uint64_t)lens[i] * 8;
+    }
+    if (segments * h > FHSM_KBKDF_MAX_DKM) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    { CK_RV r = kbkdf_check_ranges(dp, ndp, segments, keys_bits, segments * h * 8);
+      if (r != FHSM_RV_OK) return r; }
+
+    size_t okm_len = (size_t)segments * h;
+    uint8_t *okm = OPENSSL_malloc(okm_len);
+    if (!okm) return FHSM_RV_HOST_MEMORY;
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, mac_name, NULL);
+    EVP_MAC_CTX *ctx = mac ? EVP_MAC_CTX_new(mac) : NULL;
+    OSSL_PARAM mp[2] = {
+        OSSL_PARAM_construct_utf8_string(sub_param, (char*)sub_name, 0),
+        OSSL_PARAM_construct_end()
+    };
+    CK_RV rv = FHSM_RV_FUNCTION_FAILED;
+    if (ctx && kbkdf_run(ctx, key, key_len, mp, mech, dp, ndp, iv, iv_len, h,
+                         segments, keys_bits, segments * h * 8, okm))
+        rv = FHSM_RV_OK;
+    EVP_MAC_CTX_free(ctx);
+    EVP_MAC_free(mac);
+
+    CK_ULONG made = 0;
+    size_t off = 0;
+    for (CK_ULONG i = 0; rv == FHSM_RV_OK && i <= nadd; ++i) {
+        rv = derive_store_secret(t, hSession,
+                                 i ? add[i - 1].pTemplate : pTemplate,
+                                 i ? add[i - 1].ulAttributeCount : ulCount,
+                                 okm + off, lens[i], CKO_SECRET_KEY, &handles[i]);
+        if (rv != FHSM_RV_OK) { *(i ? add[i - 1].phKey : phKey) = 0; break; }
+        off += (lens[i] + h - 1) / h * h;
+        ++made;
+    }
+    OPENSSL_cleanse(okm, okm_len);
+    OPENSSL_free(okm);
+    if (rv != FHSM_RV_OK) {
+        /* All of them or none (§6.42.6). */
+        for (CK_ULONG i = 0; i < made; ++i)
+            (void)fhsm_token_object_destroy(t, (uint32_t)handles[i]);
+        return rv;
+    }
+    *phKey = handles[0];
+    for (CK_ULONG i = 0; i < nadd; ++i) *add[i].phKey = handles[i + 1];
+    return FHSM_RV_OK;
+}
+
 CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                    CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
                    CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
@@ -4357,6 +4751,10 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    if (pMechanism->mechanism == CKM_SP800_108_COUNTER_KDF_OP
+        || pMechanism->mechanism == CKM_SP800_108_FEEDBACK_KDF_OP
+        || pMechanism->mechanism == CKM_SP800_108_DOUBLE_PIPELINE_KDF_OP)
+        return kbkdf_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
     /* HKDF (RFC 5869, PKCS#11 v3.2 §6.32). Advertised with a handler in
      * src/dispatch/fhsm_dispatch_kdf.c that nothing called; 660 vectors in
      * the conformance report read "HKDF derive failed for valid vector ...
