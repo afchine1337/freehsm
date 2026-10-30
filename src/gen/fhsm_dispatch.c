@@ -126,6 +126,16 @@ __attribute__((weak)) fhsm_rv_t dispatch_aes_gmac(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
+__attribute__((weak)) fhsm_rv_t dispatch_aes_key_wrap_pad(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
 __attribute__((weak)) fhsm_rv_t dispatch_aes_keygen(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
@@ -646,6 +656,16 @@ __attribute__((weak)) fhsm_rv_t dispatch_rsa_pss(
     return FHSM_RV_FUNCTION_FAILED;
 }
 
+__attribute__((weak)) fhsm_rv_t dispatch_rsa_pss_sha224(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
 __attribute__((weak)) fhsm_rv_t dispatch_rsa_pss_sha256(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
@@ -697,6 +717,16 @@ __attribute__((weak)) fhsm_rv_t dispatch_sha1(
 }
 
 __attribute__((weak)) fhsm_rv_t dispatch_sha1_rsa(
+    unsigned long session, unsigned long key,
+    const void *params, size_t plen,
+    fhsm_slice_t in, uint8_t *out, size_t *outlen)
+{
+    (void)session; (void)key; (void)params; (void)plen;
+    (void)in; (void)out; (void)outlen;
+    return FHSM_RV_FUNCTION_FAILED;
+}
+
+__attribute__((weak)) fhsm_rv_t dispatch_sha1_rsa_pss(
     unsigned long session, unsigned long key,
     const void *params, size_t plen,
     fhsm_slice_t in, uint8_t *out, size_t *outlen)
@@ -845,6 +875,7 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00000006u, "CKM_SHA1_RSA_PKCS", "RSA", "sign", 0, dispatch_reject_fips },
     { 0x00000009u, "CKM_RSA_PKCS_OAEP", "RSA", "encrypt", 1, dispatch_rsa_oaep },
     { 0x0000000Du, "CKM_RSA_PKCS_PSS", "RSA", "sign", 1, dispatch_rsa_pss },
+    { 0x0000000Eu, "CKM_SHA1_RSA_PKCS_PSS", "RSA", "sign", 0, dispatch_reject_fips },
     { 0x0000000Fu, "CKM_ML_KEM_KEY_PAIR_GEN", "ML-KEM", "keypair", 1, dispatch_ml_kem_keypair },
     { 0x00000010u, "CKM_DSA_KEY_PAIR_GEN", "DSA", "keypair", 0, dispatch_reject_fips },
     { 0x00000017u, "CKM_ML_KEM", "ML-KEM", "encap", 1, dispatch_ml_kem_encap },
@@ -882,6 +913,7 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x00000044u, "CKM_SHA384_RSA_PKCS_PSS", "RSA", "sign", 1, dispatch_rsa_pss_sha384 },
     { 0x00000045u, "CKM_SHA512_RSA_PKCS_PSS", "RSA", "sign", 1, dispatch_rsa_pss_sha512 },
     { 0x00000046u, "CKM_SHA224_RSA_PKCS", "RSA", "sign", 1, dispatch_rsa_pkcs_sha224 },
+    { 0x00000047u, "CKM_SHA224_RSA_PKCS_PSS", "RSA", "sign", 1, dispatch_rsa_pss_sha224 },
     { 0x00000048u, "CKM_SHA512_224", "SHA2", "digest", 1, dispatch_sha512_224 },
     { 0x00000049u, "CKM_SHA512_224_HMAC", "HMAC", "sign", 1, dispatch_hmac_sha512_224 },
     { 0x0000004Cu, "CKM_SHA512_256", "SHA2", "digest", 1, dispatch_sha512_256 },
@@ -939,6 +971,7 @@ const fhsm_mech_entry_t fhsm_mechanism_table[] = {
     { 0x0000108Au, "CKM_AES_CMAC", "AES", "sign", 1, dispatch_aes_cmac },
     { 0x0000108Eu, "CKM_AES_GMAC", "AES", "sign", 1, dispatch_aes_gmac },
     { 0x00002109u, "CKM_AES_KEY_WRAP", "AES", "wrap+encrypt", 1, dispatch_aes_kw },
+    { 0x0000210Au, "CKM_AES_KEY_WRAP_PAD", "AES", "wrap", 0, dispatch_reject_fips },
     { 0x0000210Bu, "CKM_AES_KEY_WRAP_KWP", "AES", "wrap+encrypt", 1, dispatch_aes_kwp },
     { 0x0000402Au, "CKM_HKDF_DERIVE", "HKDF", "derive", 1, dispatch_hkdf },
     { 0x0000402Bu, "CKM_HKDF_DATA", "HKDF", "derive", 1, dispatch_hkdf_data },

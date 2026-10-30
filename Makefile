@@ -1041,6 +1041,15 @@ tests/test_set_dates: tests/test_set_dates.c $(LIB)
 tests/test_init_token_session: tests/test_init_token_session.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+tests/test_rsa_pss_raw: tests/test_rsa_pss_raw.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
+tests/test_encrypt_update_size: tests/test_encrypt_update_size.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
+tests/test_template_id: tests/test_template_id.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # Parameter / attribute validation hardening (#125).
 tests/test_input_validation: tests/test_input_validation.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
@@ -1262,6 +1271,9 @@ TEST_BINS = \
 	tests/test_attributes \
 	tests/test_set_dates \
 	tests/test_init_token_session \
+	tests/test_rsa_pss_raw \
+	tests/test_encrypt_update_size \
+	tests/test_template_id \
 	tests/test_input_validation \
 	tests/test_session_objects \
 	tests/test_oaep_decrypt_size \
@@ -1424,6 +1436,12 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_set_dates
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_init_token_session
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_rsa_pss_raw
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_encrypt_update_size
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_template_id
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_input_validation
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

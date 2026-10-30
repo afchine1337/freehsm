@@ -47,6 +47,7 @@ struct FN_LIST { CK_VERSION version; void *pfn[104]; };
 
 #define CKR_OK                         0UL
 #define CKR_FUNCTION_FAILED            0x06UL
+#define CKR_ARGUMENTS_BAD              0x07UL
 #define CKR_BUFFER_TOO_SMALL           0x150UL
 #define CKR_FUNCTION_NOT_SUPPORTED     0x54UL
 
@@ -167,8 +168,12 @@ int main(void)
        && ((struct FN_LIST *)sel->pFunctionList)->version.minor == 0,
        "an explicit {3,0} yields v3.0");
 
-    ok(C_GetInterface((CK_BYTE*)"PKCS 11", &v99, &sel, 0) != CKR_OK,
+    ok(C_GetInterface((CK_BYTE*)"PKCS 11", &v99, &sel, 0) == CKR_ARGUMENTS_BAD,
        "an unpublished version is refused, not silently substituted");
+    ok(C_GetInterface((CK_BYTE*)"PKCS 11 other", NULL, &sel, 0) == CKR_ARGUMENTS_BAD,
+       "an unknown interface name is refused");
+    ok(C_GetInterface((CK_BYTE*)"PKCS 11", NULL, &sel, 1) == CKR_ARGUMENTS_BAD,
+       "flags no interface carries are refused, not ignored");
 
     /* (2b) A returned CK_INTERFACE survives the next call.
      *

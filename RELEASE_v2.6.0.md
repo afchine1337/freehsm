@@ -18,6 +18,12 @@ open on it.
 `C_InitToken` with a session open on the slot was carried out and is now
 `CKR_SESSION_EXISTS`. Close the sessions first.
 
+**Check your parsing if an application reads an Ed25519, Ed448, X25519 or
+X448 public key's `CKA_EC_POINT`, or an SLH-DSA public key's `CKA_VALUE`.**
+The first was a DER OCTET STRING around the key, the second a
+SubjectPublicKeyInfo; both are now the key's bytes alone, as PKCS#11 v3.2
+defines them. An import accepts either form, as before.
+
 Two low-severity fixes ride along: the unwrap buffer is cleared on every
 exit (#27), and a public key's `CKA_ALLOWED_MECHANISMS` holds again after a
 `C_Logout`, which 2.5.1 had broken.
@@ -69,6 +75,25 @@ cleared by an empty value. A data object's `CKA_APPLICATION` likewise, up to
 64 bytes. The dates remain informational, as PKCS#11 says: stored, never
 enforced.
 
+## Two RSA-PSS mechanisms, and RSA-1024 where it is allowed
+
+`CKM_SHA224_RSA_PKCS_PSS` is offered in both profiles and
+`CKM_SHA1_RSA_PKCS_PSS` in `all-mechanisms`, beside the PKCS#1 v1.5
+mechanisms of the same hashes that were already there. The
+`all-mechanisms` build in permissive mode also generates RSA-1024 keys; the
+NIST profile and the strict mode keep the 2048-bit minimum. The same build
+and mode wrap and unwrap keys with AES-CBC and AES-CBC-PAD, which PKCS#11
+allows and NIST does not approve for key wrapping (SP 800-38F), and with
+`CKM_AES_KEY_WRAP_PAD`, which PKCS#11 v3.2 deprecates and v3.0 callers still use.
+
+## Private keys wrap and unwrap
+
+A private key generated with `CKA_EXTRACTABLE=TRUE` can now be wrapped: the
+attribute was ignored at generation. `C_WrapKey` gives it as PKCS#8, and
+`C_UnwrapKey` with `CKA_CLASS = CKO_PRIVATE_KEY` makes a sensitive private key
+of it, refusing a blob whose key is not of the template's type. A wrapped key
+of more than 4 KiB is refused, which leaves out the largest ML-DSA keys.
+
 ## `C_InitToken` with a session open
 
 PKCS#11 answers `CKR_SESSION_EXISTS`. The module re-initialized the token,
@@ -77,6 +102,36 @@ holding handles and a login state that no longer existed. The refusal comes
 before the SO PIN is examined, so it costs no attempt.
 
 ## Fixes
+
+**Edwards and Montgomery `CKA_EC_POINT`.** PKCS#11 v3.2 defines it as the
+public key bytes of RFC 8032 or RFC 7748. The module wrapped them in a DER
+OCTET STRING, the v3.0 wording, under a comment calling that what the
+specification describes. Setting up OpenSC's pkcs11-tool tests against
+FreeHSM showed it: `pkcs11-tool --read-object --type pubkey` refused the
+key. The bare bytes are returned now.
+
+**`CKA_ID` on unwrapped, derived and encapsulated keys.** `C_UnwrapKey`,
+`C_DeriveKey`, `C_EncapsulateKey` and `C_DecapsulateKey` created the key
+without the `CKA_ID` of their template; only `C_GenerateKey` kept it. An
+application that unwraps a key under an id and looks it up by that id now
+finds it.
+
+**`C_EncryptUpdate` with AES-ECB, -CBC or -CBC-PAD.** It required room for
+the part plus a block, more than it writes, and refused a buffer of the
+exact length with `CKR_BUFFER_TOO_SMALL`. pkcs11-tool encrypts 1024-byte
+parts into a 1024-byte buffer, so it could not encrypt an input of 1024
+bytes or more. The size check and the size query use the exact length now.
+
+**Bare `CKM_RSA_PKCS_PSS`.** It signs a digest the caller computed, named by
+`hashAlg` in its parameters. The module dropped `hashAlg` and OpenSSL fell
+back to SHA-1, so a SHA-1 digest signed and a SHA-256 one failed with
+`CKR_FUNCTION_FAILED`. OpenSC's sign-and-verify test asks for exactly that.
+`hashAlg` now names the digest.
+
+**SLH-DSA public `CKA_VALUE`.** Same setup, same symptom: an SLH-DSA public
+key came back as a SubjectPublicKeyInfo where PKCS#11 v3.2 defines the FIPS
+205 key. ML-KEM and ML-DSA were converted to raw on the way out; the list
+did not name SLH-DSA.
 
 **The unwrap buffer (#27).** Three checks in `C_UnwrapKey` after a
 successful decrypt -- a key type that does not fit the key's length, a
@@ -98,7 +153,12 @@ DEK, and now asks for that. 2.5.1 only.
 ## Measured
 
 `make tests` in both profiles, green. New: `tests/test_public_objects.c`
-(17), `tests/test_set_dates.c` (15), `tests/test_init_token_session.c` (5).
+(17), `tests/test_set_dates.c` (15), `tests/test_init_token_session.c` (5),
+`tests/test_rsa_pss_raw.c` (10), `tests/test_encrypt_update_size.c` (7),
+`tests/test_template_id.c` (13); the first and the last run fewer where a build
+or mode does not offer a mechanism. OpenSC's `pkcs11-tool` scripts and `p11test`
+pass against an `all-mechanisms` build, apart from its KEM script, which
+encapsulates without a login.
 
 pkcs11-check 0.2.3 in CI, signed module: 5 011 tests and 2 failures in
 `nist-approved-only`, 5 142 and 3 in `all-mechanisms`, all of them listed in

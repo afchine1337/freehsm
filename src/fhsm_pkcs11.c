@@ -49,6 +49,7 @@
 #include "fhsm_session.h"
 #include "fhsm_pairwise.h"
 #include "fhsm_apilock.h"
+#include "fhsm_mode.h"
 
 #include <unistd.h>      /* getpid() : post-fork state detection (#125) */
 #include <stdint.h>
@@ -1599,6 +1600,19 @@ static CK_ULONG fhsm_mech_flags_for(const char *op) {
 #define FHSM_EC_MIN_BITS 256u
 #define FHSM_EC_MAX_BITS 521u
 
+/* The smallest RSA modulus this module generates, and advertises through
+ * C_GetMechanismInfo -- one answer for both, for the reason the EC bounds
+ * above are one definition.
+ *
+ * 2048 where NIST's rules apply: the nist-approved-only build, or the strict
+ * runtime mode. RSA-1024 generation is not approved (SP 800-131A), which
+ * puts it with SHA-1 and RSA PKCS#1 v1.5: available in the all-mechanisms
+ * build in permissive mode, refused otherwise. OpenSC's pkcs11-tool tests
+ * generate RSA-1024 keys, and refused them here with CKR_KEY_SIZE_RANGE. */
+static CK_ULONG rsa_min_bits(void) {
+    return (fhsm_build_fips_strict || fhsm_mode_is_fips()) ? 2048 : 1024;
+}
+
 static void fhsm_mech_keysizes_for(const char *fam,
                                     CK_ULONG *mn, CK_ULONG *mx) {
     *mn = 0; *mx = 0;
@@ -1612,7 +1626,7 @@ static void fhsm_mech_keysizes_for(const char *fam,
      * so "DES" keeps its own single length and advertises nothing usable. */
     if (!strcmp(fam, "TDES"))    { *mn = 24;   *mx = 24;   return; }
     if (!strcmp(fam, "DES"))     { *mn = 8;    *mx = 8;    return; }
-    if (!strcmp(fam, "RSA"))     { *mn = 2048; *mx = 4096; return; }
+    if (!strcmp(fam, "RSA"))     { *mn = rsa_min_bits(); *mx = 4096; return; }
     if (!strcmp(fam, "EC") || !strcmp(fam, "EdDSA") || !strcmp(fam, "ECM"))
                                  { *mn = FHSM_EC_MIN_BITS; *mx = FHSM_EC_MAX_BITS; return; }
     if (!strcmp(fam, "HMAC") || !strcmp(fam, "KMAC") || !strcmp(fam, "GENERIC"))
@@ -1649,6 +1663,13 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slotID, CK_ULONG type, CK_VOID_PTR pInfo) {
     } *info = pInfo;
     fhsm_mech_keysizes_for(e->family, &info->ulMinKeySize, &info->ulMaxKeySize);
     info->flags = fhsm_mech_flags_for(e->operation);
+    /* AES-CBC and AES-CBC-PAD also wrap and unwrap, where C_WrapKey takes
+     * them: the all-mechanisms build in permissive mode. Added here rather
+     * than in the generated table, which knows the profile but not the
+     * runtime mode. */
+    if ((type == 0x00001082UL || type == 0x00001085UL)
+        && !fhsm_build_fips_strict && !fhsm_mode_is_fips())
+        info->flags |= CKF_WRAP | CKF_UNWRAP_MECH;
     return FHSM_RV_OK;
 }
 
@@ -1934,6 +1955,10 @@ typedef struct fhsm_op_s {
     int         pss_have;
     long        pss_saltlen;   /* salt length in bytes */
     uint32_t    pss_mgf;       /* CKG_MGF1_SHA* identifier */
+    uint32_t    pss_hash;      /* CKM_SHA* hashAlg: the digest the caller
+                                * computed, for bare CKM_RSA_PKCS_PSS */
+    uint32_t    enc_pending;   /* multipart ECB/CBC/CBC-PAD encryption:
+                                * input bytes held back, 0..15 */
     /* CK_GCM_PARAMS members captured at EncryptInit / DecryptInit. The
      * static buffers are intentionally generous to cover Wycheproof's
      * LongIv / large-AAD cases : the corpus has IVs up to 2056 bits
@@ -2512,6 +2537,22 @@ static int fhsm_date_wellformed(const uint8_t *d, size_t n) {
     /* Shape only -- no calendar arithmetic. 2026-02-31 passes, and that is the
      * right amount of checking for a field the spec calls informational. */
     return mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31;
+}
+
+/* CKA_ID from a creation template, for the paths that build an object from
+ * bytes they computed -- C_UnwrapKey, C_DeriveKey, C_EncapsulateKey,
+ * C_DecapsulateKey. Each passed NULL to fhsm_token_object_add, so the key
+ * was created without the id its caller asked for and could not be found
+ * by it; C_GenerateKey alone read it. OpenSC's unwrap test looks its
+ * unwrapped keys up by --application-id, and found none (2026-10-29). The
+ * length is bounded by fhsm_token_object_add, as on the C_GenerateKey path. */
+static const uint8_t *fhsm_template_id(CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                                       size_t *id_len) {
+    *id_len = 0;
+    long i = find_attr(pTemplate, ulCount, CKA_ID);
+    if (i < 0 || !pTemplate[i].pValue) return NULL;
+    *id_len = (size_t)pTemplate[i].ulValueLen;
+    return (const uint8_t *)pTemplate[i].pValue;
 }
 
 static CK_RV fhsm_apply_obj_meta(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
@@ -4852,8 +4893,10 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
       }
     }
     uint32_t handle = 0;
+    size_t id_len = 0;
+    const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
     fhsm_rv_t rv = fhsm_token_object_add(t, obj_class, derived_ckk, label,
-                                          secret, secret_len, NULL, 0,
+                                          secret, secret_len, id, id_len,
                                           obj_flags, &handle);
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
@@ -4971,9 +5014,28 @@ static fhsm_rv_t fhsm_rsa_v15_unwrap(const uint8_t *priv_der, size_t priv_len,
  * a CK_RV coming back into it is a narrowing conversion that -Wconversion
  * refuses. The other way round widens, which is silent and correct at the
  * three entry points that do return CK_RV. */
+/* CKM_AES_KEY_WRAP_PAD, which PKCS#11 v3.0 has and v3.2 deprecates in favour
+ * of CKM_AES_KEY_WRAP_KWP and CKM_AES_KEY_WRAP_PKCS7. Kept for callers written
+ * against 3.0, with the RFC 5649 construction of KWP, which is what OpenSSL's
+ * aes-wrap-pad and pkcs11-tool's AES-KEY-WRAP-PAD mean by it. The two
+ * interfaces share C_WrapKey and the mechanism list, so it cannot be limited
+ * to the 3.0 one; it is limited as the other legacy mechanisms are, to the
+ * all-mechanisms build in permissive mode. */
+#define FHSM_CKM_AES_KEY_WRAP_PAD  0x0000210AUL
+
+static int mech_is_aes_kw(CK_MECHANISM_TYPE m) {
+    return m == CKM_AES_KEY_WRAP || m == CKM_AES_KEY_WRAP_KWP
+        || (m == FHSM_CKM_AES_KEY_WRAP_PAD
+            && !fhsm_build_fips_strict && !fhsm_mode_is_fips());
+}
+
 static fhsm_rv_t kw_iv_from_mech(CK_MECHANISM *m, const unsigned char **out) {
     *out = NULL;
     if (!m->pParameter && m->ulParameterLen == 0) return FHSM_RV_OK;
+    /* The old mechanism's callers pass what they pass: OpenSC's unwrap test
+     * gives it 16 zero bytes. Only a 4-byte AIV means anything here. */
+    if (m->mechanism == FHSM_CKM_AES_KEY_WRAP_PAD && m->ulParameterLen != 4)
+        return FHSM_RV_OK;
     size_t want = (m->mechanism == CKM_AES_KEY_WRAP) ? 8u : 4u;
     if (!m->pParameter || m->ulParameterLen != want)
         return FHSM_RV_MECHANISM_PARAM_INVALID;
@@ -4981,6 +5043,100 @@ static fhsm_rv_t kw_iv_from_mech(CK_MECHANISM *m, const unsigned char **out) {
     return FHSM_RV_OK;
 }
 
+/* AES-CBC and AES-CBC-PAD as wrapping mechanisms (PKCS#11 v3.2 lists Wrap
+ * and Unwrap for both). Not a key-wrapping method NIST approves -- SP
+ * 800-38F has KW, KWP and KWA -- so, like RSA-1024 and SHA-1 signatures,
+ * they run in the all-mechanisms build in permissive mode and are refused
+ * otherwise. OpenSC's test-pkcs11-tool-unwrap-wrap-test.sh wraps and unwraps
+ * with both and got CKR_MECHANISM_INVALID.
+ *
+ * The parameter is the 16-byte IV. CBC takes a value of a whole number of
+ * blocks and produces as many bytes; CBC-PAD takes any length and adds one to
+ * sixteen bytes of PKCS#7 padding. */
+#define FHSM_CKM_AES_CBC_WRAP      0x00001082UL
+#define FHSM_CKM_AES_CBC_PAD_WRAP  0x00001085UL
+
+static int mech_is_aes_cbc_wrap(CK_MECHANISM_TYPE m) {
+    return m == FHSM_CKM_AES_CBC_WRAP || m == FHSM_CKM_AES_CBC_PAD_WRAP;
+}
+
+/* Length the CBC wrap of `n` bytes produces, or 0 when CBC cannot take n. */
+static size_t aes_cbc_wrap_len(CK_MECHANISM_TYPE m, size_t n) {
+    if (m == FHSM_CKM_AES_CBC_WRAP) return (n > 0 && n % 16 == 0) ? n : 0;
+    return (n / 16 + 1) * 16;
+}
+
+/* One-shot AES-CBC(-PAD) under `key`. `out` holds at least in_len + 16. */
+static fhsm_rv_t aes_cbc_wrap_run(int enc, CK_MECHANISM *m,
+                                  const uint8_t *key, size_t key_len,
+                                  const uint8_t *in, size_t in_len,
+                                  uint8_t *out, size_t *out_len) {
+    if (fhsm_build_fips_strict || fhsm_mode_is_fips())
+        return FHSM_RV_MECHANISM_INVALID;
+    if (!m->pParameter || m->ulParameterLen != 16)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    const char *nm = key_len == 16 ? "AES-128-CBC"
+                   : key_len == 24 ? "AES-192-CBC"
+                   : key_len == 32 ? "AES-256-CBC" : NULL;
+    if (!nm) return 0x00000114UL;   /* CKR_WRAPPING_KEY_SIZE_RANGE */
+    EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, nm, NULL);
+    EVP_CIPHER_CTX *ctx = c ? EVP_CIPHER_CTX_new() : NULL;
+    int outl = 0, finl = 0;
+    int ok = ctx
+        && EVP_CipherInit_ex2(ctx, c, key, m->pParameter, enc, NULL) == 1
+        && EVP_CIPHER_CTX_set_padding(ctx, m->mechanism == FHSM_CKM_AES_CBC_PAD_WRAP) == 1
+        && EVP_CipherUpdate(ctx, out, &outl, in, (int)in_len) == 1
+        && EVP_CipherFinal_ex(ctx, out + outl, &finl) == 1;
+    EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+    if (!ok) return enc ? FHSM_RV_FUNCTION_FAILED
+                        : 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
+    *out_len = (size_t)(outl + finl);
+    return FHSM_RV_OK;
+}
+
+/* What PKCS#11 wraps for a private key is its PKCS#8 PrivateKeyInfo. The store
+ * holds i2d_PrivateKey's form, which for RSA and EC is the traditional DER of
+ * that algorithm, so the stored value is not what may leave the token: a
+ * key wrapped as it lay could be unwrapped by this module and by no other.
+ *
+ * Returns the DER in a buffer the caller must OPENSSL_clear_free, or NULL with
+ * *len == 0 when the stored value does not parse as a private key -- the
+ * composite ML-DSA blob, which has no PKCS#8 form and is wrapped as it is. */
+static uint8_t *private_value_to_pkcs8(const uint8_t *v, size_t vl, int *len) {
+    uint8_t *der = NULL;
+    const unsigned char *p = v;
+    EVP_PKEY *pk = d2i_AutoPrivateKey(NULL, &p, (long)vl);
+    PKCS8_PRIV_KEY_INFO *inf = pk ? EVP_PKEY2PKCS8(pk) : NULL;
+    *len = inf ? i2d_PKCS8_PRIV_KEY_INFO(inf, &der) : 0;
+    PKCS8_PRIV_KEY_INFO_free(inf);
+    EVP_PKEY_free(pk);
+    if (*len <= 0) { *len = 0; return NULL; }
+    return der;
+}
+
+/* Does the key `pk` belong to CKA_KEY_TYPE `ckk`? */
+static int pkey_is_ckk(EVP_PKEY *pk, CK_ULONG ckk) {
+    switch (ckk) {
+        case 0x00UL: return EVP_PKEY_is_a(pk, "RSA");                   /* CKK_RSA */
+        case 0x03UL: return EVP_PKEY_is_a(pk, "EC");                    /* CKK_EC */
+        case 0x40UL: return EVP_PKEY_is_a(pk, "ED25519")                /* CKK_EC_EDWARDS */
+                         || EVP_PKEY_is_a(pk, "ED448");
+        case 0x41UL: return EVP_PKEY_is_a(pk, "X25519")                 /* CKK_EC_MONTGOMERY */
+                         || EVP_PKEY_is_a(pk, "X448");
+        case 0x49UL: return !strncmp(EVP_PKEY_get0_type_name(pk), "ML-KEM", 6);
+        case 0x4AUL: return !strncmp(EVP_PKEY_get0_type_name(pk), "ML-DSA", 6);
+        case 0x4BUL: return !strncmp(EVP_PKEY_get0_type_name(pk), "SLH-DSA", 7);
+        default:     return 0;
+    }
+}
+
+static CK_RV wrap_key_value(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                            CK_OBJECT_HANDLE hWrappingKey, CK_OBJECT_HANDLE hKey,
+                            unsigned char *pWrappedKey, CK_ULONG *pulWrappedKeyLen,
+                            const uint8_t *pkcs8, size_t pkcs8_len);
+
+/* The conversion sits outside wrap_key_value, which has twenty-odd exits: one
+ * place frees the DER, and none of them can forget to. */
 CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                 CK_OBJECT_HANDLE hWrappingKey, CK_OBJECT_HANDLE hKey,
                 unsigned char *pWrappedKey, CK_ULONG *pulWrappedKeyLen) {
@@ -4989,6 +5145,22 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !pulWrappedKeyLen) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    const uint8_t *sv = NULL; size_t svl = 0; uint32_t scl = 0;
+    uint8_t *p8 = NULL; int p8l = 0;
+    if (fhsm_token_object_get(t, (uint32_t)hKey, &sv, &svl, &scl, NULL) == FHSM_RV_OK
+        && scl == CKO_PRIVATE_KEY)
+        p8 = private_value_to_pkcs8(sv, svl, &p8l);
+    CK_RV rv = wrap_key_value(hSession, pMechanism, hWrappingKey, hKey,
+                              pWrappedKey, pulWrappedKeyLen, p8, (size_t)p8l);
+    OPENSSL_clear_free(p8, (size_t)p8l);
+    return rv;
+}
+
+static CK_RV wrap_key_value(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
+                            CK_OBJECT_HANDLE hWrappingKey, CK_OBJECT_HANDLE hKey,
+                            unsigned char *pWrappedKey, CK_ULONG *pulWrappedKeyLen,
+                            const uint8_t *pkcs8, size_t pkcs8_len) {
+    fhsm_token_t *t = fhsm_session_token(hSession);
     { CK_RV ac = fhsm_check_allowed_mech(t, hWrappingKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     /* CKA_WRAP_TEMPLATE on the wrapping key constrains the key being
      * wrapped -- an object that already exists, not a template. */
@@ -5028,6 +5200,8 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         && !(src_flags & FHSM_OBJF_EXTRACTABLE)) {
         return 0x0000006AUL;   /* CKR_KEY_UNEXTRACTABLE (0x68 is KEY_FUNCTION_NOT_PERMITTED) */
     }
+    /* A private key leaves as PKCS#8; see private_value_to_pkcs8. */
+    if (pkcs8) { kv = pkcs8; kvl = pkcs8_len; }
 
     /* Wrapping key : load value or DER. */
     const uint8_t *wkv = NULL; size_t wkl = 0;
@@ -5036,8 +5210,7 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) return rv;
 
     /* --- AES-KW (RFC 3394) and AES-KWP (RFC 5649) --- */
-    if (pMechanism->mechanism == CKM_AES_KEY_WRAP
-        || pMechanism->mechanism == CKM_AES_KEY_WRAP_KWP) {
+    if (mech_is_aes_kw(pMechanism->mechanism)) {
         if (wkt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
         const unsigned char *kwiv = NULL;
         { CK_RV ir = kw_iv_from_mech(pMechanism, &kwiv); if (ir != FHSM_RV_OK) return ir; }
@@ -5168,6 +5341,27 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return FHSM_RV_OK;
     }
 
+    /* --- AES-CBC / AES-CBC-PAD, all-mechanisms and permissive only --- */
+    if (mech_is_aes_cbc_wrap(pMechanism->mechanism)) {
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return FHSM_RV_MECHANISM_INVALID;
+        if (wkt != CKK_AES) return 0x00000115UL;   /* CKR_WRAPPING_KEY_TYPE_INCONSISTENT */
+        size_t need = aes_cbc_wrap_len(pMechanism->mechanism, kvl);
+        if (need == 0) return 0x00000062UL;        /* CKR_KEY_SIZE_RANGE */
+        if (pWrappedKey == NULL) { *pulWrappedKeyLen = (CK_ULONG)need; return FHSM_RV_OK; }
+        if (*pulWrappedKeyLen < need) {
+            *pulWrappedKeyLen = (CK_ULONG)need;
+            return 0x00000150UL;                   /* CKR_BUFFER_TOO_SMALL */
+        }
+        size_t got = 0;
+        fhsm_rv_t crv = aes_cbc_wrap_run(1, pMechanism, wkv, wkl, kv, kvl,
+                                         pWrappedKey, &got);
+        if (crv != FHSM_RV_OK) return crv;
+        *pulWrappedKeyLen = (CK_ULONG)got;
+        (void)fhsm_audit_event(FHSM_EV_WRAP, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
+        return FHSM_RV_OK;
+    }
+
     return FHSM_RV_MECHANISM_INVALID;
 }
 
@@ -5246,8 +5440,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * private key, with room to spare against an 8 MiB default stack. */
     uint8_t pt[4096]; size_t pt_len = 0;
 
-    if (pMechanism->mechanism == CKM_AES_KEY_WRAP
-        || pMechanism->mechanism == CKM_AES_KEY_WRAP_KWP) {
+    if (mech_is_aes_kw(pMechanism->mechanism)) {
         if (ukt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
         const unsigned char *kwiv = NULL;
         { CK_RV ir = kw_iv_from_mech(pMechanism, &kwiv); if (ir != FHSM_RV_OK) return ir; }
@@ -5336,17 +5529,34 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                             pMechanism->mechanism == CKM_RSA_X_509,
                             pWrappedKey, ulWrappedKeyLen, pt, &pt_len);
         if (vrv != FHSM_RV_OK) { fhsm_zeroize(pt, sizeof(pt)); return vrv; }
+    } else if (mech_is_aes_cbc_wrap(pMechanism->mechanism)) {
+        /* AES-CBC / AES-CBC-PAD, all-mechanisms and permissive only; see
+         * aes_cbc_wrap_run. Decryption yields no more than it is given, so a
+         * blob of at most sizeof(pt) bytes fits. */
+        if (ukt != CKK_AES) return 0x000000F2UL;   /* CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT */
+        if (ulWrappedKeyLen == 0 || ulWrappedKeyLen % 16 != 0
+            || ulWrappedKeyLen > sizeof(pt))
+            return 0x00000112UL;                   /* CKR_WRAPPED_KEY_LEN_RANGE */
+        fhsm_rv_t crv = aes_cbc_wrap_run(0, pMechanism, ukv, ukl,
+                                         pWrappedKey, ulWrappedKeyLen, pt, &pt_len);
+        if (crv != FHSM_RV_OK) { fhsm_zeroize(pt, sizeof(pt)); return crv; }
     } else {
         return FHSM_RV_MECHANISM_INVALID;
     }
 
-    /* Import the decrypted bytes as a fresh secret-key object. From here to
-     * the import, every exit goes through pt_done, which clears pt. */
+    /* Import the decrypted bytes as a fresh object: a secret key, or the
+     * private key the template's CKA_CLASS names. From here to the import,
+     * every exit goes through pt_done, which clears pt. */
     uint32_t handle = 0;
     char label[64] = "";
     uint32_t key_type = CKK_AES;
+    uint32_t obj_class = CKO_SECRET_KEY;
     uint8_t obj_flags = FHSM_OBJF_SENSITIVE;
-    long li = find_attr(pTemplate, ulCount, CKA_LABEL);
+    long li = find_attr(pTemplate, ulCount, CKA_CLASS);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen == sizeof(CK_ULONG)
+        && *(CK_ULONG *)pTemplate[li].pValue == CKO_PRIVATE_KEY)
+        obj_class = CKO_PRIVATE_KEY;
+    li = find_attr(pTemplate, ulCount, CKA_LABEL);
     if (li >= 0) {
         size_t n = pTemplate[li].ulValueLen;
         if (n >= sizeof(label)) n = sizeof(label) - 1;
@@ -5417,8 +5627,39 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
       }
     }
 
-    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
-                                pt, pt_len, NULL, 0, obj_flags, &handle);
+    {
+        size_t id_len = 0;
+        const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
+        if (obj_class == CKO_PRIVATE_KEY) {
+            /* The blob is a PKCS#8 PrivateKeyInfo, the form C_WrapKey gives.
+             * It is stored as every reader here expects it, i2d_PrivateKey's
+             * form, and sensitive whatever the template says, as an imported
+             * private key is. The key type is checked against the key: the
+             * blob carries one, and the template only claims one. */
+            const unsigned char *pp = pt;
+            PKCS8_PRIV_KEY_INFO *inf = d2i_PKCS8_PRIV_KEY_INFO(NULL, &pp, (long)pt_len);
+            EVP_PKEY *pk = (inf && pp == pt + pt_len) ? EVP_PKCS82PKEY(inf) : NULL;
+            PKCS8_PRIV_KEY_INFO_free(inf);
+            uint8_t *der = NULL;
+            int dl = 0;
+            if (!pk) {
+                rv = 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
+            } else if (!pkey_is_ckk(pk, key_type)) {
+                rv = FHSM_RV_KEY_TYPE_INCONSISTENT;
+            } else if ((dl = i2d_PrivateKey(pk, &der)) <= 0) {
+                rv = FHSM_RV_FUNCTION_FAILED;
+            } else {
+                rv = fhsm_token_object_add(t, CKO_PRIVATE_KEY, key_type, label,
+                                            der, (size_t)dl, id, id_len,
+                                            obj_flags | FHSM_OBJF_SENSITIVE, &handle);
+            }
+            EVP_PKEY_free(pk);
+            OPENSSL_clear_free(der, dl > 0 ? (size_t)dl : 0);
+        } else {
+            rv = fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
+                                        pt, pt_len, id, id_len, obj_flags, &handle);
+        }
+    }
 pt_done:
     fhsm_zeroize(pt, sizeof(pt));
     if (rv != FHSM_RV_OK) return rv;
@@ -5437,7 +5678,7 @@ pt_done:
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
-    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
+    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(obj_class, pTemplate, ulCount));
     (void)fhsm_audit_event(FHSM_EV_UNWRAP, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
     return FHSM_RV_OK;
@@ -5631,8 +5872,10 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
       }
     }
     uint32_t handle = 0;
+    size_t id_len = 0;
+    const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
     rv = fhsm_token_object_add(t, CKO_SECRET_KEY, new_ckk, label,
-                                ss, out_len, NULL, 0, obj_flags,
+                                ss, out_len, id, id_len, obj_flags,
                                 &handle);
     fhsm_zeroize(ss, sizeof(ss));
     if (rv != FHSM_RV_OK) return rv;
@@ -5896,8 +6139,10 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
       }
     }
     uint32_t handle = 0;
+    size_t id_len = 0;
+    const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
     rv = fhsm_token_object_add(t, CKO_SECRET_KEY, new_ckk, label,
-                                ss, out_len, NULL, 0, obj_flags,
+                                ss, out_len, id, id_len, obj_flags,
                                 &handle);
     fhsm_zeroize(ss, sizeof(ss));
     if (rv != FHSM_RV_OK) return rv;
@@ -6627,7 +6872,9 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         long i = find_attr(pPub, ulPub, CKA_MODULUS_BITS);
         if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen == sizeof(CK_ULONG))
             bits = (long)(*(CK_ULONG*)pPub[i].pValue);
-        if (bits != 2048 && bits != 3072 && bits != 4096) return FHSM_RV_KEY_SIZE_RANGE;
+        if (bits != 2048 && bits != 3072 && bits != 4096
+            && !(bits == 1024 && rsa_min_bits() == 1024))
+            return FHSM_RV_KEY_SIZE_RANGE;
         /* Validate CKA_PUBLIC_EXPONENT if supplied : FIPS 186-5 requires
          * an odd exponent >= 3 ; e = 0/1/2/4 are cryptographically
          * invalid (pkcs11-check TestRsaExponent, #125). A valid exponent
@@ -6840,6 +7087,17 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         long ut = fhsm_parse_unwrap_template(pPriv, ulPriv);
         if (ut < 0) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         priv_flags |= (uint8_t)ut;
+        /* CKA_EXTRACTABLE as the template asks; FALSE when it does not say.
+         * It was never read here, so every generated private key was
+         * unextractable and C_WrapKey refused it with CKR_KEY_UNEXTRACTABLE,
+         * whatever its owner had asked for -- OpenSC's unwrap-wrap test
+         * generates an RSA key --extractable and wraps it under AES-KWP and
+         * AES-CBC-PAD. CKA_SENSITIVE stays TRUE: the value leaves the token
+         * wrapped, never in clear, as for an imported private key. */
+        long ei = find_attr(pPriv, ulPriv, CKA_EXTRACTABLE);
+        if (ei >= 0 && pPriv[ei].pValue && pPriv[ei].ulValueLen >= 1
+            && *(unsigned char *)pPriv[ei].pValue)
+            priv_flags |= FHSM_OBJF_EXTRACTABLE;
     }
     fhsm_rv_t rv = fhsm_token_object_add(t, CKO_PUBLIC_KEY, ckk_type,
                                           label_pub, pub_der, (size_t)pub_len,
@@ -6924,9 +7182,11 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
                               (void)fhsm_token_object_destroy(t, hk); return mr; } }
     { uint8_t pu = fhsm_compute_usage(CKO_PRIVATE_KEY, pPriv, ulPriv);
-      /* PQC keys (ML-KEM/ML-DSA/SLH-DSA) do not derive (#125 : ML-KEM
-       * private key must report CKA_DERIVE=FALSE). */
-      if (ckk_type == CKK_ML_KEM || ckk_type == CKK_ML_DSA || ckk_type == CKK_SLH_DSA)
+      /* Only EC and Montgomery keys derive. PQC keys were excluded here
+       * (#125 : ML-KEM private key must report CKA_DERIVE=FALSE); RSA and
+       * Edwards keys were not, and their private half claimed CKA_DERIVE
+       * while the public half did not (OpenSC's p11test usage_test). */
+      if (ckk_type != CKK_EC && ckk_type != CKK_EC_MONTGOMERY_KT)
           pu &= (uint8_t)~FHSM_USAGE_DERIVE;
       (void)fhsm_token_object_set_usage(t, hk, pu); }
     return FHSM_RV_OK;
@@ -6940,8 +7200,9 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
  *    CKA_MODULUS_BITS     : CK_ULONG (bit length of n)
  *    CKA_MODULUS          : big-endian n (RSA only)
  *    CKA_PUBLIC_EXPONENT  : big-endian e (RSA only)
- *    CKA_EC_POINT         : DER-encoded OCTET STRING wrapping the
- *                           uncompressed point 0x04|X|Y (EC only)
+ *    CKA_EC_POINT         : CKK_EC: DER-encoded OCTET STRING wrapping the
+ *                           uncompressed point 0x04|X|Y. Edwards and
+ *                           Montgomery: the bare RFC 8032 / RFC 7748 bytes.
  *    CKA_EC_PARAMS_QUERY  : DER-encoded curve OID (EC only)
  *
  *  Returns 0 on success and writes the value + length, -1 if the
@@ -7092,22 +7353,24 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
                 if (*out_len < 5) { *out_len = 5; rc = -2; }
                 else { memcpy(out, oid, 5); *out_len = 5; rc = 0; }
             } else {
-                /* CKA_EC_POINT is the RFC 8032 public key, DER-wrapped as an
-                 * OCTET STRING. The import path accepts both that and the
-                 * bare form, because both are in use; what is produced here
-                 * is the one the specification describes. */
+                /* CKA_EC_POINT is the public key bytes as RFC 8032 (Edwards)
+                 * and RFC 7748 (Montgomery) define them -- PKCS#11 v3.2, the
+                 * Edwards and Montgomery public key attribute tables. It was
+                 * DER-wrapped as an OCTET STRING here, the v3.0 wording,
+                 * under a comment calling that what the specification
+                 * describes; v3.1 changed it to the bare bytes. pkcs11-tool
+                 * refuses the wrapped form when it reads the key back
+                 * (--read-object --type pubkey), which is how it showed. The
+                 * import path still accepts both, because both are in use. */
                 uint8_t raw[64]; size_t raw_len = 0;
                 if (EVP_PKEY_get_octet_string_param(pkey, "pub", raw,
                                                      sizeof(raw), &raw_len) != 1)
                     raw_len = 0;
-                if (raw_len > 0 && raw_len <= 127) {
-                    size_t total = 2 + raw_len;
-                    if (*out_len < total) { *out_len = total; rc = -2; }
+                if (raw_len > 0) {
+                    if (*out_len < raw_len) { *out_len = raw_len; rc = -2; }
                     else {
-                        out[0] = 0x04;
-                        out[1] = (uint8_t)raw_len;
-                        memcpy(out + 2, raw, raw_len);
-                        *out_len = total;
+                        memcpy(out, raw, raw_len);
+                        *out_len = raw_len;
                         rc = 0;
                     }
                 }
@@ -7173,7 +7436,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     if (fhsm_object_access_denied(t, cko_class))
         return FHSM_RV_OBJECT_HANDLE_INVALID;
     int fhsm_buf_too_small = 0;
-    int fhsm_type_invalid  = 0;   /* an unknown attribute type was requested */
+    int fhsm_type_invalid  = 0;   /* an attribute this object does not have */
     int fhsm_sensitive     = 0;   /* a value that may not be revealed was requested */
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         const void *src = NULL; size_t src_len = 0;
@@ -7199,12 +7462,12 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                  * par. 4.6.3) ; the store's key_type field carries
                  * CKA_CERTIFICATE_TYPE for that class instead. */
                 if (cko_class == CKO_CERTIFICATE) {
-                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
                 }
                 src = &tmp_type;  src_len = sizeof(CK_ULONG); break;
             case CKA_CERTIFICATE_TYPE:
                 if (cko_class != CKO_CERTIFICATE) {
-                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
                 }
                 src = &tmp_type;  src_len = sizeof(CK_ULONG); break;
             case CKA_VALUE: {
@@ -7239,8 +7502,13 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     fhsm_sensitive = 1;
                     continue;
                 }
-                /* PKCS#11 v3.2 defines CKA_VALUE of an ML-KEM or ML-DSA
-                 * public key as the *raw* key. This module stores
+                /* PKCS#11 v3.2 defines CKA_VALUE of an ML-KEM, ML-DSA or
+                 * SLH-DSA public key as the *raw* key -- for SLH-DSA, "Public
+                 * key as defined in [FIPS 205]", PK.seed || PK.root. SLH-DSA
+                 * was imported raw and read back as SubjectPublicKeyInfo:
+                 * this list had ML-KEM and ML-DSA only, and pkcs11-tool
+                 * --read-object could not build the key from what it got
+                 * (OpenSC's test setup, 2026-10-29). This module stores
                  * SubjectPublicKeyInfo, because that is what every reader in
                  * it expects, so the conversion happens here -- the mirror of
                  * the one C_CreateObject performs on import, and the second
@@ -7261,14 +7529,15 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                  * caller expects a raw key is the silence this module keeps
                  * removing. */
                 if (cko_class == CKO_PUBLIC_KEY
-                    && (ckk_type == CKK_ML_KEM || ckk_type == CKK_ML_DSA)) {
+                    && (ckk_type == CKK_ML_KEM || ckk_type == CKK_ML_DSA
+                        || ckk_type == CKK_SLH_DSA)) {
                     const unsigned char *pp = value;
                     EVP_PKEY *pk = d2i_PUBKEY(NULL, &pp, (long)value_len);
                     size_t rl = sizeof pqc_raw;
                     int raw_ok = (pk != NULL)
                                  && EVP_PKEY_get_raw_public_key(pk, pqc_raw, &rl) == 1;
                     if (pk) EVP_PKEY_free(pk);
-                    if (!raw_ok) { pTemplate[i].ulValueLen = (CK_ULONG)-1; continue; }
+                    if (!raw_ok) { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue; }
                     src = pqc_raw; src_len = rl;
                     break;
                 }
@@ -7284,7 +7553,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             case CKA_PARAMETER_SET:
                 if (!fhsm_pset_selector_of(cko_class, ckk_type, value, value_len,
                                            &pset_sel)) {
-                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
                 }
                 src = &pset_sel; src_len = sizeof(CK_ULONG); break;
             /* CKA_ENCAPSULATE / CKA_DECAPSULATE (§5.14.7, §5.14.8).
@@ -7303,7 +7572,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 int is_encap = (pTemplate[i].type == CKA_ENCAPSULATE_ATTR);
                 uint32_t want_class = is_encap ? CKO_PUBLIC_KEY : CKO_PRIVATE_KEY;
                 if (ckk_type != CKK_ML_KEM || cko_class != want_class) {
-                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
                 }
                 uint8_t f2 = 0;
                 (void)fhsm_token_object_get_flags2(t, (uint32_t)hObject, &f2);
@@ -7324,13 +7593,13 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 uint8_t f2 = 0;
                 (void)fhsm_token_object_get_flags2(t, (uint32_t)hObject, &f2);
                 if (!(f2 & FHSM_OBJF2_HAS_ALLOWED_MECH)) {
-                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
                 }
                 uint32_t mechs[FHSM_POLICY_MECH_MAX];
                 uint8_t  cnt = (uint8_t)FHSM_POLICY_MECH_MAX;
                 if (fhsm_token_object_get_allowed_mechs(t, (uint32_t)hObject,
                                                          mechs, &cnt) != FHSM_RV_OK) {
-                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
                 }
                 /* Widening to CK_MECHANISM_TYPE, which is a CK_ULONG and so
                  * eight bytes where the record holds four. The caller's array
@@ -7374,12 +7643,12 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                                       : FHSM_OBJF2_HAS_DERIVE_TMPL;
                 uint8_t f2 = 0;
                 (void)fhsm_token_object_get_flags2(t, (uint32_t)hObject, &f2);
-                if (!(f2 & bit)) { pTemplate[i].ulValueLen = (CK_ULONG)-1; continue; }
+                if (!(f2 & bit)) { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue; }
                 fhsm_policy_attr_t ent[FHSM_POLICY_ATTR_MAX];
                 uint8_t cnt = (uint8_t)FHSM_POLICY_ATTR_MAX;
                 if (fhsm_token_object_get_tmpl(t, (uint32_t)hObject, w, ent, &cnt)
                     != FHSM_RV_OK) {
-                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
                 }
                 size_t need = (size_t)cnt * sizeof(CK_ATTRIBUTE);
                 if (pTemplate[i].pValue == NULL) {       /* size query */
@@ -7441,7 +7710,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     size_t need = 0;
                     int e1 = extract_pubkey_attr(t, (uint32_t)hObject,
                                                   pTemplate[i].type, NULL, &need);
-                    if (e1 == -1) { pTemplate[i].ulValueLen = (CK_ULONG)-1; continue; }
+                    if (e1 == -1) { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue; }
                     /* e1 == -2 : `need` now holds the required size. */
                     pTemplate[i].ulValueLen = (CK_ULONG)need;
                 } else {
@@ -7450,20 +7719,20 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                                   pTemplate[i].type,
                                                   pTemplate[i].pValue, &out_len);
                     if (e2 == 0) pTemplate[i].ulValueLen = (CK_ULONG)out_len;
-                    else         pTemplate[i].ulValueLen = (CK_ULONG)-1;
+                    else { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; }
                 }
                 continue;
             }
             case CKA_LABEL:
                 if (fhsm_token_object_get_label(t, (uint32_t)hObject,
                         &label_p, &label_len) != FHSM_RV_OK) {
-                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
                 }
                 src = label_p; src_len = label_len; break;
             case CKA_ID:
                 if (fhsm_token_object_get_id(t, (uint32_t)hObject,
                         &id_p, &id_len) != FHSM_RV_OK) {
-                    pTemplate[i].ulValueLen = (CK_ULONG)-1; continue;
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
                 }
                 src = id_p; src_len = id_len; break;
             /* --- Boolean policy / usage attributes (#125 : previously
@@ -7592,7 +7861,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     size_t need = 0;
                     int e1 = extract_cert_attr(t, (uint32_t)hObject,
                                                 pTemplate[i].type, NULL, &need);
-                    if (e1 == -1) { pTemplate[i].ulValueLen = (CK_ULONG)-1; continue; }
+                    if (e1 == -1) { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue; }
                     pTemplate[i].ulValueLen = (CK_ULONG)need;
                 } else {
                     size_t out_len = pTemplate[i].ulValueLen;
@@ -7600,7 +7869,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                                 pTemplate[i].type,
                                                 pTemplate[i].pValue, &out_len);
                     if (e2 == 0) pTemplate[i].ulValueLen = (CK_ULONG)out_len;
-                    else         pTemplate[i].ulValueLen = (CK_ULONG)-1;
+                    else { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; }
                 }
                 continue;
             }
@@ -9049,6 +9318,7 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * this slot would otherwise hash on top of the previous one's parts. */
     if (op->md_ctx) { EVP_MD_CTX_free((EVP_MD_CTX *)op->md_ctx); op->md_ctx = NULL; }
     op->key_handle = (uint32_t)hKey;
+    op->enc_pending = 0;
     /* CKA_ALWAYS_AUTHENTICATE, read once here rather than at each entry point
      * (§5.6). Every C_*Init reaches op_init, so the flag is carried by every
      * operation that holds a key handle, whether or not that operation is one
@@ -9386,6 +9656,7 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     op->pss_have    = 0;
     op->pss_saltlen = 0;
     op->pss_mgf     = 0;
+    op->pss_hash    = 0;
     /* Every RSA-PSS mechanism (bare CKM_RSA_PKCS_PSS and the
      * CKM_SHAxxx_RSA_PKCS_PSS variants) requires CK_RSA_PKCS_PSS_PARAMS
      * (hashAlg, mgf, sLen) per PKCS#11 v3.2 : a missing or too-short
@@ -9400,9 +9671,20 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         && pMechanism->pParameter
         && pMechanism->ulParameterLen >= 3 * sizeof(CK_ULONG)) {
         const CK_ULONG *p = (const CK_ULONG *)pMechanism->pParameter;
-        /* p[0] = hashAlg (we already know it from the mechanism),
-         * p[1] = mgf,
-         * p[2] = sLen */
+        /* p[0] = hashAlg, p[1] = mgf, p[2] = sLen.
+         *
+         * hashAlg was dropped here as "already known from the mechanism",
+         * which holds for CKM_SHAxxx_RSA_PKCS_PSS and not for bare
+         * CKM_RSA_PKCS_PSS, where it is the only statement of which digest
+         * the caller computed. Nothing told OpenSSL, which assumed SHA-1:
+         * a 20-byte digest signed, a SHA-256 one failed. OpenSC's
+         * test-pkcs11-tool-sign-verify.sh found it, 2026-10-29. */
+        op->pss_hash    = (uint32_t)p[0];
+        if (op->mechanism == 0x0000000DUL /* CKM_RSA_PKCS_PSS */) {
+            const EVP_MD *hmd = oaep_md(p[0]);
+            if (!hmd) return FHSM_RV_MECHANISM_PARAM_INVALID;
+            EVP_MD_free((EVP_MD *)hmd);
+        }
         op->pss_mgf     = (uint32_t)p[1];
         op->pss_saltlen = (long)p[2];
         /* Reject an absurd salt length (#125 TestRsaPssSaltLengthBoundary):
@@ -9650,6 +9932,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x0006:                                        /* SHA1_RSA_PKCS */
         case 0x0040: case 0x0041: case 0x0042:              /* SHA{256,384,512}_RSA_PKCS */
         case 0x0043: case 0x0044: case 0x0045:              /* SHA{256,384,512}_RSA_PKCS_PSS */
+        case 0x000E: case 0x0047:                           /* SHA{1,224}_RSA_PKCS_PSS */
             want = 0x00; break;                             /* CKK_RSA */
         case 0x1041: case 0x1042: case 0x1043:              /* ECDSA / ECDSA_SHA1 / SHA224 */
         case 0x1044: case 0x1045: case 0x1046:              /* ECDSA_SHA{256,384,512} */
@@ -10789,6 +11072,12 @@ static const char *hmac_digest_name(fhsm_hash_t h) {
 #ifndef CKM_SHA512_RSA_PKCS_PSS
 #define CKM_SHA512_RSA_PKCS_PSS   0x00000045UL
 #endif
+#ifndef CKM_SHA224_RSA_PKCS_PSS
+#define CKM_SHA224_RSA_PKCS_PSS   0x00000047UL
+#endif
+#ifndef CKM_SHA1_RSA_PKCS_PSS
+#define CKM_SHA1_RSA_PKCS_PSS     0x0000000EUL
+#endif
 
 CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                   CK_OBJECT_HANDLE hKey) {
@@ -10814,6 +11103,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
         case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
+        case CKM_SHA224_RSA_PKCS_PSS:
         case CKM_SHA224_RSA_PKCS:
         case CKM_SHA3_224_RSA_PKCS: case CKM_SHA3_256_RSA_PKCS:
         case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS:
@@ -10828,6 +11118,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x3EUL: case 0x3FUL:                           /* CKM_HASH_SLH_DSA_SHAKE* */
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
+        case CKM_SHA1_RSA_PKCS_PSS: /* non-FIPS : all-mechanisms only */
         case CKM_RSA_X_509:     /* raw RSA, no padding : all-mechanisms only */
         case CKM_COMPOSITE_MLDSA65_ED25519: /* Composite ML-DSA (#112) : all-mechanisms only */
             if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
@@ -10968,8 +11259,8 @@ static fhsm_rv_t aes_cmac(const uint8_t *key, size_t key_len,
  * (caller-provided digest, used with raw CKM_ECDSA / CKM_RSA_PKCS). */
 static const char *mech_hash_name(uint32_t m) {
     switch (m) {
-        case CKM_SHA1_RSA_PKCS:                                 return "SHA1";
-        case CKM_SHA224_RSA_PKCS:                                return "SHA224";
+        case CKM_SHA1_RSA_PKCS: case CKM_SHA1_RSA_PKCS_PSS:     return "SHA1";
+        case CKM_SHA224_RSA_PKCS: case CKM_SHA224_RSA_PKCS_PSS:  return "SHA224";
         case CKM_ECDSA_SHA256: case CKM_SHA256_RSA_PKCS:
         case CKM_SHA256_RSA_PKCS_PSS:                            return "SHA256";
         case CKM_ECDSA_SHA384: case CKM_SHA384_RSA_PKCS:
@@ -11001,7 +11292,9 @@ static int mech_is_pss(uint32_t m) {
     return m == CKM_RSA_PKCS_PSS
         || m == CKM_SHA256_RSA_PKCS_PSS
         || m == CKM_SHA384_RSA_PKCS_PSS
-        || m == CKM_SHA512_RSA_PKCS_PSS;
+        || m == CKM_SHA512_RSA_PKCS_PSS
+        || m == CKM_SHA224_RSA_PKCS_PSS
+        || m == CKM_SHA1_RSA_PKCS_PSS;
 }
 
 /* Apply the caller's CK_RSA_PKCS_PSS_PARAMS to an EVP context: padding, salt
@@ -11036,6 +11329,19 @@ static fhsm_rv_t pss_apply_params(EVP_PKEY_CTX *ctx, int have,
     if (!md)
         return FHSM_RV_MECHANISM_PARAM_INVALID;
     int rc = EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, md);
+    EVP_MD_free((EVP_MD *)md);
+    return (rc > 0) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+/* Bare CKM_RSA_PKCS_PSS signs a digest the caller computed; hashAlg names
+ * it. Set on the raw EVP_PKEY_sign / EVP_PKEY_verify context before
+ * pss_apply_params, which then gets the salt length and MGF right for it. */
+static fhsm_rv_t pss_apply_hash(EVP_PKEY_CTX *ctx, uint32_t hash)
+{
+    const EVP_MD *md = oaep_md(hash);
+    if (!md)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    int rc = EVP_PKEY_CTX_set_signature_md(ctx, md);
     EVP_MD_free((EVP_MD *)md);
     return (rc > 0) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
@@ -11259,8 +11565,9 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
                 goto cleanup;
         }
         if (mech_is_pss(op->mechanism)
-            && pss_apply_params(pkctx_raw, op->pss_have,
-                                op->pss_saltlen, op->pss_mgf) != FHSM_RV_OK)
+            && (pss_apply_hash(pkctx_raw, op->pss_hash) != FHSM_RV_OK
+                || pss_apply_params(pkctx_raw, op->pss_have,
+                                    op->pss_saltlen, op->pss_mgf) != FHSM_RV_OK))
             goto cleanup;
         if (EVP_PKEY_sign(pkctx_raw, sig, &out_len, data, data_len) <= 0)
             goto cleanup;
@@ -11508,6 +11815,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_RSA_PKCS: case CKM_SHA256_RSA_PKCS: case CKM_SHA384_RSA_PKCS:
         case CKM_SHA512_RSA_PKCS: case CKM_RSA_PKCS_PSS: case CKM_SHA256_RSA_PKCS_PSS:
         case CKM_SHA384_RSA_PKCS_PSS: case CKM_SHA512_RSA_PKCS_PSS:
+        case CKM_SHA224_RSA_PKCS_PSS:
         case CKM_SHA224_RSA_PKCS:
         case CKM_SHA3_224_RSA_PKCS: case CKM_SHA3_256_RSA_PKCS:
         case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS:
@@ -11522,6 +11830,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x3EUL: case 0x3FUL:                           /* CKM_HASH_SLH_DSA_SHAKE* */
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
+        case CKM_SHA1_RSA_PKCS_PSS: /* non-FIPS : all-mechanisms only */
         case CKM_RSA_X_509:     /* raw RSA, no padding : all-mechanisms only */
         case CKM_COMPOSITE_MLDSA65_ED25519: /* Composite ML-DSA (#112) : all-mechanisms only */
             if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
@@ -11829,8 +12138,9 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
                 goto vcleanup;
         }
         if (mech_is_pss(op->mechanism)
-            && pss_apply_params(pkctx_raw, op->pss_have,
-                                op->pss_saltlen, op->pss_mgf) != FHSM_RV_OK)
+            && (pss_apply_hash(pkctx_raw, op->pss_hash) != FHSM_RV_OK
+                || pss_apply_params(pkctx_raw, op->pss_have,
+                                    op->pss_saltlen, op->pss_mgf) != FHSM_RV_OK))
             goto vcleanup;
         int vrv = EVP_PKEY_verify(pkctx_raw, sig_to_verify, sig_to_verify_len,
                                     pData, ulDataLen);
@@ -12747,12 +13057,22 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     if (ulPartLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     fhsm_rv_t rv = ensure_cipher_ctx(op, t, 1);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
-    /* Output upper bound : stream ciphers (GCM/CTR) emit exactly ulPartLen ;
-     * block ciphers (ECB/CBC/CBC-PAD) may emit up to ulPartLen + one block as
-     * a buffered block completes. Refuse an undersized output buffer BEFORE
-     * EVP writes rather than overrun pEnc (#125 TestUpdateOutputGuard, #57). */
-    { int ek = op_cipher_kind(op->mechanism);
-      size_t need = (ek == 2 || ek == 3) ? ulPartLen + 16 : ulPartLen;
+    /* Output length : stream ciphers (GCM/CTR) emit exactly ulPartLen ; block
+     * ciphers (ECB/CBC/CBC-PAD) emit every whole block of what is held back
+     * plus ulPartLen -- encryption holds back only an incomplete block, even
+     * with padding. Refuse an undersized output buffer BEFORE EVP writes
+     * rather than overrun pEnc (#125 TestUpdateOutputGuard, #57).
+     *
+     * The block bound was ulPartLen + 16 whatever was held back: an upper
+     * bound, not the length. pkcs11-tool encrypts in 1024-byte parts into a
+     * 1024-byte buffer, which an aligned part fills exactly, and was refused
+     * with CKR_BUFFER_TOO_SMALL (OpenSC test-pkcs11-tool-sym-crypt-test.sh,
+     * AES-CBC-PAD over 24393 bytes). The size query answers the same exact
+     * number, as C_DecryptUpdate's does. */
+    int ek = op_cipher_kind(op->mechanism);
+    int block = (ek == 2 || ek == 3);
+    { size_t need = block ? ((op->enc_pending + (size_t)ulPartLen) / 16) * 16
+                          : ulPartLen;
       if (pEnc == NULL) { *pulEncLen = need; return FHSM_RV_OK; }
       if (*pulEncLen < need) { *pulEncLen = need; return 0x00000150UL; }
     }
@@ -12760,6 +13080,7 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     if (EVP_EncryptUpdate(op->cipher_ctx, pEnc, &out_len, pPart, (int)ulPartLen) != 1) {
         op->active = 0; return FHSM_RV_FUNCTION_FAILED;
     }
+    if (block) op->enc_pending = (uint32_t)((op->enc_pending + ulPartLen) % 16);
     *pulEncLen = (CK_ULONG)out_len;
     return FHSM_RV_OK;
 }
@@ -13315,17 +13636,20 @@ CK_RV C_GetInterfaceList(CK_INTERFACE *pInterfacesList, CK_ULONG *pulCount) {
 
 CK_RV C_GetInterface(unsigned char *pInterfaceName, void *pVersion,
                      CK_INTERFACE **ppInterface, CK_FLAGS flags) {
-    /* flags is still ignored, as it was. CKF_INTERFACE_FORK_SAFE is the bit a
-     * caller would set here, and answering it truthfully is a separate
-     * question from this change -- the module does reset state across a fork
+    /* "the interface returned must match all of the supplied flag values".
+     * Neither interface carries a flag, so any non-zero flags match nothing.
+     * They were ignored, and a caller asking for CKF_INTERFACE_FORK_SAFE was
+     * told it had it. The module does reset state across a fork
      * (fhsm_state_reset_after_fork), but claiming the flag is a promise about
-     * every path, not an observation about one. Left as it was rather than
-     * bundled in. */
-    (void)flags;
-    if (!ppInterface) return FHSM_RV_ARGUMENTS_BAD;
+     * every path, not an observation about one.
+     *
+     * An interface that does not exist is CKR_ARGUMENTS_BAD throughout. The
+     * specification allows that or CKR_FUNCTION_FAILED; OpenSC answers the
+     * first and its p11test requires it, and nothing failed here. */
+    if (!ppInterface || flags != 0) return FHSM_RV_ARGUMENTS_BAD;
     if (pInterfaceName != NULL
         && strcmp((const char*)pInterfaceName, "PKCS 11") != 0) {
-        return FHSM_RV_FUNCTION_FAILED;
+        return FHSM_RV_ARGUMENTS_BAD;
     }
     fhsm_init_v3_2_table();
 
@@ -13379,7 +13703,7 @@ CK_RV C_GetInterface(unsigned char *pInterfaceName, void *pVersion,
         /* Refusing a version we do not publish, rather than handing back a
          * table whose shape the caller did not ask for and will index by its
          * own idea of the layout. */
-        return FHSM_RV_FUNCTION_FAILED;
+        return FHSM_RV_ARGUMENTS_BAD;
     }
     *ppInterface = iface_p;
     return FHSM_RV_OK;

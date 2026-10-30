@@ -33,6 +33,9 @@
  *   (7) edwards25519 key, no parameters: pure Ed25519, sign and verify
  *   (8) a token edwards448 key keeps (5) and (6) across C_Finalize /
  *       C_Initialize -- the profile is in the store, not only in memory
+ *   (9) CKA_EC_POINT is the bare RFC 8032 key, 32 or 57 bytes, as PKCS#11
+ *       v3.2 defines it; it was DER-wrapped (34 or 59), the v3.0 form, and
+ *       pkcs11-tool --read-object refused it
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -52,6 +55,7 @@ typedef struct { CK_BYTE phFlag; CK_ULONG ulContextDataLen; CK_BYTE *pContextDat
 #define CKA_SIGN                      0x108UL
 #define CKA_VERIFY                    0x10AUL
 #define CKA_EC_PARAMS                 0x180UL
+#define CKA_EC_POINT                  0x181UL
 #define CKM_EC_EDWARDS_KEY_PAIR_GEN   0x1055UL
 #define CKM_EDDSA                     0x1057UL
 
@@ -110,6 +114,13 @@ static int ec_params_is(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o,
     CK_ATTRIBUTE a = { CKA_EC_PARAMS, buf, sizeof buf };
     if (C_GetAttributeValue(s, o, &a, 1) != CKR_OK) return 0;
     return a.ulValueLen == want_len && memcmp(buf, want, want_len) == 0;
+}
+
+/* (9): the length of the object's CKA_EC_POINT, or 0 if it cannot be read. */
+static CK_ULONG ec_point_len(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o) {
+    CK_BYTE buf[128];
+    CK_ATTRIBUTE a = { CKA_EC_POINT, buf, sizeof buf };
+    return C_GetAttributeValue(s, o, &a, 1) == CKR_OK ? a.ulValueLen : 0;
 }
 
 /* (5): NULL refused on both Inits, the empty block accepted. */
@@ -194,6 +205,9 @@ int main(void)
         ok(rv == CKR_MECHANISM_PARAM_INVALID, what);
         /* The refusal left no operation behind: plain Ed25519 still works. */
         ok(roundtrip(s, &bare, pub, priv), "(1) no parameters after the refusals");
+        CK_ULONG pl = ec_point_len(s, pub);
+        snprintf(what, sizeof what, "(9) CKA_EC_POINT is the bare 32-byte key (got %lu)", pl);
+        ok(pl == 32, what);
     }
 
     printf("Ed448\n");
@@ -203,6 +217,9 @@ int main(void)
         ok(roundtrip(s, &withp, pub, priv), "(3) empty CK_EDDSA_PARAMS is pure Ed448: sign and verify");
         ok(roundtrip(s, &bare, pub, priv), "(4) id-Ed448, no parameters: sign and verify");
         ok(ec_params_is(s, pub, OID_ED448, sizeof OID_ED448), "(6) id-Ed448: CKA_EC_PARAMS is the OID");
+        CK_ULONG pl = ec_point_len(s, pub);
+        snprintf(what, sizeof what, "(9) CKA_EC_POINT is the bare 57-byte key (got %lu)", pl);
+        ok(pl == 57, what);
     }
 
     /* PrintableString, tag 0x13. */

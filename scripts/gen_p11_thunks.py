@@ -128,6 +128,12 @@ MECHANISMS: tuple[Mech, ...] = (
          notes="PKCS#11 v3.2 §6.16.3: single-part wrap/unwrap AND single-part "
                "encrypt/decrypt. Encrypt input must be an exact multiple of the "
                "8-byte semiblock; use KWP for other lengths."),
+    Mech("CKM_AES_KEY_WRAP_PAD",   0x0000210A, "AES",  "wrap",    "dispatch_aes_key_wrap_pad",
+         fips="non-approved", key_type="CKK_AES",
+         refs=("RFC 5649",),
+         notes="PKCS#11 v3.0; deprecated by v3.2 for CKM_AES_KEY_WRAP_KWP. Same "
+               "construction as KWP, wrap and unwrap only; kept for callers "
+               "written against 3.0, refused in the nist-approved-only profile."),
     Mech("CKM_AES_KEY_WRAP_KWP",   0x0000210B, "AES",  "wrap+encrypt", "dispatch_aes_kwp",
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
@@ -244,6 +250,13 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", key_type="CKK_RSA",
          min_key_bits=2048, max_key_bits=4096,
          refs=("FIPS 186-5",)),
+    # SHA-224 with PSS, the PSS twin of CKM_SHA224_RSA_PKCS below, which was
+    # here alone. OpenSC's test-pkcs11-tool-sign-verify.sh signs with both and
+    # got CKR_MECHANISM_INVALID for this one (2026-10-29).
+    Mech("CKM_SHA224_RSA_PKCS_PSS",0x00000047, "RSA",  "sign",    "dispatch_rsa_pss_sha224",
+         fips="approved", key_type="CKK_RSA",
+         min_key_bits=2048, max_key_bits=4096,
+         refs=("FIPS 186-5", "RFC 8017 §8.1")),
     Mech("CKM_RSA_PKCS_OAEP",      0x00000009, "RSA",  "encrypt", "dispatch_rsa_oaep",
          fips="approved", key_type="CKK_RSA",
          min_key_bits=2048, max_key_bits=4096,
@@ -261,6 +274,11 @@ MECHANISMS: tuple[Mech, ...] = (
          notes="SHA-1 is forbidden for signature generation per SP 800-131A rev. 2. "
                "Kept for interop with applications that still verify legacy "
                "signatures; refused in the nist-approved-only profile."),
+    Mech("CKM_SHA1_RSA_PKCS_PSS",  0x0000000E, "RSA",  "sign",    "dispatch_sha1_rsa_pss",
+         fips="non-approved", key_type="CKK_RSA",
+         notes="The PSS twin of CKM_SHA1_RSA_PKCS, on the same terms: SHA-1 is "
+               "forbidden for signature generation per SP 800-131A rev. 2; "
+               "refused in the nist-approved-only profile."),
     # RSASSA-PKCS1-v1_5 with SHA-2. Reachable through C_Sign since long before
     # this line existed -- mech_hash_name(), C_SignInit and C_VerifyInit all
     # knew these three -- but absent from this table, so C_GetMechanismList
@@ -724,7 +742,7 @@ def gen_header(mechs: tuple[Mech, ...],
         "#endif",
         "",
         "/* ---- Build profile flag ----",
-        " * 1 = nist-approved-only : the thirteen mechanisms NIST has not",
+        " * 1 = nist-approved-only : the fifteen mechanisms NIST has not",
         " *     approved get a reject handler in place of their operation.",
         " * 0 = all-mechanisms : they are executable, subject to the runtime",
         " *     mode (FHSM_MODE=strict|permissive), which is a separate",
@@ -1051,8 +1069,8 @@ def main(argv: list[str] | None = None) -> int:
     # were not opposites. `all-mechanisms` is what the profile actually
     # contains.
     #
-    # Neither is about age. Of the thirteen the profile excludes, eleven are
-    # old (MD5, SHA-1, 3DES, RC4, DSA, DH, RSA v1.5) and two are newer than
+    # Neither is about age. Of the fifteen the profile excludes, thirteen are
+    # old (MD5, SHA-1, 3DES, RC4, DSA, DH, RSA v1.5, AES-KW-PAD) and two are newer than
     # anything else here: X25519/X448 key generation and the composite ML-DSA
     # signature. A bucket holding RC4 and a post-quantum composite has no
     # name based on age, which is why `legacy` was never right for it either.

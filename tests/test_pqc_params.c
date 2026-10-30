@@ -87,8 +87,11 @@ static long pset_of(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o)
 {
     CK_ULONG v = 0;
     CK_ATTRIBUTE a = { CKA_PARAMETER_SET, &v, sizeof v };
-    if (C_GetAttributeValue(s, o, &a, 1) != CKR_OK) return -2;
-    if (a.ulValueLen == (CK_ULONG)-1) return -1;
+    CK_RV rv = C_GetAttributeValue(s, o, &a, 1);
+    /* An attribute the key does not have: the error, and the length saying so. */
+    if (rv == 0x12UL /* CKR_ATTRIBUTE_TYPE_INVALID */ && a.ulValueLen == (CK_ULONG)-1)
+        return -1;
+    if (rv != CKR_OK) return -2;
     if (a.ulValueLen != sizeof v) return -2;
     return (long)v;
 }

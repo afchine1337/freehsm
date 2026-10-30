@@ -12,7 +12,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 *Minor: public objects can be found and read before a login, from a new
 public section in the token file. `CKA_START_DATE`, `CKA_END_DATE` and a
 data object's `CKA_APPLICATION` are settable; `C_InitToken` answers
-`CKR_SESSION_EXISTS`. Two low-severity fixes: the unwrap buffer is cleared
+`CKR_SESSION_EXISTS`; an Edwards or Montgomery `CKA_EC_POINT` is the bare
+key, as PKCS#11 v3.2 defines it. Two low-severity fixes: the unwrap buffer is cleared
 on every exit (#27), and `CKA_ALLOWED_MECHANISMS` holds again after a
 logout, which 2.5.1 had broken. No security advisory.
 `RELEASE_v2.6.0.md` has the release notes.*
@@ -29,6 +30,37 @@ logout, which 2.5.1 had broken. No security advisory.
   section and answers as before until its next login.
   `docs/TOKEN_STORE_FORMAT.md`, "The public section";
   `tests/test_public_objects.c`.
+* **`CKM_SHA224_RSA_PKCS_PSS` and `CKM_SHA1_RSA_PKCS_PSS`.** The PSS twins of
+  `CKM_SHA224_RSA_PKCS` and `CKM_SHA1_RSA_PKCS`, which the module had
+  without them. SHA-224 in both profiles; SHA-1, not approved for signature
+  generation, in `all-mechanisms` only, as `CKM_SHA1_RSA_PKCS` is. OpenSC's
+  sign-and-verify test asks for both. `tests/test_rsa_pss_raw.c`, (6) (7).
+* **AES-CBC and AES-CBC-PAD as wrapping mechanisms, where NIST's rules do
+  not apply.** PKCS#11 v3.2 lists Wrap and Unwrap for both; NIST approves
+  KW, KWP and KWA for key wrapping (SP 800-38F), not CBC. So, like RSA-1024,
+  they wrap and unwrap in the `all-mechanisms` build in permissive mode,
+  where `C_GetMechanismInfo` also advertises it, and are refused otherwise.
+  OpenSC's `test-pkcs11-tool-unwrap-wrap-test.sh` uses both.
+  `tests/test_template_id.c`, (4).
+* **Private keys wrap and unwrap.** `C_GenerateKeyPair` ignored
+  `CKA_EXTRACTABLE` on the private template, so no generated private key
+  could be wrapped; it is honoured now, and the key stays sensitive.
+  `C_WrapKey` gives a private key as PKCS#8 `PrivateKeyInfo`, as PKCS#11
+  defines, where it gave the stored DER, traditional for RSA and EC.
+  `C_UnwrapKey` takes `CKA_CLASS = CKO_PRIVATE_KEY`: the blob must parse as
+  PKCS#8 and hold the template's key type (`CKR_WRAPPED_KEY_INVALID`,
+  `CKR_KEY_TYPE_INCONSISTENT`), and the key comes back sensitive. A blob over
+  4 KiB is refused as before, which leaves out the largest ML-DSA keys.
+  `tests/test_template_id.c`, (5).
+* **`CKM_AES_KEY_WRAP_PAD`, for callers written against PKCS#11 v3.0.**
+  Deprecated by v3.2 for `CKM_AES_KEY_WRAP_KWP`, whose RFC 5649 construction
+  it shares here. Wrap and unwrap, `all-mechanisms` in permissive mode; the
+  two interfaces share `C_WrapKey`, so it cannot be limited to the 3.0 one.
+* **RSA-1024 key generation, where NIST's rules do not apply.** The
+  `all-mechanisms` build in permissive mode generates RSA-1024 keys and
+  advertises 1024 as the minimum; `nist-approved-only`, or the strict mode,
+  keeps 2048 (SP 800-131A). OpenSC's pkcs11-tool tests generate RSA-1024
+  keys and were refused with `CKR_KEY_SIZE_RANGE`.
 
 ### Security
 * **`C_UnwrapKey` left the unwrapped key on the stack when it refused it**
@@ -53,6 +85,60 @@ logout, which 2.5.1 had broken. No security advisory.
   login.
 
 ### Fixed
+* **An Edwards or Montgomery key's `CKA_EC_POINT` was DER-wrapped.** PKCS#11
+  v3.2 defines it as the public key bytes of RFC 8032 and RFC 7748; the
+  module wrapped them in an OCTET STRING (34 bytes for Ed25519, 59 for
+  Ed448), the v3.0 form, under a comment calling that what the specification
+  describes. `pkcs11-tool --read-object --type pubkey` refused the key, which
+  is how it showed, while setting up OpenSC's test suite against FreeHSM.
+  The bare bytes are returned now; an import still accepts both forms.
+  `tests/test_eddsa_params.c`, (9).
+* **`C_UnwrapKey`, `C_DeriveKey`, `C_EncapsulateKey` and `C_DecapsulateKey`
+  dropped `CKA_ID`.** The new key was created without the id its template
+  gave it; only `C_GenerateKey` kept it, so a caller that unwrapped a key
+  under an id could not find it by that id (OpenSC's
+  `test-pkcs11-tool-unwrap-wrap-test.sh`, `--application-id`). All four take
+  it from the template now. `tests/test_template_id.c`.
+* **`C_GetAttributeValue` answered `CKR_OK` for an attribute the object does
+  not have.** `CKA_MODULUS` on an EC key, `CKA_EC_POINT` on an RSA key, an
+  absent `CKA_ALLOWED_MECHANISMS` and a dozen others set
+  `CK_UNAVAILABLE_INFORMATION` in the length and returned success, so a
+  caller checking the return code allocated 2^64-1 bytes (OpenSC's p11test).
+  They now return `CKR_ATTRIBUTE_TYPE_INVALID` with that length, as an
+  unknown attribute already did; the other attributes of the call are still
+  given.
+* **Generated RSA and Edwards private keys claimed `CKA_DERIVE`.** Neither
+  can derive, and the public half said FALSE. Only EC and Montgomery keys
+  carry it now, as the PQC keys already did not.
+* **`C_GetInterface` ignored `flags`.** PKCS#11 says the interface returned
+  must match all of them; neither of the module's interfaces carries one, so
+  non-zero flags now match nothing. That, an unknown name and an unknown
+  version answer `CKR_ARGUMENTS_BAD`, where the last two were
+  `CKR_FUNCTION_FAILED`, as OpenSC's module does and its p11test requires.
+* **`C_EncryptUpdate` on a block cipher refused a buffer of the exact
+  length.** ECB, CBC and CBC-PAD encryption hold back only an incomplete
+  block, so a part produces every whole block of what is held plus the
+  part. The module asked for the part plus 16 whatever was held, an upper
+  bound, and answered `CKR_BUFFER_TOO_SMALL` to a buffer that would have
+  sufficed. pkcs11-tool encrypts in 1024-byte parts into a 1024-byte
+  buffer, so any input of 1024 bytes or more failed there (OpenSC's
+  `test-pkcs11-tool-sym-crypt-test.sh`). The size check and the size query
+  now use the exact length, as `C_DecryptUpdate` already did.
+  `tests/test_encrypt_update_size.c`.
+* **Bare `CKM_RSA_PKCS_PSS` ignored `hashAlg`.** It signs a digest the
+  caller computed, and `CK_RSA_PKCS_PSS_PARAMS.hashAlg` says which; the
+  module dropped it as "known from the mechanism", true only of the
+  `CKM_SHAxxx_RSA_PKCS_PSS` variants, and OpenSSL fell back to SHA-1. A
+  20-byte digest signed; a SHA-256 one failed with `CKR_FUNCTION_FAILED`.
+  `hashAlg` now sets the digest, and one that is not a digest is
+  `CKR_MECHANISM_PARAM_INVALID` at Init. Found by OpenSC's
+  `test-pkcs11-tool-sign-verify.sh`. `tests/test_rsa_pss_raw.c`.
+* **An SLH-DSA public key's `CKA_VALUE` was a SubjectPublicKeyInfo.**
+  PKCS#11 v3.2 defines it as the FIPS 205 public key, PK.seed || PK.root,
+  as for ML-KEM and ML-DSA, which were converted; the list that converts
+  them did not name SLH-DSA. Imported raw, read back as DER, and refused by
+  `pkcs11-tool --read-object` in the same OpenSC setup. Raw now, 32, 48 or
+  64 bytes. `tests/test_slh_dsa_sets.c`, (5).
 * **`C_InitToken` re-initialized a token with sessions open on it.**
   PKCS#11 answers `CKR_SESSION_EXISTS`; the module destroyed the objects and
   reset both PINs under sessions that went on holding handles and a login

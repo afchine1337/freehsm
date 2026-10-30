@@ -41,13 +41,14 @@ static int             g_is_fips = 0;
 /* The spellings this axis accepts, and what each one is.
  *
  * Canonical since 2026-09-26: strict and permissive. They say what the module
- * does with the thirteen mechanisms NIST has not approved -- refuse them, or
+ * does with the fifteen mechanisms NIST has not approved -- refuse them, or
  * run them -- without naming a standard the module does not claim. FHSM_MODE
  * was `fips`, which asserted in an environment variable the same thing the
  * `-FIPS` version suffix asserted before v2.0.0 removed it.
  *
- * `legacy` was wrong for a second reason. The thirteen are not old: eleven
- * are (MD5, SHA-1, 3DES, RC4, DSA, DH, RSA v1.5 and its SHA-1 pairing), and
+ * `legacy` was wrong for a second reason. The fifteen are not old: thirteen
+ * are (MD5, SHA-1, 3DES, RC4, DSA, DH, RSA v1.5, and SHA-1 with RSA v1.5 and
+ * with PSS, and the deprecated AES-KW-PAD), and
  * two are newer than anything else in the module -- X25519/X448 key
  * generation, and the composite ML-DSA signature. One bucket holding RC4 and
  * a post-quantum composite has no name based on age.

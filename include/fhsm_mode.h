@@ -55,7 +55,7 @@ extern "C" {
  *
  * The name says `fips` because it predates the rename and is exported: a
  * caller links against this symbol. The question it answers is "may the
- * thirteen mechanisms NIST has not approved run?", and the two answers are
+ * fifteen mechanisms NIST has not approved run?", and the two answers are
  * spelled strict and permissive as of 2026-09-26.
  *
  * This is the SECOND of two axes. It cannot reach a mechanism the build

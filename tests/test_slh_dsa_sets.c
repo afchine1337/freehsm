@@ -16,6 +16,9 @@
  *   (1) C_GenerateKeyPair succeeds with CKA_PARAMETER_SET
  *   (2) C_Sign gives a signature of FIPS 205's length for the set
  *   (3) C_Verify accepts it, and rejects it with one bit changed
+ *   (5) the public key's CKA_VALUE is the raw FIPS 205 key, PK.seed ||
+ *       PK.root: 32, 48 or 64 bytes. It came back as a SubjectPublicKeyInfo,
+ *       which pkcs11-tool --read-object could not build a key from
  * and, after all twelve, (4) the module still generates a key, which it
  * would not in ERROR.
  * ======================================================================== */
@@ -34,6 +37,7 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKR_SIGNATURE_INVALID    0xC0UL
 #define CKF_RW                   6UL
 #define CKA_TOKEN                0x001UL
+#define CKA_VALUE                0x011UL
 #define CKA_SIGN                 0x108UL
 #define CKA_VERIFY               0x10AUL
 #define CKA_PARAMETER_SET        0x61DUL
@@ -44,14 +48,14 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define USER_PIN "userpin1234"
 
 /* PKCS#11 v3.2 CKP_SLH_DSA_*, 1 to 12, and FIPS 205 Table 2's signature
-   length for each. */
-static const struct { const char *name; CK_ULONG sig_len; } SETS[] = {
-    { "SHA2-128s",  7856 }, { "SHAKE-128s",  7856 },
-    { "SHA2-128f", 17088 }, { "SHAKE-128f", 17088 },
-    { "SHA2-192s", 16224 }, { "SHAKE-192s", 16224 },
-    { "SHA2-192f", 35664 }, { "SHAKE-192f", 35664 },
-    { "SHA2-256s", 29792 }, { "SHAKE-256s", 29792 },
-    { "SHA2-256f", 49856 }, { "SHAKE-256f", 49856 },
+   and public key lengths for each. */
+static const struct { const char *name; CK_ULONG sig_len, pk_len; } SETS[] = {
+    { "SHA2-128s",  7856, 32 }, { "SHAKE-128s",  7856, 32 },
+    { "SHA2-128f", 17088, 32 }, { "SHAKE-128f", 17088, 32 },
+    { "SHA2-192s", 16224, 48 }, { "SHAKE-192s", 16224, 48 },
+    { "SHA2-192f", 35664, 48 }, { "SHAKE-192f", 35664, 48 },
+    { "SHA2-256s", 29792, 64 }, { "SHAKE-256s", 29792, 64 },
+    { "SHA2-256f", 49856, 64 }, { "SHAKE-256f", 49856, 64 },
 };
 #define NSETS (sizeof SETS / sizeof SETS[0])
 
@@ -96,11 +100,13 @@ int main(void)
     CK_RV (*C_Sign)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG*);
     CK_RV (*C_VerifyInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
     CK_RV (*C_Verify)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG,CK_BYTE*,CK_ULONG);
+    CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
     #define SYM(n) *(void**)&n = dlsym(h,#n)
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
     SYM(C_Login); SYM(C_Logout); SYM(C_InitPIN); SYM(C_GenerateKeyPair);
-    SYM(C_SignInit); SYM(C_Sign); SYM(C_VerifyInit); SYM(C_Verify);
-    if (!C_GenerateKeyPair || !C_SignInit || !C_Sign || !C_VerifyInit || !C_Verify) {
+    SYM(C_SignInit); SYM(C_Sign); SYM(C_VerifyInit); SYM(C_Verify); SYM(C_GetAttributeValue);
+    if (!C_GenerateKeyPair || !C_SignInit || !C_Sign || !C_VerifyInit || !C_Verify
+        || !C_GetAttributeValue) {
         fprintf(stderr, "missing symbols\n"); return 2;
     }
 
@@ -129,6 +135,13 @@ int main(void)
         snprintf(what, sizeof what, "(1) %s: C_GenerateKeyPair (rv 0x%lx)", SETS[i].name, rv);
         ok(rv == CKR_OK, what);
         if (rv != CKR_OK) continue;
+
+        CK_BYTE pk[128];
+        CK_ATTRIBUTE va = { CKA_VALUE, pk, sizeof pk };
+        rv = C_GetAttributeValue(s, pub, &va, 1);
+        snprintf(what, sizeof what, "(5) %s: public CKA_VALUE is the raw %lu-byte key (got %lu)",
+                 SETS[i].name, SETS[i].pk_len, rv == CKR_OK ? va.ulValueLen : 0UL);
+        ok(rv == CKR_OK && va.ulValueLen == SETS[i].pk_len, what);
 
         CK_MECHANISM m = { CKM_SLH_DSA, NULL, 0 };
         CK_ULONG sl = 65536;
