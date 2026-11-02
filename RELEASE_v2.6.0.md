@@ -183,7 +183,9 @@ pytest below 9.2.
 ## Credits
 
 AlexLaroche reported #27 and wrote the harness that confirmed it and its
-fix. The harness is Denis Mingulov's `pkcs11-check`.
+fix. The harness is Denis Mingulov's `pkcs11-check`. petrn asked for SP 800-108
+(#28) and confirmed the counter KDF on a GlobalPlatform card, authenticating
+with SCP03 and using the session keys for secure messaging.
 
 ## Verifying this release
 
