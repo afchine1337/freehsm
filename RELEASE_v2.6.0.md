@@ -82,7 +82,8 @@ enforced.
 PRF and additional derived keys. The caller lays out the PRF's input field by
 field, which covers GlobalPlatform SCP03; petrn asked for it for that reason
 (#28). OpenSSL's KBKDF has one fixed layout, so the module runs the loop itself
-over `EVP_MAC`. `CKM_DES3_CMAC` is not offered as a PRF.
+over `EVP_MAC`. `CKM_DES3_CMAC` is a PRF too in `all-mechanisms` and permissive
+mode, where 3DES runs; NIST does not approve it.
 
 ## Two RSA-PSS mechanisms, and RSA-1024 where it is allowed
 
@@ -164,7 +165,7 @@ DEK, and now asks for that. 2.5.1 only.
 `make tests` in both profiles, green. New: `tests/test_public_objects.c`
 (17), `tests/test_set_dates.c` (15), `tests/test_init_token_session.c` (5),
 `tests/test_rsa_pss_raw.c` (10), `tests/test_encrypt_update_size.c` (7),
-`tests/test_template_id.c` (13), `tests/test_sp800_108.c` (20); the fourth and
+`tests/test_template_id.c` (13), `tests/test_sp800_108.c` (22); the fourth and
 the sixth run fewer where a build or mode does not offer a mechanism. OpenSC's `pkcs11-tool` scripts and `p11test`
 pass against an `all-mechanisms` build, apart from its KEM script, which
 encapsulates without a login.
