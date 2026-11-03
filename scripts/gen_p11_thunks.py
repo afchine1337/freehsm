@@ -533,8 +533,9 @@ MECHANISMS: tuple[Mech, ...] = (
     # which the TLV handlers have no way to take.
     Mech("CKM_SP800_108_COUNTER_KDF",         0x000003AC, "SP800-108", "derive",
          "dispatch_sp800_108", fips="approved", refs=("SP 800-108r1",),
-         notes="HMAC or AES-CMAC PRF; the fields of the PRF input in the "
-               "caller's order, which covers SCP03."),
+         notes="HMAC or AES-CMAC PRF, and 3DES-CMAC where 3DES runs; the "
+               "fields of the PRF input in the caller's order, which covers "
+               "SCP03."),
     Mech("CKM_SP800_108_FEEDBACK_KDF",        0x000003AD, "SP800-108", "derive",
          "dispatch_sp800_108", fips="approved", refs=("SP 800-108r1",)),
     Mech("CKM_SP800_108_DOUBLE_PIPELINE_KDF", 0x000003AE, "SP800-108", "derive",

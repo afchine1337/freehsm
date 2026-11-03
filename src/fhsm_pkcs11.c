@@ -3575,6 +3575,29 @@ static CK_RV fhsm_apply_ed_curve_name(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
                                         (uint8_t)(f3 | FHSM_OBJF3_ED_CURVE_NAME));
 }
 
+static int fhsm_always_sensitive(fhsm_token_t *t, CK_OBJECT_HANDLE h) {
+    uint8_t f = 0, f3 = 0;
+    (void)fhsm_token_object_get_flags(t, (uint32_t)h, &f);
+    (void)fhsm_token_object_get_flags3(t, (uint32_t)h, &f3);
+    return (f & FHSM_OBJF_SENSITIVE) && !(f3 & FHSM_OBJF3_WAS_NOT_SENSITIVE);
+}
+
+static int fhsm_never_extractable(fhsm_token_t *t, CK_OBJECT_HANDLE h) {
+    uint8_t f = 0, f3 = 0;
+    (void)fhsm_token_object_get_flags(t, (uint32_t)h, &f);
+    (void)fhsm_token_object_get_flags3(t, (uint32_t)h, &f3);
+    return !(f & FHSM_OBJF_EXTRACTABLE) && !(f3 & FHSM_OBJF3_WAS_EXTRACTABLE);
+}
+
+/* Add to a key's history. A failure is returned, not dropped: the key would
+ * go on claiming a past it did not have. */
+static CK_RV fhsm_add_key_history(fhsm_token_t *t, uint32_t handle, uint8_t bits) {
+    uint8_t f3 = 0;
+    (void)fhsm_token_object_get_flags3(t, handle, &f3);
+    return fhsm_token_object_set_flags3(t, handle, (uint8_t)(f3 | bits));
+}
+#define FHSM_KEY_FROM_OUTSIDE (FHSM_OBJF3_WAS_NOT_SENSITIVE | FHSM_OBJF3_WAS_EXTRACTABLE)
+
 /* The parameter set whose raw *private* key is `len` bytes, within the family
  * the key type names.
  *
@@ -3830,6 +3853,9 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (der) { OPENSSL_cleanse(der, store_len); OPENSSL_free(der); }
         if (rv != FHSM_RV_OK) return rv;
         *phObject = handle;
+    /* §5.7: a key created from a value is neither, whatever its template. */
+    { CK_RV ar = fhsm_add_key_history(t, handle, FHSM_KEY_FROM_OUTSIDE);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
@@ -4159,6 +4185,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     OPENSSL_free(enc);
     if (rv != FHSM_RV_OK) return rv;
     *phObject = handle;
+    { CK_RV ar = fhsm_add_key_history(t, handle, FHSM_KEY_FROM_OUTSIDE);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
@@ -4255,7 +4283,8 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                   CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                                   const uint8_t *secret, size_t secret_len,
                                   uint32_t default_class,
-                                  CK_OBJECT_HANDLE *phKey);
+                                  CK_OBJECT_HANDLE hBase, CK_OBJECT_HANDLE hBase2,
+                                  int combines, CK_OBJECT_HANDLE *phKey);
 /* Defined with the other *Init guards, some three thousand lines below. */
 static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
                                        CK_ULONG mech);
@@ -4623,8 +4652,8 @@ static CK_RV kbkdf_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
         if (!add[i].phKey) return FHSM_RV_MECHANISM_PARAM_INVALID;
     { CK_RV r = kbkdf_check_fields(mech, dp, ndp); if (r != FHSM_RV_OK) return r; }
 
-    /* The base key: §6.42 asks CKK_AES of the AES-CMAC PRF. CKM_DES3_CMAC is
-     * in its table and not here: nothing asked for it, and it is not approved. */
+    /* The base key: §6.42 asks CKK_AES of the AES-CMAC PRF, and CMAC with
+     * 3DES needs a 3DES key. */
     const uint8_t *key = NULL; size_t key_len = 0;
     uint32_t kcl = 0, kkt = 0;
     { fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hBaseKey, &key, &key_len,
@@ -4641,6 +4670,13 @@ static CK_RV kbkdf_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
         mac_name = "CMAC"; sub_param = "cipher"; h = 16;
         sub_name = key_len == 16 ? "AES-128-CBC"
                  : key_len == 24 ? "AES-192-CBC" : "AES-256-CBC";
+    } else if (prf == 0x00000138UL /* CKM_DES3_CMAC */) {
+        /* Not approved, so where 3DES itself runs and nowhere else. */
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips())
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        if (kkt != CKK_DES3 || key_len != 24) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        mac_name = "CMAC"; sub_param = "cipher"; h = 8;
+        sub_name = "DES-EDE3-CBC";
     } else {
         fhsm_hash_t hh;
         if (prf > 0xFFFFFFFFUL || !fhsm_hmac_hash_of((uint32_t)prf, &hh, &h))
@@ -4691,7 +4727,8 @@ static CK_RV kbkdf_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
         rv = derive_store_secret(t, hSession,
                                  i ? add[i - 1].pTemplate : pTemplate,
                                  i ? add[i - 1].ulAttributeCount : ulCount,
-                                 okm + off, lens[i], CKO_SECRET_KEY, &handles[i]);
+                                 okm + off, lens[i], CKO_SECRET_KEY,
+                                 hBaseKey, 0, 0, &handles[i]);
         if (rv != FHSM_RV_OK) { *(i ? add[i - 1].phKey : phKey) = 0; break; }
         off += (lens[i] + h - 1) / h * h;
         ++made;
@@ -4929,7 +4966,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                                             okm, want_len,
                                             (pMechanism->mechanism == CKM_HKDF_DATA_OP)
                                               ? CKO_DATA : CKO_SECRET_KEY,
-                                            phKey);
+                                            hBaseKey, 0, 0, phKey);
         OPENSSL_cleanse(okm, want_len);
         OPENSSL_free(okm);
         return hstore;
@@ -4964,6 +5001,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * three take a byte string. Both are read into one pair of
          * variables so the combining code below has a single shape. */
         const uint8_t *ov = NULL; size_t ovl = 0;
+        CK_OBJECT_HANDLE base2 = 0;
         if (pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY_OP) {
             if (!pMechanism->pParameter
                 || pMechanism->ulParameterLen < sizeof(CK_OBJECT_HANDLE))
@@ -4980,6 +5018,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
              * one-byte base and extracting the result. */
             { CK_RV u2 = fhsm_check_usage(t, h2, FHSM_USAGE_DERIVE);
               if (u2 != FHSM_RV_OK) return u2; }
+            base2 = h2;
         } else {
             if (!pMechanism->pParameter
                 || pMechanism->ulParameterLen < sizeof(CK_KEY_DERIVATION_STRING_DATA))
@@ -5020,7 +5059,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                 break;
         }
         CK_RV crv = derive_store_secret(t, hSession, pTemplate, ulCount,
-                                         buf, need, CKO_SECRET_KEY, phKey);
+                                         buf, need, CKO_SECRET_KEY,
+                                         hBaseKey, base2, 1, phKey);
         OPENSSL_cleanse(buf, need);
         OPENSSL_free(buf);
         return crv;
@@ -5206,7 +5246,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     EVP_PKEY_free(priv);
 
     CK_RV srv = derive_store_secret(t, hSession, pTemplate, ulCount,
-                                     z, z_len, CKO_SECRET_KEY, phKey);
+                                     z, z_len, CKO_SECRET_KEY,
+                                     hBaseKey, 0, 0, phKey);
     fhsm_zeroize(z, sizeof(z));
     return srv;
 }
@@ -5229,7 +5270,8 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                   CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                                   const uint8_t *secret, size_t secret_len,
                                   uint32_t default_class,
-                                  CK_OBJECT_HANDLE *phKey) {
+                                  CK_OBJECT_HANDLE hBase, CK_OBJECT_HANDLE hBase2,
+                                  int combines, CK_OBJECT_HANDLE *phKey) {
     /* CKM_HKDF_DATA derives a data object, CKM_HKDF_DERIVE and the 6.20
      * combiners derive a key. The caller passes the class its mechanism
      * implies and the template may state it explicitly; anything other than
@@ -5277,6 +5319,24 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
         && ((unsigned char*)pTemplate[li].pValue)[0] != 0) {
         obj_flags |= FHSM_OBJF_EXTRACTABLE;
     }
+    /* `combines`: the §6.43 mechanisms, whose output contains the base key's
+     * bytes in the clear. A KDF's output does not, so its template is free;
+     * here the output is the base key, and it stays as guarded as the base key
+     * whatever the template says (§6.43.3 to §6.43.6). Every mechanism passes
+     * on the base key's past. */
+    uint8_t history = 0;
+    for (int b = 0; b < 2; ++b) {
+        CK_OBJECT_HANDLE h = b ? hBase2 : hBase;
+        uint8_t bf = 0;
+        if (!h) continue;
+        if (combines && fhsm_token_object_get_flags(t, (uint32_t)h, &bf) == FHSM_RV_OK) {
+            if (bf & FHSM_OBJF_SENSITIVE) obj_flags |= FHSM_OBJF_SENSITIVE;
+            if (!(bf & FHSM_OBJF_EXTRACTABLE))
+                obj_flags &= (uint8_t)~FHSM_OBJF_EXTRACTABLE;
+        }
+        if (!fhsm_always_sensitive(t, h))  history |= FHSM_OBJF3_WAS_NOT_SENSITIVE;
+        if (!fhsm_never_extractable(t, h)) history |= FHSM_OBJF3_WAS_EXTRACTABLE;
+    }
     /* Honour a requested CKA_KEY_TYPE in the derive template (PKCS#11 v3.2
      * §A.6.4.4 : a derived key takes its type from the template). Default is
      * CKK_GENERIC_SECRET. Storing the requested type (e.g. CKK_AES) keeps the
@@ -5298,6 +5358,10 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                           obj_flags, &handle);
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
+    if (history) {
+        CK_RV ar = fhsm_add_key_history(t, handle, history);
+        if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; }
+    }
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
@@ -6062,6 +6126,9 @@ pt_done:
     fhsm_zeroize(pt, sizeof(pt));
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
+    /* §5.18: an unwrapped key was outside the token, in whatever hands. */
+    { CK_RV ar = fhsm_add_key_history(t, handle, FHSM_KEY_FROM_OUTSIDE);
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
@@ -8192,14 +8259,10 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
                 bval = (of & FHSM_OBJF_TRUSTED) ? 1 : 0; src = &bval; src_len = 1; break;
             }
-            case CKA_ALWAYS_SENSITIVE_ATTR: {
-                uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
-                bval = (of & FHSM_OBJF_SENSITIVE) ? 1 : 0; src = &bval; src_len = 1; break;
-            }
-            case CKA_NEVER_EXTRACTABLE_ATTR: {
-                uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
-                bval = (of & FHSM_OBJF_EXTRACTABLE) ? 0 : 1; src = &bval; src_len = 1; break;
-            }
+            case CKA_ALWAYS_SENSITIVE_ATTR:
+                bval = fhsm_always_sensitive(t, hObject) ? 1 : 0; src = &bval; src_len = 1; break;
+            case CKA_NEVER_EXTRACTABLE_ATTR:
+                bval = fhsm_never_extractable(t, hObject) ? 1 : 0; src = &bval; src_len = 1; break;
             case CKA_ENCRYPT_ATTR:
                 bval = fhsm_usage_bool(t, hObject, cko_class, FHSM_USAGE_ENCRYPT, cko_class != CKO_PRIVATE_KEY); src = &bval; src_len = 1; break;
             case CKA_VERIFY_ATTR:
@@ -8826,6 +8889,15 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                           copy_id, copy_id_len,
                                           copy_flags, &new_handle);
     if (r2 != FHSM_RV_OK) return r2;
+    /* The copy has the original's past (§5.7), not a clean one from its
+     * template. */
+    { uint8_t src_f3 = 0;
+      (void)fhsm_token_object_get_flags3(t, (uint32_t)hObject, &src_f3);
+      if (!fhsm_always_sensitive(t, hObject)) src_f3 |= FHSM_OBJF3_WAS_NOT_SENSITIVE;
+      if (!fhsm_never_extractable(t, hObject)) src_f3 |= FHSM_OBJF3_WAS_EXTRACTABLE;
+      CK_RV ar = fhsm_add_key_history(t, new_handle,
+                                      (uint8_t)(src_f3 & FHSM_KEY_FROM_OUTSIDE));
+      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, new_handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, new_handle,

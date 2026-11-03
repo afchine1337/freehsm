@@ -303,7 +303,7 @@ refused. It previously became `CKM_AES_CMAC` silently. Set
 | Mechanism | Value | Op | FIPS | Handler | Reference |
 |---|---|---|---|---|---|
 | `CKM_SP800_108_COUNTER_KDF` | `0x000003AC` | derive | ✅ | `dispatch_sp800_108` | SP 800-108r1 |
-| | | | | | _HMAC or AES-CMAC PRF; the fields of the PRF input in the caller's order, which covers SCP03._ |
+| | | | | | _HMAC or AES-CMAC PRF, and 3DES-CMAC where 3DES runs; the fields of the PRF input in the caller's order, which covers SCP03._ |
 | `CKM_SP800_108_FEEDBACK_KDF` | `0x000003AD` | derive | ✅ | `dispatch_sp800_108` | SP 800-108r1 |
 | `CKM_SP800_108_DOUBLE_PIPELINE_KDF` | `0x000003AE` | derive | ✅ | `dispatch_sp800_108` | SP 800-108r1 |
 

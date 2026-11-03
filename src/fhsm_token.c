@@ -1930,6 +1930,8 @@ fhsm_rv_t fhsm_token_object_add(fhsm_token_t *t, uint32_t cko_class,
     }
     if (id && id_len)       { memcpy(o->id, id, id_len); o->id_len = (uint32_t)id_len; }
     o->flags = flags;
+    if (!(flags & FHSM_OBJF_SENSITIVE))  o->flags3 |= FHSM_OBJF3_WAS_NOT_SENSITIVE;
+    if (flags & FHSM_OBJF_EXTRACTABLE)   o->flags3 |= FHSM_OBJF3_WAS_EXTRACTABLE;
 
     t->object_count++;
     t->next_handle = o->handle + 1;

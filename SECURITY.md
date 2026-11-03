@@ -466,15 +466,68 @@ object-store defect above, which goes through the same function.
 
 ---
 
+## Self-disclosed sensitive-key disclosure — concatenation and XOR derivation (2026-11-04)
+
+**Advisory:** [GHSA-4x45-2v79-28cj](https://github.com/afchine1337/freehsm/security/advisories/GHSA-4x45-2v79-28cj)
+· Moderate · CWE-863 · no CVE requested
+
+**A logged-in session could read a sensitive, unextractable secret key
+through `C_DeriveKey`.** Affects v2.2.0 to v2.5.1, in both profiles. Fixed
+in v2.6.0.
+
+**Cause.** `CKM_CONCATENATE_BASE_AND_DATA`, `CKM_CONCATENATE_DATA_AND_BASE`,
+`CKM_XOR_BASE_AND_DATA` and `CKM_CONCATENATE_BASE_AND_KEY` derive a key that
+contains the base key's bytes. PKCS#11 v3.2 §6.43 makes it sensitive when a
+base key is sensitive, and not extractable when a base key is not
+extractable. FreeHSM applied the template alone. A template with
+`CKA_SENSITIVE=FALSE` and `CKA_EXTRACTABLE=TRUE` produced a key whose
+`CKA_VALUE` could be read: XOR with zeros returns the base key unchanged,
+concatenation returns it followed or preceded by known bytes.
+
+**Conditions.** A session logged in as the user, and a generic secret key
+with `CKA_DERIVE=TRUE` as the base, or as the second key of
+`CKM_CONCATENATE_BASE_AND_KEY`. A secret key has `CKA_DERIVE=TRUE` only when
+the template that made it says so. `CKA_SENSITIVE` exists to keep a key's
+value from the very sessions that may use it, so holding the user PIN is not
+meant to be enough.
+
+**Effect.** Disclosure of the key's value to anything that can log in to
+the token: an application sharing it, or code running with its PIN.
+
+**Fixed.** The derived key is sensitive and not extractable whenever a base
+key requires it, whatever the template asks. `tests/test_key_history.c`,
+checks (9) and (11). (9) fails on v2.2.0 and v2.5.1: the derived key is
+readable. On v2.5.1, (11) imports what it reads and computes the same HMAC
+as the generated key, so the value is the key's.
+
+**If you ran an affected version.**
+
+- A key derived this way on an affected version keeps the flags it was
+  given; upgrading does not change existing objects. Token objects derived
+  with these four mechanisms from a sensitive key may hold its value in a
+  readable key: destroy them.
+- If something other than your own application could log in to the token
+  and the token holds generic secret keys with `CKA_DERIVE=TRUE`, treat
+  those keys as exposed and replace them.
+
+**Found by** reading §6.42 and §6.43 while making `CKA_ALWAYS_SENSITIVE`
+and `CKA_NEVER_EXTRACTABLE` conformant.
+
+**Timeline.** Present since v2.2.0 (2026-09-23), the first release in which
+`C_DeriveKey` reached these mechanisms. Found and confirmed on 2026-11-03;
+fixed and released on 2026-11-04.
+
+---
+
 ## Supported versions
 
 | Version | Supported |
 |---|---|
-| `2.6.x` | ✅ — active development |
-| `2.5.1` | ✅ — supported. First version carrying the object-store and `C_InitToken` fixes described above. After a `C_Logout` it does not enforce a public key's `CKA_ALLOWED_MECHANISMS` (low; fixed in 2.6.0, see the CHANGELOG) |
-| `2.2.0` – `2.5.0` | ⚠️ — **affected by the wrong-PIN object-store defect** and the `C_InitToken` check; upgrade to v2.5.1 |
-| `2.1.x` | ⚠️ — affected by the above, and by the `C_DecryptFinal` out-of-bounds write; upgrade to v2.5.1 |
-| `2.0.x` | ⚠️ — affected by the above, the `C_DecryptFinal` write and the `C_UnwrapKey` stack overflow; upgrade to v2.5.1 |
+| `2.6.x` | ✅ — supported, active development |
+| `2.5.1` | ⚠️ — **affected by the concatenation/XOR key disclosure**; after a `C_Logout` it does not enforce a public key's `CKA_ALLOWED_MECHANISMS` (low); upgrade to v2.6.0 |
+| `2.2.0` – `2.5.0` | ⚠️ — affected by the concatenation/XOR key disclosure, **the wrong-PIN object-store defect** and the `C_InitToken` check; upgrade to v2.6.0 |
+| `2.1.x` | ⚠️ — affected by the wrong-PIN defect, the `C_InitToken` check and the `C_DecryptFinal` out-of-bounds write; upgrade to v2.6.0 |
+| `2.0.x` | ⚠️ — affected by the above, and by the `C_UnwrapKey` stack overflow; upgrade to v2.6.0 |
 | `1.5.x` – `1.6.x` | ⚠️ — affected by all of them; no backports planned, upgrade |
 | `1.4.0` | ❌ — **published unsigned** (see above); unusable as shipped, do not work around it |
 | `1.1.x` – `1.3.x` | ❌ — end of life. Affected by the `C_DecryptFinal` write, and all `1.1.x` additionally by the integrity self-test defect |
@@ -492,7 +545,7 @@ The wrong-PIN object-store defect and the `C_InitToken` check also reach
 every row from `1.1.x` upward. v2.5.1 is the first version without them.
 
 This table was last accurate at v1.2.1, corrected when the `C_UnwrapKey` entry
-was written, corrected again for v2.2.0, and again for v2.5.1 — a supported-versions table
+was written, corrected again for v2.2.0, v2.5.1 and v2.6.0 — a supported-versions table
 that lags is the one place a reader checks to find out whether an advisory
 concerns them, so it is updated in the same commit as the advisory rather than
 in a tidying pass afterwards.

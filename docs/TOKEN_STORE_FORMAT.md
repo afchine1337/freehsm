@@ -465,6 +465,14 @@ Why this is not a v5:
 checks, after `C_Finalize` and `C_Initialize`, that the parameter is still
 required and `CKA_EC_PARAMS` still reads back as the string.
 
+Two more bits since 2.6.0. `FHSM_OBJF3_WAS_NOT_SENSITIVE` (0x02) and
+`FHSM_OBJF3_WAS_EXTRACTABLE` (0x04) hold the history behind
+`CKA_ALWAYS_SENSITIVE` and `CKA_NEVER_EXTRACTABLE`, which the current flags
+cannot show. They stay on the line above. A set bit is the negative answer, so
+an older record reads as it always did, from the current flags, until the key is
+re-created; a build that predates them clears them and reports the same way.
+Neither attribute restricts anything in the module.
+
 ## Versioning policy
 
 Header `Version` (offset 4) is bumped on any *header* layout change;

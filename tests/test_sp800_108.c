@@ -28,6 +28,8 @@
  *       no CKA_VALUE_LEN
  *   (8) a bad additional template: its phKey says CK_INVALID_HANDLE and no key
  *       is created
+ *   (9) 3DES-CMAC, literal bytes and a 3DES key, where the build and mode run
+ *       3DES
  * ========================================================================= */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -69,6 +71,8 @@ typedef struct { CK_ULONG prfType, ulNumberOfDataParams; CK_PRF_DATA_PARAM *pDat
 #define CKO_SECRET_KEY               4UL
 #define CKK_GENERIC_SECRET           0x10UL
 #define CKK_AES                      0x1FUL
+#define CKK_DES3                     0x15UL
+#define CKM_DES3_CMAC                0x138UL
 #define CKM_SHA256_HMAC              0x251UL
 #define CKM_AES_CMAC                 0x108AUL
 #define CKM_COUNTER                  0x3ACUL
@@ -304,6 +308,30 @@ int main(void)
         ok(rv == CKR_OK && !memcmp(got, want, 48) && !memcmp(v2, want + 64, 16),
            k ? "(6) 48+16, sum of segments, 768 bits: the second key is segment 3"
              : "(6) 48+16, sum of keys, 512 bits: the second key is segment 3");
+    }
+
+    /* (9) Two 8-byte segments of 3DES-CMAC, where 3DES runs. */
+    {
+        CK_ULONG des3 = CKK_DES3;
+        CK_BYTE k3[24];
+        for (int i = 0; i < 24; ++i) k3[i] = (CK_BYTE)(0xA1 + i * 3);
+        CK_OBJECT_HANDLE b3 = base_key(&des3, k3, 24);
+        CK_PRF_DATA_PARAM d3p[] = { { ITER, &c16, sizeof c16 }, { BYTES, label, 4 } };
+        CK_SP800_108_KDF_PARAMS p3 = { CKM_DES3_CMAC, 2, d3p, 0, NULL };
+        CK_MECHANISM m3 = { CKM_COUNTER, &p3, sizeof p3 };
+        rv = derive(&m3, b3, 16, &h, got);
+        if (!b3 || rv == CKR_MECHANISM_PARAM_INVALID) {
+            printf("  (9) 3DES-CMAC not offered in this build or mode, skipped\n");
+        } else {
+            CK_BYTE in9[] = { 0x00,0x01, 0xde,0xad,0xbe,0xef };
+            prf("CMAC", "cipher", "DES-EDE3-CBC", k3, 24, in9, sizeof in9, want, 8);
+            in9[1] = 2;
+            prf("CMAC", "cipher", "DES-EDE3-CBC", k3, 24, in9, sizeof in9, want + 8, 8);
+            ok(rv == CKR_OK && !memcmp(got, want, 16), "(9) 3DES-CMAC, on its literal bytes");
+            kp.prfType = CKM_DES3_CMAC;
+            ok(derive(&m, bgen, 16, &h, NULL) == CKR_KEY_TYPE_INCONSISTENT,
+               "(9) 3DES-CMAC on a generic key");
+        }
     }
 
     /* (7) */

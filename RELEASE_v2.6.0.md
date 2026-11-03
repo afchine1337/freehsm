@@ -5,7 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # FreeHSM v2.6.0
 
-Public objects before a login, and three attributes that can be changed.
+A security fix, public objects before a login, SP 800-108 key derivation,
+and three attributes that can be changed.
 
 A session that is not logged in now finds the token's public keys and
 certificates and reads their attributes, as PKCS#11 provides; until now
@@ -24,11 +25,60 @@ The first was a DER OCTET STRING around the key, the second a
 SubjectPublicKeyInfo; both are now the key's bytes alone, as PKCS#11 v3.2
 defines them. An import accepts either form, as before.
 
+**Upgrade if a token holds a generic secret key with `CKA_DERIVE=TRUE` that
+must stay secret.** From 2.2.0 to 2.5.1, the concatenation and XOR derive
+mechanisms gave such a key's bytes back to any logged-in session, in a key
+that could be read. A security advisory, GHSA-4x45-2v79-28cj (moderate),
+accompanies this release; `SECURITY.md` has it.
+
+`CKA_ALWAYS_SENSITIVE` and `CKA_NEVER_EXTRACTABLE` now record the key's
+history, as PKCS#11 defines them, instead of repeating its current flags.
+
 Two low-severity fixes ride along: the unwrap buffer is cleared on every
 exit (#27), and a public key's `CKA_ALLOWED_MECHANISMS` holds again after a
 `C_Logout`, which 2.5.1 had broken.
 
-There is no security advisory in this release.
+---
+
+## A sensitive key through concatenation or XOR
+
+### What was wrong
+
+`CKM_CONCATENATE_BASE_AND_DATA`, `CKM_CONCATENATE_DATA_AND_BASE`,
+`CKM_XOR_BASE_AND_DATA` and `CKM_CONCATENATE_BASE_AND_KEY` put the base
+key's bytes in the key they derive. PKCS#11 v3.2 §6.43 therefore makes that
+key sensitive when a base key is, and not extractable when a base key is
+not. The module applied the template instead. A session that asked for
+`CKA_SENSITIVE=FALSE` and `CKA_EXTRACTABLE=TRUE` got a key it could read,
+holding the bytes of a key it could not: XOR with zeros returns them
+unchanged.
+
+### What changed
+
+The derived key is sensitive and not extractable whenever a base key -- for
+`CKM_CONCATENATE_BASE_AND_KEY`, either of the two -- requires it; the
+template still decides for a base key in the clear. Keys derived on an
+earlier version keep the flags they were given: `SECURITY.md` says what to
+do about them.
+
+### How it was found
+
+Reading §6.42 and §6.43 to make `CKA_ALWAYS_SENSITIVE` conformant.
+`tests/test_key_history.c` gets a readable derived key from a sensitive one
+on v2.2.0 and v2.5.1, and on v2.5.1 an HMAC computed with its bytes matches
+the sensitive key's.
+
+## `CKA_ALWAYS_SENSITIVE` and `CKA_NEVER_EXTRACTABLE`
+
+They say whether a key has been sensitive, and not extractable, since it was
+made. The module derived both from the current `CKA_SENSITIVE` and
+`CKA_EXTRACTABLE`, so a key generated in the clear and made sensitive
+afterwards claimed it always had been, and a derived key did not inherit
+them from its base key. The token record keeps the history now in two bits
+(`docs/TOKEN_STORE_FORMAT.md`). A key imported with `C_CreateObject` or
+`C_UnwrapKey` has neither (§5.7, §5.18), a copy has its original's, and a
+derived key has them only if its base keys did (§6.42.7). A record written
+by an earlier version has no history and answers as it did.
 
 ---
 
@@ -165,7 +215,8 @@ DEK, and now asks for that. 2.5.1 only.
 `make tests` in both profiles, green. New: `tests/test_public_objects.c`
 (17), `tests/test_set_dates.c` (15), `tests/test_init_token_session.c` (5),
 `tests/test_rsa_pss_raw.c` (10), `tests/test_encrypt_update_size.c` (7),
-`tests/test_template_id.c` (13), `tests/test_sp800_108.c` (22); the fourth and
+`tests/test_template_id.c` (13), `tests/test_sp800_108.c` (22),
+`tests/test_key_history.c` (20); the fourth and
 the sixth run fewer where a build or mode does not offer a mechanism. OpenSC's `pkcs11-tool` scripts and `p11test`
 pass against an `all-mechanisms` build, apart from its KEM script, which
 encapsulates without a login.

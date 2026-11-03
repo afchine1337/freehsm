@@ -363,6 +363,17 @@ fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
  * made before this bit was reported as. */
 #define FHSM_OBJF3_ED_CURVE_NAME 0x01
 
+/* What the key has been, which its other flags cannot say. CKA_ALWAYS_SENSITIVE
+ * and CKA_NEVER_EXTRACTABLE are history: CKA_SENSITIVE only ever turns on and
+ * CKA_EXTRACTABLE only ever turns off, so today's value hides yesterday's.
+ *
+ * Set rather than clear for the negative answer, so that a record written
+ * before these bits reads as it always did, from the current flags. Set by
+ * fhsm_token_object_add from the flags a key is born with, and by the creation
+ * paths whose key was outside the token or comes from a key that was. */
+#define FHSM_OBJF3_WAS_NOT_SENSITIVE 0x02
+#define FHSM_OBJF3_WAS_EXTRACTABLE   0x04
+
 fhsm_rv_t fhsm_token_object_get_flags3(fhsm_token_t *t, uint32_t handle,
                                         uint8_t *out_flags3);
 fhsm_rv_t fhsm_token_object_set_flags3(fhsm_token_t *t, uint32_t handle,

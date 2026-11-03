@@ -13,16 +13,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
 public section in the token file. `CKA_START_DATE`, `CKA_END_DATE` and a
 data object's `CKA_APPLICATION` are settable; `C_InitToken` answers
 `CKR_SESSION_EXISTS`; an Edwards or Montgomery `CKA_EC_POINT` is the bare
-key, as PKCS#11 v3.2 defines it. Two low-severity fixes: the unwrap buffer is cleared
-on every exit (#27), and `CKA_ALLOWED_MECHANISMS` holds again after a
-logout, which 2.5.1 had broken. No security advisory.
-`RELEASE_v2.6.0.md` has the release notes.*
+key, as PKCS#11 v3.2 defines it. Security fix: the concatenation and XOR
+derive mechanisms gave a sensitive key's bytes back in a key that was not
+(GHSA-4x45-2v79-28cj, moderate, since 2.2.0). `CKA_ALWAYS_SENSITIVE` and
+`CKA_NEVER_EXTRACTABLE` are the key's history. Two low-severity fixes: the
+unwrap buffer is cleared on every exit (#27), and `CKA_ALLOWED_MECHANISMS`
+holds again after a logout, which 2.5.1 had broken.
+`RELEASE_v2.6.0.md` has the release notes; `SECURITY.md` has the advisory.*
 
 ### Added
 * **SP 800-108 key derivation (#28).** `CKM_SP800_108_COUNTER_KDF`,
   `CKM_SP800_108_FEEDBACK_KDF` and `CKM_SP800_108_DOUBLE_PIPELINE_KDF` in both
   profiles, with an HMAC or AES-CMAC PRF, additional derived keys, and the
   fields of the PRF input in the caller's order, which covers SCP03.
+  `CKM_DES3_CMAC` is a PRF too in `all-mechanisms` and permissive mode.
   `tests/test_sp800_108.c`.
 * **Public objects before a login.** `C_FindObjectsInit` answered
   `CKR_USER_NOT_LOGGED_IN` in a session that was not logged in, because
@@ -68,6 +72,20 @@ logout, which 2.5.1 had broken. No security advisory.
   keys and were refused with `CKR_KEY_SIZE_RANGE`.
 
 ### Security
+* **A sensitive key could be read through `CKM_CONCATENATE_BASE_AND_DATA`,
+  `CKM_CONCATENATE_DATA_AND_BASE`, `CKM_XOR_BASE_AND_DATA` or
+  `CKM_CONCATENATE_BASE_AND_KEY`** (GHSA-4x45-2v79-28cj). Their output holds
+  the base key's bytes, and PKCS#11 v3.2 §6.43 makes it sensitive when a base
+  key is, and not extractable when a base key is not. The module let the
+  template decide, so a template with `CKA_SENSITIVE=FALSE` and
+  `CKA_EXTRACTABLE=TRUE` gave back, through `C_GetAttributeValue`, the value
+  of a generic secret key that was sensitive and not extractable -- XOR with
+  zeros returns it as it is. It takes a logged-in session and a base key with
+  `CKA_DERIVE=TRUE`, which a secret key has only when its template says so.
+  The output is now sensitive and not extractable whenever a base key (both,
+  for `BASE_AND_KEY`) asks for it, whatever the template says. Present since
+  2.2.0, in both profiles. `tests/test_key_history.c`, (9) and (11).
+
 * **`C_UnwrapKey` left the unwrapped key on the stack when it refused it**
   (#27, reported by AlexLaroche). Three checks after a successful decrypt --
   `CKK_AES` with a length other than 16, 24 or 32, `CKK_DES3` with a length
@@ -90,6 +108,17 @@ logout, which 2.5.1 had broken. No security advisory.
   login.
 
 ### Fixed
+* **`CKA_ALWAYS_SENSITIVE` and `CKA_NEVER_EXTRACTABLE` were read from the
+  current flags.** They are history: a key that was ever in the clear, or
+  ever extractable, says FALSE for good. The module computed them from
+  `CKA_SENSITIVE` and `CKA_EXTRACTABLE` at each read, so a key generated in
+  the clear and made sensitive afterwards claimed it always had been. The
+  token record keeps two bits now (`docs/TOKEN_STORE_FORMAT.md`), set when a
+  key is in the clear or extractable and never cleared. `C_CreateObject` and
+  `C_UnwrapKey` give FALSE to both (§5.7, §5.18), `C_CopyObject` keeps the
+  original's, and a derived key inherits a FALSE from its base keys
+  (§6.42.7). A record written before this has neither bit and reads as it
+  did. `tests/test_key_history.c`.
 * **An Edwards or Montgomery key's `CKA_EC_POINT` was DER-wrapped.** PKCS#11
   v3.2 defines it as the public key bytes of RFC 8032 and RFC 7748; the
   module wrapped them in an OCTET STRING (34 bytes for Ed25519, 59 for
