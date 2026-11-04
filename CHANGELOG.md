@@ -7,6 +7,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+* `tests/fhsm_crypt_cli.sh` altered a file by writing `X` over a ciphertext
+  byte, which left it unchanged when that byte already was `X`: once in 256
+  runs, the altered file decrypted and the test failed. It flips a bit now.
+
 ## [2.6.0] --- 2026-11-04
 
 *Minor: public objects can be found and read before a login, from a new

@@ -137,7 +137,13 @@ q "$CRYPT" decrypt --in "$W/plain.p7m" --out "$W/plain.back" --module "$LIB"
 [ $? -eq 1 ] && grep -q "exists" "$W/out"
 ok "an existing output is not written over (exit 1)" $?
 
-cp "$W/plain.p7m" "$W/bad.p7m" && printf 'X' | dd of="$W/bad.p7m" bs=1 seek=$(( $(wc -c < "$W/bad.p7m") - 20 )) conv=notrunc 2>/dev/null
+# Flip one bit rather than write a fixed byte: the ciphertext is random, and a
+# fixed 'X' already stood there once in 256 runs, leaving the file intact.
+cp "$W/plain.p7m" "$W/bad.p7m"
+pos=$(( $(wc -c < "$W/bad.p7m") - 20 ))
+byte=$(od -An -tu1 -j "$pos" -N1 "$W/bad.p7m" | tr -d ' ')
+printf "\\$(printf '%03o' $(( byte ^ 1 )))" | dd of="$W/bad.p7m" bs=1 seek="$pos" conv=notrunc 2>/dev/null
+cmp -s "$W/plain.p7m" "$W/bad.p7m" && echo "  (the altered copy is identical: test setup broken)"
 q "$CRYPT" decrypt --in "$W/bad.p7m" --out "$W/bad.out" --module "$LIB"
 [ $? -eq 4 ] && [ ! -e "$W/bad.out" ]
 ok "an altered file: exit 4, and no output" $?

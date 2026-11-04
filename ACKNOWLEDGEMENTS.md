@@ -172,6 +172,10 @@ Followed `AGD_PRE.md` as written, on a clean machine, repeatedly:
   exercise advertised mechanisms and this is internal plumbing.
 
   His stated reason was half of it. Checking the reason is what found the rest.
+* **#28** — SP 800-108 key derivation, for GlobalPlatform SCP03. The three
+  modes are in v2.6.0, with the PRF input laid out field by field as PKCS#11
+  allows. He confirmed the counter mode on a card: authenticating with SCP03
+  and using the session keys for secure messaging.
 
 ## `fencepost-error`
 
@@ -186,6 +190,13 @@ The workaround they found — `FHSM_INTEGRITY_ALLOW_UNSIGNED=1` — starts the
 module by turning its integrity check off. That a broken release pushed a user
 to disable a security control is the most useful single thing anyone has told
 this project.
+
+## `AlexLaroche`
+
+**#27** — `C_UnwrapKey` returned with the unwrapped key still in its stack
+buffer when it refused the key's type or `CKA_VALUE_LEN` after the decrypt.
+He wrote a harness that shows the bytes left on the stack, and ran it again
+on the fix: every exit after the decrypt now clears the buffer. In v2.6.0.
 
 ---
 
