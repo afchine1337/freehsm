@@ -496,9 +496,24 @@ _Static_assert(FHSM_POLICY_ENTRY_SZ == 8u + FHSM_POLICY_VALUE_MAX,
 #define FHSM_CKO_CERTIFICATE  0x01u
 #define FHSM_CKO_PUBLIC_KEY   0x02u
 
+#define FHSM_CKO_DATA         0x00u
+
+/* CKA_PRIVATE as C_GetAttributeValue reports it: TRUE but for public keys,
+ * certificates and data objects carrying FHSM_OBJF3_DATA_PUBLIC.
+ * fhsm_obj_private in fhsm_pkcs11.c applies the same rule to a handle. */
+static int obj_is_private(const fhsm_object_t *o) {
+    if (o->class == FHSM_CKO_PUBLIC_KEY || o->class == FHSM_CKO_CERTIFICATE)
+        return 0;
+    if (o->class == FHSM_CKO_DATA && (o->flags3 & FHSM_OBJF3_DATA_PUBLIC))
+        return 0;
+    return 1;
+}
+
+/* In the public section, and in the view before login: a token object that is
+ * not private. A sensitive public key stays out, as it always has. */
 static int obj_is_public(const fhsm_object_t *o) {
     return o->owner_session == 0
-        && (o->class == FHSM_CKO_PUBLIC_KEY || o->class == FHSM_CKO_CERTIFICATE)
+        && !obj_is_private(o)
         && !(o->flags & FHSM_OBJF_SENSITIVE);
 }
 
@@ -1639,12 +1654,6 @@ again: ;   /* a label must precede a statement, not the declaration below */
     pthread_mutex_unlock(&t->mu);
     return (*fails >= FHSM_PIN_MAX_FAILED) ? FHSM_RV_PIN_LOCKED
                                               : FHSM_RV_PIN_INCORRECT;
-}
-
-/* CKA_PRIVATE as C_GetAttributeValue reports it: TRUE but for public keys
- * and certificates. */
-static int obj_is_private(const fhsm_object_t *o) {
-    return o->class != FHSM_CKO_PUBLIC_KEY && o->class != FHSM_CKO_CERTIFICATE;
 }
 
 /* PKCS#11 v3.2 §5.6.8 (C_Logout): "When C_Logout successfully executes, any

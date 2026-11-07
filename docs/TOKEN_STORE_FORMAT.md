@@ -473,6 +473,18 @@ an older record reads as it always did, from the current flags, until the key is
 re-created; a build that predates them clears them and reports the same way.
 Neither attribute restricts anything in the module.
 
+One more since 2.7.0. `FHSM_OBJF3_DATA_PUBLIC` (0x08) marks a data object
+created, or copied, with `CKA_PRIVATE=FALSE`. Such an object is public: it is
+found and read before a login, goes into the public section, and survives a
+`C_Logout`. Clear, a data object is private, as every data object reported
+before the bit. This bit does restrict something, so it was placed on the
+line above with care: it is set for the *less* protected state. A build that
+predates it clears it and makes the object private again, which is stricter;
+nothing a downgrade does can expose an object. The opposite direction -- a
+public key or certificate made private -- would be a restriction an older
+build silently lifts, so it is not recorded, and `CKA_PRIVATE=TRUE` on those
+classes is ignored as it always was. Recording it needs a v5 record.
+
 ## Versioning policy
 
 Header `Version` (offset 4) is bumped on any *header* layout change;

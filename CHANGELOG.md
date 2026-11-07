@@ -7,6 +7,30 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+* **A data object's `CKA_PRIVATE` is the one the template gives, and a
+  private object of any class is out of reach before a login.** The module
+  set `CKA_PRIVATE` by class and ignored the template, so a data object
+  created with `CKA_PRIVATE=FALSE` -- what `pkcs11-tool --write-object`
+  sends without `--private` -- read back TRUE; and every data object, private
+  by that rule, was found and read before a login all the same, because only
+  secret and private keys were kept from an unauthenticated session. PKCS#11
+  v3.2 §4.4: a user "may not access the object until the user has been
+  authenticated to the token". Now a data object created or copied with
+  `CKA_PRIVATE=FALSE` is public: found and read before a login, stored in
+  the token file's public section, kept across a `C_Logout`. Any other data
+  object is private, and is no longer found or read before a login: **a
+  caller that read data objects without logging in must log in, or recreate
+  them with `CKA_PRIVATE=FALSE`.** A private key used through
+  `C_EncryptInit`, `C_DecryptInit`, `C_SignInit`, `C_VerifyInit` or
+  `C_DigestKey` without a login is `CKR_KEY_HANDLE_INVALID`; those asked only
+  whether the handle existed. Secret and private keys stay private whatever
+  the template says, and a public key or certificate asked
+  `CKA_PRIVATE=TRUE` stays public, as before: `docs/TOKEN_STORE_FORMAT.md`
+  says why. A token file with a public data object in its public section is
+  read by 2.6.x as having no public view before a login. Found by
+  pkcs11-check 0.3.0. `tests/test_private_attr.c`.
+
 ## [2.6.1] --- 2026-11-07
 
 *Patch, with a security fix: `C_WrapKey` wrapped a key whose

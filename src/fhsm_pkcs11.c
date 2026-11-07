@@ -2590,10 +2590,58 @@ static CK_RV fhsm_apply_obj_meta(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     return fhsm_token_object_set_meta(t, handle, sd, sl, ed, el, ap, al);
 }
 
+/* CKA_PRIVATE of object `h` of class `cls`: TRUE but for public keys,
+ * certificates and data objects made public (FHSM_OBJF3_DATA_PUBLIC). The
+ * same rule as obj_is_private in fhsm_token.c, which the store applies to its
+ * own records; C_GetAttributeValue, the access checks before login and
+ * C_FindObjects all ask this. */
+static int fhsm_obj_private(fhsm_token_t *t, CK_OBJECT_HANDLE h, uint32_t cls) {
+    if (cls == CKO_PUBLIC_KEY || cls == CKO_CERTIFICATE) return 0;
+    uint8_t f3 = 0;
+    if (cls == CKO_DATA
+        && fhsm_token_object_get_flags3(t, (uint32_t)h, &f3) == FHSM_RV_OK
+        && (f3 & FHSM_OBJF3_DATA_PUBLIC))
+        return 0;
+    return 1;
+}
+
+/* Records a data object's CKA_PRIVATE=FALSE.
+ *
+ * The attribute was accepted and ignored: a data object created with
+ * CKA_PRIVATE=FALSE read back TRUE, and -- the other half -- every data
+ * object was readable before a login all the same, since only secret and
+ * private keys were kept from an unauthenticated session. pkcs11-tool sends
+ * CKA_PRIVATE=FALSE on every object it makes unless --private is given, so a
+ * refusal was not an option.
+ *
+ * On the other classes the template is ignored, as before, and the class
+ * decides (§4.4 leaves the default to the token). A secret or private key
+ * usable without a login is not one this module makes. A public key or
+ * certificate asked CKA_PRIVATE=TRUE stays public: the store cannot record
+ * that restriction in a v4 record without an older build lifting it (see
+ * FHSM_OBJF3_DATA_PUBLIC). Found by pkcs11-check 0.3.0
+ * (test_logout_object_lifetime_across_two_sessions). */
+static void fhsm_apply_private_attr(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
+                                    CK_ULONG n, uint32_t handle) {
+    long pi = find_attr(tmpl, n, CKA_PRIVATE);
+    if (pi < 0 || !tmpl[pi].pValue || tmpl[pi].ulValueLen != 1) return;
+    uint32_t cls = 0, kt = 0;
+    if (fhsm_token_object_get(t, handle, NULL, NULL, &cls, &kt) != FHSM_RV_OK
+        || cls != CKO_DATA)
+        return;
+    int want_public = ((const unsigned char *)tmpl[pi].pValue)[0] == 0;
+    uint8_t f3 = 0;
+    (void)fhsm_token_object_get_flags3(t, handle, &f3);
+    uint8_t nf3 = want_public ? (uint8_t)(f3 | FHSM_OBJF3_DATA_PUBLIC)
+                              : (uint8_t)(f3 & ~FHSM_OBJF3_DATA_PUBLIC);
+    if (nf3 != f3) (void)fhsm_token_object_set_flags3(t, handle, nf3);
+}
+
 static void fhsm_apply_token_scope(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                    CK_ATTRIBUTE *tmpl, CK_ULONG n, uint32_t handle) {
     if (!tmpl_bbool(tmpl, n, CKA_TOKEN, 0))
         (void)fhsm_token_object_mark_session(t, handle, (uint32_t)hSession);
+    fhsm_apply_private_attr(t, tmpl, n, handle);
     /* Persist CKA_MODIFIABLE / CKA_DESTROYABLE = FALSE (both default TRUE) so
      * the read-back is truthful and mutation/destroy can be enforced (#125
      * TestModifiableAttribute / TestDestroyable). */
@@ -7893,7 +7941,7 @@ static int extract_cert_attr(fhsm_token_t *t, uint32_t handle,
     return rc;
 }
 
-static int fhsm_object_access_denied(fhsm_token_t *t, uint32_t cko_class);
+static int fhsm_object_access_denied(fhsm_token_t *t, CK_OBJECT_HANDLE h, uint32_t cko_class);
 
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                            CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
@@ -7913,7 +7961,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hObject, &value, &value_len,
                                           &cko_class, &ckk_type);
     if (rv != FHSM_RV_OK) return fhsm_object_lookup_rv(rv);
-    if (fhsm_object_access_denied(t, cko_class))
+    if (fhsm_object_access_denied(t, hObject, cko_class))
         return FHSM_RV_OBJECT_HANDLE_INVALID;
     int fhsm_buf_too_small = 0;
     int fhsm_type_invalid  = 0;   /* an attribute this object does not have */
@@ -8246,7 +8294,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 bval = is_tok ? 1 : 0; src = &bval; src_len = 1; break;
             }
             case CKA_PRIVATE:
-                bval = (cko_class == CKO_PUBLIC_KEY || cko_class == CKO_CERTIFICATE) ? 0 : 1;
+                bval = fhsm_obj_private(t, hObject, cko_class) ? 1 : 0;
                 src = &bval; src_len = 1; break;
             case CKA_MODIFIABLE_ATTR: {
                 uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
@@ -8421,7 +8469,7 @@ CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                           &value, &value_len,
                                           &cko_class, &ckk_type);
     if (rv != FHSM_RV_OK) return fhsm_object_lookup_rv(rv);
-    if (fhsm_object_access_denied(t, cko_class))
+    if (fhsm_object_access_denied(t, hObject, cko_class))
         return FHSM_RV_OBJECT_HANDLE_INVALID;
 
     *pulSize = (CK_ULONG)value_len;
@@ -9009,6 +9057,10 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
         if (fhsm_token_object_get_flags3(t, (uint32_t)hObject, &src_f3) == FHSM_RV_OK
             && src_f3 != 0)
             (void)fhsm_token_object_set_flags3(t, new_handle, src_f3);
+        /* CKA_PRIVATE may change in a copy (§4.4, §4.1.3); this module
+         * honours it on a data object, as at creation. After the inherited
+         * byte, so the template wins. */
+        fhsm_apply_private_attr(t, pTemplate, ulCount, new_handle);
         {
             uint32_t copy_class = 0, copy_kt = 0;
             const uint8_t *cv = NULL; size_t cvl = 0;
@@ -9129,7 +9181,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
         if (!authed_user) {
             const uint8_t *pv = NULL; size_t pl = 0; uint32_t ocl = 0, okt = 0;
             if (fhsm_token_object_get(t, prelim[j], &pv, &pl, &ocl, &okt) == FHSM_RV_OK
-                && (ocl == CKO_SECRET_KEY || ocl == CKO_PRIVATE_KEY))
+                && fhsm_obj_private(t, prelim[j], ocl))
                 continue;   /* private object hidden from unauthenticated session */
         }
         if (has_id) {
@@ -9771,21 +9823,33 @@ static uint32_t resolve_mech(uint32_t m);
  * a keyed operation, so C_*Init on a destroyed or invalid handle fails
  * with CKR_KEY_HANDLE_INVALID instead of succeeding (#125 use-after-
  * destroy: TestSignInitErrors / TestVerifyInitErrors / ...). */
-/* Access control : a private object (CKA_PRIVATE, derived from class :
- * secret / private keys) is invisible to a session that is not logged in
- * as the normal user. Accessing its handle from such a session returns
- * CKR_OBJECT_HANDLE_INVALID -- the object appears not to exist (#125). */
-static int fhsm_object_access_denied(fhsm_token_t *t, uint32_t cko_class) {
+/* Access control : a private object is invisible to a session that is not
+ * logged in as the normal user. Accessing its handle from such a session
+ * returns CKR_OBJECT_HANDLE_INVALID -- the object appears not to exist (#125).
+ *
+ * "Private" is CKA_PRIVATE as the object reports it (fhsm_obj_private). This
+ * hid secret and private keys only, so a data object reported
+ * CKA_PRIVATE=TRUE and was readable before a login: §4.4 says a user "may not
+ * access the object until the user has been authenticated to the token". */
+static int fhsm_object_access_denied(fhsm_token_t *t, CK_OBJECT_HANDLE h,
+                                     uint32_t cko_class) {
     /* Per-application login state : a private object is accessible iff the
      * token (not just this session) is logged in as the user. */
     if (fhsm_token_current_role(t) == FHSM_ROLE_USER) return 0;
-    return (cko_class == CKO_SECRET_KEY || cko_class == CKO_PRIVATE_KEY);
+    return fhsm_obj_private(t, h, cko_class);
 }
 
 static CK_RV fhsm_require_key(fhsm_token_t *t, CK_OBJECT_HANDLE hKey) {
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_token_object_get(t, (uint32_t)hKey, &kv, &kvl, &cl, &kt) != FHSM_RV_OK)
+        return FHSM_RV_KEY_HANDLE_INVALID;
+    /* A private key is not used before a login, any more than it is read
+     * (§4.4). After a C_Logout the store stays in memory; the old handles are
+     * gone (fhsm_token_logout gives new ones), but a handle found by other
+     * means reached the key in the four *Init functions, which asked only
+     * whether it existed. */
+    if (fhsm_object_access_denied(t, hKey, cl))
         return FHSM_RV_KEY_HANDLE_INVALID;
     return FHSM_RV_OK;
 }
@@ -12821,6 +12885,8 @@ CK_RV C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey) {
     uint32_t cl = 0, kt = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, obj_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
+    /* A private key's bytes go into the digest: not before a login (§4.4). */
+    if (fhsm_object_access_denied(t, hKey, cl)) return FHSM_RV_KEY_HANDLE_INVALID;
 
     /* Only secret keys can be digested ; asymmetric private keys would
      * leak the key material through the digest output. Public keys

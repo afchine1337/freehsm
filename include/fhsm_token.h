@@ -380,6 +380,21 @@ fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
 #define FHSM_OBJF3_WAS_NOT_SENSITIVE 0x02
 #define FHSM_OBJF3_WAS_EXTRACTABLE   0x04
 
+/* A data object with CKA_PRIVATE=FALSE. The default is TRUE for every class
+ * but public keys and certificates (PKCS#11 v3.2 §4.4 leaves it to the
+ * token). Honoured on data objects only, and ignored on any other class.
+ * Clear: the default, which is what every object made before this bit
+ * reported.
+ *
+ * Data objects only, and only in this direction, because of the rule
+ * docs/TOKEN_STORE_FORMAT.md sets for this byte: no bit may carry a
+ * restriction a build that predates it would silently lift. Such a build
+ * reads the bit as clear and clears it at its next write, which makes a
+ * public data object private again: stricter, not looser. A public key or
+ * certificate made private would have gone the other way, so CKA_PRIVATE=TRUE
+ * on those classes is not recorded; it would need a v5 record. */
+#define FHSM_OBJF3_DATA_PUBLIC       0x08
+
 fhsm_rv_t fhsm_token_object_get_flags3(fhsm_token_t *t, uint32_t handle,
                                         uint8_t *out_flags3);
 fhsm_rv_t fhsm_token_object_set_flags3(fhsm_token_t *t, uint32_t handle,
