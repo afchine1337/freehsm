@@ -5371,13 +5371,37 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
      * bytes in the clear. A KDF's output does not, so its template is free;
      * here the output is the base key, and it stays as guarded as the base key
      * whatever the template says (§6.43.3 to §6.43.6). Every mechanism passes
-     * on the base key's past. */
+     * on the base key's past.
+     *
+     * A template that asks for less than that -- CKA_SENSITIVE=FALSE from a
+     * sensitive base, CKA_EXTRACTABLE=TRUE from an unextractable one -- is
+     * refused CKR_TEMPLATE_INCONSISTENT, and nothing is created. Since
+     * GHSA-4x45-2v79-28cj (2.6.0) such a request was accepted and the key
+     * sealed anyway: safe, but a CKR_OK for a template the module did not
+     * honour. §4.1.1 makes a template that contradicts what the function
+     * itself contributes to the object CKR_TEMPLATE_INCONSISTENT, and §6.43
+     * contributes the base's protection. Omitting the attributes, or asking
+     * for what the base requires, is accepted as before. HKDF has no such
+     * floor and keeps honouring its template. Found by pkcs11-check 0.3.0
+     * (TestByteKdfInheritance, downgrade legs). */
+    long ask_s = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
+    long ask_e = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
+    int asks_not_sensitive = ask_s >= 0 && pTemplate[ask_s].pValue
+        && pTemplate[ask_s].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[ask_s].pValue)[0] == 0;
+    int asks_extractable = ask_e >= 0 && pTemplate[ask_e].pValue
+        && pTemplate[ask_e].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[ask_e].pValue)[0] != 0;
     uint8_t history = 0;
     for (int b = 0; b < 2; ++b) {
         CK_OBJECT_HANDLE h = b ? hBase2 : hBase;
         uint8_t bf = 0;
         if (!h) continue;
         if (combines && fhsm_token_object_get_flags(t, (uint32_t)h, &bf) == FHSM_RV_OK) {
+            if ((bf & FHSM_OBJF_SENSITIVE) && asks_not_sensitive)
+                return CKR_TEMPLATE_INCONSISTENT;
+            if (!(bf & FHSM_OBJF_EXTRACTABLE) && asks_extractable)
+                return CKR_TEMPLATE_INCONSISTENT;
             if (bf & FHSM_OBJF_SENSITIVE) obj_flags |= FHSM_OBJF_SENSITIVE;
             if (!(bf & FHSM_OBJF_EXTRACTABLE))
                 obj_flags &= (uint8_t)~FHSM_OBJF_EXTRACTABLE;

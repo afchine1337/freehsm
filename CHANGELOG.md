@@ -30,6 +30,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
   says why. A token file with a public data object in its public section is
   read by 2.6.x as having no public view before a login. Found by
   pkcs11-check 0.3.0. `tests/test_private_attr.c`.
+* **A concatenation or XOR derivation that asks for less protection than
+  its base is refused.** `CKM_CONCATENATE_BASE_AND_KEY`,
+  `CKM_CONCATENATE_BASE_AND_DATA`, `CKM_CONCATENATE_DATA_AND_BASE` and
+  `CKM_XOR_BASE_AND_DATA` give the derived key the base's protection
+  (PKCS#11 v3.2 §6.43). Since 2.6.0 (GHSA-4x45-2v79-28cj) a template asking
+  for `CKA_SENSITIVE=FALSE` from a sensitive base, or `CKA_EXTRACTABLE=TRUE`
+  from an unextractable one, was accepted and the key sealed anyway: safe,
+  but a `CKR_OK` for a template the module did not honour. It is now
+  `CKR_TEMPLATE_INCONSISTENT`, as §4.1.1 has it for a template that
+  contradicts what the function itself contributes, and nothing is created.
+  A template that leaves the two attributes out, or asks for what the base
+  requires, derives as before. HKDF, which has no such floor, still honours
+  its template. Found by pkcs11-check 0.3.0. `tests/test_key_history.c`, (9).
 
 ## [2.6.1] --- 2026-11-07
 

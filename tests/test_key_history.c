@@ -23,9 +23,11 @@
  *   (7) derived, from a base with neither: neither, however it is protected
  *   (8) the history survives a reload of a token object
  *   (9) CKM_CONCATENATE_BASE_AND_DATA, _DATA_AND_BASE, CKM_XOR_BASE_AND_DATA
- *       and CKM_CONCATENATE_BASE_AND_KEY from a sensitive, unextractable key,
- *       with a template asking for the opposite: the output is sensitive, not
- *       extractable, and CKA_VALUE does not read
+ *       and CKM_CONCATENATE_BASE_AND_KEY from a sensitive, unextractable key:
+ *       a template asking for the opposite is CKR_TEMPLATE_INCONSISTENT and
+ *       creates nothing (2.7.0; 2.6.0 accepted it and sealed the key); a
+ *       template that names neither gives a key that is sensitive, not
+ *       extractable, and whose CKA_VALUE does not read
  *  (10) the same from a key in the clear: the template still decides
  *  (11) a generated sensitive key's bytes do not come back out through XOR
  *       with zeros or concatenation: a copy imported from them would compute
@@ -47,6 +49,7 @@ typedef struct { CK_ULONG prfType, ulNumberOfDataParams; CK_PRF_DATA_PARAM *pDat
                  CK_ULONG ulAdditionalDerivedKeys; void *pAdditionalDerivedKeys; } CK_SP800_108_KDF_PARAMS;
 
 #define CKR_OK               0UL
+#define CKR_TEMPLATE_INCONSISTENT 0xD1UL
 #define CKF_RW               6UL
 #define CKA_CLASS            0x000UL
 #define CKA_TOKEN            0x001UL
@@ -136,6 +139,14 @@ static CK_RV derive_as(CK_MECHANISM *m, CK_OBJECT_HANDLE base, CK_BYTE sens, CK_
                          { CKA_EXTRACTABLE, &extr, 1 }, { 0, NULL, 0 } };
     if (extra) t[5] = *extra;
     return C_DeriveKey(s, m, base, t, extra ? 6 : 5, h);
+}
+
+/* The same derivation with a template that names neither CKA_SENSITIVE nor
+ * CKA_EXTRACTABLE: the base's protection is all the key gets. */
+static CK_RV derive_plain(CK_MECHANISM *m, CK_OBJECT_HANDLE base, CK_OBJECT_HANDLE *h) {
+    CK_ATTRIBUTE t[] = { { CKA_CLASS, &cls, sizeof cls }, { CKA_KEY_TYPE, &generic, sizeof generic },
+                         { CKA_TOKEN, &no, 1 } };
+    return C_DeriveKey(s, m, base, t, 3, h);
 }
 
 static int value_readable(CK_OBJECT_HANDLE h) {
@@ -264,6 +275,9 @@ int main(void)
             CK_MECHANISM m = { ms[i].m, &sd, sizeof sd };
             CK_OBJECT_HANDLE h = 0;
             rv = derive_as(&m, locked, 0, 1, NULL, &h);
+            snprintf(what, sizeof what, "(9) %s: asking for the opposite is refused", ms[i].name);
+            ok(rv == CKR_TEMPLATE_INCONSISTENT && h == 0, what);
+            rv = derive_plain(&m, locked, &h);
             snprintf(what, sizeof what, "(9) %s: guarded", ms[i].name);
             ok(rv == CKR_OK && get_bool(h, CKA_SENSITIVE) == 1
                && get_bool(h, CKA_EXTRACTABLE) == 0 && !value_readable(h), what);
@@ -275,6 +289,9 @@ int main(void)
         CK_OBJECT_HANDLE h = 0, other = locked;
         CK_MECHANISM m = { CKM_CONCAT_KEY, &other, sizeof other };
         rv = derive_as(&m, open_, 0, 1, NULL, &h);
+        ok(rv == CKR_TEMPLATE_INCONSISTENT && h == 0,
+           "(9) CKM_CONCATENATE_BASE_AND_KEY, second key guarded: the opposite is refused");
+        rv = derive_plain(&m, open_, &h);
         ok(rv == CKR_OK && get_bool(h, CKA_SENSITIVE) == 1 && get_bool(h, CKA_EXTRACTABLE) == 0
            && !value_readable(h) && hist(h, 0, 0),
            "(9) CKM_CONCATENATE_BASE_AND_KEY, second key guarded");
