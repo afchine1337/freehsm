@@ -994,6 +994,11 @@ tests/test_gmac_params: tests/test_gmac_params.c $(LIB)
 tests/test_encap_flags: tests/test_encap_flags.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# The key C_EncapsulateKey and C_DecapsulateKey create (v3.2 5.18.8, 5.18.9):
+# its history, CKA_EXTRACTABLE's default, and the template applied or refused.
+tests/test_kem_attrs: tests/test_kem_attrs.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # The same bits across a reload, at the token layer -- the only layer where a
 # reload can be staged. See the header of the file for why the PKCS#11 test
 # cannot do it.
@@ -1268,6 +1273,7 @@ TEST_BINS = \
 	tests/test_gmac_params \
 	tests/test_encap_flags \
 	tests/test_encap_flags_store \
+	tests/test_kem_attrs \
 	tests/test_v3_fixture \
 	tests/test_allowed_mechanisms \
 	tests/test_nested_templates \
@@ -1425,6 +1431,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_encap_flags
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_encap_flags_store
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_kem_attrs
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_v3_fixture
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

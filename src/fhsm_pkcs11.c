@@ -6181,6 +6181,119 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     return FHSM_RV_OK;
 }
 
+/* The shared secret of C_EncapsulateKey or C_DecapsulateKey, stored as the new
+ * key. One function for both: the two tails were copies, about ninety lines
+ * each, and every fix to them (CKA_KEY_TYPE, CKA_VALUE_LEN, CKA_ID, the token
+ * scope) had to be made twice. What neither copy had is what this adds.
+ *
+ * PKCS#11 v3.2 §5.18.8 and §5.18.9 give the new key, in the same words:
+ *   - CKA_ALWAYS_SENSITIVE and CKA_NEVER_EXTRACTABLE FALSE. The key history
+ *     bits, as for an unwrapped key; without them a key created sensitive and
+ *     not extractable claimed TRUE for both;
+ *   - CKA_EXTRACTABLE from the template, TRUE when it does not say. FALSE was
+ *     this module's default;
+ *   - CKA_LOCAL FALSE, which it already was: FHSM_OBJF_LOCAL is set by key
+ *     generation only.
+ * Both sections also say a call that "cannot support the precise template"
+ * fails without creating a key. The usage flags (CKA_ENCRYPT and the rest)
+ * and the dates were dropped; they are stored now. A CKA_CLASS other than
+ * CKO_SECRET_KEY, or an AES or DES3 key type with a length that type does not
+ * have, is CKR_TEMPLATE_INCONSISTENT rather than a key that is not what the
+ * template describes.
+ *
+ * ss belongs to the caller, which clears it. *phNewKey is written only on
+ * success: every failure after the object exists destroys it. */
+static CK_RV kem_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                              CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                              const uint8_t *ss, size_t ss_len,
+                              CK_OBJECT_HANDLE *phNewKey) {
+    { long ci = find_attr(pTemplate, ulCount, CKA_CLASS);
+      if (ci >= 0 && pTemplate[ci].pValue
+          && pTemplate[ci].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG req = 0; memcpy(&req, pTemplate[ci].pValue, sizeof(CK_ULONG));
+          if (req != CKO_SECRET_KEY) return CKR_TEMPLATE_INCONSISTENT;
+      }
+    }
+    char label[64] = "";
+    long li = find_attr(pTemplate, ulCount, CKA_LABEL);
+    if (li >= 0 && pTemplate[li].pValue) {
+        size_t n = pTemplate[li].ulValueLen;
+        if (n >= sizeof(label)) n = sizeof(label) - 1;
+        memcpy(label, pTemplate[li].pValue, n); label[n] = '\0';
+    }
+    uint8_t obj_flags = 0;
+    if (tmpl_bbool(pTemplate, ulCount, CKA_SENSITIVE, 0))   obj_flags |= FHSM_OBJF_SENSITIVE;
+    if (tmpl_bbool(pTemplate, ulCount, CKA_EXTRACTABLE, 1)) obj_flags |= FHSM_OBJF_EXTRACTABLE;
+    /* CKA_KEY_TYPE comes from the template, as it does for a derived key. It
+     * was hard-coded CKK_GENERIC_SECRET in both copies, so a caller asking for
+     * an AES key got a generic secret and CKR_OK, and found out at first use,
+     * through the mechanism/key-type gate. */
+    uint32_t new_ckk = CKK_GENERIC_SECRET;
+    { long ki = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+      if (ki >= 0 && pTemplate[ki].pValue
+          && pTemplate[ki].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG req = 0; memcpy(&req, pTemplate[ki].pValue, sizeof(CK_ULONG));
+          new_ckk = (uint32_t)req;
+      }
+    }
+    /* CKA_VALUE_LEN, by truncation.
+     *
+     * FIPS 203 fixes the ML-KEM shared secret at 32 bytes, so a caller asking
+     * for an AES-128 key is asking for half of it. Truncating is sound here
+     * for the reason the secret exists: FIPS 203 §6.2 produces K as uniformly
+     * random key material intended for direct use, so any 16 of its bytes are
+     * a sound AES-128 key. That is not true of KEM outputs in general --
+     * SP 800-227 wants a KDF between a KEM and the keys drawn from it -- and
+     * it is why this is written here, for this mechanism, rather than as a
+     * rule about shared secrets.
+     *
+     * A length longer than the secret is refused rather than padded: the
+     * module cannot produce key material it does not have. */
+    size_t out_len = ss_len;
+    { long vi = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+      if (vi >= 0 && pTemplate[vi].pValue
+          && pTemplate[vi].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG req = 0; memcpy(&req, pTemplate[vi].pValue, sizeof(CK_ULONG));
+          if (req == 0 || (size_t)req > ss_len) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+          out_len = (size_t)req;
+      }
+    }
+    /* The lengths C_UnwrapKey holds an AES or DES3 key to. An ML-KEM secret
+     * is 32 bytes, so CKK_AES alone gives AES-256, and CKK_DES3 needs
+     * CKA_VALUE_LEN = 24. */
+    if (new_ckk == CKK_AES && out_len != 16 && out_len != 24 && out_len != 32)
+        return CKR_TEMPLATE_INCONSISTENT;
+    if (new_ckk == 0x15 /* CKK_DES3 */ && out_len != 24)
+        return CKR_TEMPLATE_INCONSISTENT;
+
+    uint32_t handle = 0;
+    size_t id_len = 0;
+    const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
+    fhsm_rv_t rv = fhsm_token_object_add(t, CKO_SECRET_KEY, new_ckk, label,
+                                          ss, out_len, id, id_len, obj_flags,
+                                          &handle);
+    if (rv != FHSM_RV_OK) return rv;
+
+    /* The same tail as C_UnwrapKey's, in the same order. */
+    CK_RV ar = fhsm_add_key_history(t, handle, FHSM_KEY_FROM_OUTSIDE);
+    if (ar == FHSM_RV_OK) ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
+    if (ar == FHSM_RV_OK) ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                       CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+    if (ar == FHSM_RV_OK) ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                       CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
+    if (ar == FHSM_RV_OK) ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
+                                       CKA_WRAP_TEMPLATE_ATTR, FHSM_TMPL_WRAP);
+    if (ar == FHSM_RV_OK) {
+        fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
+        ar = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
+    }
+    if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; }
+    (void)fhsm_token_object_set_usage(t, handle,
+                                      fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
+    *phNewKey = handle;
+    return FHSM_RV_OK;
+}
+
 /* ---------------------------------------------------------------------------
  * C_EncapsulateKey / C_DecapsulateKey --- ML-KEM Key Encapsulation Mechanism
  * (PKCS#11 v3.0 §5.21). The encapsulator uses a recipient's public key to
@@ -6194,8 +6307,8 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
  *   EVP_PKEY_decapsulate_init(ctx, NULL)
  *   EVP_PKEY_decapsulate(ctx, ss, &sslen, ct, ctlen)
  *
- * The shared secret is stored as a fresh CKO_SECRET_KEY object in the
- * token, marked sensitive.
+ * The shared secret is stored as a fresh CKO_SECRET_KEY object, with the
+ * attributes §5.18.8 and §5.18.9 give it; see kem_store_secret above.
  * ----------------------------------------------------------------------- */
 CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                        CK_OBJECT_HANDLE hPublicKey,
@@ -6239,6 +6352,9 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* The shared secret comes from the KEM, not from the caller. */
     { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* A token key from a read-only session is CKR_SESSION_READ_ONLY, as on the
+     * other creation paths; neither KEM function asked. */
+    { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     if (pMechanism->mechanism != CKM_ML_KEM_OP)
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -6302,105 +6418,9 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     EVP_PKEY_free(pkey);
     *pulCiphertextLen = ct_len_out;
 
-    /* Wrap the shared secret as a token object. Honor CKA_SENSITIVE /
-     * CKA_EXTRACTABLE from the caller template (defaults: not sensitive,
-     * not extractable). */
-    char label[64] = "";
-    uint8_t obj_flags = 0;
-    long li = find_attr(pTemplate, ulCount, CKA_LABEL);
-    if (li >= 0) {
-        size_t n = pTemplate[li].ulValueLen;
-        if (n >= sizeof(label)) n = sizeof(label) - 1;
-        memcpy(label, pTemplate[li].pValue, n); label[n] = '\0';
-    }
-    li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
-    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
-        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
-        obj_flags |= FHSM_OBJF_SENSITIVE;
-    li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
-    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
-        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
-        obj_flags |= FHSM_OBJF_EXTRACTABLE;
-    /* CKA_KEY_TYPE comes from the template (PKCS#11 v3.2 §5.14.8), as it does
-     * for a derived key. It was hard-coded CKK_GENERIC_SECRET here and in the
-     * other half of this pair, so a caller asking for an AES key got a generic
-     * secret and CKR_OK -- and found out at first use, through the
-     * mechanism/key-type gate, several layers from the cause. That is how
-     * CKM_PKCS5_PBKD2 was reported in September: "PBES2 decryption does not
-     * work". derive_store_secret was fixed then; this is the copy of the same
-     * lines that nothing could reach until the v3.2 interface was published.
-     *
-     * CKA_VALUE_LEN is honoured by truncation, below. */
-    uint32_t new_ckk = CKK_GENERIC_SECRET;
-    { long ki = find_attr(pTemplate, ulCount, 0x100 /* CKA_KEY_TYPE */);
-      if (ki >= 0 && pTemplate[ki].pValue
-          && pTemplate[ki].ulValueLen == sizeof(CK_ULONG)) {
-          CK_ULONG req = 0; memcpy(&req, pTemplate[ki].pValue, sizeof(CK_ULONG));
-          new_ckk = (uint32_t)req;
-      }
-    }
-    /* CKA_VALUE_LEN, by truncation.
-     *
-     * FIPS 203 fixes the ML-KEM shared secret at 32 bytes, so a caller asking
-     * for an AES-128 key is asking for half of it. Truncating is sound here
-     * for the reason the secret exists: FIPS 203 §6.2 produces K as uniformly
-     * random key material intended for direct use, so any 16 of its bytes are
-     * a sound AES-128 key. That is not true of KEM outputs in general --
-     * SP 800-227 wants a KDF between a KEM and the keys drawn from it -- and
-     * it is why this is written here, for this mechanism, rather than as a
-     * rule about shared secrets.
-     *
-     * Returning 32 bytes to a caller who asked for 16, in silence, was the
-     * previous behaviour and is the shape this module removed from
-     * CKM_AES_GMAC and from the KEM templates earlier the same day.
-     *
-     * A length longer than the secret is refused rather than padded: the
-     * module cannot produce key material it does not have. */
-    size_t out_len = ss_len;
-    { long vi = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
-      if (vi >= 0 && pTemplate[vi].pValue
-          && pTemplate[vi].ulValueLen == sizeof(CK_ULONG)) {
-          CK_ULONG req = 0; memcpy(&req, pTemplate[vi].pValue, sizeof(CK_ULONG));
-          if (req == 0 || (size_t)req > ss_len) {
-              fhsm_zeroize(ss, sizeof(ss));
-              return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-          }
-          out_len = (size_t)req;
-      }
-    }
-    uint32_t handle = 0;
-    size_t id_len = 0;
-    const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
-    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, new_ckk, label,
-                                ss, out_len, id, id_len, obj_flags,
-                                &handle);
+    CK_RV sr = kem_store_secret(t, hSession, pTemplate, ulCount, ss, ss_len, phNewKey);
     fhsm_zeroize(ss, sizeof(ss));
-    if (rv != FHSM_RV_OK) return rv;
-    *phNewKey = handle;
-    /* C_EncapsulateKey and C_DecapsulateKey never called this, so a key
-     * they created with CKA_TOKEN=FALSE became a token object, and
-     * CKA_MODIFIABLE / CKA_DESTROYABLE / CKA_COPYABLE from its template
-     * were dropped. Three attributes, two paths -- the same omission
-     * C_CopyObject had and that was fixed for C_CopyObject alone.
-     *
-     * These two were unreachable until the v3.2 interface was
-     * published, which is also why they had no template guards and why
-     * the first run after publishing put three crashes on
-     * C_DecapsulateKey. Every guard written before that date has to be
-     * checked against them, not assumed to cover them. */
-    fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
-    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
-      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
-    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
-                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
-      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
-    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
-                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
-      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
-    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
-                                        CKA_WRAP_TEMPLATE_ATTR, FHSM_TMPL_WRAP);
-      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
-    return FHSM_RV_OK;
+    return sr;
 }
 
 CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
@@ -6431,6 +6451,7 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     if (pMechanism->mechanism != CKM_ML_KEM_OP)
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -6569,105 +6590,9 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(pkey);
 
-    /* Honor CKA_SENSITIVE / CKA_EXTRACTABLE from the template ; default
-     * to not-sensitive (allowed export via CKA_VALUE) so test harnesses
-     * can verify the shared secret. Caller can override. */
-    char label[64] = "";
-    uint8_t obj_flags = 0;
-    long li = find_attr(pTemplate, ulCount, CKA_LABEL);
-    if (li >= 0) {
-        size_t n = pTemplate[li].ulValueLen;
-        if (n >= sizeof(label)) n = sizeof(label) - 1;
-        memcpy(label, pTemplate[li].pValue, n); label[n] = '\0';
-    }
-    li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
-    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
-        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
-        obj_flags |= FHSM_OBJF_SENSITIVE;
-    li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
-    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
-        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
-        obj_flags |= FHSM_OBJF_EXTRACTABLE;
-    /* CKA_KEY_TYPE comes from the template (PKCS#11 v3.2 §5.14.8), as it does
-     * for a derived key. It was hard-coded CKK_GENERIC_SECRET here and in the
-     * other half of this pair, so a caller asking for an AES key got a generic
-     * secret and CKR_OK -- and found out at first use, through the
-     * mechanism/key-type gate, several layers from the cause. That is how
-     * CKM_PKCS5_PBKD2 was reported in September: "PBES2 decryption does not
-     * work". derive_store_secret was fixed then; this is the copy of the same
-     * lines that nothing could reach until the v3.2 interface was published.
-     *
-     * CKA_VALUE_LEN is honoured by truncation, below. */
-    uint32_t new_ckk = CKK_GENERIC_SECRET;
-    { long ki = find_attr(pTemplate, ulCount, 0x100 /* CKA_KEY_TYPE */);
-      if (ki >= 0 && pTemplate[ki].pValue
-          && pTemplate[ki].ulValueLen == sizeof(CK_ULONG)) {
-          CK_ULONG req = 0; memcpy(&req, pTemplate[ki].pValue, sizeof(CK_ULONG));
-          new_ckk = (uint32_t)req;
-      }
-    }
-    /* CKA_VALUE_LEN, by truncation.
-     *
-     * FIPS 203 fixes the ML-KEM shared secret at 32 bytes, so a caller asking
-     * for an AES-128 key is asking for half of it. Truncating is sound here
-     * for the reason the secret exists: FIPS 203 §6.2 produces K as uniformly
-     * random key material intended for direct use, so any 16 of its bytes are
-     * a sound AES-128 key. That is not true of KEM outputs in general --
-     * SP 800-227 wants a KDF between a KEM and the keys drawn from it -- and
-     * it is why this is written here, for this mechanism, rather than as a
-     * rule about shared secrets.
-     *
-     * Returning 32 bytes to a caller who asked for 16, in silence, was the
-     * previous behaviour and is the shape this module removed from
-     * CKM_AES_GMAC and from the KEM templates earlier the same day.
-     *
-     * A length longer than the secret is refused rather than padded: the
-     * module cannot produce key material it does not have. */
-    size_t out_len = ss_len;
-    { long vi = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
-      if (vi >= 0 && pTemplate[vi].pValue
-          && pTemplate[vi].ulValueLen == sizeof(CK_ULONG)) {
-          CK_ULONG req = 0; memcpy(&req, pTemplate[vi].pValue, sizeof(CK_ULONG));
-          if (req == 0 || (size_t)req > ss_len) {
-              fhsm_zeroize(ss, sizeof(ss));
-              return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-          }
-          out_len = (size_t)req;
-      }
-    }
-    uint32_t handle = 0;
-    size_t id_len = 0;
-    const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
-    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, new_ckk, label,
-                                ss, out_len, id, id_len, obj_flags,
-                                &handle);
+    CK_RV sr = kem_store_secret(t, hSession, pTemplate, ulCount, ss, ss_len, phNewKey);
     fhsm_zeroize(ss, sizeof(ss));
-    if (rv != FHSM_RV_OK) return rv;
-    *phNewKey = handle;
-    /* C_EncapsulateKey and C_DecapsulateKey never called this, so a key
-     * they created with CKA_TOKEN=FALSE became a token object, and
-     * CKA_MODIFIABLE / CKA_DESTROYABLE / CKA_COPYABLE from its template
-     * were dropped. Three attributes, two paths -- the same omission
-     * C_CopyObject had and that was fixed for C_CopyObject alone.
-     *
-     * These two were unreachable until the v3.2 interface was
-     * published, which is also why they had no template guards and why
-     * the first run after publishing put three crashes on
-     * C_DecapsulateKey. Every guard written before that date has to be
-     * checked against them, not assumed to cover them. */
-    fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
-    { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, handle);
-      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
-    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
-                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
-      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
-    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
-                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
-      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
-    { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, handle,
-                                        CKA_WRAP_TEMPLATE_ATTR, FHSM_TMPL_WRAP);
-      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
-    return FHSM_RV_OK;
+    return sr;
 }
 
 /* CK_INTERFACE v3.0 getters are defined AFTER the v2.40 fhsm_function_list

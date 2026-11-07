@@ -17,8 +17,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
   answers `CKR_DEVICE_MEMORY`, as storing an object value does. The only
   length bound that is not a mechanism's is the store's value cap (2 MiB).
   `*phKey` is written only on success.
+* **The key from `C_EncapsulateKey` or `C_DecapsulateKey` is extractable
+  unless the template says otherwise.** PKCS#11 v3.2 §5.18.8 and §5.18.9 set
+  `CKA_EXTRACTABLE` from the template "with a default of CK_TRUE"; the module
+  defaulted to FALSE. A caller that wants the shared secret kept from
+  `C_WrapKey` sets `CKA_EXTRACTABLE=FALSE`.
 
 ### Fixed
+* **`C_EncapsulateKey` and `C_DecapsulateKey` did not give the new key the
+  attributes PKCS#11 v3.2 §5.18.8 and §5.18.9 define.** A key created
+  sensitive and not extractable answered TRUE for `CKA_ALWAYS_SENSITIVE` and
+  `CKA_NEVER_EXTRACTABLE`, which the specification sets to FALSE: like an
+  unwrapped key, its bytes exist outside the token. Both sections also say a
+  call that cannot support the precise template creates nothing; the module
+  dropped `CKA_ENCRYPT` and the other usage flags and the dates, and accepted
+  a `CKA_CLASS` other than `CKO_SECRET_KEY` and an AES or DES3 key type with
+  a length that type does not have. The flags and dates are stored now, and
+  the rest is `CKR_TEMPLATE_INCONSISTENT`. A `CKA_TOKEN=TRUE` template in a
+  read-only session is `CKR_SESSION_READ_ONLY`, as on the other creation
+  paths, and `*phKey` is written only on success. The two functions share
+  that code now; it was copied. `tests/test_kem_attrs.c`.
 * `tests/fhsm_crypt_cli.sh` altered a file by writing `X` over a ciphertext
   byte, which left it unchanged when that byte already was `X`: once in 256
   runs, the altered file decrypted and the test failed. It flips a bit now.
