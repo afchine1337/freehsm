@@ -123,17 +123,23 @@ extern "C" {
  * are found and read before a login; three attributes become settable. A
  * public session that got CKR_USER_NOT_LOGGED_IN from C_FindObjectsInit now
  * gets its public objects, and C_InitToken answers CKR_SESSION_EXISTS with
- * a session open -- answers that change for callers that meet them. */
+ * a session open -- answers that change for callers that meet them.
+ *
+ * 2.6.1, PATCH: a security fix (C_WrapKey on unextractable keys) and
+ * conformance fixes found by pkcs11-check 0.3.0. Calls answer differently
+ * only where they answered against PKCS#11 v3.2: a classical public key's
+ * CKA_VALUE, the CKA_EXTRACTABLE default of unwrapped and encapsulated keys,
+ * private handles after a logout. Two audit event values are appended. */
 #define FHSM_VERSION_MAJOR   2
 #define FHSM_VERSION_MINOR   6
-#define FHSM_VERSION_PATCH   0
+#define FHSM_VERSION_PATCH   1
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
  * a certification this project does not hold. The profile a
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
-#define FHSM_VERSION_STRING  "2.6.0"
+#define FHSM_VERSION_STRING  "2.6.1"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including

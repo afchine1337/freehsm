@@ -64,6 +64,14 @@ valid AES length, an empty `CK_EDDSA_PARAMS` on Ed25519 answered with a pure
 Ed25519 signature, and `C_EncryptFinal` refusing to finish an operation that
 had received no data.
 
+In v2.6.1, a run of 0.3.0 made before its release found that `C_WrapKey`
+wrapped a key whose `CKA_EXTRACTABLE` is FALSE unless it was also sensitive,
+present since v1.1.0. Its new extractability tests reached the defect from five directions: a key
+created so, one cleared by `C_SetAttributeValue`, a `C_CopyObject` copy, and
+the outputs of the byte-level derivations and of HKDF. The same run found a
+classical public key's `CKA_VALUE`, the unwrap default of `CKA_EXTRACTABLE`,
+the parity of derived DES keys, and private objects outliving a `C_Logout`.
+
 ## Simon Josefsson (`jas4711`)
 
 Preparing Debian packages, and reporting what that exposed:

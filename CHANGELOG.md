@@ -7,6 +7,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.6.1] --- 2026-11-07
+
+*Patch, with a security fix: `C_WrapKey` wrapped a key whose
+`CKA_EXTRACTABLE` is FALSE unless it was also sensitive (GHSA-m5m7-4gmc-qmv5,
+moderate, since 1.1.0). Conformance fixes found by pkcs11-check 0.3.0: an RSA,
+EC, Edwards or Montgomery public key has no `CKA_VALUE`; unwrapped and
+encapsulated keys are extractable unless the template says otherwise;
+`C_Logout` destroys private session objects and invalidates private handles;
+derived DES keys get their parity bits. `C_UnwrapKey` decrypts into the
+secure heap (#29). Audit events 86 and 87 are new.*
+
 ### Added
 * **Audit events `encapsulate` (86) and `decapsulate` (87).** `C_EncapsulateKey`
   and `C_DecapsulateKey` create a key, as `C_UnwrapKey` and `C_DeriveKey` do,

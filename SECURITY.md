@@ -519,15 +519,64 @@ fixed and released on 2026-11-04.
 
 ---
 
+## Self-disclosed unextractable-key wrapping — `C_WrapKey` (2026-11-07)
+
+**Advisory:** [GHSA-m5m7-4gmc-qmv5](https://github.com/afchine1337/freehsm/security/advisories/GHSA-m5m7-4gmc-qmv5)
+· Moderate · CWE-863
+
+**A logged-in session could wrap, and so read, a key whose
+`CKA_EXTRACTABLE` is FALSE, unless that key was also sensitive.** Affects
+v1.1.0 to v2.6.0, in both profiles. Fixed in v2.6.1.
+
+**Cause.** PKCS#11 v3.2 §5.18.5 requires the key to be wrapped to have
+`CKA_EXTRACTABLE=TRUE`. `C_WrapKey` refused only a key that was both
+sensitive and not extractable. `CKA_SENSITIVE` defaults to FALSE, so a key
+created with `CKA_EXTRACTABLE=FALSE` alone was wrapped on request, while
+`C_GetAttributeValue` withheld its value for the same flag.
+
+**Conditions.** A session logged in as the user, the unextractable key, and
+any key with `CKA_WRAP=TRUE`, which the session can import itself with a
+value it knows. The key is reached when it was created with
+`CKA_EXTRACTABLE=FALSE` and without `CKA_SENSITIVE=TRUE`, made unextractable
+later by `C_SetAttributeValue` or by a `C_CopyObject` template, derived by
+the concatenation and XOR mechanisms from such a base (made unextractable by
+the v2.6.0 fix above), or derived by HKDF without `CKA_EXTRACTABLE`.
+
+**Effect.** Disclosure of the key's value to anything that can log in to
+the token. Keys created with both `CKA_SENSITIVE=TRUE` and
+`CKA_EXTRACTABLE=FALSE` were refused and are not affected.
+
+**Fixed.** A private or secret key whose `CKA_EXTRACTABLE` is FALSE is
+refused `CKR_KEY_UNEXTRACTABLE`, sensitive or not, before the size query.
+`tests/test_wrap_unextractable.c`, cases (2) to (6).
+
+**If you ran an affected version.**
+
+- If something other than your own application could log in to the token
+  and the token holds keys with `CKA_EXTRACTABLE=FALSE` and
+  `CKA_SENSITIVE=FALSE`, treat those keys as exposed and replace them.
+- Keys that must not leave the token can be made sensitive with
+  `C_SetAttributeValue` (`CKA_SENSITIVE` may go from FALSE to TRUE); that
+  closes the path on an affected version too.
+
+**Found by** the extractability tests of Denis Mingulov's `pkcs11-check`
+0.3.0, in a run made before its release.
+
+**Timeline.** Present since v1.1.0, the initial open-source release. Found on
+2026-11-07; fixed and released on 2026-11-07.
+
+---
+
 ## Supported versions
 
 | Version | Supported |
 |---|---|
-| `2.6.x` | ✅ — supported, active development |
-| `2.5.1` | ⚠️ — **affected by the concatenation/XOR key disclosure**; after a `C_Logout` it does not enforce a public key's `CKA_ALLOWED_MECHANISMS` (low); upgrade to v2.6.0 |
-| `2.2.0` – `2.5.0` | ⚠️ — affected by the concatenation/XOR key disclosure, **the wrong-PIN object-store defect** and the `C_InitToken` check; upgrade to v2.6.0 |
-| `2.1.x` | ⚠️ — affected by the wrong-PIN defect, the `C_InitToken` check and the `C_DecryptFinal` out-of-bounds write; upgrade to v2.6.0 |
-| `2.0.x` | ⚠️ — affected by the above, and by the `C_UnwrapKey` stack overflow; upgrade to v2.6.0 |
+| `2.6.1` | ✅ — supported, active development |
+| `2.6.0` | ⚠️ — **affected by the unextractable-key wrapping**; upgrade to v2.6.1 |
+| `2.5.1` | ⚠️ — affected by the unextractable-key wrapping and **the concatenation/XOR key disclosure**; after a `C_Logout` it does not enforce a public key's `CKA_ALLOWED_MECHANISMS` (low); upgrade to v2.6.1 |
+| `2.2.0` – `2.5.0` | ⚠️ — affected by the above, **the wrong-PIN object-store defect** and the `C_InitToken` check; upgrade to v2.6.1 |
+| `2.1.x` | ⚠️ — affected by the unextractable-key wrapping, the wrong-PIN defect, the `C_InitToken` check and the `C_DecryptFinal` out-of-bounds write; upgrade to v2.6.1 |
+| `2.0.x` | ⚠️ — affected by the above, and by the `C_UnwrapKey` stack overflow; upgrade to v2.6.1 |
 | `1.5.x` – `1.6.x` | ⚠️ — affected by all of them; no backports planned, upgrade |
 | `1.4.0` | ❌ — **published unsigned** (see above); unusable as shipped, do not work around it |
 | `1.1.x` – `1.3.x` | ❌ — end of life. Affected by the `C_DecryptFinal` write, and all `1.1.x` additionally by the integrity self-test defect |
@@ -544,8 +593,11 @@ Older tags carry it; it means nothing beyond the name they were released under.
 The wrong-PIN object-store defect and the `C_InitToken` check also reach
 every row from `1.1.x` upward. v2.5.1 is the first version without them.
 
+The unextractable-key wrapping reaches every row from `1.1.x` upward as
+well. v2.6.1 is the first version without it.
+
 This table was last accurate at v1.2.1, corrected when the `C_UnwrapKey` entry
-was written, corrected again for v2.2.0, v2.5.1 and v2.6.0 — a supported-versions table
+was written, corrected again for v2.2.0, v2.5.1, v2.6.0 and v2.6.1 — a supported-versions table
 that lags is the one place a reader checks to find out whether an advisory
 concerns them, so it is updated in the same commit as the advisory rather than
 in a tidying pass afterwards.
