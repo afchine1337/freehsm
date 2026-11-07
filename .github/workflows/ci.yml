@@ -356,14 +356,23 @@ jobs:
     timeout-minutes: 30
     container:
       image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-20261006
-      options: --user root
+      # seccomp=unconfined lets setarch below call personality(ADDR_NO_RANDOMIZE),
+      # which Docker's default profile refuses.
+      options: --user root --security-opt seccomp=unconfined
     steps:
       - uses: actions/checkout@v7
 
+      # Under ASLR as recent runner kernels set it (a larger vm.mmap_rnd_bits),
+      # this TSan aborts before main() with "unexpected memory mapping": the
+      # binary lands where its shadow memory should be. First seen 2026-11-07;
+      # green on the same code that morning.
+      # It is TSan's address layout, not a race; test_apilock died on its first
+      # instruction. ASLR is turned off for this job alone, so the sanitizer
+      # gets the layout it expects; the plain suite and every other job keep it.
       - name: Concurrency tests under ThreadSanitizer
         run: |
           set -o pipefail
-          make tsan-concurrency 2>&1 | tee tsan.log
+          setarch "$(uname -m)" -R make tsan-concurrency 2>&1 | tee tsan.log
 
       - name: Upload the sanitizer log
         if: always()
