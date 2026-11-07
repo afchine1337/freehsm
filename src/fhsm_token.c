@@ -89,8 +89,7 @@
 #define FHSM_OBJ_VALUE_LEN  5500      /* legacy v1 record field size  */
 /* #125 large-object storage : the in-memory value is now heap-allocated
  * (see fhsm_object_t.value), so this cap no longer costs static memory.
- * 2 MiB covers 1 MiB data objects (test_large_objects) with headroom. */
-#define FHSM_OBJ_VALUE_MAX  (2u * 1024u * 1024u) /* v2 per-object value cap */
+ * FHSM_OBJ_VALUE_MAX, the v2 per-object value cap, is in fhsm_token.h. */
 
 /* The secure-heap arena must be able to hold a full token of sensitive values
  * (#127). That link is set by hand -- the 8 MiB default was computed for

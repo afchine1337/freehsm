@@ -5827,6 +5827,265 @@ static CK_RV wrap_key_value(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism
     return FHSM_RV_MECHANISM_INVALID;
 }
 
+/* ---------------------------------------------------------------------------
+ * C_UnwrapKey, in three parts (#29).
+ *
+ * The decrypted key is held in fhsm_secure_malloc memory, the mlock'd arena
+ * where the stored copy goes too. It used to be a 4 KiB array on the stack,
+ * for a reason the comment above it gave: the function had 28 return
+ * statements, about twenty of them after the decrypt, and a heap buffer would
+ * need a release on each. One missed path leaks plaintext key material, and
+ * #27 (AlexLaroche) had found three that left even the stack copy uncleared.
+ * The stack is not locked, so while the call ran the key could reach swap or
+ * a core dump; and 4 KiB refused the largest ML-DSA private keys.
+ *
+ * Every path that can fail once the buffer exists now lives in a helper that
+ * never owns it. C_UnwrapKey allocates, calls them, and releases, in straight
+ * code with no exit in between -- the shape C_WrapKey already has for its
+ * PKCS#8 DER. A new check added to either helper cannot skip the release.
+ *
+ *   unwrap_plain_cap  the checks that need neither key nor plaintext, and the
+ *                     number of bytes the decrypt may write;
+ *   unwrap_decrypt    the decrypt, into the caller's buffer;
+ *   unwrap_import     the checks that read the plaintext, and the import.
+ * ----------------------------------------------------------------------- */
+static CK_RV unwrap_plain_cap(CK_MECHANISM *m, uint32_t ucl, uint32_t ukt,
+                              size_t ukl, CK_ULONG wlen, size_t *cap) {
+    CK_MECHANISM_TYPE mech = m->mechanism;
+    if (mech_is_aes_kw(mech)) {
+        if (ukt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        const unsigned char *kwiv = NULL;
+        { CK_RV ir = kw_iv_from_mech(m, &kwiv); if (ir != FHSM_RV_OK) return ir; }
+
+        /* Unwrapping-key size. C_WrapKey validates this at the matching point,
+         * with a comment saying a bad size must not "silently fall through to
+         * the 256-bit cipher name". That fix was applied to the wrap path
+         * only: here a 20-byte key still selected AES-256-WRAP. */
+        if (ukl != 16 && ukl != 24 && ukl != 32)
+            return 0x00000114UL;   /* CKR_WRAPPING_KEY_SIZE_RANGE */
+
+        /* Wrapped-blob length, checked before anything is allocated or written.
+         *
+         * RFC 3394 (KW):  blob is a multiple of 8 and at least 24
+         *                 (16 bytes of key + the 8-byte AIV).
+         * RFC 5649 (KWP): blob is a multiple of 8 and at least 16.
+         *
+         * Both yield the blob less its 8-byte integrity block, and that is all
+         * EVP writes: EVP_DecryptUpdate takes no output capacity, the caller
+         * guarantees it. When the buffer was a fixed 256 bytes and nothing
+         * compared the blob with it, Wycheproof AES-KW wrote past it
+         * (pkcs11-check, 2026-09-07); _FORTIFY_SOURCE made that an abort, in a
+         * build that had it. */
+        size_t min_blob = (mech == CKM_AES_KEY_WRAP) ? 24 : 16;
+        if (wlen < min_blob || (wlen % 8) != 0)
+            return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
+        *cap = (size_t)wlen - 8;
+    } else if (mech == CKM_RSA_PKCS_OAEP
+               || mech == CKM_RSA_PKCS || mech == CKM_RSA_X_509) {
+        /* PKCS#1 v1.5 / raw RSA key transport is non-FIPS: all-mechanisms
+         * only. OAEP is the approved one. */
+        if (mech != CKM_RSA_PKCS_OAEP && fhsm_build_fips_strict)
+            return FHSM_RV_MECHANISM_INVALID;
+        if (ucl != CKO_PRIVATE_KEY || ukt != CKK_RSA)
+            return 0x000000F2UL;   /* CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT */
+        /* An RSA decryption yields at most the modulus length, and a blob that
+         * is a wrapping under this key has exactly that length: the v1.5 and
+         * raw helper refuses any other, and OAEP fails on it. The blob length
+         * is therefore enough, without parsing the key twice. */
+        if (wlen == 0) return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
+        *cap = (size_t)wlen;
+    } else if (mech_is_aes_cbc_wrap(mech)) {
+        /* AES-CBC / AES-CBC-PAD, all-mechanisms and permissive only; see
+         * aes_cbc_wrap_run, whose output holds at least in_len + 16. */
+        if (ukt != CKK_AES) return 0x000000F2UL;   /* CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT */
+        if (wlen == 0 || wlen % 16 != 0)
+            return 0x00000112UL;                   /* CKR_WRAPPED_KEY_LEN_RANGE */
+        *cap = (size_t)wlen + 16;
+    } else {
+        return FHSM_RV_MECHANISM_INVALID;
+    }
+
+    /* The one bound that is not a mechanism's: a key the store could not hold.
+     * fhsm_token_object_add would refuse it after the decrypt; here it is
+     * refused before anything is allocated for it. It also keeps the (int)
+     * lengths the EVP calls take in range. The 4 KiB of the stack buffer is
+     * gone, and with it the refusal of ML-DSA-87 private keys (4.9 KiB as
+     * PKCS#8). */
+    if (wlen > FHSM_OBJ_VALUE_MAX)
+        return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
+    return FHSM_RV_OK;
+}
+
+/* Decrypts the blob into pt, of cap bytes from unwrap_plain_cap. The caller
+ * owns pt and clears it, whatever this returns. */
+static CK_RV unwrap_decrypt(CK_MECHANISM *m, const uint8_t *ukv, size_t ukl,
+                            const unsigned char *in, CK_ULONG in_len,
+                            uint8_t *pt, size_t cap, size_t *pt_len) {
+    CK_MECHANISM_TYPE mech = m->mechanism;
+    if (mech_is_aes_kw(mech)) {
+        const unsigned char *kwiv = NULL;
+        { CK_RV ir = kw_iv_from_mech(m, &kwiv); if (ir != FHSM_RV_OK) return ir; }
+        /* What KW and KWP write, against what the buffer holds. The two are
+         * computed in two functions, and EVP would not notice if they parted. */
+        if (in_len < 8 || cap < (size_t)in_len - 8) return FHSM_RV_FUNCTION_FAILED;
+        const char *cname = NULL;
+        if (mech == CKM_AES_KEY_WRAP) {
+            cname = (ukl == 16) ? "AES-128-WRAP" :
+                    (ukl == 24) ? "AES-192-WRAP" : "AES-256-WRAP";
+        } else {
+            cname = (ukl == 16) ? "AES-128-WRAP-PAD" :
+                    (ukl == 24) ? "AES-192-WRAP-PAD" : "AES-256-WRAP-PAD";
+        }
+        EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cname, NULL);
+        if (!c) return FHSM_RV_MECHANISM_INVALID;
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
+        EVP_CIPHER_CTX_set_flags(ctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
+        if (EVP_DecryptInit_ex2(ctx, c, ukv, kwiv, NULL) != 1) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            return FHSM_RV_FUNCTION_FAILED;
+        }
+        int outl = 0, finl = 0;
+        int ok = EVP_DecryptUpdate(ctx, pt, &outl, in, (int)in_len) == 1
+              && EVP_DecryptFinal_ex(ctx, pt + outl, &finl) == 1;
+        EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+        if (!ok) return 0x00000110UL;  /* CKR_WRAPPED_KEY_INVALID (0x69 is KEY_NOT_WRAPPABLE) */
+        *pt_len = (size_t)(outl + finl);
+        return FHSM_RV_OK;
+    }
+    if (mech == CKM_RSA_PKCS_OAEP) {
+        /* RSA-OAEP unwrap : the inverse of the C_WrapKey branch. The decrypt
+         * path is not a substitute (see the note there), and the unwrapped
+         * bytes must land in a key object the caller never sees in the clear.
+         * #125 TestRSAOAEPWrap. */
+        *pt_len = cap;
+        return fhsm_rsa_oaep_unwrap(ukv, ukl, m, in, in_len, pt, pt_len);
+    }
+    if (mech == CKM_RSA_PKCS || mech == CKM_RSA_X_509) {
+        /* The result is NOT inspected -- see fhsm_rsa_v15_unwrap. */
+        *pt_len = cap;
+        return fhsm_rsa_v15_unwrap(ukv, ukl, mech == CKM_RSA_X_509,
+                                   in, in_len, pt, pt_len);
+    }
+    if (mech_is_aes_cbc_wrap(mech)) {
+        if (cap < (size_t)in_len + 16) return FHSM_RV_FUNCTION_FAILED;
+        return aes_cbc_wrap_run(0, m, ukv, ukl, in, in_len, pt, pt_len);
+    }
+    return FHSM_RV_MECHANISM_INVALID;
+}
+
+/* Imports the decrypted bytes as a fresh object: a secret key, or the private
+ * key the template's CKA_CLASS names. Reads pt, never keeps it. */
+static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
+                           CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
+                           const uint8_t *pt, size_t pt_len,
+                           uint32_t *obj_class_out, uint32_t *handle) {
+    fhsm_rv_t rv;
+    char label[64] = "";
+    uint32_t key_type = CKK_AES;
+    uint32_t obj_class = CKO_SECRET_KEY;
+    uint8_t obj_flags = FHSM_OBJF_SENSITIVE;
+    long li = find_attr(pTemplate, ulCount, CKA_CLASS);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen == sizeof(CK_ULONG)
+        && *(CK_ULONG *)pTemplate[li].pValue == CKO_PRIVATE_KEY)
+        obj_class = CKO_PRIVATE_KEY;
+    *obj_class_out = obj_class;
+    li = find_attr(pTemplate, ulCount, CKA_LABEL);
+    if (li >= 0) {
+        size_t n = pTemplate[li].ulValueLen;
+        if (n >= sizeof(label)) n = sizeof(label) - 1;
+        memcpy(label, pTemplate[li].pValue, n); label[n] = '\0';
+    }
+    li = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen == sizeof(CK_ULONG))
+        key_type = (uint32_t)(*(CK_ULONG*)pTemplate[li].pValue);
+    /* Tookan §3.3 : an attacker who can wrap a CKA_SENSITIVE key and then
+     * unwrap it supplies CKA_SENSITIVE=FALSE here and gets a readable copy.
+     * Reproduced: a SENSITIVE=True key came back as 16 plaintext bytes.
+     *
+     * A previous attempt refused the downgrade outright. That blocked the
+     * attack but broke seven legitimate round-trips (wrap -> unwrap -> read
+     * back and compare is the standard way to verify a wrapping mechanism at
+     * all), because the blob carries no attributes and the module cannot tell
+     * an attacker's downgrade from a non-sensitive key being re-imported.
+     * Refusing every downgrade is not a defence, it is a denial of the
+     * feature. Reverted; the real fix is CKA_UNWRAP_TEMPLATE on the
+     * unwrapping key (§4.9), which lets the *wrapping key's* policy -- the
+     * only party that legitimately knows -- decide. Tracked as follow-up;
+     * documented as a known limitation until then. */
+    li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[li].pValue)[0] == 0) {
+        /* Tookan §3.3 defence. The blob carries no attributes, so the module
+         * cannot know how sensitive the original was -- but if the unwrapping
+         * key was created with CKA_UNWRAP_TEMPLATE demanding CKA_SENSITIVE,
+         * its owner has already answered that question. §4.9 applies the user
+         * template "as if the object has already been created", so the one-way
+         * CKA_SENSITIVE rule makes this downgrade CKR_ATTRIBUTE_READ_ONLY.
+         * Without such a policy the downgrade is honoured, as refusing every
+         * one breaks legitimate round-trips (see the reverted attempt). */
+        uint8_t uwf = 0;
+        (void)fhsm_token_object_get_flags(t, (uint32_t)hUnwrappingKey, &uwf);
+        if (uwf & FHSM_OBJF_UNWRAP_SENS)
+            return 0x00000010UL;   /* CKR_ATTRIBUTE_READ_ONLY */
+        obj_flags &= (uint8_t)~FHSM_OBJF_SENSITIVE;
+    }
+    li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
+    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
+        obj_flags |= FHSM_OBJF_EXTRACTABLE;
+
+    /* Key-type confusion defence (Tookan §3.x, #125
+     * TestKeyTypeConfusionOnUnwrap) : the unwrapped length must be valid for
+     * the claimed CKA_KEY_TYPE, otherwise a blob wrapped as one key type is
+     * being reinterpreted as an incompatible one. A CKA_VALUE_LEN in the
+     * template must also match the recovered length. */
+    if (key_type == CKK_AES && pt_len != 16 && pt_len != 24 && pt_len != 32)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (key_type == 0x15 /* CKK_DES3 */ && pt_len != 24)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    { long vli = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+      if (vli >= 0 && pTemplate[vli].pValue
+          && pTemplate[vli].ulValueLen == sizeof(CK_ULONG)) {
+          CK_ULONG want_len = *(CK_ULONG*)pTemplate[vli].pValue;
+          if (want_len != pt_len)
+              return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+      }
+    }
+
+    size_t id_len = 0;
+    const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
+    if (obj_class != CKO_PRIVATE_KEY)
+        return fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
+                                     pt, pt_len, id, id_len, obj_flags, handle);
+
+    /* The blob is a PKCS#8 PrivateKeyInfo, the form C_WrapKey gives. It is
+     * stored as every reader here expects it, i2d_PrivateKey's form, and
+     * sensitive whatever the template says, as an imported private key is.
+     * The key type is checked against the key: the blob carries one, and the
+     * template only claims one. */
+    const unsigned char *pp = pt;
+    PKCS8_PRIV_KEY_INFO *inf = d2i_PKCS8_PRIV_KEY_INFO(NULL, &pp, (long)pt_len);
+    EVP_PKEY *pk = (inf && pp == pt + pt_len) ? EVP_PKCS82PKEY(inf) : NULL;
+    PKCS8_PRIV_KEY_INFO_free(inf);
+    uint8_t *der = NULL;
+    int dl = 0;
+    if (!pk) {
+        rv = 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
+    } else if (!pkey_is_ckk(pk, key_type)) {
+        rv = FHSM_RV_KEY_TYPE_INCONSISTENT;
+    } else if ((dl = i2d_PrivateKey(pk, &der)) <= 0) {
+        rv = FHSM_RV_FUNCTION_FAILED;
+    } else {
+        rv = fhsm_token_object_add(t, CKO_PRIVATE_KEY, key_type, label,
+                                    der, (size_t)dl, id, id_len,
+                                    obj_flags | FHSM_OBJF_SENSITIVE, handle);
+    }
+    EVP_PKEY_free(pk);
+    OPENSSL_clear_free(der, dl > 0 ? (size_t)dl : 0);
+    return rv;
+}
+
 CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                   CK_OBJECT_HANDLE hUnwrappingKey,
                   unsigned char *pWrappedKey, CK_ULONG ulWrappedKeyLen,
@@ -5878,254 +6137,26 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                                           &ukv, &ukl, &ucl, &ukt);
     if (rv != FHSM_RV_OK) return rv;
 
-    /* 4 KiB, not 256 bytes.
-     *
-     * The 256-byte buffer refused three valid Wycheproof AES-KW vectors
-     * (tc10, tc52, tc107) whose plaintext is longer than that. Those three
-     * used to abort the process; bounding the length turned the abort into a
-     * clean CKR_WRAPPED_KEY_LEN_RANGE, which is better and still wrong.
-     *
-     * Enlarging the stack buffer rather than moving to fhsm_secure_malloc is
-     * deliberate. This function has 28 return statements, about twenty of them
-     * after this point; a heap allocation would need a free on every one, and
-     * one missed path leaks plaintext key material. The heap version is worth
-     * doing with the function restructured around a single exit.
-     *
-     * The buffer is zeroised on every exit after a decrypt has written it:
-     * the checks between the decrypt and the import jump to one place that
-     * clears it (#27, AlexLaroche: three of them returned with the whole key
-     * still here, on the caller's stack). The decrypt failures clear it too,
-     * although OpenSSL and the RSA helpers leave nothing there when they
-     * fail -- a rule with exceptions is one the next check gets wrong.
-     *
-     * 4 KiB covers every AES-KW vector in the corpus and a DER-encoded RSA-4096
-     * private key, with room to spare against an 8 MiB default stack. */
-    uint8_t pt[4096]; size_t pt_len = 0;
+    size_t cap = 0;
+    { CK_RV cr = unwrap_plain_cap(pMechanism, ucl, ukt, ukl, ulWrappedKeyLen, &cap);
+      if (cr != FHSM_RV_OK) return cr; }
+    /* Arena full: CKR_DEVICE_MEMORY, as when an object value finds it full,
+     * which tells the operator to raise secure_heap_kb. Never a fallback to
+     * pageable memory. */
+    uint8_t *pt = fhsm_secure_malloc(cap);
+    if (!pt) return FHSM_RV_DEVICE_MEMORY;
+    size_t pt_len = 0;
+    uint32_t handle = 0, obj_class = CKO_SECRET_KEY;
+    CK_RV ur = unwrap_decrypt(pMechanism, ukv, ukl, pWrappedKey, ulWrappedKeyLen,
+                              pt, cap, &pt_len);
+    if (ur == FHSM_RV_OK)
+        ur = unwrap_import(t, hUnwrappingKey, pTemplate, ulCount, pt, pt_len,
+                           &obj_class, &handle);
+    /* The only release of pt, with no exit between it and the allocation.
+     * fhsm_secure_free clears the block before returning it to the arena. */
+    fhsm_secure_free(pt);
+    if (ur != FHSM_RV_OK) return ur;
 
-    if (mech_is_aes_kw(pMechanism->mechanism)) {
-        if (ukt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
-        const unsigned char *kwiv = NULL;
-        { CK_RV ir = kw_iv_from_mech(pMechanism, &kwiv); if (ir != FHSM_RV_OK) return ir; }
-
-        /* Unwrapping-key size. C_WrapKey validates this at the matching point
-         * above, with a comment saying a bad size must not "silently fall
-         * through to the 256-bit cipher name". That fix was applied to the wrap
-         * path only: here a 20-byte key still selected AES-256-WRAP. */
-        if (ukl != 16 && ukl != 24 && ukl != 32)
-            return 0x00000114UL;   /* CKR_WRAPPING_KEY_SIZE_RANGE */
-
-        /* Wrapped-blob length, checked BEFORE anything writes into pt[].
-         *
-         * EVP_DecryptUpdate takes no output-capacity argument: the caller
-         * guarantees the buffer. AES-KW yields ulWrappedKeyLen - 8 bytes, so a
-         * blob longer than sizeof(pt) + 8 writes past a 256-byte stack buffer.
-         * _FORTIFY_SOURCE and the stack canary turn that into an abort, which
-         * is how it was found (pkcs11-check Wycheproof AES-KW, 2026-09-07) --
-         * but both are build flags. A distribution build without them would
-         * take the write instead of the abort, on data that arrives from
-         * outside by the very purpose of key wrapping.
-         *
-         * RFC 3394 (KW):  blob is a multiple of 8 and at least 24
-         *                 (16 bytes of key + the 8-byte AIV).
-         * RFC 5649 (KWP): blob is a multiple of 8 and at least 16.
-         *
-         * The 256-byte ceiling is the current scope: the tail of this function
-         * imports the result as a secret key. Unwrapping a DER-encoded private
-         * key needs a larger, heap-allocated buffer and is a separate change. */
-        {
-            size_t min_blob = (pMechanism->mechanism == CKM_AES_KEY_WRAP) ? 24 : 16;
-            if (ulWrappedKeyLen < min_blob || (ulWrappedKeyLen % 8) != 0)
-                return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
-            if (ulWrappedKeyLen - 8 > sizeof(pt))
-                return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
-        }
-
-        const char *cname = NULL;
-        if (pMechanism->mechanism == CKM_AES_KEY_WRAP) {
-            cname = (ukl == 16) ? "AES-128-WRAP" :
-                    (ukl == 24) ? "AES-192-WRAP" : "AES-256-WRAP";
-        } else {
-            cname = (ukl == 16) ? "AES-128-WRAP-PAD" :
-                    (ukl == 24) ? "AES-192-WRAP-PAD" : "AES-256-WRAP-PAD";
-        }
-        EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cname, NULL);
-        if (!c) return FHSM_RV_MECHANISM_INVALID;
-        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-        if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
-        EVP_CIPHER_CTX_set_flags(ctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
-        if (EVP_DecryptInit_ex2(ctx, c, ukv, kwiv, NULL) != 1) {
-            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
-            return FHSM_RV_FUNCTION_FAILED;
-        }
-        int outl = 0, finl = 0;
-        if (EVP_DecryptUpdate(ctx, pt, &outl, pWrappedKey, (int)ulWrappedKeyLen) != 1
-            || EVP_DecryptFinal_ex(ctx, pt + outl, &finl) != 1) {
-            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
-            fhsm_zeroize(pt, sizeof(pt));
-            return 0x00000110UL;  /* CKR_WRAPPED_KEY_INVALID (0x69 is KEY_NOT_WRAPPABLE) */
-        }
-        pt_len = (size_t)(outl + finl);
-        EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
-    } else if (pMechanism->mechanism == CKM_RSA_PKCS_OAEP) {
-        /* RSA-OAEP unwrap : the inverse of the C_WrapKey branch above. The
-         * decrypt path is not a substitute (see the note there), and the
-         * unwrapped bytes must land in a key object the caller never sees
-         * in the clear. #125 TestRSAOAEPWrap. */
-        if (ucl != CKO_PRIVATE_KEY || ukt != CKK_RSA)
-            return 0x000000F2UL;   /* CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT */
-        pt_len = sizeof(pt);
-        fhsm_rv_t orv = fhsm_rsa_oaep_unwrap(ukv, ukl, pMechanism,
-                                              pWrappedKey, ulWrappedKeyLen,
-                                              pt, &pt_len);
-        if (orv != FHSM_RV_OK) { fhsm_zeroize(pt, sizeof(pt)); return orv; }
-    } else if (pMechanism->mechanism == CKM_RSA_PKCS
-               || pMechanism->mechanism == CKM_RSA_X_509) {
-        /* PKCS#1 v1.5 / raw RSA key transport. Non-FIPS: all-mechanisms only.
-         * The result is NOT inspected -- see fhsm_rsa_v15_unwrap. */
-        if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
-        if (ucl != CKO_PRIVATE_KEY || ukt != CKK_RSA)
-            return 0x000000F2UL;   /* CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT */
-        pt_len = sizeof(pt);
-        fhsm_rv_t vrv = fhsm_rsa_v15_unwrap(
-                            ukv, ukl,
-                            pMechanism->mechanism == CKM_RSA_X_509,
-                            pWrappedKey, ulWrappedKeyLen, pt, &pt_len);
-        if (vrv != FHSM_RV_OK) { fhsm_zeroize(pt, sizeof(pt)); return vrv; }
-    } else if (mech_is_aes_cbc_wrap(pMechanism->mechanism)) {
-        /* AES-CBC / AES-CBC-PAD, all-mechanisms and permissive only; see
-         * aes_cbc_wrap_run. Decryption yields no more than it is given, so a
-         * blob of at most sizeof(pt) bytes fits. */
-        if (ukt != CKK_AES) return 0x000000F2UL;   /* CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT */
-        if (ulWrappedKeyLen == 0 || ulWrappedKeyLen % 16 != 0
-            || ulWrappedKeyLen > sizeof(pt))
-            return 0x00000112UL;                   /* CKR_WRAPPED_KEY_LEN_RANGE */
-        fhsm_rv_t crv = aes_cbc_wrap_run(0, pMechanism, ukv, ukl,
-                                         pWrappedKey, ulWrappedKeyLen, pt, &pt_len);
-        if (crv != FHSM_RV_OK) { fhsm_zeroize(pt, sizeof(pt)); return crv; }
-    } else {
-        return FHSM_RV_MECHANISM_INVALID;
-    }
-
-    /* Import the decrypted bytes as a fresh object: a secret key, or the
-     * private key the template's CKA_CLASS names. From here to the import,
-     * every exit goes through pt_done, which clears pt. */
-    uint32_t handle = 0;
-    char label[64] = "";
-    uint32_t key_type = CKK_AES;
-    uint32_t obj_class = CKO_SECRET_KEY;
-    uint8_t obj_flags = FHSM_OBJF_SENSITIVE;
-    long li = find_attr(pTemplate, ulCount, CKA_CLASS);
-    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen == sizeof(CK_ULONG)
-        && *(CK_ULONG *)pTemplate[li].pValue == CKO_PRIVATE_KEY)
-        obj_class = CKO_PRIVATE_KEY;
-    li = find_attr(pTemplate, ulCount, CKA_LABEL);
-    if (li >= 0) {
-        size_t n = pTemplate[li].ulValueLen;
-        if (n >= sizeof(label)) n = sizeof(label) - 1;
-        memcpy(label, pTemplate[li].pValue, n); label[n] = '\0';
-    }
-    li = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
-    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen == sizeof(CK_ULONG))
-        key_type = (uint32_t)(*(CK_ULONG*)pTemplate[li].pValue);
-    /* Tookan §3.3 : an attacker who can wrap a CKA_SENSITIVE key and then
-     * unwrap it supplies CKA_SENSITIVE=FALSE here and gets a readable copy.
-     * Reproduced: a SENSITIVE=True key came back as 16 plaintext bytes.
-     *
-     * A previous attempt refused the downgrade outright. That blocked the
-     * attack but broke seven legitimate round-trips (wrap -> unwrap -> read
-     * back and compare is the standard way to verify a wrapping mechanism at
-     * all), because the blob carries no attributes and the module cannot tell
-     * an attacker's downgrade from a non-sensitive key being re-imported.
-     * Refusing every downgrade is not a defence, it is a denial of the
-     * feature. Reverted; the real fix is CKA_UNWRAP_TEMPLATE on the
-     * unwrapping key (§4.9), which lets the *wrapping key's* policy -- the
-     * only party that legitimately knows -- decide. Tracked as follow-up;
-     * documented as a known limitation until then. */
-    li = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
-    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
-        && ((unsigned char*)pTemplate[li].pValue)[0] == 0) {
-        /* Tookan §3.3 defence. The blob carries no attributes, so the module
-         * cannot know how sensitive the original was -- but if the unwrapping
-         * key was created with CKA_UNWRAP_TEMPLATE demanding CKA_SENSITIVE,
-         * its owner has already answered that question. §4.9 applies the user
-         * template "as if the object has already been created", so the one-way
-         * CKA_SENSITIVE rule makes this downgrade CKR_ATTRIBUTE_READ_ONLY.
-         * Without such a policy the downgrade is honoured, as refusing every
-         * one breaks legitimate round-trips (see the reverted attempt). */
-        uint8_t uwf = 0;
-        (void)fhsm_token_object_get_flags(t, (uint32_t)hUnwrappingKey, &uwf);
-        if (uwf & FHSM_OBJF_UNWRAP_SENS) {
-            rv = 0x00000010UL;   /* CKR_ATTRIBUTE_READ_ONLY */
-            goto pt_done;
-        }
-        obj_flags &= (uint8_t)~FHSM_OBJF_SENSITIVE;
-    }
-    li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
-    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
-        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
-        obj_flags |= FHSM_OBJF_EXTRACTABLE;
-
-    /* Key-type confusion defence (Tookan §3.x, #125
-     * TestKeyTypeConfusionOnUnwrap) : the unwrapped length must be valid for
-     * the claimed CKA_KEY_TYPE, otherwise a blob wrapped as one key type is
-     * being reinterpreted as an incompatible one. A CKA_VALUE_LEN in the
-     * template must also match the recovered length. */
-    if (key_type == CKK_AES && pt_len != 16 && pt_len != 24 && pt_len != 32) {
-        rv = FHSM_RV_KEY_TYPE_INCONSISTENT;
-        goto pt_done;
-    }
-    if (key_type == 0x15 /* CKK_DES3 */ && pt_len != 24) {
-        rv = FHSM_RV_KEY_TYPE_INCONSISTENT;
-        goto pt_done;
-    }
-    { long vli = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
-      if (vli >= 0 && pTemplate[vli].pValue
-          && pTemplate[vli].ulValueLen == sizeof(CK_ULONG)) {
-          CK_ULONG want_len = *(CK_ULONG*)pTemplate[vli].pValue;
-          if (want_len != pt_len) {
-              rv = FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-              goto pt_done;
-          }
-      }
-    }
-
-    {
-        size_t id_len = 0;
-        const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
-        if (obj_class == CKO_PRIVATE_KEY) {
-            /* The blob is a PKCS#8 PrivateKeyInfo, the form C_WrapKey gives.
-             * It is stored as every reader here expects it, i2d_PrivateKey's
-             * form, and sensitive whatever the template says, as an imported
-             * private key is. The key type is checked against the key: the
-             * blob carries one, and the template only claims one. */
-            const unsigned char *pp = pt;
-            PKCS8_PRIV_KEY_INFO *inf = d2i_PKCS8_PRIV_KEY_INFO(NULL, &pp, (long)pt_len);
-            EVP_PKEY *pk = (inf && pp == pt + pt_len) ? EVP_PKCS82PKEY(inf) : NULL;
-            PKCS8_PRIV_KEY_INFO_free(inf);
-            uint8_t *der = NULL;
-            int dl = 0;
-            if (!pk) {
-                rv = 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
-            } else if (!pkey_is_ckk(pk, key_type)) {
-                rv = FHSM_RV_KEY_TYPE_INCONSISTENT;
-            } else if ((dl = i2d_PrivateKey(pk, &der)) <= 0) {
-                rv = FHSM_RV_FUNCTION_FAILED;
-            } else {
-                rv = fhsm_token_object_add(t, CKO_PRIVATE_KEY, key_type, label,
-                                            der, (size_t)dl, id, id_len,
-                                            obj_flags | FHSM_OBJF_SENSITIVE, &handle);
-            }
-            EVP_PKEY_free(pk);
-            OPENSSL_clear_free(der, dl > 0 ? (size_t)dl : 0);
-        } else {
-            rv = fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
-                                        pt, pt_len, id, id_len, obj_flags, &handle);
-        }
-    }
-pt_done:
-    fhsm_zeroize(pt, sizeof(pt));
-    if (rv != FHSM_RV_OK) return rv;
-    *phKey = handle;
     /* §5.18: an unwrapped key was outside the token, in whatever hands. */
     { CK_RV ar = fhsm_add_key_history(t, handle, FHSM_KEY_FROM_OUTSIDE);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; } }
@@ -6144,6 +6175,7 @@ pt_done:
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
     (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(obj_class, pTemplate, ulCount));
+    *phKey = handle;
     (void)fhsm_audit_event(FHSM_EV_UNWRAP, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
     return FHSM_RV_OK;
@@ -11175,8 +11207,10 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             kwname = (kvl == 16) ? "AES-128-WRAP-PAD" :
                      (kvl == 24) ? "AES-192-WRAP-PAD" : "AES-256-WRAP-PAD";
         }
-        /* Sized like the C_UnwrapKey buffer, plus a cipher block of slack for
-         * what EVP writes before trimming. */
+        /* Sized like the C_UnwrapKey stack buffer before #29 moved it to the
+         * secure heap, plus a cipher block of slack for what EVP writes
+         * before trimming. This is data the caller decrypts into its own
+         * buffer, not a key the module keeps. */
         static const size_t KW_MAX = 4096;
         if (upper > KW_MAX) {
             op->active = 0;

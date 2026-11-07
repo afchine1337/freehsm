@@ -803,10 +803,11 @@ tests/test_robustness_args: tests/test_robustness_args.c $(LIB)
 tests/test_op_state: tests/test_op_state.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
-# C_UnwrapKey must bound the wrapped blob before decrypting into its
-# 256-byte stack buffer, and must validate the unwrapping-key size the way
-# C_WrapKey already did. Found 2026-09-07 by pkcs11-check against the
-# Wycheproof AES-KW vectors, as an abort from _FORTIFY_SOURCE.
+# C_UnwrapKey must bound the wrapped blob before decrypting it, and must
+# validate the unwrapping-key size the way C_WrapKey already did. Found
+# 2026-09-07 by pkcs11-check against the Wycheproof AES-KW vectors, as an
+# abort from _FORTIFY_SOURCE. Since #29 the plaintext is in the secure heap;
+# the second run, with a 256 KiB arena (--tiny), checks CKR_DEVICE_MEMORY.
 tests/test_unwrap_len: tests/test_unwrap_len.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
@@ -1355,6 +1356,9 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_op_state
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_unwrap_len
+	d=$$(mktemp -d) && printf 'secure_heap_kb = 256\n' > $$d/tiny.conf && \
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$d FHSM_CONF=$$d/tiny.conf OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_unwrap_len --tiny
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_hmac_multipart
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

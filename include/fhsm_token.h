@@ -134,6 +134,12 @@ void fhsm_token_logout(fhsm_token_t *t);
 #define FHSM_MAX_OBJECTS 1024
 #endif
 
+/* Largest object value the store holds (v2 records, #110). Here rather than in
+ * fhsm_token.c because C_UnwrapKey refuses a blob whose plaintext could not be
+ * stored before it allocates anything for it (#29). 2 MiB covers 1 MiB data
+ * objects (test_large_objects) with headroom. */
+#define FHSM_OBJ_VALUE_MAX  (2u * 1024u * 1024u)
+
 fhsm_role_t fhsm_token_current_role(const fhsm_token_t *t);
 
 /* PIN administration. SO can change either PIN; USER can change only

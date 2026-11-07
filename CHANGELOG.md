@@ -7,6 +7,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+* **`C_UnwrapKey` holds the decrypted key in the secure heap (#29).** It was
+  a 4 KiB array on the stack, which is not locked in memory, and the size
+  refused a wrapped ML-DSA-87 private key (about 4.9 KiB as PKCS#8). The
+  buffer now comes from the mlock'd arena at the size the mechanism can
+  write, and is cleared and released in one place: the checks that can fail
+  after the allocation are in two helpers that never own it. A full arena
+  answers `CKR_DEVICE_MEMORY`, as storing an object value does. The only
+  length bound that is not a mechanism's is the store's value cap (2 MiB).
+  `*phKey` is written only on success.
+
 ### Fixed
 * `tests/fhsm_crypt_cli.sh` altered a file by writing `X` over a ciphertext
   byte, which left it unchanged when that byte already was `X`: once in 256
