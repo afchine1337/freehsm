@@ -5654,13 +5654,23 @@ static CK_RV wrap_key_value(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism
     uint32_t cl = 0, kt = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hKey, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
-    /* If the source key is marked sensitive AND not extractable, refuse
-     * to wrap (CKR_KEY_UNEXTRACTABLE). */
-    uint8_t src_flags = 0;
-    (void)fhsm_token_object_get_flags(t, (uint32_t)hKey, &src_flags);
-    if ((src_flags & FHSM_OBJF_SENSITIVE)
-        && !(src_flags & FHSM_OBJF_EXTRACTABLE)) {
-        return 0x0000006AUL;   /* CKR_KEY_UNEXTRACTABLE (0x68 is KEY_FUNCTION_NOT_PERMITTED) */
+    /* §5.18.5: "The CKA_EXTRACTABLE attribute of the key to be wrapped MUST
+     * also be CK_TRUE." This used to refuse only a key that was sensitive
+     * *and* unextractable, so a key with CKA_EXTRACTABLE=FALSE and
+     * CKA_SENSITIVE=FALSE left the token wrapped -- while C_GetAttributeValue
+     * withheld its CKA_VALUE for the same flag. CKA_SENSITIVE governs reading
+     * the value in clear; CKA_EXTRACTABLE governs wrapping it; the two are
+     * independent, and only the first was enforced here. Found by
+     * pkcs11-check 0.3.0 (QC2/QC3 extractability tests).
+     *
+     * Private and secret keys carry the attribute; flags that cannot be read
+     * are taken as the strict answer, as C_GetAttributeValue does. Placed
+     * before the size query below, so the refusal does not leak the length. */
+    if (cl == CKO_PRIVATE_KEY || cl == CKO_SECRET_KEY) {
+        uint8_t src_flags = 0;
+        if (fhsm_token_object_get_flags(t, (uint32_t)hKey, &src_flags) != FHSM_RV_OK
+            || !(src_flags & FHSM_OBJF_EXTRACTABLE))
+            return 0x0000006AUL;   /* CKR_KEY_UNEXTRACTABLE (0x68 is KEY_FUNCTION_NOT_PERMITTED) */
     }
     /* A private key leaves as PKCS#8; see private_value_to_pkcs8. */
     if (pkcs8) { kv = pkcs8; kvl = pkcs8_len; }

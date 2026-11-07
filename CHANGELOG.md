@@ -49,6 +49,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   byte, which left it unchanged when that byte already was `X`: once in 256
   runs, the altered file decrypted and the test failed. It flips a bit now.
 
+### Security
+* **`C_WrapKey` wrapped a key whose `CKA_EXTRACTABLE` is FALSE, unless the
+  key was also sensitive.** PKCS#11 v3.2 §5.18.5 says the key to be wrapped
+  MUST have `CKA_EXTRACTABLE=TRUE`; the module refused only a key that was
+  sensitive and not extractable. `CKA_SENSITIVE` defaults to FALSE, so a key
+  created with `CKA_EXTRACTABLE=FALSE` alone, or cleared to FALSE by
+  `C_SetAttributeValue` or `C_CopyObject`, left the token wrapped under any
+  key with `CKA_WRAP=TRUE`, while `C_GetAttributeValue` withheld its value
+  for the same flag. That includes the output of the byte-level derivations
+  made unextractable by the GHSA-4x45-2v79-28cj fix in 2.6.0, and of HKDF. It
+  takes a logged-in session. A private or secret key is now refused
+  `CKR_KEY_UNEXTRACTABLE` whenever it is not extractable, the size query
+  included. Present since 1.1.0, in both profiles. Found by
+  pkcs11-check 0.3.0. `tests/test_wrap_unextractable.c`.
+
 ## [2.6.0] --- 2026-11-04
 
 *Minor: public objects can be found and read before a login, from a new

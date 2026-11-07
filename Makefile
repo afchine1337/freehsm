@@ -1027,6 +1027,10 @@ tests/test_nested_templates: tests/test_nested_templates.c libfreehsm.so
 tests/test_wrap_with_trusted: tests/test_wrap_with_trusted.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# C_WrapKey refuses CKA_EXTRACTABLE=FALSE whether or not the key is sensitive.
+tests/test_wrap_unextractable: tests/test_wrap_unextractable.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # C_Finalize releases the state it built, authentication included. #125 fixed
 # the fork half of this; the same-process half stayed until 2026-09-19.
 tests/test_finalize_release: tests/test_finalize_release.c $(LIB)
@@ -1278,6 +1282,7 @@ TEST_BINS = \
 	tests/test_allowed_mechanisms \
 	tests/test_nested_templates \
 	tests/test_wrap_with_trusted \
+	tests/test_wrap_unextractable \
 	tests/test_finalize_release \
 	tests/test_apilock \
 	tests/test_concurrency \
@@ -1441,6 +1446,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_nested_templates
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_wrap_with_trusted
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_wrap_unextractable
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_finalize_release
 # The concurrency tests (#111-prep) were run by hand under TSAN=1 and by
