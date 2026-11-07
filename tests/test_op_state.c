@@ -92,7 +92,15 @@ int main(void) {
     CK_MECHANISM aesgen = { CKM_AES_KEY_GEN, NULL, 0 };
     C_GenerateKey(s, &aesgen, at, 4, &ak);
 
-    /* (1) leave an operation active, close, reopen : must not bleed */
+    /* (1) leave an operation active, close, reopen : must not bleed.
+     *
+     * A second session stays open across the close. Closing the last session
+     * logs the token out, and a logout gives private objects new handles
+     * (PKCS#11 v3.2 §5.6.8), so `ak` would be gone and this probe would test
+     * the handle instead of the operation state. The keeper is opened after
+     * `s`, so the slot `s` frees is the one the reopen takes. */
+    CK_SESSION_HANDLE keeper = 0;
+    C_OpenSession(0, CKF_RW, NULL, NULL, &keeper);
     CK_BYTE iv[16] = {0};
     CK_MECHANISM cbc = { CKM_AES_CBC, iv, 16 };
     C_EncryptInit(s, &cbc, ak);            /* active = 1, not terminated */

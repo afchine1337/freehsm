@@ -26,6 +26,11 @@
  *   (5) EXTRACTABLE cleared by C_SetAttributeValue: refused afterwards.
  *   (6) a C_CopyObject copy made with CKA_EXTRACTABLE=FALSE: refused, while
  *       its extractable source still wraps.
+ *   (7) C_UnwrapKey: §5.18.6 says "The CKA_EXTRACTABLE attribute is by
+ *       default set to CK_TRUE." A key unwrapped from a template that does
+ *       not name it reads back TRUE and wraps again; one unwrapped with
+ *       EXTRACTABLE=FALSE reads back FALSE and is refused. The default was
+ *       FALSE; also found by pkcs11-check 0.3.0.
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -47,6 +52,7 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKA_KEY_TYPE                 0x100UL
 #define CKA_SENSITIVE                0x103UL
 #define CKA_WRAP                     0x106UL
+#define CKA_UNWRAP                   0x107UL
 #define CKA_EXTRACTABLE              0x162UL
 #define CKO_SECRET_KEY               4UL
 #define CKK_AES                      0x1FUL
@@ -77,6 +83,9 @@ static CK_RV (*C_CopyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK
 static CK_RV (*C_SetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
 static CK_RV (*C_WrapKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,
                           CK_OBJECT_HANDLE,CK_BYTE*,CK_ULONG*);
+static CK_RV (*C_UnwrapKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,
+                            CK_BYTE*,CK_ULONG,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
+static CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
 
 static CK_ULONG g_klass = CKO_SECRET_KEY, g_aes = CKK_AES;
 static CK_BYTE  g_yes = 1, g_no = 0;
@@ -86,7 +95,7 @@ static const CK_BYTE g_val[16] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 };
 static CK_RV make_key(CK_SESSION_HANDLE s, const char *label, int sens, int extr,
                       int wrap, CK_OBJECT_HANDLE *out)
 {
-    CK_ATTRIBUTE t[10];
+    CK_ATTRIBUTE t[12];
     CK_ULONG c = 0;
     t[c].type = CKA_CLASS;    t[c].pValue = &g_klass; t[c].ulValueLen = sizeof g_klass; c++;
     t[c].type = CKA_KEY_TYPE; t[c].pValue = &g_aes;   t[c].ulValueLen = sizeof g_aes; c++;
@@ -98,7 +107,8 @@ static CK_RV make_key(CK_SESSION_HANDLE s, const char *label, int sens, int extr
                         t[c].ulValueLen = 1; c++; }
     if (extr != OMIT) { t[c].type = CKA_EXTRACTABLE; t[c].pValue = extr ? &g_yes : &g_no;
                         t[c].ulValueLen = 1; c++; }
-    if (wrap) { t[c].type = CKA_WRAP; t[c].pValue = &g_yes; t[c].ulValueLen = 1; c++; }
+    if (wrap) { t[c].type = CKA_WRAP;   t[c].pValue = &g_yes; t[c].ulValueLen = 1; c++;
+                t[c].type = CKA_UNWRAP; t[c].pValue = &g_yes; t[c].ulValueLen = 1; c++; }
     *out = 0;
     return C_CreateObject(s, t, c, out);
 }
@@ -112,6 +122,31 @@ static CK_RV wrap(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE wrapper, CK_OBJECT_HANDL
     return C_WrapKey(s, &m, wrapper, k, size_query ? NULL : out, &ol);
 }
 
+/* Unwraps `blob` as a session AES key; `extr` is 1, 0 or OMIT. */
+static CK_RV unwrap(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE wrapper,
+                    CK_BYTE *blob, CK_ULONG bl, int extr, CK_OBJECT_HANDLE *out)
+{
+    CK_MECHANISM m = { CKM_AES_KEY_WRAP, NULL, 0 };
+    CK_ATTRIBUTE t[4];
+    CK_ULONG c = 0;
+    t[c].type = CKA_CLASS;    t[c].pValue = &g_klass; t[c].ulValueLen = sizeof g_klass; c++;
+    t[c].type = CKA_KEY_TYPE; t[c].pValue = &g_aes;   t[c].ulValueLen = sizeof g_aes; c++;
+    t[c].type = CKA_TOKEN;    t[c].pValue = &g_no;    t[c].ulValueLen = 1; c++;
+    if (extr != OMIT) { t[c].type = CKA_EXTRACTABLE; t[c].pValue = extr ? &g_yes : &g_no;
+                        t[c].ulValueLen = 1; c++; }
+    *out = 0;
+    return C_UnwrapKey(s, &m, wrapper, blob, bl, t, c, out);
+}
+
+/* CKA_EXTRACTABLE as read back: 1, 0, or -1 if it could not be read. */
+static int read_extractable(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE k)
+{
+    CK_BYTE v = 0xFF;
+    CK_ATTRIBUTE a = { CKA_EXTRACTABLE, &v, 1 };
+    if (C_GetAttributeValue(s, k, &a, 1) != CKR_OK || a.ulValueLen != 1) return -1;
+    return v ? 1 : 0;
+}
+
 int main(void)
 {
     void *lib = dlopen("./libfreehsm.so", RTLD_NOW);
@@ -120,11 +155,13 @@ int main(void)
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
     SYM(C_Login); SYM(C_Logout); SYM(C_InitPIN); SYM(C_CreateObject);
     SYM(C_CopyObject); SYM(C_SetAttributeValue); SYM(C_WrapKey);
-    if (!C_WrapKey || !C_CopyObject || !C_SetAttributeValue || !C_Logout) {
+    SYM(C_UnwrapKey); SYM(C_GetAttributeValue);
+    if (!C_WrapKey || !C_CopyObject || !C_SetAttributeValue || !C_Logout
+        || !C_UnwrapKey || !C_GetAttributeValue) {
         fprintf(stderr, "missing symbols\n"); return 2;
     }
 
-    printf("C_WrapKey and CKA_EXTRACTABLE=FALSE\n\n");
+    printf("C_WrapKey, C_UnwrapKey and CKA_EXTRACTABLE\n\n");
 
     CK_BYTE label[32]; memset(label,' ',32); memcpy(label,"wrapunx",7);
     if (C_Initialize(NULL)) { fprintf(stderr,"C_Initialize\n"); return 2; }
@@ -183,6 +220,25 @@ int main(void)
            "(6) a copy made with EXTRACTABLE=FALSE: refused");
         ok(wrap(s, wrapper, open_k, 0) == CKR_OK,
            "    while its extractable source still wraps");
+    }
+
+    /* (7) C_UnwrapKey's default. */
+    {
+        CK_MECHANISM m = { CKM_AES_KEY_WRAP, NULL, 0 };
+        CK_BYTE blob[64];
+        CK_ULONG bl = sizeof blob;
+        CK_OBJECT_HANDLE u_def = 0, u_unx = 0;
+        ok(C_WrapKey(s, &m, wrapper, open_k, blob, &bl) == CKR_OK,
+           "(7) a key wraps, to be unwrapped below");
+        ok(unwrap(s, wrapper, blob, bl, OMIT, &u_def) == CKR_OK
+           && read_extractable(s, u_def) == 1,
+           "    unwrapped without CKA_EXTRACTABLE: reads back TRUE");
+        ok(wrap(s, wrapper, u_def, 0) == CKR_OK,
+           "    and wraps again");
+        ok(unwrap(s, wrapper, blob, bl, 0, &u_unx) == CKR_OK
+           && read_extractable(s, u_unx) == 0
+           && wrap(s, wrapper, u_unx, 0) == CKR_KEY_UNEXTRACTABLE,
+           "    unwrapped with EXTRACTABLE=FALSE: reads FALSE, refused");
     }
 
     C_Finalize(NULL);

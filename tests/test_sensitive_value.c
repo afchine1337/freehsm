@@ -27,7 +27,9 @@
  *   (4) imported, not sensitive, CKA_EXTRACTABLE=FALSE: withheld
  *   (5) asked together with CKA_LABEL: the label is given, the value is not,
  *       and the call returns CKR_ATTRIBUTE_SENSITIVE
- *   (6) a public key's CKA_VALUE is still given
+ *   (6) a public key's public material (CKA_EC_POINT) is still given; its
+ *       CKA_VALUE, which v3.2 does not define for EC, is
+ *       CKR_ATTRIBUTE_TYPE_INVALID rather than CKR_ATTRIBUTE_SENSITIVE
  *   (7) C_CreateObject keeps what the template says: CKA_SENSITIVE and
  *       CKA_EXTRACTABLE read back as given, and a key imported sensitive and
  *       extractable is withheld. Import ignored both, so an imported secret
@@ -60,6 +62,8 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKA_VALUE_LEN            0x161UL
 #define CKA_EXTRACTABLE          0x162UL
 #define CKA_EC_PARAMS            0x180UL
+#define CKA_EC_POINT             0x181UL
+#define CKR_ATTRIBUTE_TYPE_INVALID 0x12UL
 #define CKO_SECRET_KEY           4UL
 #define CKK_AES                  0x1FUL
 #define CKM_AES_KEY_GEN          0x1080UL
@@ -239,9 +243,16 @@ int main(void)
         if (C_GenerateKeyPair(s, &m, pt, 3, kt, 2, &pub, &priv) != CKR_OK) {
             fprintf(stderr, "C_GenerateKeyPair\n"); return 2;
         }
+        /* An EC public key has no CKA_VALUE in v3.2; its public material is
+         * CKA_EC_POINT, and that is what must not be withheld. CKA_VALUE is
+         * absent, not sensitive. */
+        CK_ATTRIBUTE ep = { CKA_EC_POINT, buf, sizeof buf };
+        ok(C_GetAttributeValue(s, pub, &ep, 1) == CKR_OK
+           && ep.ulValueLen != UNAVAILABLE && ep.ulValueLen > 0,
+           "(6) a public key's CKA_EC_POINT is given");
         rv = read_value(s, pub, buf, sizeof buf, &len, &size_rv, &size_len);
-        ok(rv == CKR_OK && len != UNAVAILABLE && len > 0,
-           "(6) a public key's CKA_VALUE is given");
+        ok(rv == CKR_ATTRIBUTE_TYPE_INVALID && len == UNAVAILABLE,
+           "(6) its CKA_VALUE is absent, not withheld as sensitive");
         rv = read_value(s, priv, buf, sizeof buf, &len, &size_rv, &size_len);
         ok(rv == CKR_ATTRIBUTE_SENSITIVE && len == UNAVAILABLE,
            "(6) its private half's is not");

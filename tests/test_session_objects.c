@@ -152,6 +152,59 @@ int main(void) {
       if (r4 != 0UL) { fprintf(stderr,"FAIL: logout from a peer session 0x%lx (want 0)\n",(unsigned long)r4); fails++; }
       else printf("  a peer session may log the token out : OK\n"); }
 
+    /* What C_Logout does to private objects (PKCS#11 v3.2 §5.6.8): "any of
+     * the application's handles to private objects become invalid (even if a
+     * user is later logged back into the token, those handles remain
+     * invalid). In addition, all private session objects from sessions
+     * belonging to the application are destroyed." Both survived the logout
+     * here: the session objects stayed, and every old handle worked again
+     * after the next login. Found by pkcs11-check 0.3.0. The private session
+     * objects of both sessions go, the token object stays under a new handle
+     * that C_FindObjects returns, and the old handle stays invalid. */
+    { CK_RV (*C_Logout)(CK_SESSION_HANDLE); *(void**)&C_Logout = dlsym(H,"C_Logout");
+      CK_RV (*GA)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
+      *(void**)&GA = dlsym(H,"C_GetAttributeValue");
+      CK_SESSION_HANDLE p1, p2; OS(0,6,NULL,NULL,&p1); OS(0,6,NULL,NULL,&p2);
+      (void)L(p1,1,up,8);
+      CK_ULONG lcls = 4, lkt = 0x1F, lvl = 32; CK_BYTE lT = 1, lF = 0;
+      static char l_s1[] = "lo-sess-1", l_s2[] = "lo-sess-2", l_tok[] = "lo-token";
+      CK_ATTRIBUTE a1[] = { {0,&lcls,8}, {0x100,&lkt,8}, {0x161,&lvl,8}, {0x01,&lF,1},
+                            {0x03,l_s1,sizeof l_s1 - 1} };
+      CK_ATTRIBUTE a2[] = { {0,&lcls,8}, {0x100,&lkt,8}, {0x161,&lvl,8}, {0x01,&lF,1},
+                            {0x03,l_s2,sizeof l_s2 - 1} };
+      CK_ATTRIBUTE a3[] = { {0,&lcls,8}, {0x100,&lkt,8}, {0x161,&lvl,8}, {0x01,&lT,1},
+                            {0x03,l_tok,sizeof l_tok - 1} };
+      CK_OBJECT_HANDLE hs1 = 0, hs2 = 0, htok = 0;
+      CK_MECHANISM kg = { 0x1080, 0, 0 };
+      int made = GK(p1, &kg, a1, 5, &hs1) == 0 && GK(p2, &kg, a2, 5, &hs2) == 0
+                 && GK(p1, &kg, a3, 5, &htok) == 0;
+      if (!made) { fprintf(stderr,"FAIL: logout case: keys not generated\n"); fails++; }
+
+      #define FIND_LABEL(s, l, out, n) do { CK_ATTRIBUTE ft = {0x03, (l), sizeof(l) - 1}; \
+          (n) = 0; FI((s), &ft, 1); FO((s), (out), 4, &(n)); FF(s); } while (0)
+      CK_ULONG cc = 0; CK_ATTRIBUTE q = {0,&cc,8};
+      CK_RV rlo = C_Logout(p2);                         /* from the other session */
+      if (made && rlo != 0UL) { fprintf(stderr,"FAIL: logout 0x%lx\n",(unsigned long)rlo); fails++; }
+      (void)L(p1,1,up,8);
+      CK_OBJECT_HANDLE f[4]; CK_ULONG n1, n2, nt;
+      FIND_LABEL(p1, l_s1, f, n1);
+      FIND_LABEL(p2, l_s2, f, n2);
+      FIND_LABEL(p2, l_tok, f, nt);
+      if (made && (n1 != 0 || n2 != 0)) {
+          fprintf(stderr,"FAIL: private session objects after logout: %lu, %lu (want 0, 0)\n", n1, n2); fails++;
+      } else if (made) printf("  C_Logout destroys the private session objects of both sessions : OK\n");
+      CK_RV rs = GA(p1, hs1, &q, 1), rt = GA(p2, htok, &q, 1);
+      if (made && (rs != 0x82UL || rt != 0x82UL)) {
+          fprintf(stderr,"FAIL: old handles after relogin 0x%lx, 0x%lx (want 0x82, 0x82)\n",
+                  (unsigned long)rs, (unsigned long)rt); fails++;
+      } else if (made) printf("  old private handles stay invalid after a relogin : OK\n");
+      cc = 0;
+      if (made && (nt != 1 || f[0] == htok || GA(p2, f[0], &q, 1) != 0UL || cc != 4)) {
+          fprintf(stderr,"FAIL: token object after relogin: %lu found (want 1, new handle, usable)\n", nt); fails++;
+      } else if (made) printf("  the private token object is found again under a new handle : OK\n");
+      #undef FIND_LABEL
+      (void)C_Logout(p1); CSf(p1); CSf(p2); }
+
     if (fails) { fprintf(stderr, "test_session_objects : %d FAIL\n", fails); return 1; }
     printf("test_session_objects : PASS\n");
     return 0;

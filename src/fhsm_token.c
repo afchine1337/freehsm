@@ -1641,6 +1641,30 @@ again: ;   /* a label must precede a statement, not the declaration below */
                                               : FHSM_RV_PIN_INCORRECT;
 }
 
+/* CKA_PRIVATE as C_GetAttributeValue reports it: TRUE but for public keys
+ * and certificates. */
+static int obj_is_private(const fhsm_object_t *o) {
+    return o->class != FHSM_CKO_PUBLIC_KEY && o->class != FHSM_CKO_CERTIFICATE;
+}
+
+/* PKCS#11 v3.2 §5.6.8 (C_Logout): "When C_Logout successfully executes, any
+ * of the application's handles to private objects become invalid (even if a
+ * user is later logged back into the token, those handles remain invalid).
+ * In addition, all private session objects from sessions belonging to the
+ * application are destroyed." This only dropped the DEK and the role: a
+ * private session object outlived the logout, and every old handle worked
+ * again after the next login. Found by pkcs11-check 0.3.0.
+ *
+ * The private session objects of every session are destroyed: login state
+ * belongs to the token, so this logout is every session's. The private token
+ * objects stay, under fresh handles taken from next_handle, so an old handle
+ * finds nothing, now or after a relogin; C_FindObjects returns the new ones.
+ * The store on disk keeps the old numbers until the next login rewrites it
+ * (write_atomic copies the blob as it is while the DEK is gone), and a new
+ * process reads whatever is on disk: handles are not promised across
+ * processes. Public objects keep their handles, as they keep their place in
+ * the public section. Values are released through obj_free_value, which
+ * defers to fhsm_api_free_value, as C_CloseSession's destruction does. */
 void fhsm_token_logout(fhsm_token_t *t) {
     if (!t) return;
     pthread_mutex_lock(&t->mu);
@@ -1648,7 +1672,33 @@ void fhsm_token_logout(fhsm_token_t *t) {
      * 32-byte buffer in place (it remains allocated for the next login). */
     if (t->dek) fhsm_zeroize(t->dek, DEK_LEN);
     t->dek_live  = 0;
+    /* Closing the last session comes here whether or not anyone logged in;
+     * only a logout of a logged-in token touches the objects. */
+    const int was_in = t->logged_in != FHSM_ROLE_NONE;
     t->logged_in = FHSM_ROLE_NONE;
+
+    uint32_t i = 0;
+    int changed = 0;
+    while (was_in && i < t->object_count) {
+        fhsm_object_t *o = &t->objects[i];
+        if (!obj_is_private(o)) { i++; continue; }
+        if (o->owner_session != 0) {
+            obj_free_value(o);
+            fhsm_zeroize(o, sizeof(*o));
+            if (i != t->object_count - 1) {
+                t->objects[i] = t->objects[t->object_count - 1];
+                fhsm_zeroize(&t->objects[t->object_count - 1], sizeof(t->objects[0]));
+            }
+            t->object_count--;
+            changed = 1;
+            continue;   /* the swapped-in entry is checked next */
+        }
+        o->handle = (t->next_handle == 0) ? 1 : t->next_handle;
+        t->next_handle = o->handle + 1;
+        changed = 1;
+        i++;
+    }
+    if (changed) t->objects_dirty = 1;
     pthread_mutex_unlock(&t->mu);
 }
 

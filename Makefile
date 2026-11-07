@@ -1031,6 +1031,14 @@ tests/test_wrap_with_trusted: tests/test_wrap_with_trusted.c libfreehsm.so
 tests/test_wrap_unextractable: tests/test_wrap_unextractable.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# RSA, EC, Edwards and Montgomery public keys have no CKA_VALUE.
+tests/test_pub_value_absent: tests/test_pub_value_absent.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
+# A DES-family key from a byte derivation has its parity bits set.
+tests/test_derive_des_parity: tests/test_derive_des_parity.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # C_Finalize releases the state it built, authentication included. #125 fixed
 # the fork half of this; the same-process half stayed until 2026-09-19.
 tests/test_finalize_release: tests/test_finalize_release.c $(LIB)
@@ -1283,6 +1291,8 @@ TEST_BINS = \
 	tests/test_nested_templates \
 	tests/test_wrap_with_trusted \
 	tests/test_wrap_unextractable \
+	tests/test_pub_value_absent \
+	tests/test_derive_des_parity \
 	tests/test_finalize_release \
 	tests/test_apilock \
 	tests/test_concurrency \
@@ -1448,6 +1458,10 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_wrap_with_trusted
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_wrap_unextractable
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_pub_value_absent
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_derive_des_parity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_finalize_release
 # The concurrency tests (#111-prep) were run by hand under TSAN=1 and by

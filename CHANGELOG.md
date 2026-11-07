@@ -30,6 +30,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `CKA_EXTRACTABLE` from the template "with a default of CK_TRUE"; the module
   defaulted to FALSE. A caller that wants the shared secret kept from
   `C_WrapKey` sets `CKA_EXTRACTABLE=FALSE`.
+* **The key from `C_UnwrapKey` is extractable unless the template says
+  otherwise.** PKCS#11 v3.2 §5.18.6: "The CKA_EXTRACTABLE attribute is by
+  default set to CK_TRUE." The module set it only when the template asked.
+  The key stays sensitive by default, so its value is still withheld; it can
+  be wrapped again. Found by pkcs11-check 0.3.0.
+  `tests/test_wrap_unextractable.c`, case (7).
+* **An RSA, EC, Edwards or Montgomery public key has no `CKA_VALUE`.**
+  `C_GetAttributeValue` returned the SubjectPublicKeyInfo the module stores,
+  a form of its own; PKCS#11 v3.2 defines no `CKA_VALUE` for these keys, and
+  it now answers `CKR_ATTRIBUTE_TYPE_INVALID`. The key is read from
+  `CKA_MODULUS` and `CKA_PUBLIC_EXPONENT`, or `CKA_EC_PARAMS` and
+  `CKA_EC_POINT`, as `pkcs11-tool --read-object` and `tools/pkiops.c`
+  already do. ML-KEM, ML-DSA and SLH-DSA public keys keep their raw
+  `CKA_VALUE`, and the composite key its blob. Found by pkcs11-check 0.3.0.
+  `tests/test_pub_value_absent.c`.
 
 ### Fixed
 * **`C_EncapsulateKey` and `C_DecapsulateKey` did not give the new key the
@@ -48,6 +63,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
 * `tests/fhsm_crypt_cli.sh` altered a file by writing `X` over a ciphertext
   byte, which left it unchanged when that byte already was `X`: once in 256
   runs, the altered file decrypted and the test failed. It flips a bit now.
+* A DES, DES2, DES3 or CDMF key derived with `CKM_CONCATENATE_*`,
+  `CKM_XOR_BASE_AND_DATA`, HKDF or ECDH kept the low bit of every byte as the
+  derivation gave it. PKCS#11 v3.2 has the derivation set the parity bits for
+  those key types, and it does now. DES ignores them, so no result changes;
+  the stored value is the one a DES key generator would give. Found by
+  pkcs11-check 0.3.0. `tests/test_derive_des_parity.c`.
+* **`C_Logout` left private objects reachable by their old handles.**
+  PKCS#11 v3.2 §5.6.8: the handles to private objects become invalid, "even
+  if a user is later logged back into the token", and the private session
+  objects are destroyed. The logout only dropped the key and the role: a
+  private session object outlived it, and every old handle worked again after
+  the next login. The private session objects of every session on the token
+  are now destroyed, and the private token objects take new handles, which
+  `C_FindObjects` returns; an old handle answers
+  `CKR_OBJECT_HANDLE_INVALID`. The same happens when closing the last session
+  logs the token out. Public objects keep their handles. Found by
+  pkcs11-check 0.3.0. `tests/test_session_objects.c`.
 
 ### Security
 * **`C_WrapKey` wrapped a key whose `CKA_EXTRACTABLE` is FALSE, unless the

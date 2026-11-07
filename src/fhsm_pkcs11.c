@@ -5350,12 +5350,35 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
           derived_ckk = (uint32_t)req;
       }
     }
+    /* A DES, DES2, DES3 or CDMF key derived here gets its parity bits set:
+     * PKCS#11 v3.2 has the derivation mechanisms adjust them for those key
+     * types, and the bytes came out of a concatenation, an XOR or a KDF with
+     * whatever low bits they had. The cipher ignores them, so this changes
+     * the stored value and no result; a caller that reads the value, or
+     * checks parity as some tokens do on import, saw keys no DES key
+     * generator would produce. Found by pkcs11-check 0.3.0 (the byte
+     * derivations, four mechanisms by four key types). */
+    uint8_t des_buf[24];
+    int des_fixed = 0;
+    if (obj_class == CKO_SECRET_KEY
+        && (derived_ckk == 0x13 /* CKK_DES */ || derived_ckk == 0x14 /* CKK_DES2 */
+            || derived_ckk == 0x15 /* CKK_DES3 */ || derived_ckk == 0x1E /* CKK_CDMF */)
+        && secret_len > 0 && secret_len <= sizeof des_buf) {
+        for (size_t i = 0; i < secret_len; ++i) {
+            uint8_t b = secret[i] & 0xFE, ones = 0;
+            for (uint8_t v = b; v; v &= (uint8_t)(v - 1)) ones++;
+            des_buf[i] = (uint8_t)(b | ((ones & 1) ? 0 : 1));   /* odd parity */
+        }
+        secret = des_buf;
+        des_fixed = 1;
+    }
     uint32_t handle = 0;
     size_t id_len = 0;
     const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
     fhsm_rv_t rv = fhsm_token_object_add(t, obj_class, derived_ckk, label,
                                           secret, secret_len, id, id_len,
                                           obj_flags, &handle);
+    if (des_fixed) OPENSSL_cleanse(des_buf, sizeof des_buf);
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
     if (history) {
@@ -6040,9 +6063,14 @@ static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
             return 0x00000010UL;   /* CKR_ATTRIBUTE_READ_ONLY */
         obj_flags &= (uint8_t)~FHSM_OBJF_SENSITIVE;
     }
+    /* §5.18.6: "The CKA_EXTRACTABLE attribute is by default set to CK_TRUE."
+     * It used to be set only when the template asked for it. The key stays
+     * sensitive by default, so its value is still withheld; it can be wrapped
+     * again, as the caller who just unwrapped it could. Found by
+     * pkcs11-check 0.3.0. */
     li = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
-    if (li >= 0 && pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
-        && ((unsigned char*)pTemplate[li].pValue)[0] != 0)
+    if (li < 0 || (pTemplate[li].pValue && pTemplate[li].ulValueLen >= 1
+                   && ((unsigned char*)pTemplate[li].pValue)[0] != 0))
         obj_flags |= FHSM_OBJF_EXTRACTABLE;
 
     /* Key-type confusion defence (Tookan §3.x, #125
@@ -7992,6 +8020,20 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     if (!raw_ok) { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue; }
                     src = pqc_raw; src_len = rl;
                     break;
+                }
+                /* RSA, EC, Edwards and Montgomery public keys have no
+                 * CKA_VALUE in PKCS#11 v3.2: their tables list CKA_MODULUS
+                 * and CKA_PUBLIC_EXPONENT, or CKA_EC_PARAMS and CKA_EC_POINT.
+                 * This returned the stored SubjectPublicKeyInfo, a form of the
+                 * module's own that a caller could take for the standard
+                 * one. pkcs11-tool and tools/pkiops.c build the key from the
+                 * standard attributes. Found by pkcs11-check 0.3.0. */
+                if (cko_class == CKO_PUBLIC_KEY
+                    && (ckk_type == 0x00000000UL /* CKK_RSA */
+                        || ckk_type == 0x00000003UL /* CKK_EC */
+                        || ckk_type == 0x00000040UL /* CKK_EC_EDWARDS */
+                        || ckk_type == 0x00000041UL /* CKK_EC_MONTGOMERY */)) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
                 }
                 src = value;      src_len = value_len;
                 break;
