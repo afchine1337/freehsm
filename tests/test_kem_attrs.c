@@ -28,10 +28,14 @@
  *   (6) key type and length: AES-128 by CKA_VALUE_LEN, AES with 20 bytes and
  *       DES3 with 32 refused;
  *   (7) CKA_TOKEN=TRUE in a read-only session: CKR_SESSION_READ_ONLY;
- *   (8) the two shared secrets are still equal.
+ *   (8) the two shared secrets are still equal;
+ *   (9) each success writes one audit line, encapsulate or decapsulate, with
+ *       the parameter set; a refusal writes none.
  * ======================================================================== */
+#include <dirent.h>
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef unsigned long CK_RV, CK_ULONG, CK_SLOT_ID, CK_SESSION_HANDLE,
@@ -114,6 +118,36 @@ static CK_RV encap(CK_ATTRIBUTE *t, CK_ULONG n, CK_OBJECT_HANDLE *h) {
 /* Decapsulate the last ciphertext with t. */
 static CK_RV decap(CK_ATTRIBUTE *t, CK_ULONG n, CK_OBJECT_HANDLE *h) {
     return C_DecapsulateKey(s, &kem, priv, t, n, ct, ctl, h);
+}
+
+/* Lines of the audit log naming `event`, and how many of them also name an
+ * ML-KEM parameter set. The log is FHSM_TOKENS_DIR/audit.log.NNNNNN, one file
+ * per opening. -1 when there is no directory to read. */
+static int audit_count(const char *event, int *with_alg) {
+    const char *dir = getenv("FHSM_TOKENS_DIR");
+    DIR *d = dir ? opendir(dir) : NULL;
+    if (!d) return -1;
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"event\":\"%s\"", event);
+    int n = 0;
+    *with_alg = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strncmp(de->d_name, "audit.log.", 10) != 0) continue;
+        char path[1024];
+        snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        char line[8192];
+        while (fgets(line, sizeof line, f)) {
+            if (!strstr(line, pat)) continue;
+            n++;
+            if (strstr(line, "\"alg\":\"ML-KEM-")) (*with_alg)++;
+        }
+        fclose(f);
+    }
+    closedir(d);
+    return n;
 }
 
 int main(void)
@@ -287,6 +321,30 @@ int main(void)
            && q1[0].ulValueLen == 32 && q2[0].ulValueLen == 32
            && memcmp(v1, v2, 32) == 0,
            "(8) the two shared secrets are equal");
+    }
+
+    /* (9) The audit log. Counted before and after, so the cases above do not
+     *     have to be tallied: one success of each and one refusal of each. */
+    {
+        int ea0 = 0, da0 = 0, ea1 = 0, da1 = 0;
+        int e0 = audit_count("encapsulate", &ea0);
+        int d0 = audit_count("decapsulate", &da0);
+        if (e0 < 0 || d0 < 0) {
+            ok(0, "(9) the audit log is readable (FHSM_TOKENS_DIR)");
+        } else {
+            CK_ATTRIBUTE bad_t[] = { { CKA_CLASS, &cls_data, sizeof cls_data } };
+            CK_OBJECT_HANDLE e = 0, d = 0;
+            (void)encap(NULL, 0, &e);
+            (void)decap(NULL, 0, &d);
+            (void)encap(bad_t, 1, &e);
+            (void)decap(bad_t, 1, &d);
+            int e1 = audit_count("encapsulate", &ea1);
+            int d1 = audit_count("decapsulate", &da1);
+            ok(e0 > 0 && d0 > 0, "(9) the earlier cases were logged");
+            ok(e1 == e0 + 1 && d1 == d0 + 1,
+               "(9) one line per success, none per refusal");
+            ok(ea1 == e1 && da1 == d1, "(9) every line names the parameter set");
+        }
     }
 
     C_Finalize(NULL);

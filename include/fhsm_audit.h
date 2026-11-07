@@ -129,7 +129,14 @@ typedef enum fhsm_audit_event_e {
      * stolen certificate is not detectable by content, since every request it
      * makes is well-formed and authorised -- what changes is the rate and the
      * shape. Written once per crossing, never per refusal. */
-    FHSM_EV_IDENTITY_LIMITED = 85
+    FHSM_EV_IDENTITY_LIMITED = 85,
+    /* C_EncapsulateKey and C_DecapsulateKey. Each creates a key, as unwrap and
+     * derive do, and neither wrote a line: they were unreachable until the
+     * v3.2 interface was published, and the audit calls were never added when
+     * it was. At the end, as the comment at the top of this list asks, though
+     * 50 and 51, beside UNWRAP and DERIVE, are free. */
+    FHSM_EV_ENCAPSULATE      = 86,
+    FHSM_EV_DECAPSULATE      = 87
 } fhsm_audit_event_t;
 
 /* Open the audit log for a given token. Creates the file if absent,

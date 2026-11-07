@@ -6203,6 +6203,14 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
  *
  * ss belongs to the caller, which clears it. *phNewKey is written only on
  * success: every failure after the object exists destroys it. */
+/* The parameter set, for the audit line: which KEM was used, as a signature's
+ * line says "composite". A name, never a length of key material. */
+static const char *kem_set_name(const EVP_PKEY *pkey) {
+    return EVP_PKEY_is_a(pkey, "ML-KEM-512")  ? "ML-KEM-512"
+         : EVP_PKEY_is_a(pkey, "ML-KEM-768")  ? "ML-KEM-768"
+         : EVP_PKEY_is_a(pkey, "ML-KEM-1024") ? "ML-KEM-1024" : "ML-KEM";
+}
+
 static CK_RV kem_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                               CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                               const uint8_t *ss, size_t ss_len,
@@ -6414,12 +6422,19 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
         return FHSM_RV_FUNCTION_FAILED;
     }
+    const char *alg = kem_set_name(pkey);
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(pkey);
     *pulCiphertextLen = ct_len_out;
 
     CK_RV sr = kem_store_secret(t, hSession, pTemplate, ulCount, ss, ss_len, phNewKey);
     fhsm_zeroize(ss, sizeof(ss));
+    /* Success only, as for unwrap and derive: the line records a key that
+     * now exists. A size query (pCiphertext NULL) returned above, unlogged. */
+    if (sr == FHSM_RV_OK)
+        (void)fhsm_audit_event(FHSM_EV_ENCAPSULATE, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK,
+                                "alg", alg, FHSM_AUDIT_END);
     return sr;
 }
 
@@ -6587,11 +6602,16 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     /* A #define inside a function body still has file scope. Undefined here
      * so it does not reach the rest of the translation unit. */
 #undef MLKEM_DBG
+    const char *alg = kem_set_name(pkey);
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(pkey);
 
     CK_RV sr = kem_store_secret(t, hSession, pTemplate, ulCount, ss, ss_len, phNewKey);
     fhsm_zeroize(ss, sizeof(ss));
+    if (sr == FHSM_RV_OK)
+        (void)fhsm_audit_event(FHSM_EV_DECAPSULATE, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK,
+                                "alg", alg, FHSM_AUDIT_END);
     return sr;
 }
 

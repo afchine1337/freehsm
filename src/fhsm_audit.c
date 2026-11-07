@@ -129,6 +129,8 @@ static const char *event_name(fhsm_audit_event_t ev) {
         case FHSM_EV_REQUEST_REFUSED:  return "request_refused";
         case FHSM_EV_IDENTITY_RESUMED: return "identity_resumed";
         case FHSM_EV_IDENTITY_LIMITED: return "identity_limited";
+        case FHSM_EV_ENCAPSULATE:      return "encapsulate";
+        case FHSM_EV_DECAPSULATE:      return "decapsulate";
         default:                       return "unknown";
     }
 }

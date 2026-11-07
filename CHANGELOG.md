@@ -7,6 +7,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+* **Audit events `encapsulate` (86) and `decapsulate` (87).** `C_EncapsulateKey`
+  and `C_DecapsulateKey` create a key, as `C_UnwrapKey` and `C_DeriveKey` do,
+  and wrote no line. Each success now writes one, with the parameter set as
+  `alg` (`ML-KEM-768`, for instance); a refusal writes none, as for unwrap
+  and derive. New values, appended: the existing ones are unchanged.
+  `tests/test_kem_attrs.c`, (9).
+
 ### Changed
 * **`C_UnwrapKey` holds the decrypted key in the secure heap (#29).** It was
   a 4 KiB array on the stack, which is not locked in memory, and the size
