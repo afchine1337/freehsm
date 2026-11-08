@@ -4413,6 +4413,57 @@ typedef struct CK_ECDH1_DERIVE_PARAMS_s {
     void    *pPublicData;
 } CK_ECDH1_DERIVE_PARAMS;
 
+/* The length of the key CKM_ECDH1_DERIVE makes from a z_len-byte secret
+ * under CKD_NULL (PKCS#11 v3.2 §6.3.16): by CKA_KEY_TYPE, then CKA_VALUE_LEN
+ * where the key type takes one. The caller keeps the trailing *len bytes --
+ * "the truncation removes bytes from the leading end of the secret value".
+ *   - DES, DES2, DES3, CDMF: the type's own length; a CKA_VALUE_LEN that
+ *     says otherwise is CKR_TEMPLATE_INCONSISTENT.
+ *   - AES: CKA_VALUE_LEN 16, 24 or 32 (§6.10.2), else
+ *     CKR_ATTRIBUTE_VALUE_INVALID; without one, Z must be such a length,
+ *     else CKR_TEMPLATE_INCOMPLETE.
+ *   - any other type: CKA_VALUE_LEN 1..z_len, else
+ *     CKR_ATTRIBUTE_VALUE_INVALID; without one, all of Z.
+ * Never more than Z: a length past it is CKR_ATTRIBUTE_VALUE_INVALID, or
+ * CKR_TEMPLATE_INCONSISTENT for a DES type. */
+static CK_RV ecdh_key_len(CK_ATTRIBUTE *tmpl, CK_ULONG n, size_t z_len, size_t *len) {
+    CK_ULONG kt = CKK_GENERIC_SECRET;
+    long ki = find_attr(tmpl, n, CKA_KEY_TYPE);
+    if (ki >= 0 && tmpl[ki].pValue && tmpl[ki].ulValueLen == sizeof(CK_ULONG))
+        memcpy(&kt, tmpl[ki].pValue, sizeof kt);
+    int have = 0; CK_ULONG want = 0;
+    long vi = find_attr(tmpl, n, CKA_VALUE_LEN);
+    if (vi >= 0) {
+        if (!tmpl[vi].pValue || tmpl[vi].ulValueLen != sizeof(CK_ULONG))
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        memcpy(&want, tmpl[vi].pValue, sizeof want);
+        have = 1;
+    }
+    size_t fixed = 0;
+    switch (kt) {
+        case 0x13UL: case 0x1EUL: fixed = 8;  break;   /* CKK_DES, CKK_CDMF */
+        case 0x14UL:              fixed = 16; break;   /* CKK_DES2 */
+        case 0x15UL:              fixed = 24; break;   /* CKK_DES3 */
+        default: break;
+    }
+    if (fixed) {
+        if ((have && want != fixed) || fixed > z_len) return CKR_TEMPLATE_INCONSISTENT;
+        *len = fixed;
+        return FHSM_RV_OK;
+    }
+    if (kt == 0x1FUL /* CKK_AES */) {
+        size_t l = have ? (size_t)want : z_len;
+        if (l != 16 && l != 24 && l != 32)
+            return have ? FHSM_RV_ATTRIBUTE_VALUE_INVALID : CKR_TEMPLATE_INCOMPLETE;
+        if (l > z_len) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        *len = l;
+        return FHSM_RV_OK;
+    }
+    if (have && (want == 0 || want > z_len)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    *len = have ? (size_t)want : z_len;
+    return FHSM_RV_OK;
+}
+
 static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                   CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                                   const uint8_t *secret, size_t secret_len,
@@ -5217,6 +5268,12 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     CK_ECDH1_DERIVE_PARAMS *p = pMechanism->pParameter;
     if (p->kdf != CKD_NULL || !p->pPublicData || p->ulPublicDataLen == 0)
         return FHSM_RV_ARGUMENTS_BAD;
+    /* §6.3.16, CK_ECDH1_DERIVE_PARAMS: "With the key derivation function
+     * CKD_NULL, pSharedData must be NULL and ulSharedDataLen must be zero."
+     * Shared data was accepted and ignored, so a caller who meant a KDF got
+     * raw Z and CKR_OK (#33 C15). */
+    if (p->pSharedData != NULL || p->ulSharedDataLen != 0)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
 
     /* Load our private key. */
     const uint8_t *kv = NULL; size_t kvl = 0;
@@ -5382,8 +5439,19 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     EVP_PKEY_free(peer);
     EVP_PKEY_free(priv);
 
+    /* The key's length (#33 C16, C17). §6.3.16: the mechanism "truncates the
+     * result according to the CKA_KEY_TYPE attribute of the template and, if
+     * it has one and the key type supports it, the CKA_VALUE_LEN attribute
+     * of the template. (The truncation removes bytes from the leading end of
+     * the secret value.)" The whole of Z was stored whatever the template
+     * said: CKA_VALUE_LEN 33 on P-256 made a 32-byte key, and an AES key
+     * asked 13 bytes came out 32. */
+    size_t key_len = 0;
+    CK_RV lrv = ecdh_key_len(pTemplate, ulCount, z_len, &key_len);
+    if (lrv != FHSM_RV_OK) { fhsm_zeroize(z, sizeof(z)); return lrv; }
+
     CK_RV srv = derive_store_secret(t, hSession, pTemplate, ulCount,
-                                     z, z_len, CKO_SECRET_KEY,
+                                     z + (z_len - key_len), key_len, CKO_SECRET_KEY,
                                      hBaseKey, 0, 0, phKey);
     fhsm_zeroize(z, sizeof(z));
     return srv;

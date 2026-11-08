@@ -101,6 +101,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `CKR_MECHANISM_PARAM_INVALID` for the SHA-1, SHA-224, SHA-256, SHA-384 and
   SHA-512 variants. Bare `CKM_RSA_PKCS_PSS` is unchanged. Reported by
   AlexLaroche (#33, C14). `tests/test_rsa_pss_raw.c`, (8).
+* **`CKM_ECDH1_DERIVE` makes the key the template asks for, and refuses
+  shared data under `CKD_NULL`.** The whole shared secret was stored
+  whatever the template said: `CKA_VALUE_LEN` 33 on P-256 gave a 32-byte
+  key, and an AES key asked 13 bytes came out 32. PKCS#11 v3.2 §6.3.16 has
+  the mechanism truncate by `CKA_KEY_TYPE` and then `CKA_VALUE_LEN`,
+  removing bytes from the leading end. The key now holds the trailing
+  `CKA_VALUE_LEN` bytes. A length of 0 or past the secret is
+  `CKR_ATTRIBUTE_VALUE_INVALID`, and so is an AES length other than 16, 24
+  or 32. An AES key without `CKA_VALUE_LEN` takes the whole secret when that
+  is a valid AES length, and is `CKR_TEMPLATE_INCOMPLETE` otherwise (P-384,
+  P-521). DES types take their own length. A derivation that sets no
+  `CKA_VALUE_LEN` on a generic secret is unchanged. `CKD_NULL` with
+  `pSharedData` or `ulSharedDataLen` set, which the specification forbids,
+  is now `CKR_MECHANISM_PARAM_INVALID` instead of being ignored. Reported by
+  AlexLaroche (#33, C15, C16, C17). `tests/test_ecdh_key_len.c`.
 
 ## [2.6.1] --- 2026-11-07
 
