@@ -156,6 +156,27 @@ project adheres to [Semantic Versioning](https://semver.org/).
   searched with attributes it expected to be ignored, must change.**
   Reported by AlexLaroche (#33, C5, C7, C8, C9, C11).
   `tests/test_template_checks.c`.
+* **An RSA key gets the public exponent its template asks for.** A
+  `CKA_PUBLIC_EXPONENT` was checked and then replaced by 65537, so a
+  template asking 65539 got 65537 and `CKR_OK`. The exponent is now the
+  one asked for, within FIPS 186-5 (odd, 2^16 < e < 2^256), in both
+  profiles. Any other value, e = 3 included, is
+  `CKR_ATTRIBUTE_VALUE_INVALID`. Without the attribute, the exponent is
+  still 65537. Reported by AlexLaroche (#33, C6).
+  `tests/test_template_checks.c`, (6).
+* **`CKA_OBJECT_ID` on a data object is refused instead of dropped.** The
+  object record has no field for it: `C_CreateObject` accepted it, and
+  reading it back was `CKR_ATTRIBUTE_TYPE_INVALID`. It is now refused at
+  creation with `CKR_ATTRIBUTE_TYPE_INVALID`. Storing it needs a token store
+  format change. Reported by AlexLaroche (#33, C10).
+  `tests/test_template_checks.c`, (7).
+* **`C_GetMechanismInfo` states `CKM_GENERIC_SECRET_KEY_GEN`'s range in
+  bits.** PKCS#11 v3.2 §6.8.3 counts this mechanism's key sizes in bits,
+  where its HMAC neighbours count in bytes. The module reported the byte
+  range, 1 to 64, so a caller read a 64-bit ceiling and saw a 9-byte key
+  accepted past it. It now reports 8 to 512. The keys it makes are
+  unchanged, from 1 to 64 bytes. Reported by AlexLaroche (#33, C18).
+  `tests/test_generic_secret_len.c`, (0).
 
 ## [2.6.1] --- 2026-11-07
 

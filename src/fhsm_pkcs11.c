@@ -1673,6 +1673,16 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slotID, CK_ULONG type, CK_VOID_PTR pInfo) {
         CK_FLAGS flags;
     } *info = pInfo;
     fhsm_mech_keysizes_for(e->family, &info->ulMinKeySize, &info->ulMaxKeySize);
+    /* CKM_GENERIC_SECRET_KEY_GEN alone counts in bits: "the supported range
+     * of key sizes, in bits" (§6.8.3), where its HMAC neighbours count in
+     * bytes. The family's 1..64 bytes was reported as 1..64, so a caller
+     * read a 64-bit ceiling the generator does not have and saw a 9-byte
+     * key accepted past it (#33 C18). Same range, stated in the unit the
+     * mechanism uses. */
+    if (type == 0x00000350UL /* CKM_GENERIC_SECRET_KEY_GEN */) {
+        info->ulMinKeySize *= 8;
+        info->ulMaxKeySize *= 8;
+    }
     info->flags = fhsm_mech_flags_for(e->operation);
     /* AES-CBC and AES-CBC-PAD also wrap and unwrap, where C_WrapKey takes
      * them: the all-mechanisms build in permissive mode. Added here rather
@@ -3804,6 +3814,13 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     { CK_RV cr = fhsm_check_trusted_attr(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount);  if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* CKA_OBJECT_ID (Table 20, data objects) has no field in the object
+     * record: it was accepted, dropped, and read back as
+     * CKR_ATTRIBUTE_TYPE_INVALID (#33 C10). Refused here instead, the answer
+     * the store's other unstorable attributes got before they had a place.
+     * Storing it needs a token store format change (TOKEN_STORE_FORMAT.md). */
+    if (find_attr(pTemplate, ulCount, 0x00000012UL /* CKA_OBJECT_ID */) >= 0)
+        return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
 
     /* CKA_TRUSTED reaching this point can only have been set by the SO (the
      * guard above rejects it otherwise), so persist it. Computed once here:
@@ -7639,22 +7656,41 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (bits != 2048 && bits != 3072 && bits != 4096
             && !(bits == 1024 && rsa_min_bits() == 1024))
             return FHSM_RV_KEY_SIZE_RANGE;
-        /* Validate CKA_PUBLIC_EXPONENT if supplied : FIPS 186-5 requires
-         * an odd exponent >= 3 ; e = 0/1/2/4 are cryptographically
-         * invalid (pkcs11-check TestRsaExponent, #125). A valid exponent
-         * is accepted; generation uses the standard F4 (65537). */
+        /* CKA_PUBLIC_EXPONENT, when supplied, is the key's exponent (§6.1.4).
+         * It was checked and then replaced by F4: a template asking 65539
+         * got 65537 and CKR_OK (#33 C6). The exponent is now the one asked
+         * for, within FIPS 186-5 §A.1.1 -- odd, 2^16 < e < 2^256 -- for both
+         * profiles: e = 3 is valid PKCS#11 and refused here, as the invalid
+         * 0, 1, 2 and 4 were (pkcs11-check TestRsaExponent, #125), with
+         * CKR_ATTRIBUTE_VALUE_INVALID. Absent, it is F4. */
+        BIGNUM *e_bn = NULL;
         long e_i = find_attr(pPub, ulPub, 0x00000122UL /* CKA_PUBLIC_EXPONENT */);
-        if (e_i >= 0 && pPub[e_i].pValue && pPub[e_i].ulValueLen > 0) {
-            BIGNUM *e_bn = BN_bin2bn((const unsigned char *)pPub[e_i].pValue,
-                                      (int)pPub[e_i].ulValueLen, NULL);
+        if (e_i >= 0) {
+            if (!pPub[e_i].pValue || pPub[e_i].ulValueLen == 0 || pPub[e_i].ulValueLen > 64)
+                return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            e_bn = BN_bin2bn((const unsigned char *)pPub[e_i].pValue,
+                             (int)pPub[e_i].ulValueLen, NULL);
             if (!e_bn) return FHSM_RV_HOST_MEMORY;
-            int bad = (!BN_is_odd(e_bn) || BN_cmp(e_bn, BN_value_one()) <= 0
-                       || BN_is_word(e_bn, 1));
-            /* reject e < 3 : e==1 caught above ; e==2 is even (caught) */
-            BN_free(e_bn);
-            if (bad) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            if (!BN_is_odd(e_bn) || BN_num_bits(e_bn) <= 16 || BN_num_bits(e_bn) > 256) {
+                BN_free(e_bn);
+                return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            }
         }
-        pkey = EVP_PKEY_Q_keygen(NULL, NULL, "RSA", bits);
+        if (e_bn) {
+            EVP_PKEY_CTX *rctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL);
+            if (!rctx
+                || EVP_PKEY_keygen_init(rctx) != 1
+                || EVP_PKEY_CTX_set_rsa_keygen_bits(rctx, (int)bits) != 1
+                || EVP_PKEY_CTX_set1_rsa_keygen_pubexp(rctx, e_bn) != 1
+                || EVP_PKEY_generate(rctx, &pkey) != 1) {
+                EVP_PKEY_free(pkey);
+                pkey = NULL;
+            }
+            EVP_PKEY_CTX_free(rctx);
+            BN_free(e_bn);
+        } else {
+            pkey = EVP_PKEY_Q_keygen(NULL, NULL, "RSA", bits);
+        }
         ckk_type = CKK_RSA;
         pw_family = FHSM_PAIRWISE_RSA;
     } else if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN) {

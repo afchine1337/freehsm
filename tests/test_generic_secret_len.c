@@ -10,6 +10,9 @@
  * CKR_KEY_SIZE_RANGE (pkcs11-check TestGenericSecretKeyGen, 512 bits).
  *
  * What is asserted:
+ *   (0) C_GetMechanismInfo states the range in bits, 8..512, as §6.8.3 has
+ *       it for this mechanism; it reported the byte range 1..64, a 64-bit
+ *       ceiling a 9-byte key then went past (#33 C18)
  *   (1) every length from the advertised minimum to the maximum generates,
  *       and CKA_VALUE_LEN reads back as asked
  *   (2) one below the minimum and one above the maximum: CKR_KEY_SIZE_RANGE
@@ -103,9 +106,17 @@ int main(void)
     if (C_GetMechanismInfo(0, CKM_GENERIC_SECRET_KEY_GEN, &info) != CKR_OK) {
         fprintf(stderr, "C_GetMechanismInfo\n"); return 2;
     }
-    printf("  advertised: %lu to %lu bytes\n", info.ulMinKeySize, info.ulMaxKeySize);
+    printf("  advertised: %lu to %lu bits\n", info.ulMinKeySize, info.ulMaxKeySize);
 
     char what[96];
+    /* (0) In bits, as §6.8.3 has it for this mechanism: 8 to 512, one to 64
+     *     bytes. It reported 1..64, the family's byte range (#33 C18). From
+     *     here on the range is used in bytes, which CKA_VALUE_LEN counts. */
+    snprintf(what, sizeof what, "(0) advertised in bits: 8..512 (got %lu..%lu)",
+             info.ulMinKeySize, info.ulMaxKeySize);
+    ok(info.ulMinKeySize == 8 && info.ulMaxKeySize == 512, what);
+    info.ulMinKeySize /= 8;
+    info.ulMaxKeySize /= 8;
     int bad = 0;
     for (CK_ULONG n = info.ulMinKeySize; n <= info.ulMaxKeySize; ++n) {
         CK_OBJECT_HANDLE k = 0;

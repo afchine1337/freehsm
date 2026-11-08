@@ -31,6 +31,11 @@
  *       finds the session object, CKA_TOKEN=TRUE does not; CKA_KEY_TYPE=AES
  *       finds the AES key and not the generic secret; a 4-byte CKA_CLASS
  *       finds nothing
+ *   (6) C6: CKA_PUBLIC_EXPONENT 65539 makes a key with 65539, where F4 was
+ *       made; e = 3, outside FIPS 186-5's 2^16 < e < 2^256, is
+ *       CKR_ATTRIBUTE_VALUE_INVALID
+ *   (7) C10: a data object with CKA_OBJECT_ID is CKR_ATTRIBUTE_TYPE_INVALID,
+ *       not accepted and dropped: the store has no field for it
  * ========================================================================= */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -44,6 +49,10 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 
 #define CKR_OK                       0UL
 #define CKR_ATTRIBUTE_READ_ONLY      0x10UL
+#define CKR_ATTRIBUTE_TYPE_INVALID   0x12UL
+#define CKR_ATTRIBUTE_VALUE_INVALID  0x13UL
+#define CKA_OBJECT_ID                0x012UL
+#define CKA_MODULUS_BITS             0x121UL
 #define CKR_TEMPLATE_INCOMPLETE      0xD0UL
 #define CKR_TEMPLATE_INCONSISTENT    0xD1UL
 #define CKF_RW                       6UL
@@ -108,11 +117,13 @@ int main(void) {
     CK_RV (*C_GenerateKeyPair)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_ATTRIBUTE*,CK_ULONG,
                                CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*,CK_OBJECT_HANDLE*);
     CK_RV (*C_CreateObject)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
+    CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
     #define SYM(n) *(void**)&n = dlsym(lib, #n); \
                    if (!n) { fprintf(stderr, "missing %s\n", #n); return 2; }
     SYM(C_Initialize) SYM(C_Finalize) SYM(C_InitToken) SYM(C_OpenSession) SYM(C_Login)
     SYM(C_Logout) SYM(C_InitPIN) SYM(C_GenerateKey) SYM(C_GenerateKeyPair)
     SYM(C_CreateObject) SYM(C_FindObjectsInit) SYM(C_FindObjects) SYM(C_FindObjectsFinal)
+    SYM(C_GetAttributeValue)
 
     printf("Templates the module did not honour\n\n");
     CK_BYTE label[32]; memset(label, ' ', 32); memcpy(label, "tmplchk", 7);
@@ -218,6 +229,36 @@ int main(void) {
         unsigned int dc4 = 0;
         CK_ATTRIBUTE f5[] = { { CKA_CLASS, &dc4, 4 } };
         ok(count(f5, 1, NULL) == 0, "(5) a 4-byte CKA_CLASS finds nothing");
+    }
+
+    /* (6) C6 */
+    {
+        CK_ULONG bits = 2048;
+        CK_MECHANISM m = { CKM_RSA_PKCS_KEY_PAIR_GEN, NULL, 0 };
+        CK_ATTRIBUTE vt[] = { { CKA_SIGN, &yes, 1 } };
+        static CK_BYTE e65539[] = { 0x01, 0x00, 0x03 }, e3[] = { 0x03 };
+        CK_ATTRIBUTE pt[] = { { CKA_MODULUS_BITS, &bits, sizeof bits }, { CKA_VERIFY, &yes, 1 },
+                              { CKA_PUBLIC_EXPONENT, e65539, sizeof e65539 } };
+        CK_BYTE eb[8]; CK_ATTRIBUTE ea = { CKA_PUBLIC_EXPONENT, eb, sizeof eb };
+        rv = C_GenerateKeyPair(s, &m, pt, 3, vt, 1, &h, &h2);
+        ok(rv == CKR_OK && C_GetAttributeValue(s, h, &ea, 1) == CKR_OK
+           && ea.ulValueLen == 3 && memcmp(eb, e65539, 3) == 0,
+           "(6) RSA, CKA_PUBLIC_EXPONENT 65539: the key has 65539");
+        pt[2].pValue = e3; pt[2].ulValueLen = 1;
+        rv = C_GenerateKeyPair(s, &m, pt, 3, vt, 1, &h, &h2);
+        snprintf(what, sizeof what, "(6) RSA, e = 3: ATTRIBUTE_VALUE_INVALID (0x%lx)", rv);
+        ok(rv == CKR_ATTRIBUTE_VALUE_INVALID, what);
+    }
+
+    /* (7) C10 */
+    {
+        CK_ULONG dc = CKO_DATA;
+        static CK_BYTE oid[] = { 0x06, 0x03, 0x2A, 0x03, 0x04 };
+        CK_ATTRIBUTE dt[] = { { CKA_CLASS, &dc, sizeof dc }, { CKA_VALUE, (void *)"v", 1 },
+                              { CKA_OBJECT_ID, oid, sizeof oid } };
+        rv = C_CreateObject(s, dt, 3, &h);
+        snprintf(what, sizeof what, "(7) data object with CKA_OBJECT_ID: TYPE_INVALID (0x%lx)", rv);
+        ok(rv == CKR_ATTRIBUTE_TYPE_INVALID, what);
     }
 
     C_Finalize(NULL);
