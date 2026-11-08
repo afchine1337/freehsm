@@ -3150,6 +3150,27 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         }
         key_len = (uint32_t)req;
     }
+    /* The mechanism decides the key type (PBKDF2 aside, which takes it from
+     * the template above). A template that names another one -- CKM_AES_KEY_GEN
+     * with CKK_GENERIC_SECRET -- contradicts what the mechanism contributes:
+     * CKR_TEMPLATE_INCONSISTENT (§4.1.1). It was accepted, and an AES key made
+     * (#33 C7). A class other than CKO_SECRET_KEY, the same. */
+    { long kt = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+      if (kt >= 0) {
+          CK_ULONG req = 0;
+          if (!pTemplate[kt].pValue || pTemplate[kt].ulValueLen != sizeof(CK_ULONG))
+              return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+          memcpy(&req, pTemplate[kt].pValue, sizeof(CK_ULONG));
+          if (req != key_type) return CKR_TEMPLATE_INCONSISTENT;
+      }
+      long kc = find_attr(pTemplate, ulCount, CKA_CLASS);
+      if (kc >= 0) {
+          CK_ULONG req = 0;
+          if (!pTemplate[kc].pValue || pTemplate[kc].ulValueLen != sizeof(CK_ULONG))
+              return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+          memcpy(&req, pTemplate[kc].pValue, sizeof(CK_ULONG));
+          if (req != CKO_SECRET_KEY) return CKR_TEMPLATE_INCONSISTENT;
+      } }
     long i;
 
     char label[64] = ""; const uint8_t *id = NULL; size_t id_len = 0;
@@ -3366,6 +3387,23 @@ static long fhsm_parse_unwrap_template(CK_ATTRIBUTE *tmpl, CK_ULONG n) {
  * Setting it to FALSE, or omitting it, is always fine. #125 TestCKATrusted. */
 static CK_RV fhsm_check_trusted_attr(CK_SESSION_HANDLE hSession,
                                       CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    /* The attributes the token alone sets, whatever the session: CKA_LOCAL,
+     * CKA_NEVER_EXTRACTABLE, CKA_ALWAYS_SENSITIVE, CKA_KEY_GEN_MECHANISM
+     * (§4.11, footnote 2: "must not be specified when the object is
+     * created") and CKA_UNIQUE_ID (§4.4.1, assigned by the token). In a
+     * creation or C_SetAttributeValue template they are
+     * CKR_ATTRIBUTE_READ_ONLY. They were accepted and dropped -- the key
+     * then reported its own value, not the template's (#33 C8, C9). Every
+     * creation path and C_SetAttributeValue call this function, so the rule
+     * sits here once. */
+    for (CK_ULONG k = 0; k < n; ++k) {
+        CK_ATTRIBUTE_TYPE ty = tmpl[k].type;
+        if (ty == CKA_LOCAL_ATTR || ty == CKA_NEVER_EXTRACTABLE_ATTR
+            || ty == CKA_ALWAYS_SENSITIVE_ATTR
+            || ty == 0x00000166UL /* CKA_KEY_GEN_MECHANISM */
+            || ty == 0x00000004UL /* CKA_UNIQUE_ID */)
+            return 0x00000010UL;   /* CKR_ATTRIBUTE_READ_ONLY */
+    }
     long i = find_attr(tmpl, n, CKA_TRUSTED_ATTR);
     if (i < 0 || !tmpl[i].pValue || tmpl[i].ulValueLen != 1) return FHSM_RV_OK;
     if (!*(unsigned char *)tmpl[i].pValue) return FHSM_RV_OK;   /* FALSE: fine */
@@ -7589,10 +7627,15 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         ckk_type  = CKK_COMPOSITE_MLDSA65_ED25519;
         composite = 1;
     } else if (pMechanism->mechanism == CKM_RSA_PKCS_KEY_PAIR_GEN) {
-        long bits = 2048;
+        /* CKA_MODULUS_BITS is required in the public key template (§6.1.2):
+         * without it the template is CKR_TEMPLATE_INCOMPLETE (§4.1.1). A
+         * missing one made a 2048-bit key and answered CKR_OK, so the caller
+         * never learned that the size had been chosen for it (#33 C5). */
         long i = find_attr(pPub, ulPub, CKA_MODULUS_BITS);
-        if (i >= 0 && pPub[i].pValue && pPub[i].ulValueLen == sizeof(CK_ULONG))
-            bits = (long)(*(CK_ULONG*)pPub[i].pValue);
+        if (i < 0) return CKR_TEMPLATE_INCOMPLETE;
+        if (!pPub[i].pValue || pPub[i].ulValueLen != sizeof(CK_ULONG))
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        long bits = (long)(*(CK_ULONG*)pPub[i].pValue);
         if (bits != 2048 && bits != 3072 && bits != 4096
             && !(bits == 1024 && rsa_min_bits() == 1024))
             return FHSM_RV_KEY_SIZE_RANGE;
@@ -9385,6 +9428,36 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     return FHSM_RV_OK;
 }
 
+/* 1 when object `h` matches every attribute of the template other than the
+ * class, label and id, which the store's search has already applied: its value
+ * is readable and has the same length and bytes. An attribute the object does
+ * not have, or will not reveal, does not match. Read through
+ * C_GetAttributeValue, so the answer is the one a caller would get; the API
+ * lock is not taken twice by a nested call. A CKA_CLASS of the wrong size is
+ * compared here too, and matches nothing. */
+static int fhsm_find_match_rest(CK_SESSION_HANDLE hSession, uint32_t h,
+                                CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    for (CK_ULONG i = 0; i < n; ++i) {
+        CK_ATTRIBUTE_TYPE ty = tmpl[i].type;
+        if (ty == CKA_LABEL || ty == CKA_ID) continue;
+        if (ty == CKA_CLASS && tmpl[i].ulValueLen == sizeof(CK_ULONG)) continue;
+        CK_ATTRIBUTE q = { ty, NULL, 0 };
+        if (C_GetAttributeValue(hSession, h, &q, 1) != FHSM_RV_OK) return 0;
+        if (q.ulValueLen != tmpl[i].ulValueLen) return 0;
+        if (q.ulValueLen == 0) continue;
+        if (q.ulValueLen > 8192) return 0;
+        uint8_t *buf = OPENSSL_malloc(q.ulValueLen);
+        if (!buf) return 0;
+        q.pValue = buf;
+        int same = C_GetAttributeValue(hSession, h, &q, 1) == FHSM_RV_OK
+                && q.ulValueLen == tmpl[i].ulValueLen
+                && memcmp(buf, tmpl[i].pValue, q.ulValueLen) == 0;
+        OPENSSL_clear_free(buf, tmpl[i].ulValueLen);
+        if (!same) return 0;
+    }
+    return 1;
+}
+
 CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
                         CK_ULONG ulCount) {
     FHSM_API_SHARED();
@@ -9400,6 +9473,19 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
     uint32_t   filter_class = 0;  int has_class = 0;
     char       filter_label[64] = ""; int has_label = 0;
     uint8_t    filter_id[32]; size_t filter_id_len = 0; int has_id = 0;
+    /* Every other attribute of the template is matched on the object's value
+     * (fhsm_find_match_rest). Only the class, label and id were looked at, so
+     * {CKA_TOKEN} or {CKA_KEY_TYPE} matched every object -- a CKA_TOKEN of
+     * four zero bytes, not a CK_BBOOL, found a session object (#33 C11).
+     * §5.7.7: an object matches when all the template's attributes match. */
+    int        has_rest = 0;
+    for (CK_ULONG i = 0; i < ulCount; ++i) {
+        if (pTemplate[i].type != CKA_CLASS && pTemplate[i].type != CKA_LABEL
+            && pTemplate[i].type != CKA_ID)
+            has_rest = 1;
+        else if (pTemplate[i].type == CKA_CLASS && pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+            has_rest = 1;   /* a class of the wrong size matches nothing */
+    }
     for (CK_ULONG i = 0; i < ulCount; ++i) {
         if (pTemplate[i].type == CKA_CLASS && pTemplate[i].ulValueLen == sizeof(CK_ULONG)) {
             filter_class = (uint32_t)(*(CK_ULONG*)pTemplate[i].pValue);
@@ -9464,6 +9550,8 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE *pTemplate,
             if (oidl != filter_id_len) continue;
             if (oidl > 0 && memcmp(oid, filter_id, oidl) != 0) continue;
         }
+        if (has_rest && !fhsm_find_match_rest(hSession, prelim[j], pTemplate, ulCount))
+            continue;
         f->handles[k++] = prelim[j];
     }
     f->count = k;

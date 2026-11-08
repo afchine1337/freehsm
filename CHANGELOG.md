@@ -133,6 +133,29 @@ project adheres to [Semantic Versioning](https://semver.org/).
     `CKR_MECHANISM_PARAM_INVALID`, not `CKR_ARGUMENTS_BAD`.
 
   Reported by AlexLaroche (#33, C2, C3, C4, C12). `tests/test_attr_rv.c`.
+* **Templates the module did not follow are refused, and searches match
+  every attribute.** Each case below answered `CKR_OK` for a template the
+  module had not followed.
+  * `C_GenerateKeyPair` for RSA without `CKA_MODULUS_BITS` is
+    `CKR_TEMPLATE_INCOMPLETE`. It made a 2048-bit key.
+  * `C_GenerateKey` with a `CKA_KEY_TYPE` or `CKA_CLASS` other than what
+    the mechanism makes is `CKR_TEMPLATE_INCONSISTENT`. An AES key was made
+    under `CKK_GENERIC_SECRET`.
+  * `CKA_LOCAL`, `CKA_NEVER_EXTRACTABLE`, `CKA_ALWAYS_SENSITIVE`,
+    `CKA_KEY_GEN_MECHANISM` and `CKA_UNIQUE_ID` in any creation template,
+    or in `C_SetAttributeValue`, are `CKR_ATTRIBUTE_READ_ONLY`, and nothing
+    is made. They were dropped.
+  * `C_FindObjects` matched the class, label and id and ignored every
+    other attribute, so `{CKA_TOKEN=FALSE}` or `{CKA_KEY_TYPE=CKK_AES}`
+    found every object. Each attribute of the template is now compared with
+    the object's value, length and bytes. An attribute the object lacks or
+    will not reveal does not match, nor does a `CKA_TOKEN` or `CKA_CLASS`
+    of the wrong size.
+
+  **A caller that generated RSA keys without `CKA_MODULUS_BITS`, or
+  searched with attributes it expected to be ignored, must change.**
+  Reported by AlexLaroche (#33, C5, C7, C8, C9, C11).
+  `tests/test_template_checks.c`.
 
 ## [2.6.1] --- 2026-11-07
 

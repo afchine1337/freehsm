@@ -65,7 +65,9 @@ int main(void){
   int strict=1;for(CK_ULONG i=0;i<mn;i++)if(ml[i]==0x1){strict=0;break;}free(ml);
   printf("test_legacy_rsa : profile = %s\n",strict?"nist-approved-only":"all-mechanisms");
   CK_MECHANISM kg={0x0000,0,0};/*CKM_RSA_PKCS_KEY_PAIR_GEN*/
-  CK_OBJECT_HANDLE pub=0,prv=0;CK_RV rv=GKP(s,&kg,0,0,0,0,&pub,&prv);
+  /* CKA_MODULUS_BITS is required (#33 C5): an empty template was given 2048. */
+  CK_ULONG bits=2048;CK_ATTRIBUTE kgpub[]={{0x121/*CKA_MODULUS_BITS*/,&bits,sizeof bits}};
+  CK_OBJECT_HANDLE pub=0,prv=0;CK_RV rv=GKP(s,&kg,kgpub,1,0,0,&pub,&prv);
   if(rv){fprintf(stderr,"RSA keypair 0x%lx\n",rv);return 2;}
   if(strict){
     CK_MECHANISM m={0x1,0,0};
