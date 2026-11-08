@@ -77,6 +77,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `CKA_PRIVATE` out counts as private, the default of the `CKA_PRIVATE`
   change above. Reported by AlexLaroche (#31).
   `tests/test_private_attr.c`, (8).
+* **A read-only session no longer copies a token object into a token
+  object.** `C_CopyObject` checked the copy's template for `CKA_TOKEN=TRUE`;
+  a template that left it out -- or an empty one -- passed, and the copy
+  took `CKA_TOKEN=TRUE` from its source. Only session objects can be created
+  in a read-only session: such a copy is now `CKR_SESSION_READ_ONLY`, and
+  one asked `CKA_TOKEN=FALSE` is made as before. Reported by AlexLaroche
+  (#30). `tests/test_private_attr.c`, (9).
 
 ## [2.6.1] --- 2026-11-07
 

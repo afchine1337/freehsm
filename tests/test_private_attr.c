@@ -36,7 +36,10 @@
  *       before a login at all, public or not); with the SO logged in,
  *       C_CreateObject of a private secret key or data object, C_GenerateKey,
  *       C_GenerateKeyPair and a copy made CKA_PRIVATE=TRUE are all
- *       CKR_USER_NOT_LOGGED_IN, while public data objects are still made.
+ *       CKR_USER_NOT_LOGGED_IN, while public data objects are still made;
+ *   (9) a read-only session copies a token object into a session object
+ *       only (#30): a template that leaves CKA_TOKEN out, and an empty one,
+ *       inherit TRUE and are CKR_SESSION_READ_ONLY; CKA_TOKEN=FALSE is made.
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -50,6 +53,8 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 
 #define CKR_OK                    0UL
 #define CKR_USER_NOT_LOGGED_IN    0x101UL
+#define CKR_SESSION_READ_ONLY     0xB5UL
+#define CKF_SERIAL                4UL
 #define CKK_GENERIC_SECRET        0x10UL
 #define CKF_RW                    6UL
 #define CKA_CLASS                 0x0UL
@@ -327,8 +332,33 @@ int main(void)
         ok(find_label(s2, "tok-public", &src) == 1
            && C_CopyObject(s2, src, cp, 2, &x) == CKR_USER_NOT_LOGGED_IN,
            "(8) SO: a public data object copied CKA_PRIVATE=TRUE is refused");
-        ok(C_CopyObject(s2, src, &cp[1], 1, &x) == CKR_OK,
+        /* Relabelled: a second "tok-public" would throw off (9)'s search. */
+        CK_ATTRIBUTE cq[] = { { CKA_TOKEN, &g_no, 1 }, { CKA_LABEL, (void*)"so-copy", 7 } };
+        ok(C_CopyObject(s2, src, cq, 2, &x) == CKR_OK,
            "(8) SO: and copied as it is, it is made");
+    }
+    (void)C_Logout(s2);
+
+    /* (9) A read-only session copies a token object into a session object
+     *     only (#30). */
+    if (C_Login(s2,1,(CK_BYTE*)USER_PIN,strlen(USER_PIN))) { fprintf(stderr,"USER (3)\n"); return 2; }
+    {
+        CK_SESSION_HANDLE ro = 0;
+        if (C_OpenSession(0,CKF_SERIAL,NULL,NULL,&ro)) { fprintf(stderr,"RO session\n"); return 2; }
+        CK_OBJECT_HANDLE src = 0, x = 0;
+        CK_ATTRIBUTE lt[] = { { CKA_LABEL, (void*)"ro-copy", 7 } };
+        ok(find_label(ro, "tok-public", &src) == 1
+           && C_CopyObject(ro, src, lt, 1, &x) == CKR_SESSION_READ_ONLY,
+           "(9) RO: a copy that inherits CKA_TOKEN=TRUE is refused");
+        ok(find_label(ro, "ro-copy", NULL) == 0, "(9) and nothing is made");
+        CK_ATTRIBUTE st[] = { { CKA_LABEL, (void*)"ro-copy", 7 }, { CKA_TOKEN, &g_no, 1 } };
+        CK_BYTE tv = 0xFF;
+        CK_ATTRIBUTE ta = { CKA_TOKEN, &tv, 1 };
+        ok(C_CopyObject(ro, src, st, 2, &x) == CKR_OK
+           && C_GetAttributeValue(ro, x, &ta, 1) == CKR_OK && tv == 0,
+           "(9) RO: a copy asked CKA_TOKEN=FALSE is a session object");
+        ok(C_CopyObject(ro, src, lt, 0, &x) == CKR_SESSION_READ_ONLY,
+           "(9) RO: a verbatim copy of a token object is refused");
     }
     (void)C_Logout(s2);
 

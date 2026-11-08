@@ -8923,6 +8923,20 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
      * before CKA_COPYABLE, whose answer would show the object exists. */
     if (fhsm_handle_access_denied(t, hObject))
         return FHSM_RV_OBJECT_HANDLE_INVALID;
+    /* A template that does not name CKA_TOKEN leaves the copy with the
+     * source's, so a copy of a token object is a token object. The check
+     * above reads the template only, and passed it: an RO session made a
+     * token object (#30). "Only session objects can be created during a
+     * read-only session". */
+    if (find_attr(pTemplate, ulCount, CKA_TOKEN) < 0) {
+        int src_tok = 0;
+        unsigned long sflags = 0;
+        if (fhsm_token_object_is_token(t, (uint32_t)hObject, &src_tok) == FHSM_RV_OK
+            && src_tok
+            && fhsm_session_info(hSession, NULL, &sflags, NULL) == FHSM_RV_OK
+            && !(sflags & 0x00000002UL /* CKF_RW_SESSION */))
+            return FHSM_RV_SESSION_READ_ONLY;
+    }
     /* CKA_COPYABLE=FALSE on the source (§4.4 : CKR_ACTION_PROHIBITED).
      *
      * The attribute was accepted at creation, dropped, and reported back as a
