@@ -402,6 +402,16 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
     }
     g_init_pid = self;
 
+    /* Already initialized in this process: CKR_CRYPTOKI_ALREADY_INITIALIZED
+     * (§5.4), and nothing is touched. The transition table refused
+     * INITIALIZED -> INITIALIZING and that came back CKR_FUNCTION_FAILED, which
+     * a caller cannot tell from a real failure -- and wrappers that load the
+     * module twice in one process treat the right answer as success (#32).
+     * A forked child was reset above and initializes as new. */
+    { fhsm_module_state_t st = fhsm_state_get();
+      if (st == FHSM_STATE_INITIALIZED || st == FHSM_STATE_AUTHENTICATED)
+          return FHSM_RV_CRYPTOKI_ALREADY_INITIALIZED; }
+
     fhsm_rv_t rv = fhsm_secure_heap_init();
     if (rv != FHSM_RV_OK) return rv;
     rv = fhsm_state_set(FHSM_STATE_INITIALIZING);

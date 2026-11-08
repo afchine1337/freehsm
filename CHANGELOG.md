@@ -57,6 +57,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
   requires, derives as before. HKDF, which has no such floor, still honours
   its template. Found by pkcs11-check 0.3.0. `tests/test_key_history.c`, (9).
 
+### Fixed
+* **A second `C_Initialize` answers `CKR_CRYPTOKI_ALREADY_INITIALIZED`.** It
+  answered `CKR_FUNCTION_FAILED`: the state machine refused the transition,
+  and the refusal came back as a failure a caller could not tell from a real
+  one. Two components of one process that load the module, each calling
+  `C_Initialize` and taking `CKR_CRYPTOKI_ALREADY_INITIALIZED` as success,
+  now work. Nothing is reset: sessions and the login stay as they were.
+  Reported by AlexLaroche (#32). `tests/test_finalize_release.c`, (0).
+
 ## [2.6.1] --- 2026-11-07
 
 *Patch, with a security fix: `C_WrapKey` wrapped a key whose

@@ -23,6 +23,10 @@
  * could not make the module re-read its own file: the second C_Login answered
  * CKR_USER_ALREADY_LOGGED_IN, so the token was never reopened. That test had
  * to move to the token layer. This one is why it can come back.
+ *
+ * Case (0), added for #32: a second C_Initialize before C_Finalize answered
+ * CKR_FUNCTION_FAILED (the state machine refusing the transition) instead of
+ * CKR_CRYPTOKI_ALREADY_INITIALIZED.
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -37,6 +41,7 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKR_OK                       0UL
 #define CKR_USER_ALREADY_LOGGED_IN   0x100UL
 #define CKR_SESSION_HANDLE_INVALID   0xB3UL
+#define CKR_CRYPTOKI_ALREADY_INITIALIZED 0x191UL
 #define CKF_RW                       6UL
 #define CKA_CLASS                    0UL
 #define CKA_TOKEN                    1UL
@@ -119,6 +124,14 @@ int main(void)
      * pointing at the store rather than at the template. */
     ok(C_GenerateKey(s, &gen, kt, sizeof kt / sizeof kt[0], &hk) == CKR_OK,
        "a token key is generated before finalizing");
+
+    /* (0) A second C_Initialize, still initialized: CKR_CRYPTOKI_ALREADY_
+     *     INITIALIZED, not CKR_FUNCTION_FAILED, and nothing is reset -- the
+     *     login holds (#32). */
+    ok(C_Initialize(NULL) == CKR_CRYPTOKI_ALREADY_INITIALIZED,
+       "(0) a second C_Initialize is CKR_CRYPTOKI_ALREADY_INITIALIZED");
+    ok(C_Login(s,1,(CK_BYTE*)USER_PIN,strlen(USER_PIN)) == CKR_USER_ALREADY_LOGGED_IN,
+       "(0) and the login it found still holds");
 
     C_Finalize(NULL);
 

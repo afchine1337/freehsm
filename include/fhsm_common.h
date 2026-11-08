@@ -202,6 +202,7 @@ typedef uint32_t fhsm_rv_t;
 #define FHSM_RV_TOKEN_NOT_PRESENT           0x000000E0u
 #define FHSM_RV_USER_NOT_LOGGED_IN          0x00000101u
 #define FHSM_RV_CRYPTOKI_NOT_INITIALIZED    0x00000190u
+#define FHSM_RV_CRYPTOKI_ALREADY_INITIALIZED 0x00000191u
 
 /* Vendor-reserved extensions (FreeHSM). */
 #define FHSM_RV_KAT_FAILED                  0x80000001u
