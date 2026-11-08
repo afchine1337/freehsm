@@ -25,7 +25,12 @@
  *       object survives the logout and a private one does not;
  *   (6) in a new process image (C_Finalize, C_Initialize), before any login:
  *       the public token data object is found and read from the public
- *       section, the private one is not found.
+ *       section, the private one is not found;
+ *   (7) with the SO logged in, which decrypts the store, no handle that the
+ *       search hides can be changed (C_SetAttributeValue), copied out with
+ *       CKA_PRIVATE=FALSE (C_CopyObject) or destroyed (C_DestroyObject); the
+ *       user then finds the private data objects intact. Those three calls
+ *       ran no access check, and handles are small integers.
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -79,6 +84,8 @@ static CK_RV (*C_GenerateKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_ATTRIBUTE*,CK_U
 static CK_RV (*C_GenerateKeyPair)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_ATTRIBUTE*,CK_ULONG,
                                   CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*,CK_OBJECT_HANDLE*);
 static CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
+static CK_RV (*C_SetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
+static CK_RV (*C_DestroyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE);
 static CK_RV (*C_FindObjectsInit)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
 static CK_RV (*C_FindObjects)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE*,CK_ULONG,CK_ULONG*);
 static CK_RV (*C_FindObjectsFinal)(CK_SESSION_HANDLE);
@@ -141,7 +148,9 @@ int main(void)
     SYM(C_Login); SYM(C_Logout); SYM(C_InitPIN); SYM(C_CreateObject); SYM(C_CopyObject);
     SYM(C_GenerateKey); SYM(C_GenerateKeyPair); SYM(C_GetAttributeValue);
     SYM(C_FindObjectsInit); SYM(C_FindObjects); SYM(C_FindObjectsFinal);
-    if (!C_CopyObject || !C_GenerateKeyPair || !C_FindObjectsFinal || !C_Logout) {
+    SYM(C_SetAttributeValue); SYM(C_DestroyObject);
+    if (!C_CopyObject || !C_GenerateKeyPair || !C_FindObjectsFinal || !C_Logout
+        || !C_SetAttributeValue || !C_DestroyObject) {
         fprintf(stderr, "missing symbols\n"); return 2;
     }
 
@@ -230,6 +239,41 @@ int main(void)
        "(6) before a login, the public data object is read from the file");
     ok(find_label(s2, "tok-default", NULL) == 0 && find_label(s2, "tok-private", NULL) == 0,
        "(6) the private ones are not there");
+
+    /* (7) The SO: every handle the search hides is refused. */
+    if (C_Login(s2,0,(CK_BYTE*)SO_PIN,strlen(SO_PIN))) { fprintf(stderr,"SO (2)\n"); return 2; }
+    {
+        CK_OBJECT_HANDLE vis[64];
+        CK_ULONG nv = 0;
+        if (C_FindObjectsInit(s2, NULL, 0) == CKR_OK) {
+            (void)C_FindObjects(s2, vis, 64, &nv);
+            (void)C_FindObjectsFinal(s2);
+        }
+        CK_ATTRIBUTE st = { CKA_LABEL, (void*)"so-set", 6 };
+        CK_ATTRIBUTE ct[] = { { CKA_PRIVATE, &g_no, 1 }, { CKA_TOKEN, &g_no, 1 } };
+        int changed = 0, copied = 0, destroyed = 0;
+        for (CK_OBJECT_HANDLE x = 1; x <= 256; x++) {
+            int seen = 0;
+            for (CK_ULONG i = 0; i < nv; i++) if (vis[i] == x) seen = 1;
+            if (seen) continue;
+            CK_OBJECT_HANDLE c = 0;
+            CK_RV r1 = C_SetAttributeValue(s2, x, &st, 1);
+            CK_RV r2 = C_CopyObject(s2, x, ct, 2, &c);
+            CK_RV r3 = C_DestroyObject(s2, x);
+            if (r1 == CKR_OK) changed++;
+            if (r2 == CKR_OK) copied++;
+            if (r3 == CKR_OK) destroyed++;
+        }
+        ok(changed == 0, "(7) the SO changes no hidden object");
+        ok(copied == 0, "(7) the SO copies no hidden object out");
+        ok(destroyed == 0, "(7) the SO destroys no hidden object");
+    }
+    (void)C_Logout(s2);
+    if (C_Login(s2,1,(CK_BYTE*)USER_PIN,strlen(USER_PIN))) { fprintf(stderr,"USER (2)\n"); return 2; }
+    ok(find_label(s2, "tok-private", &h) == 1 && value_is(s2, h, "tok-private")
+       && find_label(s2, "tok-default", &h) == 1 && value_is(s2, h, "tok-default"),
+       "(7) the user finds the private data objects intact");
+    ok(find_label(s2, "so-set", NULL) == 0, "(7) and no object relabelled by the SO");
 
     C_Finalize(NULL);
     printf("\n%s\n", fails ? "FAILURES" : "all good");

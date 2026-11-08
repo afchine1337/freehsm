@@ -2605,6 +2605,21 @@ static int fhsm_obj_private(fhsm_token_t *t, CK_OBJECT_HANDLE h, uint32_t cls) {
     return 1;
 }
 
+/* fhsm_object_access_denied for a handle whose class the caller has not read:
+ * C_SetAttributeValue, C_CopyObject and C_DestroyObject. They ran no access
+ * check, so with the SO logged in (the store is then decrypted) a guessed
+ * handle let them change, copy -- with CKA_PRIVATE=FALSE, then read -- or
+ * destroy a private object the search would not list. A failed lookup is left
+ * to the caller, which answers it with its own return value. */
+static int fhsm_object_access_denied(fhsm_token_t *t, CK_OBJECT_HANDLE h, uint32_t cko_class);
+static int fhsm_handle_access_denied(fhsm_token_t *t, CK_OBJECT_HANDLE h) {
+    const uint8_t *v = NULL; size_t vl = 0;
+    uint32_t cls = 0, kt = 0;
+    if (fhsm_token_object_get(t, (uint32_t)h, &v, &vl, &cls, &kt) != FHSM_RV_OK)
+        return 0;
+    return fhsm_object_access_denied(t, h, cls);
+}
+
 /* Records a data object's CKA_PRIVATE=FALSE.
  *
  * The attribute was accepted and ignored: a data object created with
@@ -4259,6 +4274,9 @@ CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject) {
     FHSM_API_EXCLUSIVE();
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* A private object is invalid to anyone but the user (§4.4). */
+    if (fhsm_handle_access_denied(t, hObject))
+        return FHSM_RV_OBJECT_HANDLE_INVALID;
     /* Destroying a token (persisted) object requires a read/write session ;
      * on a read-only session it is CKR_SESSION_READ_ONLY (#125
      * TestROTokenObjectMutation / TestROExactCKR). Session objects may be
@@ -7965,8 +7983,6 @@ static int extract_cert_attr(fhsm_token_t *t, uint32_t handle,
     return rc;
 }
 
-static int fhsm_object_access_denied(fhsm_token_t *t, CK_OBJECT_HANDLE h, uint32_t cko_class);
-
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                            CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
     FHSM_API_SHARED();
@@ -8539,6 +8555,9 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A private object is invalid to the SO (§4.4). */
+    if (fhsm_handle_access_denied(t, hObject))
+        return FHSM_RV_OBJECT_HANDLE_INVALID;
     /* Bound ulCount before anything walks the template. The CKA_TRUSTED guard
      * below scans with find_attr, and this function never validated the count
      * (it only ever iterated defensively). Adding the scan without this check
@@ -8855,6 +8874,10 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
 
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* A private source is invalid to anyone but the user (§4.4): checked
+     * before CKA_COPYABLE, whose answer would show the object exists. */
+    if (fhsm_handle_access_denied(t, hObject))
+        return FHSM_RV_OBJECT_HANDLE_INVALID;
     /* CKA_COPYABLE=FALSE on the source (§4.4 : CKR_ACTION_PROHIBITED).
      *
      * The attribute was accepted at creation, dropped, and reported back as a

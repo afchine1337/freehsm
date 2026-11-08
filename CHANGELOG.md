@@ -7,6 +7,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+* **`C_SetAttributeValue`, `C_CopyObject` and `C_DestroyObject` refuse a
+  private object to anyone but the user.** They ran no access check. Without
+  a login they are refused all the same, since the store key is cleared at
+  logout; but the SO's login decrypts the store, and with it a guessed
+  handle -- handles are small integers -- let the SO change, destroy, or copy
+  out with `CKA_PRIVATE=FALSE` and then read, a private object the search
+  does not list. The three calls now answer such a handle
+  `CKR_OBJECT_HANDLE_INVALID`, as `C_GetAttributeValue` and
+  `C_GetObjectSize` do. With the `CKA_PRIVATE` change below, this fixes a
+  private data object staying readable after `C_Logout` (reported
+  privately). `tests/test_private_attr.c` (7).
+
 ### Changed
 * **A data object's `CKA_PRIVATE` is the one the template gives, and a
   private object of any class is out of reach before a login.** The module
