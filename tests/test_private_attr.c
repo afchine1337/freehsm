@@ -30,7 +30,13 @@
  *       search hides can be changed (C_SetAttributeValue), copied out with
  *       CKA_PRIVATE=FALSE (C_CopyObject) or destroyed (C_DestroyObject); the
  *       user then finds the private data objects intact. Those three calls
- *       ran no access check, and handles are small integers.
+ *       ran no access check, and handles are small integers;
+ *   (8) only the user makes a private object (#31): without a login, a data
+ *       object without CKA_PRIVATE is refused (the store makes no object
+ *       before a login at all, public or not); with the SO logged in,
+ *       C_CreateObject of a private secret key or data object, C_GenerateKey,
+ *       C_GenerateKeyPair and a copy made CKA_PRIVATE=TRUE are all
+ *       CKR_USER_NOT_LOGGED_IN, while public data objects are still made.
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -43,6 +49,8 @@ typedef struct { CK_ULONG type; void *pValue; CK_ULONG ulValueLen; } CK_ATTRIBUT
 typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; } CK_MECHANISM;
 
 #define CKR_OK                    0UL
+#define CKR_USER_NOT_LOGGED_IN    0x101UL
+#define CKK_GENERIC_SECRET        0x10UL
 #define CKF_RW                    6UL
 #define CKA_CLASS                 0x0UL
 #define CKA_TOKEN                 0x1UL
@@ -106,6 +114,21 @@ static CK_OBJECT_HANDLE mkdata(CK_SESSION_HANDLE s, const char *label, int token
                      t[c].ulValueLen = 1; c++; }
     CK_OBJECT_HANDLE h = 0;
     return C_CreateObject(s, t, c, &h) == CKR_OK ? h : 0;
+}
+
+/* The same, returning C_CreateObject's answer. */
+static CK_RV mkdata_rv(CK_SESSION_HANDLE s, const char *label, int token, int priv)
+{
+    CK_ATTRIBUTE t[5];
+    CK_ULONG c = 0;
+    t[c].type = CKA_CLASS; t[c].pValue = &g_data; t[c].ulValueLen = sizeof g_data; c++;
+    t[c].type = CKA_LABEL; t[c].pValue = (void*)label; t[c].ulValueLen = (CK_ULONG)strlen(label); c++;
+    t[c].type = CKA_VALUE; t[c].pValue = (void*)label; t[c].ulValueLen = (CK_ULONG)strlen(label); c++;
+    t[c].type = CKA_TOKEN; t[c].pValue = token ? &g_yes : &g_no; t[c].ulValueLen = 1; c++;
+    if (priv >= 0) { t[c].type = CKA_PRIVATE; t[c].pValue = priv ? &g_yes : &g_no;
+                     t[c].ulValueLen = 1; c++; }
+    CK_OBJECT_HANDLE h = 0;
+    return C_CreateObject(s, t, c, &h);
 }
 
 /* CKA_PRIVATE as read back: 1, 0, or -1. */
@@ -274,6 +297,40 @@ int main(void)
        && find_label(s2, "tok-default", &h) == 1 && value_is(s2, h, "tok-default"),
        "(7) the user finds the private data objects intact");
     ok(find_label(s2, "so-set", NULL) == 0, "(7) and no object relabelled by the SO");
+
+    /* (8) Only the user makes a private object (#31). */
+    (void)C_Logout(s2);
+    ok(mkdata_rv(s2, "pub-dflt", 0, -1) == CKR_USER_NOT_LOGGED_IN,
+       "(8) no login: a data object without CKA_PRIVATE is refused");
+    if (C_Login(s2,0,(CK_BYTE*)SO_PIN,strlen(SO_PIN))) { fprintf(stderr,"SO (3)\n"); return 2; }
+    {
+        CK_BYTE kv[16]; memset(kv, 0x5A, sizeof kv);
+        CK_ULONG gs = CKK_GENERIC_SECRET;
+        CK_ATTRIBUTE ct[] = { { CKA_CLASS, &g_secret, sizeof g_secret },
+                              { CKA_KEY_TYPE, &gs, sizeof gs },
+                              { CKA_VALUE, kv, sizeof kv }, { CKA_TOKEN, &g_no, 1 },
+                              { CKA_PRIVATE, &g_yes, 1 } };
+        CK_OBJECT_HANDLE x = 0;
+        ok(C_CreateObject(s2, ct, 5, &x) == CKR_USER_NOT_LOGGED_IN,
+           "(8) SO: C_CreateObject of a private secret key is refused");
+        ok(mkdata_rv(s2, "so-priv", 0, 1) == CKR_USER_NOT_LOGGED_IN
+           && mkdata_rv(s2, "so-dflt", 0, -1) == CKR_USER_NOT_LOGGED_IN,
+           "(8) SO: a private data object, asked or by default, is refused");
+        ok(mkdata_rv(s2, "so-pub", 0, 0) == CKR_OK,
+           "(8) SO: a public data object is made");
+        ok(C_GenerateKey(s2, &kg, kt, 6, &x) == CKR_USER_NOT_LOGGED_IN,
+           "(8) SO: C_GenerateKey is refused");
+        ok(C_GenerateKeyPair(s2, &ecg, pt, 5, vt, 2, &pub, &prv) == CKR_USER_NOT_LOGGED_IN,
+           "(8) SO: C_GenerateKeyPair is refused");
+        CK_OBJECT_HANDLE src = 0;
+        CK_ATTRIBUTE cp[] = { { CKA_PRIVATE, &g_yes, 1 }, { CKA_TOKEN, &g_no, 1 } };
+        ok(find_label(s2, "tok-public", &src) == 1
+           && C_CopyObject(s2, src, cp, 2, &x) == CKR_USER_NOT_LOGGED_IN,
+           "(8) SO: a public data object copied CKA_PRIVATE=TRUE is refused");
+        ok(C_CopyObject(s2, src, &cp[1], 1, &x) == CKR_OK,
+           "(8) SO: and copied as it is, it is made");
+    }
+    (void)C_Logout(s2);
 
     C_Finalize(NULL);
     printf("\n%s\n", fails ? "FAILURES" : "all good");

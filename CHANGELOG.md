@@ -65,6 +65,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `C_Initialize` and taking `CKR_CRYPTOKI_ALREADY_INITIALIZED` as success,
   now work. Nothing is reset: sessions and the login stay as they were.
   Reported by AlexLaroche (#32). `tests/test_finalize_release.c`, (0).
+* **Only the user makes a private object.** The check refused a public
+  session only, so the SO could create, generate, derive, unwrap or
+  decapsulate a private object -- one it could then not see, and that the
+  user would later find among its own. PKCS#11 v3.2 gives an R/W SO session
+  access to public objects only. `C_CreateObject`, `C_GenerateKey`,
+  `C_GenerateKeyPair`, `C_DeriveKey`, `C_UnwrapKey`, `C_EncapsulateKey`,
+  `C_DecapsulateKey` and `C_CopyObject` now answer `CKR_USER_NOT_LOGGED_IN`
+  to anyone but the user when the object would be private. The SO still
+  makes public objects, and a data object whose template leaves
+  `CKA_PRIVATE` out counts as private, the default of the `CKA_PRIVATE`
+  change above. Reported by AlexLaroche (#31).
+  `tests/test_private_attr.c`, (8).
 
 ## [2.6.1] --- 2026-11-07
 

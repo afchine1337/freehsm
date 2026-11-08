@@ -2500,22 +2500,39 @@ static CK_RV fhsm_check_ro_token(CK_SESSION_HANDLE hSession,
     return FHSM_RV_OK;
 }
 
-/* PKCS#11 : a private object (CKA_PRIVATE=TRUE, explicit or derived from the
- * class default -- TRUE for secret/private keys) may only be created,
- * derived or unwrapped by an authenticated (logged-in) session. A public
- * (unauthenticated) session attempting this is CKR_USER_NOT_LOGGED_IN (#125
- * TestPublicSessionRestrictions). */
-static CK_RV fhsm_check_private_login(CK_SESSION_HANDLE hSession,
-                                      CK_ATTRIBUTE *tmpl, CK_ULONG n) {
-    CK_ULONG cls = 0xFFFFFFFFUL;
+/* PKCS#11 v3.2 §4.4 and the session states of §5.6: a private object is the
+ * normal user's. Only a session logged in as the user may create, generate,
+ * derive, unwrap, decapsulate or copy one; anyone else -- a public session,
+ * and the SO, whose R/W session "has read/write access only to public objects"
+ * -- gets CKR_USER_NOT_LOGGED_IN (#125 TestPublicSessionRestrictions, #31).
+ *
+ * This refused only the public session. The SO could make a private object it
+ * could then not see, and a user would later find it as one of its own.
+ *
+ * Whether the object will be private follows fhsm_obj_private: secret and
+ * private keys always, public keys and certificates never, a data object
+ * unless its template says CKA_PRIVATE=FALSE. `cls` is the class to assume
+ * when the template names none (the class the call produces), and
+ * `data_default` what a data object is when the template does not say. */
+static CK_RV fhsm_check_private_login_cls(CK_SESSION_HANDLE hSession,
+                                          CK_ATTRIBUTE *tmpl, CK_ULONG n,
+                                          CK_ULONG cls, int data_default) {
     long ci = find_attr(tmpl, n, 0x00 /* CKA_CLASS */);
     if (ci >= 0 && tmpl[ci].pValue && tmpl[ci].ulValueLen == sizeof(CK_ULONG))
         cls = *(CK_ULONG *)tmpl[ci].pValue;
-    int default_priv = (cls == CKO_SECRET_KEY || cls == CKO_PRIVATE_KEY) ? 1 : 0;
-    if (tmpl_bbool(tmpl, n, CKA_PRIVATE, default_priv)
-        && fhsm_session_role(hSession) == FHSM_ROLE_NONE)
+    int priv;
+    if (cls == CKO_PUBLIC_KEY || cls == CKO_CERTIFICATE) priv = 0;
+    else if (cls == CKO_DATA) priv = tmpl_bbool(tmpl, n, CKA_PRIVATE, data_default);
+    else if (cls == CKO_SECRET_KEY || cls == CKO_PRIVATE_KEY) priv = 1;
+    else priv = tmpl_bbool(tmpl, n, CKA_PRIVATE, 0);   /* creation refuses it later */
+    if (priv && fhsm_session_role(hSession) != FHSM_ROLE_USER)
         return FHSM_RV_USER_NOT_LOGGED_IN;
     return FHSM_RV_OK;
+}
+
+static CK_RV fhsm_check_private_login(CK_SESSION_HANDLE hSession,
+                                      CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    return fhsm_check_private_login_cls(hSession, tmpl, n, 0xFFFFFFFFUL, 1);
 }
 
 /* Apply CKA_TOKEN scope after creating an object : if the template does
@@ -2974,6 +2991,9 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A secret or private key is the user's to make, not the SO's (#31). */
+    { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
+      if (pl != FHSM_RV_OK) return pl; }
 
     /* C_GenerateKey only ever produces symmetric keys (AES, generic-secret,
      * 3DES) -- never a KEM key. CKA_ENCAPSULATE / CKA_DECAPSULATE are defined
@@ -4864,6 +4884,9 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A secret or private key is the user's to make, not the SO's (#31). */
+    { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
+      if (pl != FHSM_RV_OK) return pl; }
     if (pMechanism->mechanism == CKM_SP800_108_COUNTER_KDF_OP
         || pMechanism->mechanism == CKM_SP800_108_FEEDBACK_KDF_OP
         || pMechanism->mechanism == CKM_SP800_108_DOUBLE_PIPELINE_KDF_OP)
@@ -6268,6 +6291,9 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A secret or private key is the user's to make, not the SO's (#31). */
+    { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
+      if (pl != FHSM_RV_OK) return pl; }
 
     const uint8_t *ukv = NULL; size_t ukl = 0;
     uint32_t ucl = 0, ukt = 0;
@@ -6507,6 +6533,9 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A secret or private key is the user's to make, not the SO's (#31). */
+    { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
+      if (pl != FHSM_RV_OK) return pl; }
 
     const uint8_t *kv = NULL; size_t kvl = 0;
     uint32_t cl = 0, kt = 0;
@@ -6611,6 +6640,9 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A secret or private key is the user's to make, not the SO's (#31). */
+    { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
+      if (pl != FHSM_RV_OK) return pl; }
 
     const uint8_t *kv = NULL; size_t kvl = 0;
     uint32_t cl = 0, kt = 0;
@@ -7402,6 +7434,9 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A secret or private key is the user's to make, not the SO's (#31). */
+    { CK_RV pl = fhsm_check_private_login_cls(hSession, pPriv, ulPriv, CKO_PRIVATE_KEY, 1);
+      if (pl != FHSM_RV_OK) return pl; }
 
     EVP_PKEY *pkey = NULL;
     uint32_t  ckk_type = 0;
@@ -8909,6 +8944,13 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                          &src_value, &src_value_len,
                                          &src_class, &src_key_type);
     if (r != FHSM_RV_OK) return fhsm_object_lookup_rv(r);
+    /* A private copy is the user's to make (#31): the SO may copy a public
+     * data object, not turn it into a private one with CKA_PRIVATE=TRUE. The
+     * class is the source's; a data copy is as private as its source unless
+     * the template says otherwise. */
+    { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount,
+                     src_class, fhsm_obj_private(t, hObject, src_class));
+      if (pl != FHSM_RV_OK) return pl; }
 
     /* Read original label / id / flags via the auxiliary accessors. */
     char     copy_label[64] = "";
