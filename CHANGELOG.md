@@ -93,6 +93,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   from its starting value, and refuse what goes past it. Within that room
   the keystream is unchanged. Reported by AlexLaroche (#33, C13).
   `tests/test_aes_ctr_counter_bits.c`.
+* **A hashing RSA-PSS mechanism refuses a `hashAlg` that is not its own.**
+  `CKM_SHA256_RSA_PKCS_PSS` with `hashAlg = CKM_SHA384` was accepted, and
+  the signature made with SHA-256 whatever the caller declared. PKCS#11
+  v3.2 says `hashAlg` "must match the hash algorithm indicated by the
+  signature mechanism". `C_SignInit` and `C_VerifyInit` now answer
+  `CKR_MECHANISM_PARAM_INVALID` for the SHA-1, SHA-224, SHA-256, SHA-384 and
+  SHA-512 variants. Bare `CKM_RSA_PKCS_PSS` is unchanged. Reported by
+  AlexLaroche (#33, C14). `tests/test_rsa_pss_raw.c`, (8).
 
 ## [2.6.1] --- 2026-11-07
 

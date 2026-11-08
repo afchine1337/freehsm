@@ -23,6 +23,10 @@
  *       bare PSS over SHA-224(M); (7) the same for CKM_SHA1_RSA_PKCS_PSS
  *       where the build has it. Neither existed: OpenSC's sign-and-verify
  *       test got CKR_MECHANISM_INVALID for both
+ *   (8) CKM_SHA256_RSA_PKCS_PSS with hashAlg CKM_SHA384, or CKM_SHA224, is
+ *       CKR_MECHANISM_PARAM_INVALID at C_SignInit and C_VerifyInit: hashAlg
+ *       must match the mechanism's digest, and was accepted and ignored
+ *       (#33 C14); with CKM_SHA256 it still signs
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -51,6 +55,7 @@ typedef struct { CK_ULONG hashAlg, mgf, sLen; } CK_RSA_PKCS_PSS_PARAMS;
 #define CKM_SHA_1                    0x220UL
 #define CKM_SHA224                   0x255UL
 #define CKM_SHA256                   0x250UL
+#define CKM_SHA384                   0x260UL
 #define CKG_MGF1_SHA1                0x1UL
 #define CKG_MGF1_SHA256              0x2UL
 #define CKG_MGF1_SHA224              0x5UL
@@ -208,6 +213,26 @@ int main(void)
     rv = C_SignInit(s, &barebad, priv);
     snprintf(what, sizeof what, "(5) unknown hashAlg refused at C_SignInit (rv 0x%lx)", rv);
     ok(rv == CKR_MECHANISM_PARAM_INVALID, what);
+
+    /* (8) A hashing PSS mechanism with another hashAlg (#33 C14). */
+    {
+        CK_RSA_PKCS_PSS_PARAMS p384 = { CKM_SHA384, CKG_MGF1_SHA256, 32 };
+        CK_MECHANISM h256_384 = { CKM_SHA256_RSA_PKCS_PSS, &p384, sizeof p384 };
+        rv = C_SignInit(s, &h256_384, priv);
+        snprintf(what, sizeof what, "(8) SHA256_RSA_PKCS_PSS, hashAlg SHA384: refused (0x%lx)", rv);
+        ok(rv == CKR_MECHANISM_PARAM_INVALID, what);
+        rv = C_VerifyInit(s, &h256_384, pub);
+        snprintf(what, sizeof what, "(8) and at C_VerifyInit (0x%lx)", rv);
+        ok(rv == CKR_MECHANISM_PARAM_INVALID, what);
+        CK_RSA_PKCS_PSS_PARAMS p224 = { CKM_SHA224, CKG_MGF1_SHA224, 28 };
+        CK_MECHANISM h256_224 = { CKM_SHA256_RSA_PKCS_PSS, &p224, sizeof p224 };
+        rv = C_SignInit(s, &h256_224, priv);
+        snprintf(what, sizeof what, "(8) SHA256_RSA_PKCS_PSS, hashAlg SHA224: refused (0x%lx)", rv);
+        ok(rv == CKR_MECHANISM_PARAM_INVALID, what);
+        sl = sizeof sig;
+        ok(sign(s, &hashed256, priv, msg, ml, sig, &sl) == CKR_OK,
+           "(8) with hashAlg SHA256 it still signs");
+    }
 
     C_Finalize(NULL);
     printf("\n%s : %d failure(s)\n", fails ? "FAIL" : "PASS", fails);

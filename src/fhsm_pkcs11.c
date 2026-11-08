@@ -10407,6 +10407,22 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             const EVP_MD *hmd = oaep_md(p[0]);
             if (!hmd) return FHSM_RV_MECHANISM_PARAM_INVALID;
             EVP_MD_free((EVP_MD *)hmd);
+        } else {
+            /* A CKM_SHAxxx_RSA_PKCS_PSS mechanism hashes with its own
+             * digest, and hashAlg "must match the hash algorithm indicated
+             * by the signature mechanism" (PKCS#11 v3.2, CK_RSA_PKCS_PSS_
+             * PARAMS). A different one was accepted and ignored: SHA-256
+             * signed while the caller had declared SHA-384 (#33 C14). */
+            CK_ULONG want = 0;
+            switch (op->mechanism) {
+                case 0x0000000EUL: want = 0x00000220UL; break; /* SHA1   -> CKM_SHA_1   */
+                case 0x00000047UL: want = 0x00000255UL; break; /* SHA224 -> CKM_SHA224  */
+                case 0x00000043UL: want = 0x00000250UL; break; /* SHA256 -> CKM_SHA256  */
+                case 0x00000044UL: want = 0x00000260UL; break; /* SHA384 -> CKM_SHA384  */
+                case 0x00000045UL: want = 0x00000270UL; break; /* SHA512 -> CKM_SHA512  */
+                default: break;
+            }
+            if (want && p[0] != want) return FHSM_RV_MECHANISM_PARAM_INVALID;
         }
         op->pss_mgf     = (uint32_t)p[1];
         op->pss_saltlen = (long)p[2];
