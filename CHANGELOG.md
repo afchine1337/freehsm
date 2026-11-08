@@ -116,6 +116,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `pSharedData` or `ulSharedDataLen` set, which the specification forbids,
   is now `CKR_MECHANISM_PARAM_INVALID` instead of being ignored. Reported by
   AlexLaroche (#33, C15, C16, C17). `tests/test_ecdh_key_len.c`.
+* **Four refusals now carry the return code PKCS#11 v3.2 gives them.**
+  * An RSA private key's `CKA_PRIVATE_EXPONENT`, primes, exponents and
+    coefficient are `CKR_ATTRIBUTE_SENSITIVE`, as every private key here is
+    sensitive. They were `CKR_ATTRIBUTE_TYPE_INVALID`, having no case at
+    all.
+  * `C_SetAttributeValue` of key material the object carries is
+    `CKR_ATTRIBUTE_READ_ONLY`, not `CKR_ATTRIBUTE_TYPE_INVALID`. This covers
+    an RSA key's modulus, exponents and private components, an EC key's
+    `CKA_EC_PARAMS` and `CKA_EC_POINT`, and a secret key's `CKA_VALUE_LEN`.
+  * Reading `CKA_MODULUS`, `CKA_PUBLIC_EXPONENT`, `CKA_EC_POINT`,
+    `CKA_EC_PARAMS` or a certificate's subject, issuer or serial number into
+    a buffer too small is `CKR_BUFFER_TOO_SMALL`, not
+    `CKR_ATTRIBUTE_TYPE_INVALID`.
+  * An AES-GCM `ulTagBits` above 128 or not a multiple of 8 is
+    `CKR_MECHANISM_PARAM_INVALID`, not `CKR_ARGUMENTS_BAD`.
+
+  Reported by AlexLaroche (#33, C2, C3, C4, C12). `tests/test_attr_rv.c`.
 
 ## [2.6.1] --- 2026-11-07
 

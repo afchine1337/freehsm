@@ -8433,6 +8433,24 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 src_len = 1;
                 break;
             }
+            case 0x123UL:   /* CKA_PRIVATE_EXPONENT */
+            case 0x124UL:   /* CKA_PRIME_1 */
+            case 0x125UL:   /* CKA_PRIME_2 */
+            case 0x126UL:   /* CKA_EXPONENT_1 */
+            case 0x127UL:   /* CKA_EXPONENT_2 */
+            case 0x128UL: { /* CKA_COEFFICIENT */
+                /* The private components of an RSA key. They had no case and
+                 * fell to the default, so the private exponent was
+                 * CKR_ATTRIBUTE_TYPE_INVALID where a sensitive EC key's
+                 * CKA_VALUE is CKR_ATTRIBUTE_SENSITIVE (#33 C2). Every private
+                 * key here is sensitive -- generated or imported, its value
+                 * leaves the token wrapped, never in clear -- so they are
+                 * always withheld. Any other object has no such attribute. */
+                pTemplate[i].ulValueLen = (CK_ULONG)-1;
+                if (cko_class == CKO_PRIVATE_KEY && ckk_type == CKK_RSA) fhsm_sensitive = 1;
+                else fhsm_type_invalid = 1;
+                continue;
+            }
             case CKA_MODULUS_BITS:
             case CKA_MODULUS:
             case CKA_PUBLIC_EXPONENT:
@@ -8451,7 +8469,12 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     int e2 = extract_pubkey_attr(t, (uint32_t)hObject,
                                                   pTemplate[i].type,
                                                   pTemplate[i].pValue, &out_len);
+                    /* -2 is a buffer too small, not an attribute the object
+                     * lacks: CKR_BUFFER_TOO_SMALL, which the caller can
+                     * retry, where this said CKR_ATTRIBUTE_TYPE_INVALID
+                     * (#33 C4). */
                     if (e2 == 0) pTemplate[i].ulValueLen = (CK_ULONG)out_len;
+                    else if (e2 == -2) { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_buf_too_small = 1; }
                     else { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; }
                 }
                 continue;
@@ -8597,7 +8620,12 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     int e2 = extract_cert_attr(t, (uint32_t)hObject,
                                                 pTemplate[i].type,
                                                 pTemplate[i].pValue, &out_len);
+                    /* -2 is a buffer too small, not an attribute the object
+                     * lacks: CKR_BUFFER_TOO_SMALL, which the caller can
+                     * retry, where this said CKR_ATTRIBUTE_TYPE_INVALID
+                     * (#33 C4). */
                     if (e2 == 0) pTemplate[i].ulValueLen = (CK_ULONG)out_len;
+                    else if (e2 == -2) { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_buf_too_small = 1; }
                     else { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; }
                 }
                 continue;
@@ -8695,6 +8723,24 @@ CK_RV C_GetObjectSize(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
  * report (slot 25 was unimplemented in v1.2.2). Wired into the v2.40
  * function list at slot 25 ; mirrored into the v3.0 table by
  * fhsm_init_v3_0_table(). */
+/* 1 when `type` is key material an object of this class and key type
+ * carries -- fixed by its value, so read-only to C_SetAttributeValue
+ * (PKCS#11 v3.2 §4.1.2) rather than unknown. */
+static int fhsm_key_material_attr(uint32_t cls, uint32_t kt, CK_ATTRIBUTE_TYPE type) {
+    if (cls == CKO_SECRET_KEY) return type == 0x161UL;           /* CKA_VALUE_LEN */
+    if (cls != CKO_PUBLIC_KEY && cls != CKO_PRIVATE_KEY) return 0;
+    if (kt == 0x00UL /* CKK_RSA */) {
+        if (type == 0x120UL || type == 0x121UL || type == 0x122UL)  /* MODULUS, _BITS, PUBLIC_EXPONENT */
+            return 1;
+        return cls == CKO_PRIVATE_KEY && type >= 0x123UL && type <= 0x128UL;
+    }
+    if (kt == 0x03UL || kt == 0x40UL || kt == 0x41UL) {        /* EC, EC_EDWARDS, EC_MONTGOMERY */
+        if (type == 0x180UL /* CKA_EC_PARAMS */) return 1;
+        return cls == CKO_PUBLIC_KEY && type == 0x181UL;      /* CKA_EC_POINT */
+    }
+    return 0;
+}
+
 CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
                           CK_OBJECT_HANDLE hObject,
                           CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
@@ -8759,8 +8805,8 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
     uint8_t f2_new = f2_now;
     int f2_touched = 0;
     /* The class decides whether the object has dates at all. */
-    uint32_t obj_class = 0;
-    (void)fhsm_token_object_get(t, (uint32_t)hObject, NULL, NULL, &obj_class, NULL);
+    uint32_t obj_class = 0, obj_kt = 0;
+    (void)fhsm_token_object_get(t, (uint32_t)hObject, NULL, NULL, &obj_class, &obj_kt);
 
     /* Two passes: validate everything, then apply. A single loop that
      * validated and applied as it went left a partial mutation behind on
@@ -8912,6 +8958,14 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
             case CKA_ALWAYS_AUTH_ATTR:
                 return 0x00000010UL;                 /* CKR_ATTRIBUTE_READ_ONLY */
             default:
+                /* The key material an object does carry is read-only: its
+                 * value fixes it. It fell here and came back
+                 * CKR_ATTRIBUTE_TYPE_INVALID, "no such attribute", for an RSA
+                 * key's CKA_MODULUS that C_GetAttributeValue reads back
+                 * (#33 C3). An attribute the object does not carry stays
+                 * CKR_ATTRIBUTE_TYPE_INVALID. */
+                if (fhsm_key_material_attr(obj_class, obj_kt, a->type))
+                    return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
                 return 0x00000012UL;                 /* CKR_ATTRIBUTE_TYPE_INVALID */
         }
     }
@@ -10175,9 +10229,13 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
              * inner parameter (#125 TestMechanismNullInnerParams). */
             if ((iv_len && !iv_ptr) || (aad_len && !aad_ptr))
                 return FHSM_RV_MECHANISM_PARAM_INVALID;
+            /* A tag length GCM does not have is a bad mechanism parameter,
+             * CKR_MECHANISM_PARAM_INVALID; it shared the size-limit test
+             * below and came back CKR_ARGUMENTS_BAD (#33 C12). */
+            if (tag_bits > 128 || (tag_bits & 7))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
             if (iv_len > sizeof(op->gcm_iv)
-                || aad_len > FHSM_AAD_MAX
-                || tag_bits > 128 || (tag_bits & 7)) {
+                || aad_len > FHSM_AAD_MAX) {
                 return FHSM_RV_ARGUMENTS_BAD;
             }
             if (iv_len && iv_ptr) memcpy(op->gcm_iv,  iv_ptr,  iv_len);
