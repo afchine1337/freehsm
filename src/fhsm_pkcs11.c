@@ -1970,6 +1970,11 @@ typedef struct fhsm_op_s {
                                 * computed, for bare CKM_RSA_PKCS_PSS */
     uint32_t    enc_pending;   /* multipart ECB/CBC/CBC-PAD encryption:
                                 * input bytes held back, 0..15 */
+    /* AES-CTR: the blocks the counter bits allow before they overflow
+     * (UINT64_MAX: more than will ever be asked), and the bytes processed so
+     * far, single-part or multipart (§6.11.3, #33 C13). */
+    uint64_t    ctr_blocks_max;
+    uint64_t    ctr_bytes_done;
     /* CK_GCM_PARAMS members captured at EncryptInit / DecryptInit. The
      * static buffers are intentionally generous to cover Wycheproof's
      * LongIv / large-AAD cases : the corpus has IVs up to 2056 bits
@@ -2077,6 +2082,39 @@ typedef struct fhsm_op_s {
     size_t      mp_len;
     size_t      mp_cap;
 } fhsm_op_t;
+
+/* AES-CTR counter room (PKCS#11 v3.2 §6.11.3). The counter is the `bits`
+ * least significant bits of cb, big-endian; from its starting value c it can
+ * count 2^bits - c blocks before it overflows ("if ulCounterBits = 2 and the
+ * counter bits start as 1 then only 3 blocks of data can be processed").
+ * Capped at UINT64_MAX, which no caller reaches. */
+static uint64_t ctr_blocks_avail(const uint8_t cb[16], unsigned bits) {
+    uint64_t lo = 0, hi = 0;
+    for (int i = 0; i < 8; i++) { hi = (hi << 8) | cb[i]; lo = (lo << 8) | cb[8 + i]; }
+    if (bits < 64) {
+        uint64_t mask = (UINT64_C(1) << bits) - 1;
+        return mask - (lo & mask) + 1;
+    }
+    if (bits > 64) {
+        unsigned hb = bits - 64;
+        uint64_t hmask = (hb == 64) ? UINT64_MAX : (UINT64_C(1) << hb) - 1;
+        if ((hi & hmask) != hmask) return UINT64_MAX;   /* 2^64 blocks or more */
+    }
+    return lo == 0 ? UINT64_MAX : (~lo) + 1;            /* 2^64 - lo */
+}
+
+/* 1 when `len` more bytes stay within the counter room of an AES-CTR
+ * operation, and counts them; 0 when they would overflow it. A partial last
+ * block uses a counter value like a whole one. Other mechanisms: always 1. */
+static int ctr_take(fhsm_op_t *op, size_t len) {
+    if (op->mechanism != 0x00001086UL /* CKM_AES_CTR */) return 1;
+    uint64_t total = op->ctr_bytes_done + (uint64_t)len;
+    if (total < op->ctr_bytes_done) return 0;
+    uint64_t blocks = total / 16 + (total % 16 != 0);
+    if (blocks > op->ctr_blocks_max) return 0;
+    op->ctr_bytes_done = total;
+    return 1;
+}
 
 /* Cumulative ceiling on a buffered multipart signature, in bytes.
  *
@@ -10151,6 +10189,9 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         if (pMechanism->ulParameterLen == 16) {
             memcpy(op->iv, pMechanism->pParameter, 16);
             op->have_iv = 1;
+            /* A bare counter block names no counter width: all 128 bits. */
+            op->ctr_blocks_max = ctr_blocks_avail(op->iv, 128);
+            op->ctr_bytes_done = 0;
         } else if (pMechanism->ulParameterLen >= sizeof(CK_ULONG) + 16) {
             CK_ULONG cbits = 0;
             memcpy(&cbits, pMechanism->pParameter, sizeof(CK_ULONG));
@@ -10160,6 +10201,12 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                    (const uint8_t *)pMechanism->pParameter + sizeof(CK_ULONG),
                    16);
             op->have_iv = 1;
+            /* ulCounterBits was checked and then dropped: OpenSSL increments
+             * all 128 bits, so a narrow counter carried into the nonce
+             * instead of stopping (#33 C13). §6.11.3: data that would
+             * overflow the counter bits is CKR_DATA_LEN_RANGE. */
+            op->ctr_blocks_max = ctr_blocks_avail(op->iv, (unsigned)cbits);
+            op->ctr_bytes_done = 0;
         } else {
             return FHSM_RV_MECHANISM_PARAM_INVALID;
         }
@@ -10969,6 +11016,11 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
             return 0x00000150UL;
         }
+        /* Past the counter bits of an AES-CTR operation (#33 C13). */
+        if (!ctr_take(op, (size_t)ulDataLen)) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            op->active = 0; return FHSM_RV_DATA_LEN_RANGE;
+        }
         int outl = 0, finl = 0;
         if (EVP_EncryptUpdate(ctx, pEnc, &outl, pData, (int)ulDataLen) != 1
             || EVP_EncryptFinal_ex(ctx, pEnc + outl, &finl) != 1) {
@@ -11470,6 +11522,11 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             *pulDataLen = ulEncLen;
             EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
             return 0x00000150UL;
+        }
+        /* Past the counter bits of an AES-CTR operation (#33 C13). */
+        if (!ctr_take(op, (size_t)ulEncLen)) {
+            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+            op->active = 0; return FHSM_RV_DATA_LEN_RANGE;
         }
         int outl = 0, finl = 0;
         if (EVP_DecryptUpdate(ctx, pData, &outl, pEnc, (int)ulEncLen) != 1
@@ -13756,6 +13813,8 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
       if (pEnc == NULL) { *pulEncLen = need; return FHSM_RV_OK; }
       if (*pulEncLen < need) { *pulEncLen = need; return 0x00000150UL; }
     }
+    /* Past the counter bits of an AES-CTR operation (#33 C13). */
+    if (!ctr_take(op, (size_t)ulPartLen)) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     int out_len = 0;
     if (EVP_EncryptUpdate(op->cipher_ctx, pEnc, &out_len, pPart, (int)ulPartLen) != 1) {
         op->active = 0; return FHSM_RV_FUNCTION_FAILED;
@@ -13948,6 +14007,8 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
           }
       }
     }
+    /* Past the counter bits of an AES-CTR operation (#33 C13). */
+    if (!ctr_take(op, (size_t)ulEncLen)) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
     int out_len = 0;
     if (EVP_DecryptUpdate(op->cipher_ctx, pPart, &out_len, pEnc, (int)ulEncLen) != 1) {
         op->active = 0; return FHSM_RV_FUNCTION_FAILED;

@@ -84,6 +84,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
   in a read-only session: such a copy is now `CKR_SESSION_READ_ONLY`, and
   one asked `CKA_TOKEN=FALSE` is made as before. Reported by AlexLaroche
   (#30). `tests/test_private_attr.c`, (9).
+* **AES-CTR stops at the end of its counter.** `ulCounterBits` was checked
+  against 1..128 and then dropped: OpenSSL increments all 128 bits of the
+  counter block, so a narrow counter carried into the nonce and the call
+  answered `CKR_OK`. PKCS#11 v3.2 §6.11.3 makes data that would overflow the
+  counter bits `CKR_DATA_LEN_RANGE`. `C_Encrypt`, `C_Decrypt` and their
+  multipart forms now count the blocks against the room the counter has
+  from its starting value, and refuse what goes past it. Within that room
+  the keystream is unchanged. Reported by AlexLaroche (#33, C13).
+  `tests/test_aes_ctr_counter_bits.c`.
 
 ## [2.6.1] --- 2026-11-07
 
