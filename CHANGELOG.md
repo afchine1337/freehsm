@@ -17,8 +17,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   does not list. The three calls now answer such a handle
   `CKR_OBJECT_HANDLE_INVALID`, as `C_GetAttributeValue` and
   `C_GetObjectSize` do. With the `CKA_PRIVATE` change below, this fixes a
-  private data object staying readable after `C_Logout` (reported
-  privately). `tests/test_private_attr.c` (7).
+  private data object staying readable after `C_Logout`, reported
+  privately by Alexandre Laroche. `tests/test_private_attr.c` (7).
 
 ### Changed
 * **A data object's `CKA_PRIVATE` is the one the template gives, and a
