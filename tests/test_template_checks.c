@@ -36,6 +36,13 @@
  *       CKR_ATTRIBUTE_VALUE_INVALID
  *   (7) C10: a data object with CKA_OBJECT_ID is CKR_ATTRIBUTE_TYPE_INVALID,
  *       not accepted and dropped: the store has no field for it
+ *   (8) C_DestroyObject of an unknown handle is CKR_OBJECT_HANDLE_INVALID,
+ *       not the store's CKR_KEY_HANDLE_INVALID
+ *   (9) a private key asked CKA_SENSITIVE=FALSE, generated or imported, is
+ *       CKR_TEMPLATE_INCONSISTENT: private keys here are always sensitive,
+ *       and the template was accepted and overridden
+ *   (10) an EC or Edwards key pair without CKA_EC_PARAMS is
+ *       CKR_TEMPLATE_INCOMPLETE, not a P-256 or Ed25519 key chosen silently
  * ========================================================================= */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -49,6 +56,9 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 
 #define CKR_OK                       0UL
 #define CKR_ATTRIBUTE_READ_ONLY      0x10UL
+#define CKR_OBJECT_HANDLE_INVALID    0x82UL
+#define CKA_SENSITIVE                0x103UL
+#define CKM_EC_EDWARDS_KEY_PAIR_GEN  0x1055UL
 #define CKR_ATTRIBUTE_TYPE_INVALID   0x12UL
 #define CKR_ATTRIBUTE_VALUE_INVALID  0x13UL
 #define CKA_OBJECT_ID                0x012UL
@@ -118,12 +128,13 @@ int main(void) {
                                CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*,CK_OBJECT_HANDLE*);
     CK_RV (*C_CreateObject)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
     CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
+    CK_RV (*C_DestroyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE);
     #define SYM(n) *(void**)&n = dlsym(lib, #n); \
                    if (!n) { fprintf(stderr, "missing %s\n", #n); return 2; }
     SYM(C_Initialize) SYM(C_Finalize) SYM(C_InitToken) SYM(C_OpenSession) SYM(C_Login)
     SYM(C_Logout) SYM(C_InitPIN) SYM(C_GenerateKey) SYM(C_GenerateKeyPair)
     SYM(C_CreateObject) SYM(C_FindObjectsInit) SYM(C_FindObjects) SYM(C_FindObjectsFinal)
-    SYM(C_GetAttributeValue)
+    SYM(C_GetAttributeValue) SYM(C_DestroyObject)
 
     printf("Templates the module did not honour\n\n");
     CK_BYTE label[32]; memset(label, ' ', 32); memcpy(label, "tmplchk", 7);
@@ -259,6 +270,46 @@ int main(void) {
         rv = C_CreateObject(s, dt, 3, &h);
         snprintf(what, sizeof what, "(7) data object with CKA_OBJECT_ID: TYPE_INVALID (0x%lx)", rv);
         ok(rv == CKR_ATTRIBUTE_TYPE_INVALID, what);
+    }
+
+    /* (8) C_DestroyObject of a handle that is no object's. */
+    rv = C_DestroyObject(s, 0x7FFFFFF0UL);
+    snprintf(what, sizeof what, "(8) C_DestroyObject, unknown handle: OBJECT_HANDLE_INVALID (0x%lx)", rv);
+    ok(rv == CKR_OBJECT_HANDLE_INVALID, what);
+
+    /* (9) A private key asked CKA_SENSITIVE=FALSE. */
+    {
+        static CK_BYTE p256[] = { 0x06,0x08,0x2A,0x86,0x48,0xCE,0x3D,0x03,0x01,0x07 };
+        CK_ATTRIBUTE pt[] = { { CKA_EC_PARAMS, p256, sizeof p256 }, { CKA_VERIFY, &yes, 1 } };
+        CK_ATTRIBUTE vt[] = { { CKA_SIGN, &yes, 1 }, { CKA_SENSITIVE, &no, 1 } };
+        CK_MECHANISM m = { CKM_EC_KEY_PAIR_GEN, NULL, 0 };
+        rv = C_GenerateKeyPair(s, &m, pt, 2, vt, 2, &h, &h2);
+        snprintf(what, sizeof what, "(9) EC pair, private CKA_SENSITIVE=FALSE: INCONSISTENT (0x%lx)", rv);
+        ok(rv == CKR_TEMPLATE_INCONSISTENT, what);
+        CK_ULONG pc = CKO_PRIVATE_KEY, ec = 3UL /* CKK_EC */;
+        CK_ATTRIBUTE ct[] = { { CKA_CLASS, &pc, sizeof pc }, { CKA_KEY_TYPE, &ec, sizeof ec },
+                              { CKA_SENSITIVE, &no, 1 } };
+        rv = C_CreateObject(s, ct, 3, &h);
+        snprintf(what, sizeof what, "(9) imported private key, CKA_SENSITIVE=FALSE: INCONSISTENT (0x%lx)", rv);
+        ok(rv == CKR_TEMPLATE_INCONSISTENT, what);
+    }
+
+    /* (10) An EC or Edwards pair without CKA_EC_PARAMS. */
+    {
+        CK_ATTRIBUTE pt[] = { { CKA_VERIFY, &yes, 1 } };
+        CK_ATTRIBUTE vt[] = { { CKA_SIGN, &yes, 1 } };
+        CK_MECHANISM m = { CKM_EC_KEY_PAIR_GEN, NULL, 0 };
+        rv = C_GenerateKeyPair(s, &m, pt, 1, vt, 1, &h, &h2);
+        snprintf(what, sizeof what, "(10) EC pair without CKA_EC_PARAMS: INCOMPLETE (0x%lx)", rv);
+        ok(rv == CKR_TEMPLATE_INCOMPLETE, what);
+        CK_MECHANISM me = { CKM_EC_EDWARDS_KEY_PAIR_GEN, NULL, 0 };
+        rv = C_GenerateKeyPair(s, &me, pt, 1, vt, 1, &h, &h2);
+        if (rv == 0x70UL /* CKR_MECHANISM_INVALID */)
+            printf("  (10) Edwards key generation not in this build, skipped\n");
+        else {
+            snprintf(what, sizeof what, "(10) Edwards pair without CKA_EC_PARAMS: INCOMPLETE (0x%lx)", rv);
+            ok(rv == CKR_TEMPLATE_INCOMPLETE, what);
+        }
     }
 
     C_Finalize(NULL);

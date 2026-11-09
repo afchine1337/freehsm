@@ -21,9 +21,9 @@
  *
  * What is asserted:
  *   (1) C2: a sensitive key's six private components are
- *       CKR_ATTRIBUTE_SENSITIVE, and so are those of a key asked
- *       CKA_SENSITIVE=FALSE (private keys are always sensitive here); a
- *       public key does not have them (CKR_ATTRIBUTE_TYPE_INVALID)
+ *       CKR_ATTRIBUTE_SENSITIVE; a private key asked CKA_SENSITIVE=FALSE is
+ *       not made (private keys are always sensitive here); a public key
+ *       does not have them (CKR_ATTRIBUTE_TYPE_INVALID)
  *   (2) C3: CKA_MODULUS of the public key, CKA_PRIME_1 of the private key,
  *       CKA_VALUE_LEN of an AES key are CKR_ATTRIBUTE_READ_ONLY;
  *       CKA_MODULUS of the AES key stays CKR_ATTRIBUTE_TYPE_INVALID
@@ -132,8 +132,8 @@ int main(void) {
     }
 
     CK_OBJECT_HANDLE spub = 0, sprv = 0, opub = 0, oprv = 0;
-    if (!rsa_pair(1, &spub, &sprv) || !rsa_pair(0, &opub, &oprv)) {
-        fprintf(stderr, "RSA key pairs\n"); return 2;
+    if (!rsa_pair(1, &spub, &sprv)) {
+        fprintf(stderr, "RSA key pair\n"); return 2;
     }
     CK_ULONG l = 0;
     CK_RV rv;
@@ -145,13 +145,10 @@ int main(void) {
         for (CK_ULONG a = 0x123; a <= 0x128; a++)
             all &= get(sprv, a, &l) == CKR_ATTRIBUTE_SENSITIVE && l == (CK_ULONG)-1;
         ok(all, "(1) sensitive key: the six private components are SENSITIVE");
-        /* Asked CKA_SENSITIVE=FALSE, CKA_EXTRACTABLE=TRUE: a private key here
-         * is sensitive all the same, so the answer is the same. */
-        all = 1;
-        for (CK_ULONG a = 0x123; a <= 0x128; a++)
-            all &= get(oprv, a, &l) == CKR_ATTRIBUTE_SENSITIVE && l == (CK_ULONG)-1;
-        ok(all, "(1) a key asked not sensitive: still SENSITIVE");
-        rv = get(opub, CKA_PRIVATE_EXPONENT, &l);
+        /* A private key here is always sensitive, so one asked
+         * CKA_SENSITIVE=FALSE is not made: the template is refused. */
+        ok(!rsa_pair(0, &opub, &oprv), "(1) a private key asked not sensitive is not made");
+        rv = get(spub, CKA_PRIVATE_EXPONENT, &l);
         snprintf(what, sizeof what, "(1) a public key has no private exponent: TYPE_INVALID (0x%lx)", rv);
         ok(rv == CKR_ATTRIBUTE_TYPE_INVALID, what);
     }
@@ -164,7 +161,7 @@ int main(void) {
         snprintf(what, sizeof what, "(2) set CKA_MODULUS of an RSA public key: READ_ONLY (0x%lx)", rv);
         ok(rv == CKR_ATTRIBUTE_READ_ONLY, what);
         CK_ATTRIBUTE p1 = { CKA_PRIME_1, junk, sizeof junk };
-        rv = C_SetAttributeValue(s, oprv, &p1, 1);
+        rv = C_SetAttributeValue(s, sprv, &p1, 1);
         snprintf(what, sizeof what, "(2) set CKA_PRIME_1 of an RSA private key: READ_ONLY (0x%lx)", rv);
         ok(rv == CKR_ATTRIBUTE_READ_ONLY, what);
 

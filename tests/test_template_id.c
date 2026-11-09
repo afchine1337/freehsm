@@ -231,12 +231,16 @@ int main(void)
                                 { CKA_KEY_TYPE, &ec, sizeof ec }, { CKA_TOKEN, &no, 1 } };
         ok(C_UnwrapKey(s, &kwp, kek, w, wlen, ec_t, 3, &bad) == 0x63UL,
            "(5) unwrapped as CKK_EC: CKR_KEY_TYPE_INCONSISTENT");
-        rv = C_UnwrapKey(s, &kwp, kek, w, wlen, up_t, 6, &up);
+        /* A private key here is always sensitive: asking otherwise is refused,
+         * where it was accepted and overridden. */
+        ok(C_UnwrapKey(s, &kwp, kek, w, wlen, up_t, 6, &bad) == 0xD1UL,
+           "(5) unwrapped asking CKA_SENSITIVE=FALSE: CKR_TEMPLATE_INCONSISTENT");
+        rv = C_UnwrapKey(s, &kwp, kek, w, wlen, up_t, 5, &up);
         ok(rv == CKR_OK && has_id(s, up, idp, sizeof idp),
            "(5) unwrapped as CKK_RSA, found by its CKA_ID");
         CK_ATTRIBUTE sa = { CKA_SENSITIVE, &sens, 1 };
         ok(C_GetAttributeValue(s, up, &sa, 1) == CKR_OK && sens == 1,
-           "(5) sensitive, though the template said FALSE");
+           "(5) sensitive");
         ok(C_SignInit(s, &sg, up) == CKR_OK
            && C_Sign(s, msg, sizeof msg - 1, sig, &sl) == CKR_OK
            && C_VerifyInit(s, &sg, rpub) == CKR_OK

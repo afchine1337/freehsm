@@ -177,6 +177,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   accepted past it. It now reports 8 to 512. The keys it makes are
   unchanged, from 1 to 64 bytes. Reported by AlexLaroche (#33, C18).
   `tests/test_generic_secret_len.c`, (0).
+* **A private key asked `CKA_SENSITIVE=FALSE` is refused instead of
+  quietly made sensitive.** Every private key here is sensitive, whether
+  generated, imported or unwrapped: its value leaves the token wrapped,
+  never in clear. A template asking otherwise was accepted with `CKR_OK`
+  and overridden. `C_GenerateKeyPair`, `C_CreateObject` and `C_UnwrapKey`
+  now answer `CKR_TEMPLATE_INCONSISTENT`. pkcs11-tool sends
+  `CKA_SENSITIVE=TRUE` for the private keys it generates and imports.
+  `tests/test_template_checks.c`, (9).
+* **An EC, Edwards or Montgomery key pair needs `CKA_EC_PARAMS`.** Without
+  it, P-256, Ed25519 or X25519 was chosen silently. The curve is the public
+  template's `CKA_EC_PARAMS`, and its absence is now
+  `CKR_TEMPLATE_INCOMPLETE`. `tests/test_template_checks.c`, (10).
+* **`C_DestroyObject` of an unknown handle is `CKR_OBJECT_HANDLE_INVALID`.**
+  It passed on the store's `CKR_KEY_HANDLE_INVALID`.
+  `tests/test_template_checks.c`, (8).
 
 ## [2.6.1] --- 2026-11-07
 

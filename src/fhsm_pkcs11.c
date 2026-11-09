@@ -2583,6 +2583,20 @@ static CK_RV fhsm_check_private_login(CK_SESSION_HANDLE hSession,
     return fhsm_check_private_login_cls(hSession, tmpl, n, 0xFFFFFFFFUL, 1);
 }
 
+/* A private key here is always sensitive: generated or imported, its value
+ * leaves the token wrapped, never in clear. A template asking
+ * CKA_SENSITIVE=FALSE was accepted and the key made sensitive anyway -- CKR_OK
+ * for a template the module did not follow. It contradicts what the module
+ * contributes, CKR_TEMPLATE_INCONSISTENT (§4.1.1), and nothing is made.
+ * pkcs11-tool sends CKA_SENSITIVE=TRUE for generated and imported private keys. */
+static CK_RV fhsm_check_private_key_sensitive(CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    long si = find_attr(tmpl, n, CKA_SENSITIVE);
+    if (si >= 0 && tmpl[si].pValue && tmpl[si].ulValueLen >= 1
+        && ((unsigned char *)tmpl[si].pValue)[0] == 0)
+        return CKR_TEMPLATE_INCONSISTENT;
+    return FHSM_RV_OK;
+}
+
 /* Apply CKA_TOKEN scope after creating an object : if the template does
  * not request a token object (default CKA_TOKEN=FALSE) the object is a
  * session object owned by hSession -- not persisted, destroyed on close. */
@@ -3814,6 +3828,14 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     { CK_RV cr = fhsm_check_trusted_attr(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount);  if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* An imported private key is sensitive whatever the template says: one
+     * asking CKA_SENSITIVE=FALSE is refused rather than quietly overridden. */
+    { long ci = find_attr(pTemplate, ulCount, CKA_CLASS);
+      if (ci >= 0 && pTemplate[ci].pValue && pTemplate[ci].ulValueLen == sizeof(CK_ULONG)
+          && *(CK_ULONG *)pTemplate[ci].pValue == CKO_PRIVATE_KEY) {
+          CK_RV cr = fhsm_check_private_key_sensitive(pTemplate, ulCount);
+          if (cr != FHSM_RV_OK) return cr;
+      } }
     /* CKA_OBJECT_ID (Table 20, data objects) has no field in the object
      * record: it was accepted, dropped, and read back as
      * CKR_ATTRIBUTE_TYPE_INVALID (#33 C10). Refused here instead, the answer
@@ -4420,7 +4442,10 @@ CK_RV C_DestroyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject) {
           && (of & FHSM_OBJF_UNDESTROYABLE))
           return 0x0000001BUL;   /* CKR_ACTION_PROHIBITED */
     }
-    return fhsm_token_object_destroy(t, (uint32_t)hObject);
+    /* The store reports a handle it does not hold as KEY_HANDLE_INVALID, its
+     * one word for "no such object"; here the handle is an object's, so
+     * CKR_OBJECT_HANDLE_INVALID, as every other object call answers. */
+    return fhsm_object_lookup_rv(fhsm_token_object_destroy(t, (uint32_t)hObject));
 }
 
 /* ---------------------------------------------------------------------------
@@ -6455,6 +6480,14 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     /* A secret or private key is the user's to make, not the SO's (#31). */
     { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
+    /* An unwrapped private key is sensitive, as an imported one is: a template
+     * asking CKA_SENSITIVE=FALSE is refused before anything is decrypted. */
+    { long ci = find_attr(pTemplate, ulCount, CKA_CLASS);
+      if (ci >= 0 && pTemplate[ci].pValue && pTemplate[ci].ulValueLen == sizeof(CK_ULONG)
+          && *(CK_ULONG *)pTemplate[ci].pValue == CKO_PRIVATE_KEY) {
+          CK_RV sr = fhsm_check_private_key_sensitive(pTemplate, ulCount);
+          if (sr != FHSM_RV_OK) return sr;
+      } }
 
     const uint8_t *ukv = NULL; size_t ukl = 0;
     uint32_t ucl = 0, ukt = 0;
@@ -7598,6 +7631,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     /* A secret or private key is the user's to make, not the SO's (#31). */
     { CK_RV pl = fhsm_check_private_login_cls(hSession, pPriv, ulPriv, CKO_PRIVATE_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
+    { CK_RV sr = fhsm_check_private_key_sensitive(pPriv, ulPriv);
+      if (sr != FHSM_RV_OK) return sr; }
 
     EVP_PKEY *pkey = NULL;
     uint32_t  ckk_type = 0;
@@ -7696,6 +7731,11 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     } else if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN) {
         const char *curve = "P-256";
         long i = find_attr(pPub, ulPub, CKA_EC_PARAMS);
+        /* The curve is the public template's CKA_EC_PARAMS, for this mechanism
+         * and for the Edwards and Montgomery generators below. Without it the
+         * template is CKR_TEMPLATE_INCOMPLETE (§4.1.1); a P-256 key was made
+         * and the caller not told the curve had been chosen for it. */
+        if (i < 0) return CKR_TEMPLATE_INCOMPLETE;
         if (i >= 0 && pPub[i].pValue) {
             const char *m = match_curve(pPub[i].pValue, pPub[i].ulValueLen);
             if (!m) return fhsm_ec_curve_refusal(pPub[i].pValue, pPub[i].ulValueLen);
@@ -7714,6 +7754,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * could not make. Default Ed25519 when CKA_EC_PARAMS is absent. */
         const char *alg = "ED25519";
         long i = find_attr(pPub, ulPub, CKA_EC_PARAMS);
+        if (i < 0) return CKR_TEMPLATE_INCOMPLETE;   /* as for CKM_EC_KEY_PAIR_GEN */
         if (i >= 0 && pPub[i].pValue) {
             const char *m = match_ed_curve(pPub[i].pValue, pPub[i].ulValueLen);
             if (!m) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
@@ -7745,6 +7786,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * CKA_EC_PARAMS is absent. */
         const char *alg = "X25519";
         long i = find_attr(pPub, ulPub, CKA_EC_PARAMS);
+        if (i < 0) return CKR_TEMPLATE_INCOMPLETE;   /* as for CKM_EC_KEY_PAIR_GEN */
         if (i >= 0 && pPub[i].pValue) {
             const char *m = match_ecm_curve(pPub[i].pValue, pPub[i].ulValueLen);
             if (!m) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
