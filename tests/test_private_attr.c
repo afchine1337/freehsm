@@ -39,7 +39,18 @@
  *       CKR_USER_NOT_LOGGED_IN, while public data objects are still made;
  *   (9) a read-only session copies a token object into a session object
  *       only (#30): a template that leaves CKA_TOKEN out, and an empty one,
- *       inherit TRUE and are CKR_SESSION_READ_ONLY; CKA_TOKEN=FALSE is made.
+ *       inherit TRUE and are CKR_SESSION_READ_ONLY; CKA_TOKEN=FALSE is made;
+ *  (10) with the SO logged in, every hidden handle gets from C_WrapKey (as the
+ *       key wrapped), C_UnwrapKey (as the unwrapping key), C_DeriveKey (as
+ *       the base key) and C_DecapsulateKey the answer a missing handle gets,
+ *       for a data-object template and a secret-key one. C_WrapKey under a
+ *       public RSA key took a private data object or key out, C_UnwrapKey
+ *       and C_DeriveKey used the user's keys into a public data object, and
+ *       their earlier checks told which hidden handles existed;
+ *  (11) the user alone: C_DeriveKey and C_UnwrapKey make no data object and
+ *       no public key, and C_WrapKey wraps no data object -- a data object
+ *       derived from a key with CKA_EXTRACTABLE=FALSE took that key out --
+ *       nor a public key. The non-extractable key is still refused.
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -54,6 +65,26 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKR_OK                    0UL
 #define CKR_USER_NOT_LOGGED_IN    0x101UL
 #define CKR_SESSION_READ_ONLY     0xB5UL
+#define CKR_KEY_HANDLE_INVALID    0x60UL
+#define CKR_KEY_NOT_WRAPPABLE     0x69UL
+#define CKR_KEY_UNEXTRACTABLE     0x6AUL
+#define CKR_TEMPLATE_INCONSISTENT 0xD1UL
+#define CKO_PUBLIC_KEY            2UL
+#define CKA_SENSITIVE             0x103UL
+#define CKA_WRAP                  0x106UL
+#define CKA_UNWRAP                0x107UL
+#define CKA_DERIVE                0x10CUL
+#define CKA_MODULUS_BITS          0x121UL
+#define CKA_PUBLIC_EXPONENT       0x122UL
+#define CKA_EXTRACTABLE           0x162UL
+#define CKM_RSA_PKCS_KEY_PAIR_GEN 0x0UL
+#define CKM_RSA_PKCS_OAEP         0x9UL
+#define CKM_SHA256                0x250UL
+#define CKG_MGF1_SHA256           0x2UL
+#define CKZ_DATA_SPECIFIED        0x1UL
+#define CKM_ML_KEM                0x17UL
+#define CKM_CONCATENATE_BASE_AND_DATA 0x362UL
+#define MISSING_HANDLE            100000UL
 #define CKF_SERIAL                4UL
 #define CKK_GENERIC_SECRET        0x10UL
 #define CKF_RW                    6UL
@@ -86,6 +117,7 @@ static CK_RV (*C_Initialize)(void*);
 static CK_RV (*C_Finalize)(void*);
 static CK_RV (*C_InitToken)(CK_SLOT_ID,CK_BYTE*,CK_ULONG,CK_BYTE*);
 static CK_RV (*C_OpenSession)(CK_SLOT_ID,CK_FLAGS,void*,void*,CK_SESSION_HANDLE*);
+static CK_RV (*C_CloseSession)(CK_SESSION_HANDLE);
 static CK_RV (*C_Login)(CK_SESSION_HANDLE,CK_ULONG,CK_BYTE*,CK_ULONG);
 static CK_RV (*C_Logout)(CK_SESSION_HANDLE);
 static CK_RV (*C_InitPIN)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
@@ -102,6 +134,18 @@ static CK_RV (*C_DestroyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE);
 static CK_RV (*C_FindObjectsInit)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
 static CK_RV (*C_FindObjects)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE*,CK_ULONG,CK_ULONG*);
 static CK_RV (*C_FindObjectsFinal)(CK_SESSION_HANDLE);
+static CK_RV (*C_WrapKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_OBJECT_HANDLE,
+                          CK_BYTE*,CK_ULONG*);
+static CK_RV (*C_UnwrapKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_BYTE*,CK_ULONG,
+                            CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
+static CK_RV (*C_DeriveKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,
+                            CK_ULONG,CK_OBJECT_HANDLE*);
+static CK_RV (*C_DecapsulateKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,
+                                 CK_ULONG,CK_BYTE*,CK_ULONG,CK_OBJECT_HANDLE*);
+
+typedef struct { CK_ULONG hashAlg, mgf, source; void *pSourceData; CK_ULONG ulSourceDataLen; }
+    CK_RSA_PKCS_OAEP_PARAMS;
+typedef struct { CK_BYTE *pData; CK_ULONG ulLen; } CK_KEY_DERIVATION_STRING_DATA;
 
 static CK_BYTE g_yes = 1, g_no = 0;
 static CK_ULONG g_data = CKO_DATA, g_secret = CKO_SECRET_KEY, g_aes = CKK_AES;
@@ -177,8 +221,10 @@ int main(void)
     SYM(C_GenerateKey); SYM(C_GenerateKeyPair); SYM(C_GetAttributeValue);
     SYM(C_FindObjectsInit); SYM(C_FindObjects); SYM(C_FindObjectsFinal);
     SYM(C_SetAttributeValue); SYM(C_DestroyObject);
+    SYM(C_CloseSession); SYM(C_WrapKey); SYM(C_UnwrapKey); SYM(C_DeriveKey); SYM(C_DecapsulateKey);
     if (!C_CopyObject || !C_GenerateKeyPair || !C_FindObjectsFinal || !C_Logout
-        || !C_SetAttributeValue || !C_DestroyObject) {
+        || !C_SetAttributeValue || !C_DestroyObject || !C_WrapKey || !C_UnwrapKey
+        || !C_DeriveKey || !C_DecapsulateKey || !C_CloseSession) {
         fprintf(stderr, "missing symbols\n"); return 2;
     }
 
@@ -359,6 +405,111 @@ int main(void)
            "(9) RO: a copy asked CKA_TOKEN=FALSE is a session object");
         ok(C_CopyObject(ro, src, lt, 0, &x) == CKR_SESSION_READ_ONLY,
            "(9) RO: a verbatim copy of a token object is refused");
+        /* The SO cannot log in while a read-only session is open (10). */
+        (void)C_CloseSession(ro);
+    }
+
+    /* (11) The user alone: key material goes into keys only. The objects made
+     * here are also what (10) sweeps. */
+    CK_RSA_PKCS_OAEP_PARAMS op = { CKM_SHA256, CKG_MGF1_SHA256, CKZ_DATA_SPECIFIED, NULL, 0 };
+    CK_MECHANISM oaep = { CKM_RSA_PKCS_OAEP, &op, sizeof op };
+    CK_BYTE bang[] = "!";
+    CK_KEY_DERIVATION_STRING_DATA kd = { bang, 1 };
+    CK_MECHANISM cat = { CKM_CONCATENATE_BASE_AND_DATA, &kd, sizeof kd };
+    CK_ULONG c_pub = CKO_PUBLIC_KEY, gsk = CKK_GENERIC_SECRET;
+    CK_ATTRIBUTE tdat[] = { { CKA_CLASS, &g_data, sizeof g_data }, { CKA_TOKEN, &g_no, 1 },
+                            { CKA_PRIVATE, &g_no, 1 } };
+    CK_ATTRIBUTE tpub[] = { { CKA_CLASS, &c_pub, sizeof c_pub }, { CKA_KEY_TYPE, &gsk, sizeof gsk },
+                            { CKA_TOKEN, &g_no, 1 }, { CKA_PRIVATE, &g_no, 1 } };
+    CK_ATTRIBUTE tsec[] = { { CKA_CLASS, &g_secret, sizeof g_secret },
+                            { CKA_KEY_TYPE, &gsk, sizeof gsk }, { CKA_TOKEN, &g_no, 1 },
+                            { CKA_EXTRACTABLE, &g_yes, 1 }, { CKA_SENSITIVE, &g_no, 1 } };
+    CK_OBJECT_HANDLE upub = 0, upriv = 0, nx = 0;
+    {
+        CK_BYTE kv[16]; memcpy(kv, "USER-DERIVE-BASE", 16);
+        CK_ATTRIBUTE nt[] = { { CKA_CLASS, &g_secret, sizeof g_secret },
+                              { CKA_KEY_TYPE, &gsk, sizeof gsk }, { CKA_VALUE, kv, sizeof kv },
+                              { CKA_TOKEN, &g_yes, 1 }, { CKA_DERIVE, &g_yes, 1 },
+                              { CKA_EXTRACTABLE, &g_no, 1 }, { CKA_SENSITIVE, &g_yes, 1 } };
+        ok(C_CreateObject(s2, nt, 7, &nx) == CKR_OK, "(11) a non-extractable derive key is made");
+        CK_ULONG bits = 2048; CK_BYTE e[] = { 1, 0, 1 };
+        CK_ATTRIBUTE rp[] = { { CKA_TOKEN, &g_yes, 1 }, { CKA_MODULUS_BITS, &bits, sizeof bits },
+                              { CKA_PUBLIC_EXPONENT, e, sizeof e }, { CKA_WRAP, &g_yes, 1 },
+                              { CKA_LABEL, (void*)"u-rsa", 5 } };
+        CK_ATTRIBUTE rk[] = { { CKA_TOKEN, &g_yes, 1 }, { CKA_UNWRAP, &g_yes, 1 },
+                              { CKA_EXTRACTABLE, &g_no, 1 } };
+        CK_MECHANISM rg = { CKM_RSA_PKCS_KEY_PAIR_GEN, NULL, 0 };
+        ok(C_GenerateKeyPair(s2, &rg, rp, 5, rk, 3, &upub, &upriv) == CKR_OK,
+           "(11) an RSA key pair, the public half CKA_WRAP, is made");
+        CK_OBJECT_HANDLE x = 0, d = 0;
+        ok(C_DeriveKey(s2, &cat, nx, tdat, 3, &x) == CKR_TEMPLATE_INCONSISTENT,
+           "(11) C_DeriveKey into a data object is refused");
+        ok(C_DeriveKey(s2, &cat, nx, tpub, 4, &x) == CKR_TEMPLATE_INCONSISTENT,
+           "(11) C_DeriveKey into a public key is refused");
+        CK_BYTE ct[256]; memset(ct, 0x11, sizeof ct);
+        ok(C_UnwrapKey(s2, &oaep, upriv, ct, sizeof ct, tdat, 3, &x) == CKR_TEMPLATE_INCONSISTENT,
+           "(11) C_UnwrapKey into a data object is refused");
+        ok(C_UnwrapKey(s2, &oaep, upriv, ct, sizeof ct, tpub, 4, &x) == CKR_TEMPLATE_INCONSISTENT,
+           "(11) C_UnwrapKey into a public key is refused");
+        CK_BYTE w[512]; CK_ULONG wl = sizeof w;
+        ok(find_label(s2, "tok-private", &d) == 1
+           && C_WrapKey(s2, &oaep, upub, d, w, &wl) == CKR_KEY_HANDLE_INVALID,
+           "(11) C_WrapKey of a data object is refused");
+        wl = sizeof w;
+        ok(C_WrapKey(s2, &oaep, upub, upub, w, &wl) == CKR_KEY_NOT_WRAPPABLE,
+           "(11) C_WrapKey of a public key is refused");
+        wl = sizeof w;
+        ok(C_WrapKey(s2, &oaep, upub, nx, w, &wl) == CKR_KEY_UNEXTRACTABLE,
+           "(11) the non-extractable key is still refused");
+    }
+    (void)C_Logout(s2);
+
+    /* (10) The SO: a hidden handle answers as a missing one. */
+    { CK_RV lr = C_Login(s2,0,(CK_BYTE*)SO_PIN,strlen(SO_PIN));
+      if (lr) { fprintf(stderr,"SO (4): 0x%lx\n", lr); return 2; } }
+    {
+        CK_OBJECT_HANDLE vis[64];
+        CK_ULONG nv = 0;
+        if (C_FindObjectsInit(s2, NULL, 0) == CKR_OK) {
+            (void)C_FindObjects(s2, vis, 64, &nv);
+            (void)C_FindObjectsFinal(s2);
+        }
+        int pub_seen = find_label(s2, "u-rsa", &upub) == 1;
+        CK_BYTE ct[256]; memset(ct, 0x11, sizeof ct);
+        CK_BYTE kct[1568]; memset(kct, 0x22, sizeof kct);
+        CK_MECHANISM kem = { CKM_ML_KEM, NULL, 0 };
+        CK_ATTRIBUTE *tt[] = { tdat, tsec };
+        CK_ULONG tn[] = { 3, 5 };
+        CK_RV mu[2], md[2], mk[2];
+        CK_OBJECT_HANDLE x = 0;
+        CK_BYTE w[512]; CK_ULONG wl = sizeof w;
+        CK_RV mw = C_WrapKey(s2, &oaep, upub, MISSING_HANDLE, w, &wl);
+        for (int k = 0; k < 2; k++) {
+            mu[k] = C_UnwrapKey(s2, &oaep, MISSING_HANDLE, ct, sizeof ct, tt[k], tn[k], &x);
+            md[k] = C_DeriveKey(s2, &cat, MISSING_HANDLE, tt[k], tn[k], &x);
+            mk[k] = C_DecapsulateKey(s2, &kem, MISSING_HANDLE, tt[k], tn[k], kct, sizeof kct, &x);
+        }
+        int wrapped = 0, unwrapped = 0, derived = 0, decapped = 0, swept = 0;
+        for (CK_OBJECT_HANDLE hh = 1; hh <= 256; hh++) {
+            int seen = 0;
+            for (CK_ULONG i = 0; i < nv; i++) if (vis[i] == hh) seen = 1;
+            if (seen) continue;
+            swept++;
+            wl = sizeof w;
+            if (C_WrapKey(s2, &oaep, upub, hh, w, &wl) != mw) wrapped++;
+            for (int k = 0; k < 2; k++) {
+                if (C_UnwrapKey(s2, &oaep, hh, ct, sizeof ct, tt[k], tn[k], &x) != mu[k])
+                    unwrapped++;
+                if (C_DeriveKey(s2, &cat, hh, tt[k], tn[k], &x) != md[k]) derived++;
+                if (C_DecapsulateKey(s2, &kem, hh, tt[k], tn[k], kct, sizeof kct, &x) != mk[k])
+                    decapped++;
+            }
+        }
+        ok(pub_seen && swept > 0, "(10) the SO sees the user's public key and sweeps the rest");
+        ok(wrapped == 0, "(10) SO: C_WrapKey answers a hidden handle as a missing one");
+        ok(unwrapped == 0, "(10) SO: C_UnwrapKey answers a hidden handle as a missing one");
+        ok(derived == 0, "(10) SO: C_DeriveKey answers a hidden handle as a missing one");
+        ok(decapped == 0, "(10) SO: C_DecapsulateKey answers a hidden handle as a missing one");
     }
     (void)C_Logout(s2);
 

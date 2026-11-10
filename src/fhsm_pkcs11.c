@@ -2709,6 +2709,51 @@ static int fhsm_handle_access_denied(fhsm_token_t *t, CK_OBJECT_HANDLE h) {
     return fhsm_object_access_denied(t, h, cls);
 }
 
+/* The same rule for the key handles of C_WrapKey, C_UnwrapKey, C_DeriveKey
+ * and the two KEM calls, run before anything else reads the key: a hidden
+ * object and a missing one answer the same `rv_invalid`, the code the call
+ * has for a bad handle of that role.
+ *
+ * These calls ran no access check either. With the SO logged in, C_WrapKey
+ * under an RSA public key the SO imported took out a user's private data
+ * object and extractable keys; C_UnwrapKey used a user's private key to
+ * decrypt what was sent to the user; C_DeriveKey copied a user's
+ * non-extractable key into a data object, which C_WrapKey then took out.
+ * Their usage and mechanism checks also ran first, so the code they returned
+ * told which hidden handles existed (GHSA-h2r5-32gc-wfx4, Alexandre Laroche). */
+static CK_RV fhsm_key_handle_visible(fhsm_token_t *t, CK_OBJECT_HANDLE h,
+                                     CK_RV rv_invalid) {
+    const uint8_t *v = NULL; size_t vl = 0;
+    uint32_t cls = 0, kt = 0;
+    if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)h, &v, &vl, &cls, &kt);
+    if (r == FHSM_RV_KEY_HANDLE_INVALID) return rv_invalid;
+    if (r != FHSM_RV_OK) return r;
+    if (fhsm_object_access_denied(t, h, cls)) return rv_invalid;
+    return FHSM_RV_OK;
+}
+
+/* The class a key-producing call may be asked for. C_UnwrapKey makes a secret
+ * or private key (§5.18.6), C_DeriveKey and the KEM calls a secret key, and
+ * CKM_HKDF_DATA a data object (§6.32). Another CKA_CLASS was honoured or
+ * ignored: CKO_DATA put key material in a data object, which neither
+ * CKA_EXTRACTABLE nor the private-object check then covered, and CKO_PUBLIC_KEY
+ * passed that check as a public object and was stored as a secret key.
+ * Refused before the private-object check, so that check runs on the class
+ * the call will actually create. */
+static CK_RV fhsm_check_made_class(CK_ATTRIBUTE *tmpl, CK_ULONG n,
+                                   int allow_private, int allow_data) {
+    long ci = find_attr(tmpl, n, 0x00 /* CKA_CLASS */);
+    if (ci < 0) return FHSM_RV_OK;
+    if (!tmpl[ci].pValue || tmpl[ci].ulValueLen != sizeof(CK_ULONG))
+        return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    CK_ULONG c = 0; memcpy(&c, tmpl[ci].pValue, sizeof(c));
+    if (c == CKO_SECRET_KEY) return FHSM_RV_OK;
+    if (c == CKO_PRIVATE_KEY && allow_private) return FHSM_RV_OK;
+    if (c == CKO_DATA && allow_data) return FHSM_RV_OK;
+    return CKR_TEMPLATE_INCONSISTENT;
+}
+
 /* Records a data object's CKA_PRIVATE=FALSE.
  *
  * The attribute was accepted and ignored: a data object created with
@@ -5043,6 +5088,10 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     /* An RO session may not derive into a token object either (§5.3). */
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* A hidden base key is a missing one, before any check that reads it. */
+    { CK_RV vr = fhsm_key_handle_visible(fhsm_session_token(hSession), hBaseKey,
+                                         FHSM_RV_KEY_HANDLE_INVALID);
+      if (vr != FHSM_RV_OK) return vr; }
     { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hBaseKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     /* CKA_DERIVE_TEMPLATE on the base key constrains the derived object. */
     { CK_RV tr = fhsm_check_nested_tmpl(fhsm_session_token(hSession), hBaseKey,
@@ -5053,6 +5102,10 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A secret key, or for CKM_HKDF_DATA a data object; nothing else. */
+    { CK_RV mc = fhsm_check_made_class(pTemplate, ulCount, 0,
+                                       pMechanism->mechanism == CKM_HKDF_DATA_OP);
+      if (mc != FHSM_RV_OK) return mc; }
     /* A secret or private key is the user's to make, not the SO's (#31). */
     { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
@@ -5107,6 +5160,10 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                 break;
             case CKF_HKDF_SALT_KEY: {
                 uint32_t scl = 0, skt = 0;
+                /* The salt key is read like the base key: hidden is missing. */
+                { CK_RV vr = fhsm_key_handle_visible(t, hp.hSaltKey,
+                                                     FHSM_RV_KEY_HANDLE_INVALID);
+                  if (vr != FHSM_RV_OK) return vr; }
                 fhsm_rv_t srv2 = fhsm_token_object_get(t, (uint32_t)hp.hSaltKey,
                                                         &salt, &salt_len, &scl, &skt);
                 if (srv2 != FHSM_RV_OK) return srv2;
@@ -5277,6 +5334,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             CK_OBJECT_HANDLE h2 = 0;
             memcpy(&h2, pMechanism->pParameter, sizeof(h2));
             uint32_t ocl = 0, okt = 0;
+            { CK_RV vr = fhsm_key_handle_visible(t, h2, FHSM_RV_KEY_HANDLE_INVALID);
+              if (vr != FHSM_RV_OK) return vr; }
             fhsm_rv_t orv = fhsm_token_object_get(t, (uint32_t)h2,
                                                    &ov, &ovl, &ocl, &okt);
             if (orv != FHSM_RV_OK) return orv;
@@ -5581,7 +5640,10 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
       if (ci >= 0 && pTemplate[ci].pValue
           && pTemplate[ci].ulValueLen == sizeof(CK_ULONG)) {
           CK_ULONG req = 0; memcpy(&req, pTemplate[ci].pValue, sizeof(CK_ULONG));
-          if (req != CKO_SECRET_KEY && req != CKO_DATA)
+          /* A data object only where the mechanism makes one (CKM_HKDF_DATA):
+           * the additional keys of a KBKDF call come through here too. */
+          if (req != CKO_SECRET_KEY
+              && !(req == CKO_DATA && default_class == CKO_DATA))
               return CKR_TEMPLATE_INCONSISTENT;
           obj_class = (uint32_t)req;
       }
@@ -5939,6 +6001,13 @@ CK_RV C_WrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!pMechanism || !pulWrappedKeyLen) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* Both handles before anything reads either: a hidden key, to be wrapped
+     * or wrapping, is a missing one (GHSA-h2r5-32gc-wfx4). */
+    { CK_RV vr = fhsm_key_handle_visible(t, hKey, FHSM_RV_KEY_HANDLE_INVALID);
+      if (vr != FHSM_RV_OK) return vr; }
+    { CK_RV vr = fhsm_key_handle_visible(t, hWrappingKey,
+                                         0x00000113UL /* CKR_WRAPPING_KEY_HANDLE_INVALID */);
+      if (vr != FHSM_RV_OK) return vr; }
     const uint8_t *sv = NULL; size_t svl = 0; uint32_t scl = 0;
     uint8_t *p8 = NULL; int p8l = 0;
     if (fhsm_token_object_get(t, (uint32_t)hKey, &sv, &svl, &scl, NULL) == FHSM_RV_OK
@@ -5986,6 +6055,12 @@ static CK_RV wrap_key_value(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism
     uint32_t cl = 0, kt = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, (uint32_t)hKey, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
+    /* C_WrapKey wraps a private or secret key (§5.18.5). A data object was
+     * wrapped too, and the check below, which only keys carry, never applied:
+     * a data object derived from a non-extractable key took that key out. */
+    if (cl == CKO_PUBLIC_KEY) return 0x00000069UL;   /* CKR_KEY_NOT_WRAPPABLE */
+    if (cl != CKO_PRIVATE_KEY && cl != CKO_SECRET_KEY)
+        return FHSM_RV_KEY_HANDLE_INVALID;
     /* §5.18.5: "The CKA_EXTRACTABLE attribute of the key to be wrapped MUST
      * also be CK_TRUE." This used to refuse only a key that was sensitive
      * *and* unextractable, so a key with CKA_EXTRACTABLE=FALSE and
@@ -6467,6 +6542,12 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * once that was reverted -- a guard applied to a subset of the paths that
      * reach the same state is not a guard (#125 TestROWrapUnwrapRestrictions). */
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+    /* A hidden unwrapping key is a missing one, before any check that reads
+     * it: the user's private key decrypted for the SO what was sent to the
+     * user (GHSA-h2r5-32gc-wfx4). */
+    { CK_RV vr = fhsm_key_handle_visible(fhsm_session_token(hSession), hUnwrappingKey,
+                                         0x000000F0UL /* CKR_UNWRAPPING_KEY_HANDLE_INVALID */);
+      if (vr != FHSM_RV_OK) return vr; }
     { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hUnwrappingKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     /* CKA_UNWRAP_TEMPLATE on the unwrapping key constrains the new key. */
     { CK_RV tr = fhsm_check_nested_tmpl(fhsm_session_token(hSession), hUnwrappingKey,
@@ -6477,6 +6558,9 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A secret or a private key; CKO_DATA put the plaintext in a data object. */
+    { CK_RV mc = fhsm_check_made_class(pTemplate, ulCount, 1, 0);
+      if (mc != FHSM_RV_OK) return mc; }
     /* A secret or private key is the user's to make, not the SO's (#31). */
     { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
@@ -6727,9 +6811,14 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A secret key, refused here rather than once the secret exists. */
+    { CK_RV mc = fhsm_check_made_class(pTemplate, ulCount, 0, 0);
+      if (mc != FHSM_RV_OK) return mc; }
     /* A secret or private key is the user's to make, not the SO's (#31). */
     { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
+    { CK_RV vr = fhsm_key_handle_visible(t, hPublicKey, FHSM_RV_KEY_HANDLE_INVALID);
+      if (vr != FHSM_RV_OK) return vr; }
 
     const uint8_t *kv = NULL; size_t kvl = 0;
     uint32_t cl = 0, kt = 0;
@@ -6834,9 +6923,15 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A secret key, refused here rather than once the secret exists. */
+    { CK_RV mc = fhsm_check_made_class(pTemplate, ulCount, 0, 0);
+      if (mc != FHSM_RV_OK) return mc; }
     /* A secret or private key is the user's to make, not the SO's (#31). */
     { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
+    /* A hidden private key is a missing one (GHSA-h2r5-32gc-wfx4). */
+    { CK_RV vr = fhsm_key_handle_visible(t, hPrivateKey, FHSM_RV_KEY_HANDLE_INVALID);
+      if (vr != FHSM_RV_OK) return vr; }
 
     const uint8_t *kv = NULL; size_t kvl = 0;
     uint32_t cl = 0, kt = 0;
