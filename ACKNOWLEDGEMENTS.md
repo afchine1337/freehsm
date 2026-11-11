@@ -199,12 +199,26 @@ module by turning its integrity check off. That a broken release pushed a user
 to disable a security control is the most useful single thing anyone has told
 this project.
 
-## `AlexLaroche`
+## Alexandre Laroche (`AlexLaroche`)
 
 **#27** — `C_UnwrapKey` returned with the unwrapped key still in its stack
 buffer when it refused the key's type or `CKA_VALUE_LEN` after the decrypt.
 He wrote a harness that shows the bytes left on the stack, and ran it again
 on the fix: every exit after the decrypt now clears the buffer. In v2.6.0.
+
+**GHSA-h2r5-32gc-wfx4**, reported privately — a data object created with
+`CKA_PRIVATE=TRUE` stayed findable and readable after `C_Logout`, because
+access went by class. His report came with a probe and three suggested
+fixes; the second, that every call taking an object handle should check
+access, found a further path through an SO login. In v2.7.0.
+
+**#30 to #33** — twenty-one places where FreeHSM answered against PKCS#11
+v3.2, each with a reproducer: a read-only session copying into a token
+object, the SO creating private objects, a second `C_Initialize`, and
+eighteen return codes and template checks. Among them an AES-CTR counter
+that carried into the nonce, a hashing RSA-PSS mechanism that ignored a
+different `hashAlg`, and `C_FindObjects` ignoring every attribute but three.
+In v2.7.0.
 
 ---
 

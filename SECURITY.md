@@ -567,16 +567,88 @@ refused `CKR_KEY_UNEXTRACTABLE`, sensitive or not, before the size query.
 
 ---
 
+## Private objects exposed without a login and to the Security Officer (2026-11-11)
+
+**Advisory:** [GHSA-h2r5-32gc-wfx4](https://github.com/afchine1337/freehsm/security/advisories/GHSA-h2r5-32gc-wfx4)
+· Moderate · CWE-863
+
+**A session with nobody logged in could find a data object created with
+`CKA_PRIVATE=TRUE` and read its `CKA_VALUE`, once the user had logged in and
+out in the same process.** Affects v1.5.0 to v2.6.1, in both profiles. Fixed
+in v2.7.0.
+
+**Cause.** PKCS#11 v3.2 §4.4 keeps a private object from anyone who has not
+authenticated as the normal user. FreeHSM decided what an unauthenticated
+session may see by object class: `C_FindObjectsInit`, `C_GetAttributeValue`
+and `C_GetObjectSize` hid secret and private keys only. A data object reported
+`CKA_PRIVATE=TRUE` and passed every check. Before any login the objects are
+not loaded, so a process that never logs in found nothing; after `C_Logout`
+they stay in memory.
+
+**Conditions.** Code in the same process as an application that logged in
+as the user and then out. Separately, `C_SetAttributeValue`, `C_CopyObject`,
+`C_DestroyObject`, `C_WrapKey`, `C_UnwrapKey`, `C_DeriveKey` and
+`C_DecapsulateKey` ran no access check at all. With the SO logged in, which
+also decrypts the store, a guessed handle let them change, destroy or copy out
+a private object. It also let them wrap a private data object or an
+extractable user key under an RSA public key the SO imported. `C_UnwrapKey`
+and `C_DeriveKey` also accepted `CKA_CLASS=CKO_DATA` with `CKA_PRIVATE=FALSE`:
+the user's private key decrypted for the SO what was sent to the user, and a
+non-extractable secret key was copied into a data object, which `C_WrapKey`
+then wrapped. The user could do the same to their own non-extractable keys.
+
+**Effect.** Disclosure of the values held in private data objects --
+passwords, API tokens, anything an application keeps there -- to code that
+opens a session after a logout, without the PIN. Under an SO login, private
+objects could also be read, modified or destroyed. The SO could also take out
+the user's extractable keys, recover non-extractable secret keys, and decrypt
+data sent to the user. Without the SO PIN, keys were not exposed.
+
+**Fixed.** Access follows `CKA_PRIVATE`, in the search, `C_GetAttributeValue`,
+`C_GetObjectSize`, the operation `*Init` calls, `C_DigestKey`, and now
+`C_SetAttributeValue`, `C_CopyObject`, `C_DestroyObject`, `C_WrapKey`,
+`C_UnwrapKey`, `C_DeriveKey` and the KEM calls. A hidden object answers like
+a missing one. `C_UnwrapKey`, `C_DeriveKey` and the KEM calls make keys only
+(a data object for `CKM_HKDF_DATA`), and `C_WrapKey` wraps private and secret
+keys only. `CKA_PRIVATE=FALSE` is honoured on data objects.
+`tests/test_private_attr.c`, cases (5) to (7), (10) and (11).
+
+**If you ran an affected version.**
+
+- An application that keeps secrets in data objects and logs out while
+  other code can run in its process should treat those values as exposed
+  and replace them.
+- Applications that read data objects without logging in must, after the
+  upgrade, log in, or recreate those objects with `CKA_PRIVATE=FALSE`.
+- `C_UnwrapKey` and `C_DeriveKey` no longer make data objects or public
+  keys, except a data object from `CKM_HKDF_DATA`, and `C_WrapKey` no
+  longer wraps data objects. A caller that relied on either meets
+  `CKR_TEMPLATE_INCONSISTENT` or `CKR_KEY_HANDLE_INVALID`.
+- Where the SO PIN is held by someone the user's keys must be kept from,
+  treat the user's extractable keys, generic secrets with `CKA_DERIVE=TRUE`
+  and data sent to the user's decryption keys as exposed to that person.
+
+**Found by** Alexandre Laroche, who reported it privately with working
+probes, and found the SO paths through key wrapping, unwrapping and
+derivation while reviewing the first fix.
+
+**Timeline.** Present since v1.5.0, which introduced data objects. Reported
+on 2026-11-08; fixed on main the same day; SO paths reported on 2026-11-10
+and fixed the same day; released on 2026-11-11.
+
+---
+
 ## Supported versions
 
 | Version | Supported |
 |---|---|
-| `2.6.1` | ✅ — supported, active development |
-| `2.6.0` | ⚠️ — **affected by the unextractable-key wrapping**; upgrade to v2.6.1 |
-| `2.5.1` | ⚠️ — affected by the unextractable-key wrapping and **the concatenation/XOR key disclosure**; after a `C_Logout` it does not enforce a public key's `CKA_ALLOWED_MECHANISMS` (low); upgrade to v2.6.1 |
-| `2.2.0` – `2.5.0` | ⚠️ — affected by the above, **the wrong-PIN object-store defect** and the `C_InitToken` check; upgrade to v2.6.1 |
-| `2.1.x` | ⚠️ — affected by the unextractable-key wrapping, the wrong-PIN defect, the `C_InitToken` check and the `C_DecryptFinal` out-of-bounds write; upgrade to v2.6.1 |
-| `2.0.x` | ⚠️ — affected by the above, and by the `C_UnwrapKey` stack overflow; upgrade to v2.6.1 |
+| `2.7.0` | ✅ — supported, active development |
+| `2.6.1` | ⚠️ — **affected by the private data object disclosure**; upgrade to v2.7.0 |
+| `2.6.0` | ⚠️ — affected by the private data object disclosure and **the unextractable-key wrapping**; upgrade to v2.7.0 |
+| `2.5.1` | ⚠️ — affected by the above and **the concatenation/XOR key disclosure**; after a `C_Logout` it does not enforce a public key's `CKA_ALLOWED_MECHANISMS` (low); upgrade to v2.7.0 |
+| `2.2.0` – `2.5.0` | ⚠️ — affected by the above, **the wrong-PIN object-store defect** and the `C_InitToken` check; upgrade to v2.7.0 |
+| `2.1.x` | ⚠️ — affected by the private data object disclosure, the unextractable-key wrapping, the wrong-PIN defect, the `C_InitToken` check and the `C_DecryptFinal` out-of-bounds write; upgrade to v2.7.0 |
+| `2.0.x` | ⚠️ — affected by the above, and by the `C_UnwrapKey` stack overflow; upgrade to v2.7.0 |
 | `1.5.x` – `1.6.x` | ⚠️ — affected by all of them; no backports planned, upgrade |
 | `1.4.0` | ❌ — **published unsigned** (see above); unusable as shipped, do not work around it |
 | `1.1.x` – `1.3.x` | ❌ — end of life. Affected by the `C_DecryptFinal` write, and all `1.1.x` additionally by the integrity self-test defect |

@@ -7,6 +7,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.7.0] --- 2026-11-11
+
+*Minor, with a security fix: a data object created with `CKA_PRIVATE=TRUE`
+was found and read by a session with nobody logged in, once the user had
+logged out (GHSA-h2r5-32gc-wfx4, moderate, since 1.5.0). The SO, through
+key wrapping, unwrapping and derivation, could also reach the user's private
+objects and keys. Access now follows `CKA_PRIVATE` in every call that takes
+a handle, and `CKA_PRIVATE=FALSE` on a data object is honoured. A
+series of conformance fixes, most reported by Alexandre Laroche (#30 to
+#33): templates the module did not follow are refused instead of answered
+`CKR_OK`, searches match every attribute, AES-CTR stops at the end of its
+counter, `CKM_ECDH1_DERIVE` makes the key length the template asks for, and
+several refusals carry the right return code. Callers that relied on the
+old answers meet new ones.*
+
 ### Security
 * **`C_SetAttributeValue`, `C_CopyObject` and `C_DestroyObject` refuse a
   private object to anyone but the user.** They ran no access check. Without
@@ -18,7 +33,30 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `CKR_OBJECT_HANDLE_INVALID`, as `C_GetAttributeValue` and
   `C_GetObjectSize` do. With the `CKA_PRIVATE` change below, this fixes a
   private data object staying readable after `C_Logout`, reported
-  privately by Alexandre Laroche. `tests/test_private_attr.c` (7).
+  privately by Alexandre Laroche (GHSA-h2r5-32gc-wfx4).
+  `tests/test_private_attr.c` (7).
+* **`C_WrapKey`, `C_UnwrapKey`, `C_DeriveKey` and the KEM calls check access
+  first, and key material goes into keys only.** The same gap, found by
+  Alexandre Laroche in his review of the fix above. With the SO logged in:
+  - `C_WrapKey`, under an RSA public key the SO imported, took out the user's
+    private data objects and extractable keys;
+  - `C_UnwrapKey` with the user's private key decrypted what was sent to the
+    user;
+  - `C_DeriveKey` copied a non-extractable generic secret into a public data
+    object, since both took `CKA_CLASS=CKO_DATA`, and `C_WrapKey` then wrapped
+    that object, because it wrapped data objects too.
+
+  Their usage and mechanism checks ran before any access check, so the
+  return code also told which hidden handles existed. Now every key handle
+  these calls take, including the HKDF salt key and the second key of
+  `CKM_CONCATENATE_BASE_AND_KEY`, is checked before anything else, and a
+  hidden one answers like a missing one. `C_UnwrapKey` makes a secret or
+  private key, `C_DeriveKey` and the KEM calls a secret key (`CKM_HKDF_DATA`
+  a data object), and any other `CKA_CLASS` is `CKR_TEMPLATE_INCONSISTENT`.
+  `C_WrapKey` refuses a data object with `CKR_KEY_HANDLE_INVALID` and a
+  public key with `CKR_KEY_NOT_WRAPPABLE` (§5.18.5). The user could take
+  out their own non-extractable keys the same way; that is closed as well.
+  `tests/test_private_attr.c` (10), (11).
 
 ### Changed
 * **A data object's `CKA_PRIVATE` is the one the template gives, and a

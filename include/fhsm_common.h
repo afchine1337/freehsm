@@ -129,17 +129,26 @@ extern "C" {
  * conformance fixes found by pkcs11-check 0.3.0. Calls answer differently
  * only where they answered against PKCS#11 v3.2: a classical public key's
  * CKA_VALUE, the CKA_EXTRACTABLE default of unwrapped and encapsulated keys,
- * private handles after a logout. Two audit event values are appended. */
+ * private handles after a logout. Two audit event values are appended.
+ *
+ * 2.7.0, MINOR: a security fix (private data objects readable without a
+ * login) and conformance fixes. A data object's CKA_PRIVATE is the
+ * template's; CKA_PRIVATE=FALSE on a data object is a new capability, and
+ * CKA_PUBLIC_EXPONENT is honoured. Many calls answer differently where they
+ * answered CKR_OK for a template they did not follow -- RSA without
+ * CKA_MODULUS_BITS, EC without CKA_EC_PARAMS, a private key asked not
+ * sensitive -- or with the wrong error; searches match every attribute. A
+ * caller that relied on those answers meets new ones, hence the minor. */
 #define FHSM_VERSION_MAJOR   2
-#define FHSM_VERSION_MINOR   6
-#define FHSM_VERSION_PATCH   1
+#define FHSM_VERSION_MINOR   7
+#define FHSM_VERSION_PATCH   0
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
  * a certification this project does not hold. The profile a
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
-#define FHSM_VERSION_STRING  "2.6.1"
+#define FHSM_VERSION_STRING  "2.7.0"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including
