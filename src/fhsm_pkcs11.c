@@ -7831,7 +7831,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * template is CKR_TEMPLATE_INCOMPLETE (§4.1.1); a P-256 key was made
          * and the caller not told the curve had been chosen for it. */
         if (i < 0) return CKR_TEMPLATE_INCOMPLETE;
-        if (i >= 0 && pPub[i].pValue) {
+        if (pPub[i].pValue) {
             const char *m = match_curve(pPub[i].pValue, pPub[i].ulValueLen);
             if (!m) return fhsm_ec_curve_refusal(pPub[i].pValue, pPub[i].ulValueLen);
             curve = m;
@@ -7850,7 +7850,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         const char *alg = "ED25519";
         long i = find_attr(pPub, ulPub, CKA_EC_PARAMS);
         if (i < 0) return CKR_TEMPLATE_INCOMPLETE;   /* as for CKM_EC_KEY_PAIR_GEN */
-        if (i >= 0 && pPub[i].pValue) {
+        if (pPub[i].pValue) {
             const char *m = match_ed_curve(pPub[i].pValue, pPub[i].ulValueLen);
             if (!m) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
             alg = m;
@@ -7882,7 +7882,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         const char *alg = "X25519";
         long i = find_attr(pPub, ulPub, CKA_EC_PARAMS);
         if (i < 0) return CKR_TEMPLATE_INCOMPLETE;   /* as for CKM_EC_KEY_PAIR_GEN */
-        if (i >= 0 && pPub[i].pValue) {
+        if (pPub[i].pValue) {
             const char *m = match_ecm_curve(pPub[i].pValue, pPub[i].ulValueLen);
             if (!m) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
             alg = m;
