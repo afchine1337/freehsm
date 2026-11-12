@@ -37,6 +37,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
   before the tag is verified; a caller that must not act on unauthenticated
   data uses `C_Decrypt`. Reported by Alexandre Laroche.
   `tests/test_gcm_multipart_decrypt.c`.
+* **A single-part call no longer finishes an operation that has taken a
+  part (#37 M1).** `C_DigestInit`, `C_DigestUpdate("abc")`, then
+  `C_Digest("def")` answered `CKR_OK` and the digest of `"def"` alone: the
+  part already given was dropped. PKCS#11 v3.2 says of `C_Digest`, `C_Sign`,
+  `C_Verify`, `C_Encrypt` and `C_Decrypt` that each cannot be used to
+  terminate a multi-part operation. The five now answer
+  `CKR_OPERATION_ACTIVE` after a `C_*Update` (or a `C_DigestKey`), and the
+  operation ends, as it does on any other error of a single-part call. The
+  rule is one flag set by the Updates and one test shared by the five, not
+  five separate checks. **Compatibility:** a caller that mixed the two
+  forms got an answer computed on part of its data; it now gets an error.
+  Reported by Alexandre Laroche. `tests/test_single_part_after_update.c`.
+* **An operation no longer carries on in the context of one that failed.**
+  A signature, verification, encryption or decryption in parts that ended on
+  an error after its first `C_*Update` (a NULL part, a NULL length, a length
+  out of range) kept its MAC or cipher context. The next operation of the
+  same kind in the session, if it was in parts too, carried on in that
+  context: the previous key, the previous IV and the parts already taken,
+  whatever its own `C_*Init` named. `C_SignFinal` then gave a MAC under the
+  earlier key over both messages, and `C_EncryptUpdate` a ciphertext under
+  the earlier key. It took a failed call by the application itself, in the
+  same session, and single-part calls were not affected. Every `C_*Init`
+  now releases what the previous operation left, as it already did for a
+  digest context. Found while testing the entry above.
+  `tests/test_single_part_after_update.c`, cases (e).
 
 ## [2.7.0] --- 2026-11-11
 

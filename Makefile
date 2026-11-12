@@ -1061,6 +1061,11 @@ tests/test_set_pin: tests/test_set_pin.c libfreehsm.so
 tests/test_gcm_multipart_decrypt: tests/test_gcm_multipart_decrypt.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# A single-part call does not finish an operation that has taken a part
+# (#37 M1): C_Digest, C_Sign, C_Verify, C_Encrypt, C_Decrypt.
+tests/test_single_part_after_update: tests/test_single_part_after_update.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # C_Finalize releases the state it built, authentication included. #125 fixed
 # the fork half of this; the same-process half stayed until 2026-09-19.
 tests/test_finalize_release: tests/test_finalize_release.c $(LIB)
@@ -1324,6 +1329,7 @@ TEST_BINS = \
 	tests/test_private_attr \
 	tests/test_set_pin \
 	tests/test_gcm_multipart_decrypt \
+	tests/test_single_part_after_update \
 	tests/test_finalize_release \
 	tests/test_apilock \
 	tests/test_concurrency \
@@ -1506,6 +1512,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_set_pin
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_gcm_multipart_decrypt
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_single_part_after_update
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_finalize_release
 # The concurrency tests (#111-prep) were run by hand under TSAN=1 and by

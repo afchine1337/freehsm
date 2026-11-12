@@ -2108,7 +2108,29 @@ typedef struct fhsm_op_s {
     uint8_t    *mp_buf;
     size_t      mp_len;
     size_t      mp_cap;
+    /* Set by the first C_*Update (or C_DigestKey) of the operation, cleared
+     * when the slot is initialised. The single-part call may not finish an
+     * operation that has taken a part: see op_single_part_refused. */
+    int         multi;
 } fhsm_op_t;
+
+/* C_Digest, C_Sign, C_Verify, C_Encrypt and C_Decrypt "cannot be used to
+ * terminate a multi-part operation": each must follow its Init with no
+ * Update in between (PKCS#11 v3.2, the description of each function).
+ * C_Digest after C_DigestUpdate used to answer the digest of its own
+ * argument alone, and CKR_OK: the parts already given were dropped without
+ * a word (#37 M1).
+ *
+ * One flag and one test for the five of them, so that the rule cannot hold
+ * for one function and not for its neighbours. The call is refused with
+ * CKR_OPERATION_ACTIVE and, like every other error of a single-part call,
+ * ends the operation; what the Updates left behind is released when the slot
+ * is next initialised. Returns 1 when the call is refused. */
+static int op_single_part_refused(fhsm_op_t *op) {
+    if (!op->multi) return 0;
+    op->active = 0;
+    return 1;
+}
 
 /* AES-CTR counter room (PKCS#11 v3.2 §6.11.3). The counter is the `bits`
  * least significant bits of cb, big-endian; from its starting value c it can
@@ -2951,6 +2973,7 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
      * here, the one place every new digest operation passes through. */
     if (op->md_ctx) { EVP_MD_CTX_free(op->md_ctx); op->md_ctx = NULL; }
     op->active = 1;
+    op->multi = 0;
     op->mechanism = (uint32_t)pMechanism->mechanism;
     return FHSM_RV_OK;
 }
@@ -2961,6 +2984,7 @@ CK_RV C_Digest(CK_SESSION_HANDLE hSession, unsigned char *pData,
     if (!pulDigestLen) return FHSM_RV_ARGUMENTS_BAD;
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (op_single_part_refused(op)) return FHSM_RV_OPERATION_ACTIVE;
     /* Reject an absurd input length before touching the data (#125 isize).
      * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
      * input-validation tranche -- it was simply never wired to the sign,
@@ -10431,9 +10455,19 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * composite and HashML-DSA stream into it, and the next operation in
      * this slot would otherwise hash on top of the previous one's parts. */
     if (op->md_ctx) { EVP_MD_CTX_free((EVP_MD_CTX *)op->md_ctx); op->md_ctx = NULL; }
+    /* And for the cipher and MAC contexts, which were not released here.
+     * An operation that ended on an error after its first Update -- a NULL
+     * part, a length out of range -- cleared op->active and kept its
+     * context, and ensure_cipher_ctx and the MAC path open one only when
+     * none is there. The next operation in the slot then carried on in the
+     * previous one's context: its key, its IV, the parts it had taken. Found
+     * by tests/test_single_part_after_update.c. */
+    if (op->cipher_ctx) { EVP_CIPHER_CTX_free((EVP_CIPHER_CTX *)op->cipher_ctx); op->cipher_ctx = NULL; }
+    if (op->mac_ctx) { EVP_MAC_CTX_free((EVP_MAC_CTX *)op->mac_ctx); op->mac_ctx = NULL; }
     op->key_handle = (uint32_t)hKey;
     op->enc_pending = 0;
     op->dec_tail_len = 0;
+    op->multi = 0;
     /* CKA_ALWAYS_AUTHENTICATE, read once here rather than at each entry point
      * (§5.6). Every C_*Init reaches op_init, so the flag is carried by every
      * operation that holds a key handle, whether or not that operation is one
@@ -11206,6 +11240,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
     FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (op_single_part_refused(op)) return FHSM_RV_OPERATION_ACTIVE;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
@@ -11665,6 +11700,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
     FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (op_single_part_refused(op)) return FHSM_RV_OPERATION_ACTIVE;
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
     { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     fhsm_token_t *t = fhsm_session_token(hSession);
@@ -12774,6 +12810,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
     FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (op_single_part_refused(op)) return FHSM_RV_OPERATION_ACTIVE;
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
     { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     /* Reject an absurd input length before touching the data (#125 isize).
@@ -13015,6 +13052,7 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
     FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    if (op_single_part_refused(op)) return FHSM_RV_OPERATION_ACTIVE;
     /* Reject an absurd input length before touching the data (#125 isize).
      * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
      * input-validation tranche -- it was simply never wired to the sign,
@@ -13406,6 +13444,7 @@ CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    op->multi = 1;
     /* Reject an absurd input length before touching the data (#125 isize).
      * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
      * input-validation tranche -- it was simply never wired to the sign,
@@ -13451,6 +13490,7 @@ CK_RV C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey) {
     FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_dig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    op->multi = 1;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
 
@@ -13737,6 +13777,7 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    op->multi = 1;
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
     { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     /* Reject an absurd input length before touching the data (#125 isize).
@@ -13981,6 +14022,7 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    op->multi = 1;
     /* Reject an absurd input length before touching the data (#125 isize).
      * The same 2 GiB ceiling C_Encrypt / C_Decrypt have carried since the
      * input-validation tranche -- it was simply never wired to the sign,
@@ -14204,6 +14246,7 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    op->multi = 1;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     /* pulEncLen is dereferenced on every path (size query and copy) ;
@@ -14371,6 +14414,7 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
     FHSM_API_SHARED();
     fhsm_op_t *op = op_slot(g_op_dec, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
+    op->multi = 1;
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
     { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     fhsm_token_t *t = fhsm_session_token(hSession);
