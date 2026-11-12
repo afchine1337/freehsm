@@ -63,6 +63,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
   digest context. Found while testing the entry above.
   `tests/test_single_part_after_update.c`, cases (e).
 
+### Documentation
+* **Refusing `CKA_SENSITIVE=FALSE` on a private key is this module's choice,
+  not a rule of PKCS#11.** The 2.7.0 notes list that refusal among answers
+  that now follow PKCS#11 v3.2. What the standard was against is the old
+  answer, `CKR_OK` for a template that was not followed. It does not forbid
+  a private key that is not sensitive: §4.1.1 lets a token refuse a template
+  that goes against a requirement of its own, with
+  `CKR_TEMPLATE_INCONSISTENT`, and says that another token may accept the
+  same template. FreeHSM keeps every private key sensitive, and says so by
+  refusing. What this costs a caller:
+  * `pkcs11-tool --unwrap` sends `CKA_SENSITIVE=FALSE` unless `--sensitive`
+    is given, so unwrapping a private key needs `--sensitive`. The 2.7.0
+    notes said pkcs11-tool sends `CKA_SENSITIVE=TRUE` for private keys; that
+    holds for the keys it generates and imports, not for the ones it
+    unwraps.
+  * pkcs11-check 0.2.3 asks for a private key that is not sensitive in its
+    ML-KEM key pair helpers and in its RSA-OAEP cross-verification. Those 28
+    tests fail at `C_GenerateKeyPair`; they are listed, with that reason, in
+    `tests/pkcs11_check_known_failures.txt`.
+
 ## [2.7.0] --- 2026-11-11
 
 *Minor, with a security fix: a data object created with `CKA_PRIVATE=TRUE`
