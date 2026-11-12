@@ -49,8 +49,8 @@ all-mechanisms  pkcs11_check/testcases/security/test_padding_oracle.py::TestRSAP
 #     2.7.0 it reached read_rsa_private_key_or_xfail and was an xfail.
 # The refusal is the module's stated behaviour (RELEASE_v2.7.0.md), so these
 # are the harness's to adapt. Measured on 2026-11-12 at 8684b7e, pkcs11-check
-# 0.2.3, both profiles, the same 28 in each. Upstream: mingulov/pkcs11-check
-# (issue to be opened; put its number here).
+# 0.2.3, both profiles, the same 28 in each. Upstream:
+# mingulov/pkcs11-check#72.
 *  pkcs11_check/testcases/ckr/test_ckr_kem.py::TestDecapsulateKeyErrors::test_garbage_ciphertext
 *  pkcs11_check/testcases/ckr/test_ckr_kem.py::TestDecapsulateKeyErrors::test_mechanism_invalid
 *  pkcs11_check/testcases/ckr/test_ckr_kem.py::TestEncapsulateKeyErrors::test_mechanism_invalid
