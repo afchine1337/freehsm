@@ -7,6 +7,22 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+* **`C_SetPIN` changes a PIN (#36).** It could not, in any session state.
+  A session that was not logged in was refused with
+  `CKR_USER_NOT_LOGGED_IN`, and a logged-in one got
+  `CKR_USER_ALREADY_LOGGED_IN`: the old PIN was verified through the login
+  path, which answers that before it looks at a PIN. The old PIN is now
+  verified by unwrapping the store key with it, and that key is wrapped
+  again under the new PIN, without touching the login state. As PKCS#11 v3.2
+  §5.4.7 has it, an R/W user or R/W SO session changes its own PIN, and an
+  R/W public session the user's. A read-only session is
+  `CKR_SESSION_READ_ONLY`, a token without a user PIN
+  `CKR_USER_PIN_NOT_INITIALIZED`, and a wrong old PIN `CKR_PIN_INCORRECT`,
+  counted and throttled as a failed login is. Objects are untouched: the
+  store key does not change. Reported by Alexandre Laroche.
+  `tests/test_set_pin.c`.
+
 ## [2.7.0] --- 2026-11-11
 
 *Minor, with a security fix: a data object created with `CKA_PRIVATE=TRUE`

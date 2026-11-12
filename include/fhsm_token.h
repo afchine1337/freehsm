@@ -142,9 +142,11 @@ void fhsm_token_logout(fhsm_token_t *t);
 
 fhsm_role_t fhsm_token_current_role(const fhsm_token_t *t);
 
-/* PIN administration. SO can change either PIN; USER can change only
- * its own. SO C_SetPIN rotates the DEK; USER does not (see header
- * comment). */
+/* Change `role`'s PIN, given the old one. Works whoever is logged in, and
+ * when nobody is, and leaves the login state as it was. The DEK is wrapped
+ * again under the new PIN and does not change. A wrong old PIN counts as a
+ * failed attempt (FHSM_RV_PIN_INCORRECT, FHSM_RV_PIN_LOCKED); a token
+ * without a user PIN answers CKR_USER_PIN_NOT_INITIALIZED. */
 fhsm_rv_t fhsm_token_set_pin(fhsm_token_t *t,
                               fhsm_role_t role,
                               const char *old_pin,

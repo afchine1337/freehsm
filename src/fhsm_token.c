@@ -1582,8 +1582,13 @@ again:
  * that moved mid-session fail an operation on a token that is legitimately
  * open, and buy nothing -- the caller reaching this point has already proved
  * PIN knowledge, which is all §5.6 asks of them. */
-fhsm_rv_t fhsm_token_verify_pin(fhsm_token_t *t, fhsm_role_t role,
-                                 const char *pin, size_t pin_len) {
+/* The body of fhsm_token_verify_pin. When `dek_out` is not NULL and the PIN
+ * verifies, the unwrapped DEK is copied there (DEK_LEN bytes, the caller's
+ * secure memory) -- what C_SetPIN needs to wrap it again under the new PIN
+ * when nobody is logged in and the live DEK is gone. */
+static fhsm_rv_t token_verify_pin_dek(fhsm_token_t *t, fhsm_role_t role,
+                                      const char *pin, size_t pin_len,
+                                      uint8_t *dek_out) {
     if (!t || !pin) return FHSM_RV_ARGUMENTS_BAD;
     if (role != FHSM_ROLE_SO && role != FHSM_ROLE_USER)
         return FHSM_RV_ARGUMENTS_BAD;
@@ -1638,6 +1643,7 @@ again: ;   /* a label must precede a statement, not the declaration below */
             scratch, &pt_len);
     fhsm_zeroize(kek, sizeof(kek));
     int verified = (dec_rv == FHSM_RV_OK && pt_len == DEK_LEN);
+    if (verified && dek_out) memcpy(dek_out, scratch, DEK_LEN);
     fhsm_zeroize(scratch, DEK_LEN);
     fhsm_secure_free(scratch);
 
@@ -1654,6 +1660,11 @@ again: ;   /* a label must precede a statement, not the declaration below */
     pthread_mutex_unlock(&t->mu);
     return (*fails >= FHSM_PIN_MAX_FAILED) ? FHSM_RV_PIN_LOCKED
                                               : FHSM_RV_PIN_INCORRECT;
+}
+
+fhsm_rv_t fhsm_token_verify_pin(fhsm_token_t *t, fhsm_role_t role,
+                                 const char *pin, size_t pin_len) {
+    return token_verify_pin_dek(t, role, pin, pin_len, NULL);
 }
 
 /* PKCS#11 v3.2 §5.6.8 (C_Logout): "When C_Logout successfully executes, any
@@ -1811,57 +1822,92 @@ out:
 }
 
 /* ---------------------------------------------------------------------------
- * fhsm_token_set_pin --- rotate a role's PIN. SO C_SetPIN also rotates
- * the DEK (NIST SP 800-57 §5.4). USER C_SetPIN only re-wraps.
+ * fhsm_token_set_pin --- change a role's PIN: the DEK is wrapped again under
+ * PBKDF2(new_pin). The DEK itself does not change.
  *
- * Implementation : verify old PIN via login-equivalent unwrap, then
- * re-wrap the DEK under PBKDF2(new_pin). For SO, the rotation policy
- * additionally regenerates the DEK before re-wrap (TODO : when objects
- * are wired, re-encrypt all of them too — beyond the scope of the
- * integration test).
+ * The old PIN is verified by unwrapping the DEK with it, into a scratch
+ * buffer, and that copy is what is wrapped again. The login state is neither
+ * needed nor changed, so this serves the three states PKCS#11 v3.2 gives
+ * C_SetPIN (§5.4.7): the user or the SO logged in, and nobody logged in,
+ * where it is the user's PIN that changes.
+ *
+ * It used to verify the old PIN through fhsm_token_login, which answers
+ * CKR_USER_ALREADY_LOGGED_IN before it looks at a PIN when the role is the
+ * current one -- every call from a logged-in session -- and which, from a
+ * session that was not logged in, would have logged the token in as a side
+ * effect. C_SetPIN refused that second case itself, so no state was left in
+ * which a PIN could be changed (#36).
+ *
+ * A wrong old PIN counts as a failed attempt and is throttled, as in
+ * fhsm_token_verify_pin: C_SetPIN is not a PIN oracle.
  * ----------------------------------------------------------------------- */
 fhsm_rv_t fhsm_token_set_pin(fhsm_token_t *t, fhsm_role_t role,
                               const char *old_pin, const char *new_pin) {
     if (!t || !old_pin || !new_pin) return FHSM_RV_ARGUMENTS_BAD;
+    if (role != FHSM_ROLE_SO && role != FHSM_ROLE_USER)
+        return FHSM_RV_ARGUMENTS_BAD;
     if (strlen(new_pin) < 4) return FHSM_RV_PIN_INCORRECT;
 
-    /* Step 1 : verify old_pin via fhsm_token_login. This populates t->dek
-     * with the unwrapped DEK if successful. */
-    /* old_pin really is a C string here: it arrived through
-     * fhsm_copy_to_cstr in C_SetPIN. The length is computed where that is
-     * known to be true, rather than assumed one call deeper. */
-    fhsm_rv_t rv = fhsm_token_login(t, role, old_pin, strlen(old_pin));
-    if (rv != FHSM_RV_OK) return rv;
-
-    /* Step 2 : re-wrap the live DEK under the new PIN. */
     pthread_mutex_lock(&t->mu);
-    uint8_t *salt        = (role == FHSM_ROLE_SO) ? t->salt_so         : t->salt_user;
-    uint8_t *nonce       = (role == FHSM_ROLE_SO) ? t->so_wrap_nonce   : t->user_wrap_nonce;
-    uint8_t *ct          = (role == FHSM_ROLE_SO) ? t->so_wrap_ct      : t->user_wrap_ct;
+    int no_user_pin = (role == FHSM_ROLE_USER && !t->user_initialized);
+    pthread_mutex_unlock(&t->mu);
+    if (no_user_pin) return 0x00000102u;   /* CKR_USER_PIN_NOT_INITIALIZED */
 
-    fhsm_rng_bytes(salt,  16);
-    fhsm_rng_bytes(nonce, 12);
+    uint8_t *dek = fhsm_secure_zalloc(DEK_LEN);
+    if (!dek) return FHSM_RV_HOST_MEMORY;
 
-    uint8_t kek[32];
+    /* Step 1 : the old PIN. old_pin really is a C string here: it arrived
+     * through fhsm_copy_to_cstr in C_SetPIN. */
+    fhsm_rv_t rv = token_verify_pin_dek(t, role, old_pin, strlen(old_pin), dek);
+    if (rv != FHSM_RV_OK) {
+        fhsm_zeroize(dek, DEK_LEN);
+        fhsm_secure_free(dek);
+        return rv;
+    }
+
+    /* Step 2 : wrap that DEK under the new PIN. The new salt, nonce and
+     * ciphertext are built aside and installed together, so a failure leaves
+     * the old PIN in place. */
+    uint8_t new_salt[16], new_nonce[12], new_ct[DEK_LEN + 16], kek[32];
+    fhsm_rng_bytes(new_salt,  sizeof(new_salt));
+    fhsm_rng_bytes(new_nonce, sizeof(new_nonce));
+
+    pthread_mutex_lock(&t->mu);
+    /* The token may have been re-initialised between the two steps. If the
+     * DEK is live, the one just unwrapped must still be it. */
+    if (t->dek_live && t->dek && fhsm_ct_memcmp(t->dek, dek, DEK_LEN) != 0) {
+        rv = FHSM_RV_FUNCTION_FAILED;
+        goto out;
+    }
     rv = fhsm_pbkdf2(FHSM_HASH_SHA256,
                       FHSM_SLICE(new_pin, strlen(new_pin)),
-                      FHSM_SLICE(salt, 16),
+                      FHSM_SLICE(new_salt, sizeof(new_salt)),
                       t->pbkdf2_iter, kek, sizeof(kek));
-    if (rv != FHSM_RV_OK) { pthread_mutex_unlock(&t->mu); return rv; }
+    if (rv != FHSM_RV_OK) goto out;
 
-    size_t ct_len = 32;
+    size_t ct_len = DEK_LEN;
     rv = fhsm_aes_gcm_encrypt(
             FHSM_SLICE(kek, sizeof(kek)),
-            FHSM_SLICE(nonce, 12),
+            FHSM_SLICE(new_nonce, sizeof(new_nonce)),
             FHSM_SLICE(t->serial, strlen(t->serial)),
-            FHSM_SLICE(t->dek, DEK_LEN),
-            ct, &ct_len,
-            ct + DEK_LEN);
-    fhsm_zeroize(kek, sizeof(kek));
-    if (rv != FHSM_RV_OK) { pthread_mutex_unlock(&t->mu); return rv; }
+            FHSM_SLICE(dek, DEK_LEN),
+            new_ct, &ct_len,
+            new_ct + DEK_LEN);
+    if (rv != FHSM_RV_OK) goto out;
 
+    memcpy((role == FHSM_ROLE_SO) ? t->salt_so       : t->salt_user,
+           new_salt,  sizeof(new_salt));
+    memcpy((role == FHSM_ROLE_SO) ? t->so_wrap_nonce : t->user_wrap_nonce,
+           new_nonce, sizeof(new_nonce));
+    memcpy((role == FHSM_ROLE_SO) ? t->so_wrap_ct    : t->user_wrap_ct,
+           new_ct,    sizeof(new_ct));
     rv = write_atomic(t);
+out:
     pthread_mutex_unlock(&t->mu);
+    fhsm_zeroize(kek, sizeof(kek));
+    fhsm_zeroize(new_ct, sizeof(new_ct));
+    fhsm_zeroize(dek, DEK_LEN);
+    fhsm_secure_free(dek);
     (void)fhsm_audit_event(FHSM_EV_SET_PIN, -1, -1, role, rv, FHSM_AUDIT_END);
     return rv;
 }

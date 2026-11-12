@@ -1798,7 +1798,14 @@ CK_RV C_InitPIN(CK_SESSION_HANDLE hSession, CK_UTF8CHAR_PTR pPin,
 }
 
 /* ---------------------------------------------------------------------------
- * C_SetPIN --- change the PIN of the currently-logged-in role.
+ * C_SetPIN --- change the PIN of the role that is logged in, or the user's
+ * PIN when nobody is (PKCS#11 v3.2 §5.4.7). It needs an R/W session: a
+ * read-only one is CKR_SESSION_READ_ONLY.
+ *
+ * A session that was not logged in was refused with
+ * CKR_USER_NOT_LOGGED_IN, and a logged-in one got
+ * CKR_USER_ALREADY_LOGGED_IN from the old PIN's verification, so no PIN
+ * could be changed in any state (#36).
  * ----------------------------------------------------------------------- */
 CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
                 CK_UTF8CHAR_PTR pOldPin, CK_ULONG ulOldLen,
@@ -1814,7 +1821,11 @@ CK_RV C_SetPIN(CK_SESSION_HANDLE hSession,
     fhsm_token_t *t = fhsm_session_token(hSession);
     fhsm_role_t   r = fhsm_session_role(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
-    if (r == FHSM_ROLE_NONE) return FHSM_RV_USER_NOT_LOGGED_IN;
+    { unsigned long flags = 0;
+      if (fhsm_session_info(hSession, NULL, &flags, NULL) == FHSM_RV_OK
+          && !(flags & 0x00000002UL /* CKF_RW_SESSION */))
+          return FHSM_RV_SESSION_READ_ONLY; }
+    if (r == FHSM_ROLE_NONE) r = FHSM_ROLE_USER;
 
     char op[128], np[128];
     if (fhsm_copy_to_cstr(op, sizeof(op), pOldPin, ulOldLen) < 0 ||
