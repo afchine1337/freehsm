@@ -22,6 +22,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   counted and throttled as a failed login is. Objects are untouched: the
   store key does not change. Reported by Alexandre Laroche.
   `tests/test_set_pin.c`.
+* **AES-GCM decrypts in parts (#35).** `C_DecryptUpdate` followed by
+  `C_DecryptFinal` answered `CKR_ENCRYPTED_DATA_INVALID` for every
+  ciphertext, however it was split, while `C_Decrypt` accepted the same
+  bytes. The tag is the end of the input (§6.13.5), and every byte went to
+  the cipher, the tag included, so the final verified against a tag that had
+  never been set. `C_DecryptUpdate` now holds back the last `ulTagBits / 8`
+  bytes it has seen and decrypts what came before them, and `C_DecryptFinal`
+  takes what is held as the tag. A part gives exactly the bytes it releases,
+  so its size query is exact, and `C_DecryptFinal` gives none. Fewer bytes
+  than a tag in all is `CKR_ENCRYPTED_DATA_LEN_RANGE`. Nothing was accepted
+  that should not have been: the defect refused valid ciphertexts. As with
+  any decryption in parts, the plaintext of the earlier parts is given out
+  before the tag is verified; a caller that must not act on unauthenticated
+  data uses `C_Decrypt`. Reported by Alexandre Laroche.
+  `tests/test_gcm_multipart_decrypt.c`.
 
 ## [2.7.0] --- 2026-11-11
 

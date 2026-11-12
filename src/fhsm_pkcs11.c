@@ -1991,6 +1991,12 @@ typedef struct fhsm_op_s {
                                 * computed, for bare CKM_RSA_PKCS_PSS */
     uint32_t    enc_pending;   /* multipart ECB/CBC/CBC-PAD encryption:
                                 * input bytes held back, 0..15 */
+    /* Multipart AES-GCM decryption: the last gcm_tag_len bytes received so
+     * far. They may be the tag, so they are kept from the cipher until more
+     * input shows they were ciphertext, or C_DecryptFinal takes them as the
+     * tag (#35). */
+    uint8_t     dec_tail[16];
+    uint32_t    dec_tail_len;
     /* AES-CTR: the blocks the counter bits allow before they overflow
      * (UINT64_MAX: more than will ever be asked), and the bytes processed so
      * far, single-part or multipart (§6.11.3, #33 C13). */
@@ -10427,6 +10433,7 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     if (op->md_ctx) { EVP_MD_CTX_free((EVP_MD_CTX *)op->md_ctx); op->md_ctx = NULL; }
     op->key_handle = (uint32_t)hKey;
     op->enc_pending = 0;
+    op->dec_tail_len = 0;
     /* CKA_ALWAYS_AUTHENTICATE, read once here rather than at each entry point
      * (§5.6). Every C_*Init reaches op_init, so the flag is carried by every
      * operation that holds a key handle, whether or not that operation is one
@@ -14407,6 +14414,43 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
      * The probe only runs when the caller's buffer is under the bound --
      * when it is at or above, no refusal is possible and there is nothing
      * to decide. */
+    /* AES-GCM. The input ends with the tag (§6.13.5: "the tag is appended to
+     * the cipher text"), and a part does not say whether it is the last one.
+     * So the last gcm_tag_len bytes seen are held back, and what came before
+     * them is decrypted. Every byte went to EVP_DecryptUpdate, the tag
+     * included, and C_DecryptFinal then verified against a tag that had
+     * never been set: every ciphertext was CKR_ENCRYPTED_DATA_INVALID, however
+     * it was split (#35).
+     *
+     * The output is exactly the input that is released, so the size is known
+     * without a probe. The held-back bytes and the part are joined in a copy
+     * before anything is written: pPart may be pEnc (§5.9), and the bytes
+     * released are no longer aligned with it. */
+    if (op_cipher_kind(op->mechanism) == 0) {
+        size_t tl = op->gcm_tag_len ? op->gcm_tag_len : 16;
+        if (tl > sizeof(op->dec_tail)) { op->active = 0; return FHSM_RV_MECHANISM_PARAM_INVALID; }
+        size_t total = (size_t)op->dec_tail_len + (size_t)ulEncLen;
+        size_t emit  = total > tl ? total - tl : 0;
+        if (pPart == NULL) { *pulPartLen = emit; return FHSM_RV_OK; }
+        if (*pulPartLen < emit) {
+            *pulPartLen = emit;
+            return 0x00000150UL;   /* operation stays alive for the retry */
+        }
+        unsigned char *in = OPENSSL_malloc(total ? total : 1);
+        if (!in) { op->active = 0; return FHSM_RV_HOST_MEMORY; }
+        memcpy(in, op->dec_tail, op->dec_tail_len);
+        if (ulEncLen) memcpy(in + op->dec_tail_len, pEnc, ulEncLen);
+        int gout = 0;
+        if (emit && EVP_DecryptUpdate(op->cipher_ctx, pPart, &gout, in, (int)emit) != 1) {
+            OPENSSL_free(in);
+            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        }
+        memcpy(op->dec_tail, in + emit, total - emit);
+        op->dec_tail_len = (uint32_t)(total - emit);
+        OPENSSL_free(in);
+        *pulPartLen = (CK_ULONG)gout;
+        return FHSM_RV_OK;
+    }
     { int dk = op_cipher_kind(op->mechanism);
       size_t bound = (dk == 2 || dk == 3) ? ulEncLen + 16 : ulEncLen;
       if (pPart == NULL) { *pulPartLen = bound; return FHSM_RV_OK; }
@@ -14496,6 +14540,25 @@ CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
             *pulLastLen = exact;
             return 0x00000150UL;   /* operation and context stay alive */
         }
+    }
+
+    /* AES-GCM: what C_DecryptUpdate held back is the tag. Fewer bytes than a
+     * tag in all is a ciphertext that cannot be one. */
+    if (dk == 0) {
+        size_t tl = op->gcm_tag_len ? op->gcm_tag_len : 16;
+        int tag_ok = (op->dec_tail_len == tl)
+                  && EVP_CIPHER_CTX_ctrl(op->cipher_ctx, EVP_CTRL_AEAD_SET_TAG,
+                                         (int)tl, op->dec_tail) == 1;
+        if (!tag_ok) {
+            int short_ct = (op->dec_tail_len != tl);
+            EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL;
+            op->dec_tail_len = 0;
+            *pulLastLen = 0;
+            op->active = 0;
+            return short_ct ? FHSM_RV_ENCRYPTED_DATA_LEN_RANGE
+                            : FHSM_RV_FUNCTION_FAILED;
+        }
+        op->dec_tail_len = 0;
     }
 
     int out_len = 0;

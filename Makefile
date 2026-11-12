@@ -1057,6 +1057,10 @@ tests/test_private_attr: tests/test_private_attr.c libfreehsm.so
 tests/test_set_pin: tests/test_set_pin.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# AES-GCM decryption in parts: the tag is held back, then verified (#35).
+tests/test_gcm_multipart_decrypt: tests/test_gcm_multipart_decrypt.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # C_Finalize releases the state it built, authentication included. #125 fixed
 # the fork half of this; the same-process half stayed until 2026-09-19.
 tests/test_finalize_release: tests/test_finalize_release.c $(LIB)
@@ -1319,6 +1323,7 @@ TEST_BINS = \
 	tests/test_derive_des_parity \
 	tests/test_private_attr \
 	tests/test_set_pin \
+	tests/test_gcm_multipart_decrypt \
 	tests/test_finalize_release \
 	tests/test_apilock \
 	tests/test_concurrency \
@@ -1499,6 +1504,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_private_attr
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_set_pin
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_gcm_multipart_decrypt
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_finalize_release
 # The concurrency tests (#111-prep) were run by hand under TSAN=1 and by
