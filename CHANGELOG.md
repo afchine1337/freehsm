@@ -7,6 +7,36 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+* **A key has the usages of its type, and derives only when asked (#34).**
+  The usages of a new private or public key came from its class alone, and
+  only a usage the template named FALSE was left out. A private key started
+  from decrypt, sign, unwrap and derive: a P-256 key asked for `CKA_SIGN`
+  reported `CKA_DERIVE=TRUE` and could be used for ECDH, and an X25519 key
+  reported `CKA_SIGN=TRUE`. `C_GenerateKeyPair` cleared `CKA_DERIVE` for
+  some types; `C_CreateObject` and `C_UnwrapKey` cleared nothing, so an
+  unwrapped Ed25519 key reported it. Every creation path now reads one
+  table:
+  * RSA: decrypt, sign, unwrap; encrypt, verify, wrap for the public key;
+  * EC: sign, and derive when asked; verify for the public key;
+  * Edwards, ML-DSA, SLH-DSA and the composite key: sign; verify;
+  * Montgomery: derive when asked, and nothing else;
+  * ML-KEM: none of these (it has `CKA_ENCAPSULATE` and `CKA_DECAPSULATE`).
+
+  `CKA_DERIVE` is FALSE unless the template says TRUE, the default PKCS#11
+  v3.2 gives it. **Compatibility:** an EC or Montgomery key made without
+  `CKA_DERIVE=TRUE` no longer derives, and `C_DeriveKey` answers
+  `CKR_KEY_FUNCTION_NOT_PERMITTED`. pkcs11-tool names the usages it wants,
+  `CKA_DERIVE` included, so its commands are unaffected. Keys already in a
+  token keep the usages they were stored with. Secret keys are unchanged.
+
+  A usage the type does not have, asked TRUE, is accepted and reads back
+  FALSE. That is a deviation, and a chosen one: without a `--usage-*`
+  option pkcs11-tool asks `CKA_DERIVE=TRUE` for an Edwards key pair,
+  `CKA_SIGN=TRUE` for a Montgomery one and `CKA_DECRYPT=TRUE` for any
+  private key it unwraps, and a refusal would fail those commands.
+  Reported by Alexandre Laroche. `tests/test_usage_defaults.c`.
+
 ### Fixed
 * **`C_SetPIN` changes a PIN (#36).** It could not, in any session state.
   A session that was not logged in was refused with

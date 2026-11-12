@@ -2518,18 +2518,69 @@ static int tmpl_bbool(CK_ATTRIBUTE *t, CK_ULONG n, CK_ATTRIBUTE_TYPE type, int d
     return ((const unsigned char *)t[i].pValue)[0] ? 1 : 0;
 }
 
-/* Compute the stored usage-flag byte for a new object from its class
- * default plus any CKA_ENCRYPT/DECRYPT/SIGN/VERIFY/WRAP/UNWRAP/DERIVE
- * overrides in the creation template (#125). */
-static uint8_t fhsm_compute_usage(uint32_t cko_class, CK_ATTRIBUTE *tmpl, CK_ULONG n) {
-    uint8_t u = FHSM_USAGE_VALID;
-    if (cko_class == CKO_SECRET_KEY)
-        u |= FHSM_USAGE_ENCRYPT | FHSM_USAGE_DECRYPT | FHSM_USAGE_SIGN
-           | FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP | FHSM_USAGE_UNWRAP;
-    else if (cko_class == CKO_PUBLIC_KEY)
-        u |= FHSM_USAGE_ENCRYPT | FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP;
-    else if (cko_class == CKO_PRIVATE_KEY)
-        u |= FHSM_USAGE_DECRYPT | FHSM_USAGE_SIGN | FHSM_USAGE_UNWRAP | FHSM_USAGE_DERIVE;
+/* The usages a key of this class and type can have: the ones some mechanism
+ * of the module takes a key of that type for.
+ *
+ * Before #34 the usages of a new key came from its class alone. A private key
+ * started from decrypt, sign, unwrap and derive whatever its type, so a P-256
+ * key asked for CKA_SIGN only reported CKA_DERIVE=TRUE -- the flag
+ * C_DeriveKey checks -- and an X25519 key reported CKA_SIGN=TRUE with no
+ * mechanism able to sign with it. C_GenerateKeyPair cleared CKA_DERIVE for
+ * the types that do not derive; C_CreateObject and C_UnwrapKey cleared
+ * nothing. One table, read by every creation path through
+ * fhsm_object_init_usage, so that a key is the same however it came in.
+ *
+ * The key types are spelt out as numbers: their macros are defined further
+ * down this file, each beside the function that first needed it. A type that
+ * is not listed keeps what its class allows.
+ *
+ * Secret keys are not typed here: all six usages, and CKA_DERIVE when asked. */
+static uint8_t fhsm_usage_possible(uint32_t cko_class, uint32_t kt) {
+    const uint8_t all_secret = FHSM_USAGE_ENCRYPT | FHSM_USAGE_DECRYPT | FHSM_USAGE_SIGN
+                             | FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP | FHSM_USAGE_UNWRAP
+                             | FHSM_USAGE_DERIVE;
+    if (cko_class == CKO_SECRET_KEY) return all_secret;
+    int priv = (cko_class == CKO_PRIVATE_KEY);
+    if (!priv && cko_class != CKO_PUBLIC_KEY) return 0;
+    switch (kt) {
+        case 0x00000000UL:   /* CKK_RSA */
+            return priv ? (FHSM_USAGE_DECRYPT | FHSM_USAGE_SIGN | FHSM_USAGE_UNWRAP)
+                        : (FHSM_USAGE_ENCRYPT | FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP);
+        case 0x00000003UL:   /* CKK_EC: ECDSA and ECDH */
+            return (uint8_t)((priv ? FHSM_USAGE_SIGN : FHSM_USAGE_VERIFY) | FHSM_USAGE_DERIVE);
+        case 0x00000041UL:   /* CKK_EC_MONTGOMERY: X25519, X448 */
+            return FHSM_USAGE_DERIVE;
+        case 0x00000040UL:   /* CKK_EC_EDWARDS */
+        case 0x0000004AUL:   /* CKK_ML_DSA */
+        case 0x0000004BUL:   /* CKK_SLH_DSA */
+        case 0x80004202UL:   /* CKK_COMPOSITE_MLDSA65_ED25519 */
+            return priv ? FHSM_USAGE_SIGN : FHSM_USAGE_VERIFY;
+        case 0x00000049UL:   /* CKK_ML_KEM: CKA_ENCAPSULATE / CKA_DECAPSULATE, kept apart */
+            return 0;
+        default:
+            return priv ? (FHSM_USAGE_DECRYPT | FHSM_USAGE_SIGN | FHSM_USAGE_UNWRAP | FHSM_USAGE_DERIVE)
+                        : (FHSM_USAGE_ENCRYPT | FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP | FHSM_USAGE_DERIVE);
+    }
+}
+
+/* Compute the stored usage-flag byte for a new object (#125, #34).
+ *
+ * It starts from what the type can do, less CKA_DERIVE: PKCS#11 v3.2 gives
+ * CKA_DERIVE a default of CK_FALSE, and leaves the default of the other
+ * usages to the token. A usage the template names FALSE is cleared. One it
+ * names TRUE is set if the type can have it, and dropped if not: pkcs11-tool
+ * asks CKA_DERIVE=TRUE for an Edwards key pair, CKA_SIGN=TRUE for a
+ * Montgomery one and CKA_DECRYPT=TRUE for any private key it unwraps, when
+ * no --usage-* option is given, so refusing those templates would refuse its
+ * plain commands. The key then reads back FALSE where TRUE was asked; that
+ * is a deviation, and it is the lesser one.
+ *
+ * A secret key keeps its six usages by default and derives only when asked,
+ * as before. */
+static uint8_t fhsm_compute_usage(uint32_t cko_class, uint32_t kt,
+                                  CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    const uint8_t possible = fhsm_usage_possible(cko_class, kt);
+    uint8_t u = (uint8_t)(FHSM_USAGE_VALID | (possible & (uint8_t)~FHSM_USAGE_DERIVE));
     static const struct { CK_ATTRIBUTE_TYPE a; uint8_t bit; } map[] = {
         { CKA_ENCRYPT_ATTR, FHSM_USAGE_ENCRYPT }, { CKA_DECRYPT_ATTR, FHSM_USAGE_DECRYPT },
         { CKA_SIGN_ATTR, FHSM_USAGE_SIGN }, { CKA_VERIFY_ATTR, FHSM_USAGE_VERIFY },
@@ -2538,10 +2589,24 @@ static uint8_t fhsm_compute_usage(uint32_t cko_class, CK_ATTRIBUTE *tmpl, CK_ULO
     };
     for (size_t i = 0; i < sizeof(map)/sizeof(map[0]); ++i) {
         int b = tmpl_bbool(tmpl, n, map[i].a, -1);
-        if (b == 1) u |= map[i].bit;
+        if (b == 1) u |= (uint8_t)(map[i].bit & possible);
         else if (b == 0) u &= (uint8_t)~map[i].bit;
     }
     return u;
+}
+
+/* Set the usages of an object that has just been made. The class and the key
+ * type are read back from the store, so the eight creation paths cannot each
+ * hold a different idea of them. `cko_hint` serves only if the object cannot
+ * be read, and then the type is taken as unknown. */
+static void fhsm_object_init_usage(fhsm_token_t *t, uint32_t handle, uint32_t cko_hint,
+                                   CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    const uint8_t *kv = NULL; size_t kvl = 0;
+    uint32_t cl = cko_hint, kt = 0xFFFFFFFFu;
+    if (fhsm_token_object_get(t, handle, &kv, &kvl, &cl, &kt) != FHSM_RV_OK) {
+        cl = cko_hint; kt = 0xFFFFFFFFu;
+    }
+    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(cl, kt, tmpl, n));
 }
 
 /* Report a usage bit for C_GetAttributeValue : the stored value if the
@@ -3349,7 +3414,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
-    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
+    fhsm_object_init_usage(t, handle, CKO_SECRET_KEY, pTemplate, ulCount);
     return FHSM_RV_OK;
 }
 
@@ -4173,7 +4238,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
         { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
           if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
-        (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
+        fhsm_object_init_usage(t, handle, (uint32_t)a.cko, pTemplate, ulCount);
         return FHSM_RV_OK;
     }
 
@@ -4212,7 +4277,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
         { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
           if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
-        (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
+        fhsm_object_init_usage(t, handle, (uint32_t)a.cko, pTemplate, ulCount);
         return FHSM_RV_OK;
     }
 
@@ -4497,7 +4562,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
-    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage((uint32_t)a.cko, pTemplate, ulCount));
+    fhsm_object_init_usage(t, handle, (uint32_t)a.cko, pTemplate, ulCount);
     return FHSM_RV_OK;
 }
 
@@ -5811,7 +5876,7 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
-    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(obj_class, pTemplate, ulCount));
+    fhsm_object_init_usage(t, handle, obj_class, pTemplate, ulCount);
     (void)fhsm_audit_event(FHSM_EV_DERIVE, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
     return FHSM_RV_OK;
@@ -6657,7 +6722,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
-    (void)fhsm_token_object_set_usage(t, handle, fhsm_compute_usage(obj_class, pTemplate, ulCount));
+    fhsm_object_init_usage(t, handle, obj_class, pTemplate, ulCount);
     *phKey = handle;
     (void)fhsm_audit_event(FHSM_EV_UNWRAP, -1, (int)hSession,
                             fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
@@ -6779,8 +6844,7 @@ static CK_RV kem_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
         ar = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
     }
     if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return ar; }
-    (void)fhsm_token_object_set_usage(t, handle,
-                                      fhsm_compute_usage(CKO_SECRET_KEY, pTemplate, ulCount));
+    fhsm_object_init_usage(t, handle, CKO_SECRET_KEY, pTemplate, ulCount);
     *phNewKey = handle;
     return FHSM_RV_OK;
 }
@@ -8154,19 +8218,15 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pPub, ulPub, hp);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
                               (void)fhsm_token_object_destroy(t, hk); return mr; } }
-    (void)fhsm_token_object_set_usage(t, hp, fhsm_compute_usage(CKO_PUBLIC_KEY, pPub, ulPub));
+    fhsm_object_init_usage(t, hp, CKO_PUBLIC_KEY, pPub, ulPub);
     fhsm_apply_token_scope(t, hSession, pPriv, ulPriv, hk);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pPriv, ulPriv, hk);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
                               (void)fhsm_token_object_destroy(t, hk); return mr; } }
-    { uint8_t pu = fhsm_compute_usage(CKO_PRIVATE_KEY, pPriv, ulPriv);
-      /* Only EC and Montgomery keys derive. PQC keys were excluded here
-       * (#125 : ML-KEM private key must report CKA_DERIVE=FALSE); RSA and
-       * Edwards keys were not, and their private half claimed CKA_DERIVE
-       * while the public half did not (OpenSC's p11test usage_test). */
-      if (ckk_type != CKK_EC && ckk_type != CKK_EC_MONTGOMERY_KT)
-          pu &= (uint8_t)~FHSM_USAGE_DERIVE;
-      (void)fhsm_token_object_set_usage(t, hk, pu); }
+    /* Which usages the type has is fhsm_usage_possible's to say, for both
+     * halves and for every other way a key comes in (#34). It was said here,
+     * for CKA_DERIVE and for this function alone. */
+    fhsm_object_init_usage(t, hk, CKO_PRIVATE_KEY, pPriv, ulPriv);
     return FHSM_RV_OK;
 }
 
