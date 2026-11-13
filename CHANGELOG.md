@@ -93,7 +93,45 @@ project adheres to [Semantic Versioning](https://semver.org/).
   digest context. Found while testing the entry above.
   `tests/test_single_part_after_update.c`, cases (e).
 
+* **Five refusals carry the return code that names what is wrong (#37).**
+  * `C_Encrypt` with AES-ECB or AES-CBC without padding, of a length that
+    is not whole blocks, is `CKR_DATA_LEN_RANGE`. It was
+    `CKR_FUNCTION_FAILED`, OpenSSL's refusal passed on as a fault (B1).
+  * `C_Decrypt` with AES-ECB, AES-CBC or AES-CBC-PAD, of a length that is
+    not whole blocks, and AES-CBC-PAD of nothing, is
+    `CKR_ENCRYPTED_DATA_LEN_RANGE`, on the length alone. It was
+    `CKR_ENCRYPTED_DATA_INVALID` (B2).
+  * `C_CreateObject` of a `CKK_AES` key whose `CKA_VALUE` is not 16, 24 or
+    32 bytes is `CKR_ATTRIBUTE_VALUE_INVALID` (§6.10.2). A 13-byte key was
+    stored, and no mechanism could use it (K2).
+  * `CKM_ECDH1_DERIVE` with a peer value that is not a point of the curve
+    in any accepted form, or is off the curve, is
+    `CKR_MECHANISM_PARAM_INVALID`: the peer value is a mechanism parameter
+    (§6.3.16). It was `CKR_ATTRIBUTE_VALUE_INVALID`. No key was made
+    before, and none is now (E1).
+  * `CKM_ECDH1_DERIVE` without a parameter, or with a key derivation
+    function other than `CKD_NULL`, is `CKR_MECHANISM_PARAM_INVALID`. It
+    was `CKR_ARGUMENTS_BAD`. The X9.63 derivations (`CKD_SHA256_KDF` and
+    the like) are not offered (E2).
+
+  **Compatibility:** a caller that tests for the old codes must test for
+  the new ones. Reported by Alexandre Laroche.
+  `tests/test_len_and_param_rv.c`.
+
 ### Documentation
+* **Two answers of #37 are left as they are, and why.**
+  * `CKA_KEY_GEN_MECHANISM` cannot be read (K3). The mechanism that made a
+    key is not stored: `CKM_PKCS5_PBKD2` makes AES and generic secret keys
+    through `C_GenerateKey` as `CKM_AES_KEY_GEN` and
+    `CKM_GENERIC_SECRET_KEY_GEN` do, so the key type does not tell which
+    it was. Storing it needs a new field in the token file, and waits for
+    the next version of the store format, with `CKA_OBJECT_ID`.
+  * A secret key created with `CKA_PRIVATE=FALSE` is accepted and is
+    private all the same (K1). Every secret key here is a private object.
+    pkcs11-tool sends `CKA_PRIVATE=FALSE` for the secret keys it generates,
+    imports, derives and decapsulates unless `--private` is given, so a
+    refusal would fail its plain commands. The attribute then reads back
+    TRUE where FALSE was asked: a deviation, kept for that reason.
 * **Refusing `CKA_SENSITIVE=FALSE` on a private key is this module's choice,
   not a rule of PKCS#11.** The 2.7.0 notes list that refusal among answers
   that now follow PKCS#11 v3.2. What the standard was against is the old

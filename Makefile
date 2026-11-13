@@ -1070,6 +1070,11 @@ tests/test_single_part_after_update: tests/test_single_part_after_update.c libfr
 tests/test_usage_defaults: tests/test_usage_defaults.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Block lengths, an AES key length and ECDH parameters refused with the
+# return code that names what is wrong (#37 B1, B2, K2, E1, E2).
+tests/test_len_and_param_rv: tests/test_len_and_param_rv.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # C_Finalize releases the state it built, authentication included. #125 fixed
 # the fork half of this; the same-process half stayed until 2026-09-19.
 tests/test_finalize_release: tests/test_finalize_release.c $(LIB)
@@ -1335,6 +1340,7 @@ TEST_BINS = \
 	tests/test_gcm_multipart_decrypt \
 	tests/test_single_part_after_update \
 	tests/test_usage_defaults \
+	tests/test_len_and_param_rv \
 	tests/test_finalize_release \
 	tests/test_apilock \
 	tests/test_concurrency \
@@ -1521,6 +1527,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_single_part_after_update
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_usage_defaults
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_len_and_param_rv
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_finalize_release
 # The concurrency tests (#111-prep) were run by hand under TSAN=1 and by

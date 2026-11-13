@@ -4085,6 +4085,14 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
 
     /* --- Verbatim path (CKO_SECRET_KEY / CKO_PRIVATE_KEY / ML-DSA pub). */
     if (a.path == FHSM_CREATE_PATH_VERBATIM) {
+        /* An AES key is 16, 24 or 32 bytes (PKCS#11 v3.2 6.10.2). A CKA_VALUE
+         * of another length was stored as given, and the object read back
+         * CKK_AES with CKA_VALUE_LEN 13: a key no AES mechanism could take.
+         * C_GenerateKey, C_UnwrapKey and C_DeriveKey refuse such a length;
+         * the import did not (#37 K2). */
+        if (a.cko == CKO_SECRET_KEY && a.ckk == CKK_AES && a.value_data
+            && a.value_len != 16 && a.value_len != 24 && a.value_len != 32)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         uint8_t flags = (a.cko == CKO_PRIVATE_KEY) ? FHSM_OBJF_SENSITIVE : 0;
         if (a.cko == CKO_SECRET_KEY && tmpl_sensitive) flags |= FHSM_OBJF_SENSITIVE;
         if ((a.cko == CKO_SECRET_KEY || a.cko == CKO_PRIVATE_KEY) && tmpl_extractable)
@@ -5506,13 +5514,23 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (pMechanism->mechanism != CKM_ECDH1_DERIVE
         && pMechanism->mechanism != CKM_ECDH1_COFACTOR_DERIVE)
         return FHSM_RV_MECHANISM_INVALID;
+    /* Everything wrong with CK_ECDH1_DERIVE_PARAMS is
+     * CKR_MECHANISM_PARAM_INVALID: the block itself, the KDF, the shared data
+     * and the peer's public value are all mechanism parameters (PKCS#11 v3.2
+     * 6.3.16). The block and the KDF answered CKR_ARGUMENTS_BAD, which is for
+     * the arguments of the function, and a peer value that would not parse
+     * CKR_ATTRIBUTE_VALUE_INVALID, which is for a template (#37 E1, E2).
+     *
+     * Only CKD_NULL is offered. A caller asking for CKD_SHA256_KDF and the
+     * X9.63 derivation is told the parameter is not one this module takes,
+     * as 6.3.16 allows, and gets no key. */
     if (!pMechanism->pParameter
         || pMechanism->ulParameterLen < sizeof(CK_ECDH1_DERIVE_PARAMS))
-        return FHSM_RV_ARGUMENTS_BAD;
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
 
     CK_ECDH1_DERIVE_PARAMS *p = pMechanism->pParameter;
     if (p->kdf != CKD_NULL || !p->pPublicData || p->ulPublicDataLen == 0)
-        return FHSM_RV_ARGUMENTS_BAD;
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
     /* §6.3.16, CK_ECDH1_DERIVE_PARAMS: "With the key derivation function
      * CKD_NULL, pSharedData must be NULL and ulSharedDataLen must be zero."
      * Shared data was accepted and ignored, so a caller who meant a KDF got
@@ -5576,10 +5594,10 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (!alg) { EVP_PKEY_free(priv); return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         size_t want = (alg[1] == '2') ? 32u : 56u;
         if ((size_t)p->ulPublicDataLen != want) {
-            EVP_PKEY_free(priv); return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            EVP_PKEY_free(priv); return FHSM_RV_MECHANISM_PARAM_INVALID;
         }
         peer = EVP_PKEY_new_raw_public_key_ex(NULL, alg, NULL, pdata, want);
-        if (!peer) { EVP_PKEY_free(priv); return FHSM_RV_ATTRIBUTE_VALUE_INVALID; }
+        if (!peer) { EVP_PKEY_free(priv); return FHSM_RV_MECHANISM_PARAM_INVALID; }
     }
     if (!peer) peer = d2i_PUBKEY(NULL, &pdata, (long)p->ulPublicDataLen);
     if (!peer) {
@@ -5626,7 +5644,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
              * failure. This returned CKR_FUNCTION_FAILED, which tells a
              * caller the module broke rather than that its argument was
              * wrong. */
-            EVP_PKEY_free(priv); return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            EVP_PKEY_free(priv); return FHSM_RV_MECHANISM_PARAM_INVALID;
         }
         EVP_PKEY_CTX_free(pctx);
     }
@@ -5648,7 +5666,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         EVP_PKEY_CTX_free(chk);
         if (!on_curve) {
             EVP_PKEY_free(peer); EVP_PKEY_free(priv);
-            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
         }
     }
 
@@ -11499,6 +11517,14 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         /* AES-ECB is FIPS-approved (SP 800-38A) and allowed in both profiles. */
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         if (!is_ecb && !op->have_iv) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+        /* AES-ECB and AES-CBC without padding take whole blocks (PKCS#11 v3.2
+         * 6.13.4: the data length is a multiple of the block size). A partial
+         * block was left to OpenSSL, whose refusal at the final came out as
+         * CKR_FUNCTION_FAILED, a fault where the caller's length was wrong
+         * (#37 B1). Refused on the length alone, before any cipher work. */
+        if ((is_ecb || op->mechanism == CKM_AES_CBC) && (ulDataLen % 16) != 0) {
+            op->active = 0; return FHSM_RV_DATA_LEN_RANGE;
+        }
         const char *cname = NULL;
         if (op->mechanism == CKM_AES_CTR) {
             cname = (kvl == 16) ? "AES-128-CTR" :
@@ -12010,6 +12036,16 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         /* AES-ECB is FIPS-approved (SP 800-38A) and allowed in both profiles. */
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         if (!is_ecb && !op->have_iv) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+        /* The ciphertext of AES-ECB, AES-CBC and AES-CBC-PAD is whole blocks,
+         * and that of AES-CBC-PAD at least one. Any other length cannot be a
+         * ciphertext, and is CKR_ENCRYPTED_DATA_LEN_RANGE on the length alone;
+         * it was CKR_ENCRYPTED_DATA_INVALID, as if the bytes had been looked
+         * at (#37 B2). */
+        if (op->mechanism != CKM_AES_CTR
+            && ((ulEncLen % 16) != 0
+                || (op->mechanism == CKM_AES_CBC_PAD && ulEncLen == 0))) {
+            op->active = 0; return FHSM_RV_ENCRYPTED_DATA_LEN_RANGE;
+        }
         const char *cname = NULL;
         if (op->mechanism == CKM_AES_CTR) {
             cname = (kvl == 16) ? "AES-128-CTR" :
