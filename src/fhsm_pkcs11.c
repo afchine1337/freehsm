@@ -7851,6 +7851,42 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
       if (pl != FHSM_RV_OK) return pl; }
     { CK_RV sr = fhsm_check_private_key_sensitive(pPriv, ulPriv);
       if (sr != FHSM_RV_OK) return sr; }
+    /* The mechanism decides the class of each half and the key type of both.
+     * A template that names another -- CKK_RSA in a CKM_EC_KEY_PAIR_GEN
+     * private template, CKO_PRIVATE_KEY in the public one -- contradicts
+     * what the mechanism contributes: CKR_TEMPLATE_INCONSISTENT (§4.1.1).
+     * C_GenerateKey and C_DeriveKey got this check for #33 C7 and this
+     * function did not: both were accepted, and the pair the mechanism names
+     * was made. Checked before anything is generated. */
+    {
+        CK_ULONG want_kt = 0; int kt_known = 1;
+        switch (pMechanism->mechanism) {
+            case CKM_RSA_PKCS_KEY_PAIR_GEN:      want_kt = CKK_RSA; break;
+            case CKM_EC_KEY_PAIR_GEN:            want_kt = CKK_EC; break;
+            case CKM_EC_EDWARDS_KEY_PAIR_GEN:    want_kt = CKK_EC_EDWARDS_CREATEOBJECT; break;
+            case CKM_EC_MONTGOMERY_KEY_PAIR_GEN: want_kt = CKK_EC_MONTGOMERY_KT; break;
+            case CKM_ML_KEM_KEY_PAIR_GEN:        want_kt = CKK_ML_KEM; break;
+            case CKM_ML_DSA_KEY_PAIR_GEN:        want_kt = CKK_ML_DSA; break;
+            case CKM_SLH_DSA_KEY_PAIR_GEN:       want_kt = CKK_SLH_DSA; break;
+            case CKM_COMPOSITE_MLDSA65_ED25519:  want_kt = CKK_COMPOSITE_MLDSA65_ED25519; break;
+            default: kt_known = 0; break;   /* refused below, as before */
+        }
+        CK_ATTRIBUTE *tp[2] = { pPub, pPriv }; CK_ULONG tn[2] = { ulPub, ulPriv };
+        const CK_ULONG want_cls[2] = { CKO_PUBLIC_KEY, CKO_PRIVATE_KEY };
+        for (int ti = 0; ti < 2; ++ti) {
+            const CK_ULONG types[2] = { CKA_CLASS, CKA_KEY_TYPE };
+            for (int ai = 0; ai < 2; ++ai) {
+                long k = find_attr(tp[ti], tn[ti], types[ai]);
+                if (k < 0) continue;
+                CK_ULONG req = 0;
+                if (!tp[ti][k].pValue || tp[ti][k].ulValueLen != sizeof(CK_ULONG))
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                memcpy(&req, tp[ti][k].pValue, sizeof(CK_ULONG));
+                if (ai == 0 ? req != want_cls[ti] : (kt_known && req != want_kt))
+                    return CKR_TEMPLATE_INCONSISTENT;
+            }
+        }
+    }
 
     EVP_PKEY *pkey = NULL;
     uint32_t  ckk_type = 0;
@@ -9487,7 +9523,7 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
     (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &copy_flags);
 
     /* Apply override template. Same rules as C_SetAttributeValue but
-     * with CKA_CLASS / CKA_KEY_TYPE / CKA_VALUE producing
+     * with CKA_CLASS / CKA_KEY_TYPE producing
      * CKR_TEMPLATE_INCONSISTENT rather than CKR_ATTRIBUTE_READ_ONLY
      * (PKCS#11 v3.2 §C.6.7.3 specifies the former for class-changing
      * attempts during copy). */
@@ -9557,8 +9593,13 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 break;
             case CKA_CLASS:
             case CKA_KEY_TYPE:
-            case CKA_VALUE:
                 return 0x000000D1UL;                 /* CKR_TEMPLATE_INCONSISTENT */
+            case CKA_VALUE:
+                /* The value is not a class-changing attribute: it is one a
+                 * copy may not modify, and §4.1.3 gives that
+                 * CKR_ATTRIBUTE_READ_ONLY, the answer C_SetAttributeValue
+                 * already gives for it (#33 C3). It shared the arm above. */
+                return 0x00000010UL;                 /* CKR_ATTRIBUTE_READ_ONLY */
             default:
                 return 0x00000012UL;                 /* CKR_ATTRIBUTE_TYPE_INVALID */
         }

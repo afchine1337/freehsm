@@ -385,13 +385,40 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
     if (!read_attr_ulong(pTemplate, ulCount, FHSM_CKA_KEY_TYPE, &attrs->ckk))
         return FHSM_PARSE_TEMPLATE_INCOMPLETE;
 
+    /* The class and the key type must agree (PKCS#11 v3.2 par. 4.1.1). A
+     * CKO_SECRET_KEY of type CKK_EC and a CKO_PRIVATE_KEY of type CKK_AES
+     * both went to the verbatim path and were stored under the type named:
+     * an object no mechanism could use, answered CKR_OK. A public key of a
+     * secret type already matched nothing below and was refused.
+     *
+     * Only the types the standard places on one side are judged. A vendor
+     * type, or one this list does not name, is left to the paths below. */
+    {
+        const unsigned long kt = attrs->ckk;
+        const int asym = kt <= 0x05UL                       /* RSA, DSA, DH, EC, X9.42 DH, KEA */
+                      || kt == FHSM_CKK_EC_EDWARDS
+                      || kt == 0x00000041UL                 /* CKK_EC_MONTGOMERY */
+                      || kt == FHSM_CKK_ML_KEM || kt == FHSM_CKK_ML_DSA
+                      || kt == FHSM_CKK_SLH_DSA;
+        const int sym = (kt >= 0x10UL && kt <= 0x3FUL       /* GENERIC_SECRET .. X2RATCHET */
+                         && kt != 0x30UL)                   /* but CKK_GOSTR3410 */
+                     || kt == 0x00000042UL;                 /* CKK_HKDF */
+        if (attrs->cko == FHSM_CKO_SECRET_KEY && asym)
+            return FHSM_PARSE_TEMPLATE_INCONSISTENT;
+        if (attrs->cko == FHSM_CKO_PRIVATE_KEY && sym)
+            return FHSM_PARSE_TEMPLATE_INCONSISTENT;
+    }
+
     /* Dispatch on (cko, ckk). */
     /* An EC private key with no CKA_EC_PARAMS is under-specified : the
      * curve is unknown, so subsequent sign/derive would be undefined.
-     * Reject rather than store a curveless key (#125 TestEcMissingParams). */
+     * Reject rather than store a curveless key (#125 TestEcMissingParams).
+     * What is wrong is a missing attribute, so the answer is
+     * CKR_TEMPLATE_INCOMPLETE, as for key-pair generation without it and
+     * for an Edwards or Montgomery private key; it was _INCONSISTENT. */
     if (attrs->cko == FHSM_CKO_PRIVATE_KEY && attrs->ckk == FHSM_CKK_EC
         && fhsm_find_attr(pTemplate, ulCount, FHSM_CKA_EC_PARAMS) < 0)
-        return FHSM_PARSE_TEMPLATE_INCONSISTENT;
+        return FHSM_PARSE_TEMPLATE_INCOMPLETE;
 
     /* An RSA private key given as components rather than as a blob. Chosen
      * only when CKA_VALUE is absent, so every import that worked before --

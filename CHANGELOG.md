@@ -118,6 +118,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
   the new ones. Reported by Alexandre Laroche.
   `tests/test_len_and_param_rv.c`.
 
+* **Class and key type are checked on every creation path (#33).** 2.7.0
+  refused a `CKA_CLASS` or `CKA_KEY_TYPE` other than the mechanism's in
+  `C_GenerateKey` and `C_DeriveKey` (C7), and made key material read-only in
+  `C_SetAttributeValue` (C3). Their neighbours were left:
+  * `C_GenerateKeyPair` with a class or key type other than the mechanism's,
+    in either template (`CKK_RSA` in a `CKM_EC_KEY_PAIR_GEN` private
+    template, `CKO_PRIVATE_KEY` in the public one), is
+    `CKR_TEMPLATE_INCONSISTENT`, and no key is made. It was `CKR_OK`, and
+    the pair the mechanism names was made.
+  * `C_CreateObject` of a `CKO_SECRET_KEY` whose key type is an asymmetric
+    one (`CKK_EC`), or of a `CKO_PRIVATE_KEY` whose key type is a secret
+    one (`CKK_AES`), is `CKR_TEMPLATE_INCONSISTENT`. Both were stored under
+    the type named, and no mechanism could use them.
+  * `C_CreateObject` of a `CKK_EC` private key without `CKA_EC_PARAMS` is
+    `CKR_TEMPLATE_INCOMPLETE`, as key pair generation without it is. It was
+    `CKR_TEMPLATE_INCONSISTENT`.
+  * `C_CopyObject` with a new `CKA_VALUE` is `CKR_ATTRIBUTE_READ_ONLY`
+    (§4.1.3). It was `CKR_TEMPLATE_INCONSISTENT`. No copy was made before,
+    and none is now.
+
+  **Compatibility:** a caller that tests for the old codes must test for
+  the new ones, and a key pair template that named the wrong class or type
+  is now refused. Reported by Alexandre Laroche.
+  `tests/test_class_type_checks.c`.
+
 ### Documentation
 * **Two answers of #37 are left as they are, and why.**
   * `CKA_KEY_GEN_MECHANISM` cannot be read (K3). The mechanism that made a
