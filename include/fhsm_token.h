@@ -230,7 +230,8 @@ fhsm_rv_t fhsm_token_object_get_label(fhsm_token_t *t, uint32_t handle,
 typedef enum {
     FHSM_OBJ_META_START_DATE = 0,
     FHSM_OBJ_META_END_DATE   = 1,
-    FHSM_OBJ_META_APPLICATION = 2
+    FHSM_OBJ_META_APPLICATION = 2,
+    FHSM_OBJ_META_OBJECT_ID   = 3
 } fhsm_obj_meta_t;
 
 /* CKA_START_DATE / CKA_END_DATE / CKA_APPLICATION. NOT persisted: the object
@@ -243,6 +244,24 @@ fhsm_rv_t fhsm_token_object_set_meta(fhsm_token_t *t, uint32_t handle,
 fhsm_rv_t fhsm_token_object_get_meta(fhsm_token_t *t, uint32_t handle,
                                      fhsm_obj_meta_t which,
                                      const uint8_t **out, size_t *out_len);
+
+/* CKA_OBJECT_ID of a data object (PKCS#11 v3.2 Table 20): the DER encoding of
+ * an object identifier, at most FHSM_OBJ_OBJECT_ID_MAX bytes. Persisted by the
+ * v5 record. Read with fhsm_token_object_get_meta(FHSM_OBJ_META_OBJECT_ID);
+ * empty when never set, which is the attribute's default. */
+#define FHSM_OBJ_OBJECT_ID_MAX 64u
+fhsm_rv_t fhsm_token_object_set_object_id(fhsm_token_t *t, uint32_t handle,
+                                          const uint8_t *oid, size_t oid_len);
+
+/* CKA_KEY_GEN_MECHANISM: the mechanism that generated the key, recorded by
+ * C_GenerateKey and C_GenerateKeyPair. Persisted by the v5 record. *out_set
+ * is 0 for a key that was not generated here, and for one stored before the
+ * v5 record, whose mechanism was never written down: the PKCS#11 layer
+ * answers CK_UNAVAILABLE_INFORMATION for both. */
+fhsm_rv_t fhsm_token_object_set_keygen_mech(fhsm_token_t *t, uint32_t handle,
+                                            uint32_t mechanism);
+fhsm_rv_t fhsm_token_object_get_keygen_mech(fhsm_token_t *t, uint32_t handle,
+                                            uint32_t *out_mechanism, int *out_set);
 
 fhsm_rv_t fhsm_token_object_get_id(fhsm_token_t *t, uint32_t handle,
                                     const uint8_t **out, size_t *out_len);

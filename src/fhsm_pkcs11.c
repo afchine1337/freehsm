@@ -2749,6 +2749,33 @@ static const uint8_t *fhsm_template_id(CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount
     return (const uint8_t *)pTemplate[i].pValue;
 }
 
+#define CKA_OBJECT_ID_ATTR          0x00000012UL
+#define CKA_KEY_GEN_MECHANISM_ATTR  0x00000166UL
+
+/* CKA_OBJECT_ID in a template for a data object: the DER of an object
+ * identifier (PKCS#11 v3.2 Table 20). The shape is checked as far as the
+ * store's field goes -- a pointer for a length, and at most
+ * FHSM_OBJ_OBJECT_ID_MAX bytes -- and the bytes are kept as given: the module
+ * does not parse the identifier, as it does not parse a certificate. */
+static CK_RV fhsm_object_id_check(const CK_ATTRIBUTE *a) {
+    if ((a->ulValueLen && !a->pValue) || a->ulValueLen > FHSM_OBJ_OBJECT_ID_MAX)
+        return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    return FHSM_RV_OK;
+}
+
+/* Store the template's CKA_OBJECT_ID on the data object just made. No
+ * attribute, nothing to do: the default is empty, which is what a new record
+ * holds. */
+static CK_RV fhsm_apply_object_id(fhsm_token_t *t, CK_ATTRIBUTE *pTemplate,
+                                  CK_ULONG ulCount, uint32_t handle) {
+    long oi = find_attr(pTemplate, ulCount, CKA_OBJECT_ID_ATTR);
+    if (oi < 0) return FHSM_RV_OK;
+    CK_RV cr = fhsm_object_id_check(&pTemplate[oi]);
+    if (cr != FHSM_RV_OK) return cr;
+    return fhsm_token_object_set_object_id(t, handle,
+               (const uint8_t *)pTemplate[oi].pValue, (size_t)pTemplate[oi].ulValueLen);
+}
+
 static CK_RV fhsm_apply_obj_meta(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                  CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                                  uint32_t handle) {
@@ -3414,6 +3441,12 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
+    /* CKA_KEY_GEN_MECHANISM (#37 K3). The key type does not tell it:
+     * CKM_PKCS5_PBKD2 makes AES and generic secret keys here as the plain
+     * generators do, so it is written down. */
+    { CK_RV kr = fhsm_token_object_set_keygen_mech(t, handle,
+                                                   (uint32_t)pMechanism->mechanism);
+      if (kr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return kr; } }
     fhsm_object_init_usage(t, handle, CKO_SECRET_KEY, pTemplate, ulCount);
     return FHSM_RV_OK;
 }
@@ -3987,13 +4020,21 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
           CK_RV cr = fhsm_check_private_key_sensitive(pTemplate, ulCount);
           if (cr != FHSM_RV_OK) return cr;
       } }
-    /* CKA_OBJECT_ID (Table 20, data objects) has no field in the object
-     * record: it was accepted, dropped, and read back as
-     * CKR_ATTRIBUTE_TYPE_INVALID (#33 C10). Refused here instead, the answer
-     * the store's other unstorable attributes got before they had a place.
-     * Storing it needs a token store format change (TOKEN_STORE_FORMAT.md). */
-    if (find_attr(pTemplate, ulCount, 0x00000012UL /* CKA_OBJECT_ID */) >= 0)
-        return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
+    /* CKA_OBJECT_ID belongs to data objects (Table 20). Up to 2.6.1 it was
+     * accepted on anything, dropped, and read back as
+     * CKR_ATTRIBUTE_TYPE_INVALID (#33 C10); 2.7.0 refused it, the record
+     * having no field. The v5 record has one (#38): a data object keeps it,
+     * and any other class is still refused, since it has no such attribute. */
+    { long oi = find_attr(pTemplate, ulCount, CKA_OBJECT_ID_ATTR);
+      if (oi >= 0) {
+          long ci = find_attr(pTemplate, ulCount, CKA_CLASS);
+          CK_ULONG cls = (CK_ULONG)-1;
+          if (ci >= 0 && pTemplate[ci].pValue && pTemplate[ci].ulValueLen == sizeof(CK_ULONG))
+              memcpy(&cls, pTemplate[ci].pValue, sizeof(CK_ULONG));
+          if (cls != CKO_DATA) return 0x00000012UL;   /* CKR_ATTRIBUTE_TYPE_INVALID */
+          CK_RV cr = fhsm_object_id_check(&pTemplate[oi]);
+          if (cr != FHSM_RV_OK) return cr;
+      } }
 
     /* CKA_TRUSTED reaching this point can only have been set by the SO (the
      * guard above rejects it otherwise), so persist it. Computed once here:
@@ -4246,6 +4287,10 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, handle);
         { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, handle);
           if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return mr; } }
+        if (a.cko == CKO_DATA) {
+            CK_RV orv = fhsm_apply_object_id(t, pTemplate, ulCount, handle);
+            if (orv != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, handle); return orv; }
+        }
         fhsm_object_init_usage(t, handle, (uint32_t)a.cko, pTemplate, ulCount);
         return FHSM_RV_OK;
     }
@@ -8277,6 +8322,12 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV mr = fhsm_apply_obj_meta(t, hSession, pPriv, ulPriv, hk);
       if (mr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
                               (void)fhsm_token_object_destroy(t, hk); return mr; } }
+    /* CKA_KEY_GEN_MECHANISM, on both halves (#37 K3). */
+    { CK_RV kr = fhsm_token_object_set_keygen_mech(t, hp, (uint32_t)pMechanism->mechanism);
+      if (kr == FHSM_RV_OK)
+          kr = fhsm_token_object_set_keygen_mech(t, hk, (uint32_t)pMechanism->mechanism);
+      if (kr != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, hp);
+                              (void)fhsm_token_object_destroy(t, hk); return kr; } }
     /* Which usages the type has is fhsm_usage_possible's to say, for both
      * halves and for every other way a key comes in (#34). It was said here,
      * for CKA_DERIVE and for this function alone. */
@@ -8902,6 +8953,34 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
                 bval = (of & FHSM_OBJF_LOCAL) ? 1 : 0; src = &bval; src_len = 1; break;
             }
+            case CKA_KEY_GEN_MECHANISM_ATTR: {
+                /* A key attribute (#37 K3). The mechanism is the one
+                 * C_GenerateKey or C_GenerateKeyPair was called with. A key
+                 * that came in another way has none, and the value is then
+                 * CK_UNAVAILABLE_INFORMATION, as PKCS#11 v3.2 has it for a
+                 * key whose CKA_LOCAL is FALSE. So is that of a key generated
+                 * before the v5 record: its mechanism was never stored. */
+                if (cko_class != CKO_SECRET_KEY && cko_class != CKO_PRIVATE_KEY
+                    && cko_class != CKO_PUBLIC_KEY) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
+                }
+                uint32_t km = 0; int kset = 0;
+                (void)fhsm_token_object_get_keygen_mech(t, (uint32_t)hObject, &km, &kset);
+                tmp_len = kset ? (CK_ULONG)km : (CK_ULONG)-1;
+                src = &tmp_len; src_len = sizeof(CK_ULONG); break;
+            }
+            case CKA_OBJECT_ID_ATTR: {
+                /* A data object's (Table 20), empty unless set (#38). */
+                if (cko_class != CKO_DATA) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
+                }
+                const uint8_t *m = NULL; size_t ml = 0;
+                if (fhsm_token_object_get_meta(t, (uint32_t)hObject,
+                        FHSM_OBJ_META_OBJECT_ID, &m, &ml) == FHSM_RV_OK && ml) {
+                    src = m; src_len = ml;
+                } else { src = &bval; src_len = 0; }
+                break;
+            }
             case CKA_ALWAYS_AUTH_ATTR: {
                 uint8_t of = 0; (void)fhsm_token_object_get_flags(t, (uint32_t)hObject, &of);
                 bval = (of & FHSM_OBJF_ALWAYS_AUTH) ? 1 : 0; src = &bval; src_len = 1; break;
@@ -9287,6 +9366,14 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
                 if ((a->ulValueLen && !a->pValue) || a->ulValueLen > 64)
                     return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
                 break;
+            case CKA_OBJECT_ID_ATTR:
+                /* The data object's other descriptive attribute, treated as
+                 * CKA_APPLICATION is: it may change after creation, and keys
+                 * and certificates do not have it (#38). */
+                if (obj_class != CKO_DATA)
+                    return 0x00000012UL;             /* CKR_ATTRIBUTE_TYPE_INVALID */
+                { CK_RV cr = fhsm_object_id_check(a); if (cr != FHSM_RV_OK) return cr; }
+                break;
             case CKA_CLASS:
             case CKA_KEY_TYPE:
             case CKA_VALUE:
@@ -9324,6 +9411,7 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
             case CKA_LOCAL_ATTR:
             case CKA_ALWAYS_SENSITIVE_ATTR:
             case CKA_NEVER_EXTRACTABLE_ATTR:
+            case CKA_KEY_GEN_MECHANISM_ATTR:
             case CKA_MODIFIABLE_ATTR:
             case CKA_DESTROYABLE_ATTR:
             case CKA_ALWAYS_AUTH_ATTR:
@@ -9362,6 +9450,12 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
         } else if (a->type == CKA_END_DATE_ATTR) {
             ed = a->ulValueLen ? (const uint8_t *)a->pValue : empty;
             el = (size_t)a->ulValueLen;
+        } else if (a->type == CKA_OBJECT_ID_ATTR) {
+            fhsm_rv_t r = fhsm_token_object_set_object_id(
+                            t, (uint32_t)hObject,
+                            a->ulValueLen ? (const uint8_t *)a->pValue : empty,
+                            (size_t)a->ulValueLen);
+            if (r != FHSM_RV_OK) return r;
         } else if (a->type == CKA_LABEL) {
             char buf[64];
             size_t n = a->ulValueLen;
@@ -9600,6 +9694,13 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                  * CKR_ATTRIBUTE_READ_ONLY, the answer C_SetAttributeValue
                  * already gives for it (#33 C3). It shared the arm above. */
                 return 0x00000010UL;                 /* CKR_ATTRIBUTE_READ_ONLY */
+            case CKA_OBJECT_ID_ATTR:
+                /* May change in a copy, as in C_SetAttributeValue; a data
+                 * object's only (#38). Applied after the copy exists. */
+                if (src_class != CKO_DATA)
+                    return 0x00000012UL;             /* CKR_ATTRIBUTE_TYPE_INVALID */
+                { CK_RV cr = fhsm_object_id_check(a); if (cr != FHSM_RV_OK) return cr; }
+                break;
             default:
                 return 0x00000012UL;                 /* CKR_ATTRIBUTE_TYPE_INVALID */
         }
@@ -9754,6 +9855,34 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
         if (mr != FHSM_RV_OK) {
             (void)fhsm_token_object_destroy(t, (uint32_t)new_handle);
             return mr;
+        }
+    }
+    /* The v5 fields follow the object too. A data object's CKA_OBJECT_ID is
+     * the source's unless the template gives another. A key's
+     * CKA_KEY_GEN_MECHANISM is the source's: the copy holds the same key
+     * material, made by the same mechanism. */
+    {
+        CK_RV xr = FHSM_RV_OK;
+        if (src_class == CKO_DATA) {
+            const uint8_t *m = NULL; size_t ml = 0;
+            uint8_t obuf[FHSM_OBJ_OBJECT_ID_MAX];
+            if (find_attr(pTemplate, ulCount, CKA_OBJECT_ID_ATTR) >= 0) {
+                xr = fhsm_apply_object_id(t, pTemplate, ulCount, (uint32_t)new_handle);
+            } else if (fhsm_token_object_get_meta(t, (uint32_t)hObject,
+                           FHSM_OBJ_META_OBJECT_ID, &m, &ml) == FHSM_RV_OK
+                       && ml && ml <= sizeof obuf) {
+                memcpy(obuf, m, ml);
+                xr = fhsm_token_object_set_object_id(t, (uint32_t)new_handle, obuf, ml);
+            }
+        } else {
+            uint32_t km = 0; int kset = 0;
+            if (fhsm_token_object_get_keygen_mech(t, (uint32_t)hObject, &km, &kset)
+                    == FHSM_RV_OK && kset)
+                xr = fhsm_token_object_set_keygen_mech(t, (uint32_t)new_handle, km);
+        }
+        if (xr != FHSM_RV_OK) {
+            (void)fhsm_token_object_destroy(t, (uint32_t)new_handle);
+            return xr;
         }
     }
 

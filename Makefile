@@ -1020,6 +1020,17 @@ tests/test_encap_flags_store: tests/test_encap_flags_store.c $(LIB_OBJ)
 tests/test_v3_fixture: tests/test_v3_fixture.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+# The same for the v5 record: tests/fixtures/token-v4.tok was written by
+# v2.7.0 (tests/make_v4_fixture.c, not built here). Also the v5 round trip of
+# CKA_OBJECT_ID and CKA_KEY_GEN_MECHANISM at the store.
+tests/test_v4_fixture: tests/test_v4_fixture.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
+# CKA_OBJECT_ID of a data object (#38) and CKA_KEY_GEN_MECHANISM of a key
+# (#37 K3), through PKCS#11 and across C_Finalize.
+tests/test_store_v5: tests/test_store_v5.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # CKA_ALLOWED_MECHANISMS: absent, listed and empty are three different answers,
 # and the module has to tell them apart. Driven through PKCS#11 because that is
 # where the enforcement lives.
@@ -1335,6 +1346,8 @@ TEST_BINS = \
 	tests/test_encap_flags_store \
 	tests/test_kem_attrs \
 	tests/test_v3_fixture \
+	tests/test_v4_fixture \
+	tests/test_store_v5 \
 	tests/test_allowed_mechanisms \
 	tests/test_nested_templates \
 	tests/test_wrap_with_trusted \
@@ -1512,6 +1525,10 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_kem_attrs
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_v3_fixture
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_v4_fixture
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_store_v5
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_allowed_mechanisms
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

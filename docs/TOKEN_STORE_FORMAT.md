@@ -173,7 +173,8 @@ in clear, after the blob:
 ```
 u32  magic = 0xF5B5B001
 u32  len
-u8   plaintext[len]        a v4 blob plaintext holding the public objects only
+u8   plaintext[len]        a blob plaintext holding the public objects only
+                           (v5 from 2.8.0 on; a v4 one is still read)
 ```
 
 * **What is public.** `CKA_PRIVATE` is derived from the class, and
@@ -484,6 +485,71 @@ nothing a downgrade does can expose an object. The opposite direction -- a
 public key or certificate made private -- would be a restriction an older
 build silently lifts, so it is not recorded, and `CKA_PRIVATE=TRUE` on those
 classes is ignored as it always was. Recording it needs a v5 record.
+
+## Objects blob v5 (2.8.0 — two attributes without a field)
+
+`CKA_OBJECT_ID` of a data object and `CKA_KEY_GEN_MECHANISM` of a key had
+nowhere to live. The first was accepted and dropped up to 2.6.1, then refused
+in 2.7.0 (#33 C10, #38). The second could not be read at all (#37 K3): the
+key type does not tell the mechanism, since `CKM_PKCS5_PBKD2` makes AES and
+generic secret keys through `C_GenerateKey` as the plain generators do. v5 is
+v4 with a 72-byte block inserted between the policy block and the value.
+
+```
+u32  magic = 0xF5B50005
+u32  object_count | u32 next_handle
+object_count x records:
+    ... v4 fixed fields, unchanged, 912 bytes ...
+    u32  key_gen_mech        the CKM_ that generated the key
+    u8   key_gen_set         1 when key_gen_mech is recorded, else 0
+    u8   object_id_len       <= 64
+    u8   pad[2]              zero
+    u8   object_id[64]       DER of the object identifier, over object_id_len
+    u8   value[value_len]
+```
+
+`FHSM_OBJ_REC_V5_FIXED` = 912 + 72 = **984**, pinned by a `_Static_assert`.
+
+Properties:
+
+* **`key_gen_set` is a byte of its own.** Every mechanism number is a valid
+  value, and `CKM_RSA_PKCS_KEY_PAIR_GEN` is zero, so the field alone cannot
+  say "not recorded". Clear, `C_GetAttributeValue` answers
+  `CK_UNAVAILABLE_INFORMATION` as the value, which is what PKCS#11 v3.2 gives
+  a key whose `CKA_LOCAL` is FALSE. Set by `C_GenerateKey` and
+  `C_GenerateKeyPair`, on both halves, and carried by `C_CopyObject`.
+* **`CKA_OBJECT_ID` needs no presence byte.** Its default is empty (Table
+  20), so a length of zero answers "never set" and "set to empty" alike. The
+  cap of 64 bytes is part of the format, as the v4 caps are: a longer
+  identifier is refused with `CKR_ATTRIBUTE_VALUE_INVALID`, never cut. The
+  bytes are stored as given; the module does not parse the identifier.
+* **Why a new magic, when neither field restricts anything.** The third
+  flags byte took new bits without a version because a build that predates a
+  bit reads it as clear, and for those bits clear is that build's own
+  behaviour. Here an older build would rewrite the record at its next
+  mutation without the block, and what the caller stored would be gone with
+  no error. A build that predates v5 therefore refuses the blob, loudly: a
+  token written by 2.8.0 is not readable by 2.7.0.
+* **Read v1 / v2 / v3 / v4, write v5.** A v4 record loads with `key_gen_set`
+  and `object_id_len` at zero, which is what it means: a key generated before
+  v5 has no mechanism on record, and reports `CK_UNAVAILABLE_INFORMATION`
+  until it is generated again. `tests/fixtures/token-v4.tok` is a real file
+  written by v2.7.0 (`tests/make_v4_fixture.c`) and `tests/test_v4_fixture.c`
+  loads it, then checks the v5 round trip.
+* **One reader for v4 and v5.** The two records differ by a block at the end
+  of the fixed part, so `parse_objects_v4` is told the size of that part and
+  reads the block when it is there. A second copy of the 912 bytes of field
+  reads would have been a second place for an offset to be wrong.
+* **The public section follows.** Its plaintext is written as v5 from this
+  build on, and a v4 plaintext, written by 2.6.0 or 2.7.0, is still read. A
+  public data object carries its `CKA_OBJECT_ID` there, so it is read and
+  matched before a login.
+* Loader bound: `FHSM_OBJ_BLOB_MAX` is derived from `FHSM_OBJ_REC_V5_FIXED`.
+* A 32-byte AES key record is 1 020 bytes on disk (4 + 984 + 32), against 948
+  under v4.
+
+`tests/test_store_v5.c` covers both attributes through PKCS#11, across a
+`C_Finalize`.
 
 ## Versioning policy
 

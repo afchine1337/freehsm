@@ -192,6 +192,13 @@ typedef struct fhsm_object_s {
     fhsm_policy_attr_t unwrap[FHSM_POLICY_ATTR_MAX];
     uint8_t  derive_count;
     fhsm_policy_attr_t derive[FHSM_POLICY_ATTR_MAX];
+    /* Persisted by the v5 record. keygen_set tells a recorded mechanism from
+     * none: zero is CKM_RSA_PKCS_KEY_PAIR_GEN. An object_id_len of zero is
+     * the attribute's default, empty. */
+    uint32_t keygen_mech;
+    uint8_t  keygen_set;
+    uint8_t  object_id_len;
+    uint8_t  object_id[FHSM_OBJ_OBJECT_ID_MAX];
 } fhsm_object_t;
 
 struct fhsm_token_s {
@@ -465,6 +472,38 @@ _Static_assert(FHSM_OBJ_REC_V4_FIXED == 912u, "v4 fixed record is 912 bytes");
 _Static_assert(FHSM_POLICY_ENTRY_SZ == 8u + FHSM_POLICY_VALUE_MAX,
                "policy entry header is 8 bytes");
 
+/* v5 blob : two attributes that had no field, CKA_OBJECT_ID of a data object
+ * (#38) and CKA_KEY_GEN_MECHANISM of a generated key (#37 K3).
+ *
+ *   ... v4 fixed fields (912) ...
+ *   key_gen_mech(4)     the CKM_ that generated the key, u32 LE
+ *   key_gen_set(1)      1 when key_gen_mech is recorded, else 0
+ *   object_id_len(1)    <= 64
+ *   pad(2)              zero
+ *   object_id(64)       DER of the object identifier, over object_id_len
+ *   value[value_len]
+ *
+ * = 912 + 72 = 984 bytes of fixed record.
+ *
+ * key_gen_set is a byte of its own because every mechanism number is a valid
+ * value, CKM_RSA_PKCS_KEY_PAIR_GEN being zero: the field alone cannot say
+ * "not recorded". CKA_OBJECT_ID needs no such byte. Its default is empty
+ * (Table 20), so a length of zero is the answer for "never set" and for "set
+ * to empty" alike.
+ *
+ * Neither field restricts anything, but an older build that rewrote the
+ * record without them would drop what the caller stored, silently. Hence a
+ * new magic: a build that predates v5 refuses the blob. v1 to v4 stay
+ * readable and load with key_gen_set and object_id_len at zero, which is what
+ * those records mean. Every write emits v5. */
+#define FHSM_OBJ_BLOB_V5_MAGIC   0xF5B50005u
+#define FHSM_OBJ_REC_V5_EXT      (4u + 1u + 1u + 2u + FHSM_OBJ_OBJECT_ID_MAX)
+#define FHSM_OBJ_REC_V5_FIXED    (FHSM_OBJ_REC_V4_FIXED + FHSM_OBJ_REC_V5_EXT)
+_Static_assert(FHSM_OBJ_REC_V5_FIXED == 984u, "v5 fixed record is 984 bytes");
+_Static_assert(FHSM_OBJ_OBJECT_ID_MAX <= FHSM_OBJ_LABEL_LEN,
+               "fhsm_token_object_get_meta copies CKA_OBJECT_ID into a "
+               "FHSM_OBJ_LABEL_LEN buffer");
+
 /* Upper bound of the objects-blob plaintext/ciphertext (GCM keeps
  * length) : the v2 bound (12 + 64 x (4 + 120 + 16384)), which also
  * covers the smaller v1 bound (8 + 64 x 5620). Used as the loader's
@@ -472,7 +511,7 @@ _Static_assert(FHSM_POLICY_ENTRY_SZ == 8u + FHSM_POLICY_VALUE_MAX,
  * tokens holding more than 11 objects (see docs/TOKEN_STORE_FORMAT.md,
  * "Regression note"). */
 #define FHSM_OBJ_BLOB_MAX \
-    (12u + (uint32_t)FHSM_MAX_OBJECTS * (4u + FHSM_OBJ_REC_V4_FIXED + FHSM_OBJ_VALUE_MAX))
+    (12u + (uint32_t)FHSM_MAX_OBJECTS * (4u + FHSM_OBJ_REC_V5_FIXED + FHSM_OBJ_VALUE_MAX))
 
 /* The public section, after the encrypted blob: the token's public objects
  * in clear, so that C_FindObjects and C_GetAttributeValue answer for them
@@ -611,14 +650,14 @@ static size_t serialized_size(const fhsm_token_t *t, int public_only) {
     size_t sz = 12;   /* magic + count + next_handle */
     for (uint32_t i = 0; i < t->object_count; ++i)
         if (obj_serialized(&t->objects[i], public_only))
-            sz += 4 + FHSM_OBJ_REC_V4_FIXED + t->objects[i].value_len;
+            sz += 4 + FHSM_OBJ_REC_V5_FIXED + t->objects[i].value_len;
     return sz;
 }
 
 static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out,
                                 int public_only) {
-    /* v4 writer. Returns the number of bytes written. */
-    put_u32_le(out + 0, FHSM_OBJ_BLOB_V4_MAGIC);
+    /* v5 writer. Returns the number of bytes written. */
+    put_u32_le(out + 0, FHSM_OBJ_BLOB_V5_MAGIC);
     /* Persist only token objects (owner_session == 0) ; session objects
      * live in memory for the lifetime of their session and are never
      * written to disk. Count them first for the header. */
@@ -631,7 +670,7 @@ static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out,
     for (uint32_t i = 0; i < t->object_count; ++i) {
         const fhsm_object_t *o = &t->objects[i];
         if (!obj_serialized(o, public_only)) continue;
-        uint32_t rec_len = FHSM_OBJ_REC_V4_FIXED + o->value_len;
+        uint32_t rec_len = FHSM_OBJ_REC_V5_FIXED + o->value_len;
         put_u32_le(out + off, rec_len); off += 4;
         put_u32_le(out + off + 0,  o->handle);
         put_u32_le(out + off + 4,  o->class);
@@ -670,7 +709,19 @@ static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out,
             (void)q;   /* size is fixed by construction; see the _Static_assert
                         * beside FHSM_OBJ_REC_V4_FIXED */
         }
-        memcpy(out + off + FHSM_OBJ_REC_V4_FIXED, o->value, o->value_len);
+        /* v5 block. The unused end of object_id is written as zero, for the
+         * reason put_policy_tmpl gives for its unused entries. */
+        {
+            uint8_t *p = out + off + FHSM_OBJ_REC_V4_FIXED;
+            uint8_t n = o->object_id_len > FHSM_OBJ_OBJECT_ID_MAX
+                            ? (uint8_t)FHSM_OBJ_OBJECT_ID_MAX : o->object_id_len;
+            memset(p, 0, FHSM_OBJ_REC_V5_EXT);
+            put_u32_le(p + 0, o->keygen_set ? o->keygen_mech : 0u);
+            p[4] = o->keygen_set ? 1 : 0;
+            p[5] = n;
+            memcpy(p + 8, o->object_id, n);
+        }
+        memcpy(out + off + FHSM_OBJ_REC_V5_FIXED, o->value, o->value_len);
         off += rec_len;
     }
     return off;
@@ -855,11 +906,17 @@ static fhsm_rv_t get_policy_tmpl(const uint8_t *p, uint8_t *out_count,
     return FHSM_RV_OK;
 }
 
-/* v4 variable-record blobs. Identical to v3 up to offset 204, then the policy
- * block. Same discipline: the record is bounds-checked before any copy, and a
- * malformed record rejects the whole blob rather than yielding a half-read
- * object whose missing half is a permission. */
-static fhsm_rv_t parse_objects_v4(fhsm_token_t *t, const uint8_t *buf, size_t len) {
+/* v4 and v5 variable-record blobs. Identical to v3 up to offset 204, then the
+ * policy block; a v5 record has its 72-byte block after that. Same
+ * discipline: the record is bounds-checked before any copy, and a malformed
+ * record rejects the whole blob rather than yielding a half-read object whose
+ * missing half is a permission.
+ *
+ * One reader for both, told the size of the fixed part: the two formats
+ * differ by a block at the end of it, and a second copy of the 912 bytes of
+ * field reads above would be a second place for an offset to be wrong. */
+static fhsm_rv_t parse_objects_v4(fhsm_token_t *t, const uint8_t *buf, size_t len,
+                                  uint32_t fixed) {
     uint32_t count = get_u32_le(buf + 4);
     if (count > FHSM_MAX_OBJECTS) return FHSM_RV_FUNCTION_FAILED;
     uint32_t next_h = get_u32_le(buf + 8);
@@ -867,8 +924,8 @@ static fhsm_rv_t parse_objects_v4(fhsm_token_t *t, const uint8_t *buf, size_t le
     for (uint32_t i = 0; i < count; ++i) {
         if (off + 4 > len) return FHSM_RV_FUNCTION_FAILED;
         uint32_t rec_len = get_u32_le(buf + off); off += 4;
-        if (rec_len < FHSM_OBJ_REC_V4_FIXED
-            || rec_len > FHSM_OBJ_REC_V4_FIXED + FHSM_OBJ_VALUE_MAX
+        if (rec_len < fixed
+            || rec_len > fixed + FHSM_OBJ_VALUE_MAX
             || off + rec_len > len) return FHSM_RV_FUNCTION_FAILED;
         fhsm_object_t *o = &t->objects[i];
         memset(o, 0, sizeof(*o));
@@ -876,7 +933,7 @@ static fhsm_rv_t parse_objects_v4(fhsm_token_t *t, const uint8_t *buf, size_t le
         o->class     = get_u32_le(buf + off + 4);
         o->key_type  = get_u32_le(buf + off + 8);
         o->value_len = get_u32_le(buf + off + 12);
-        if (o->value_len != rec_len - FHSM_OBJ_REC_V4_FIXED)
+        if (o->value_len != rec_len - fixed)
             return FHSM_RV_FUNCTION_FAILED;
         memcpy(o->label, buf + off + 16, FHSM_OBJ_LABEL_LEN);
         memcpy(o->id,    buf + off + 80, 32);
@@ -914,11 +971,22 @@ static fhsm_rv_t parse_objects_v4(fhsm_token_t *t, const uint8_t *buf, size_t le
             rv = get_policy_tmpl(p + q, &o->derive_count, o->derive);
             if (rv != FHSM_RV_OK) return rv;
         }
+        /* v5 block. A v4 record has none: no mechanism recorded, and an
+         * empty CKA_OBJECT_ID, which the memset above already says. */
+        if (fixed == FHSM_OBJ_REC_V5_FIXED) {
+            const uint8_t *p = buf + off + FHSM_OBJ_REC_V4_FIXED;
+            if (p[4] > 1 || p[5] > FHSM_OBJ_OBJECT_ID_MAX)
+                return FHSM_RV_FUNCTION_FAILED;
+            o->keygen_set    = p[4];
+            o->keygen_mech   = o->keygen_set ? get_u32_le(p + 0) : 0u;
+            o->object_id_len = p[5];
+            memcpy(o->object_id, p + 8, o->object_id_len);
+        }
         if (o->value_len) {
             fhsm_rv_t ar = obj_alloc_value(o, o->value_len,
                                             (o->flags & FHSM_OBJF_SENSITIVE) != 0);
             if (ar != FHSM_RV_OK) return ar;
-            memcpy(o->value, buf + off + FHSM_OBJ_REC_V4_FIXED, o->value_len);
+            memcpy(o->value, buf + off + fixed, o->value_len);
         }
         off += rec_len;
     }
@@ -930,9 +998,13 @@ static fhsm_rv_t parse_objects_v4(fhsm_token_t *t, const uint8_t *buf, size_t le
 static fhsm_rv_t parse_objects(fhsm_token_t *t, const uint8_t *buf, size_t len) {
     if (len < 8) return FHSM_RV_FUNCTION_FAILED;
     uint32_t magic = get_u32_le(buf);
+    if (magic == FHSM_OBJ_BLOB_V5_MAGIC) {
+        if (len < 12) return FHSM_RV_FUNCTION_FAILED;
+        return parse_objects_v4(t, buf, len, FHSM_OBJ_REC_V5_FIXED);
+    }
     if (magic == FHSM_OBJ_BLOB_V4_MAGIC) {
         if (len < 12) return FHSM_RV_FUNCTION_FAILED;
-        return parse_objects_v4(t, buf, len);
+        return parse_objects_v4(t, buf, len, FHSM_OBJ_REC_V4_FIXED);
     }
     if (magic == FHSM_OBJ_BLOB_V3_MAGIC) {
         if (len < 12) return FHSM_RV_FUNCTION_FAILED;
@@ -1093,7 +1165,10 @@ static void public_view_load(fhsm_token_t *t) {
         || pub_off + 8 + len != (size_t)st.st_size) goto out;
     pt = malloc(len);
     if (!pt || pread(fd, pt, len, (off_t)(pub_off + 8)) != (ssize_t)len) goto out;
-    if (get_u32_le(pt) != FHSM_OBJ_BLOB_V4_MAGIC) goto out;
+    /* A v4 plaintext was written by 2.6.0 and 2.7.0, a v5 one by this build
+     * and later. Nothing older ever wrote a section. */
+    if (get_u32_le(pt) != FHSM_OBJ_BLOB_V5_MAGIC
+        && get_u32_le(pt) != FHSM_OBJ_BLOB_V4_MAGIC) goto out;
     if (parse_objects(t, pt, len) != FHSM_RV_OK) { objects_free_all(t); goto out; }
     for (uint32_t i = 0; i < t->object_count; ++i)
         if (!obj_is_public(&t->objects[i])) { objects_free_all(t); goto out; }
@@ -2267,6 +2342,8 @@ fhsm_rv_t fhsm_token_object_get_meta(fhsm_token_t *t, uint32_t handle,
                     src = o->end_date;    *out_len = o->end_date_len;    break;
                 case FHSM_OBJ_META_APPLICATION:
                     src = o->application; *out_len = o->application_len; break;
+                case FHSM_OBJ_META_OBJECT_ID:
+                    src = o->object_id;   *out_len = o->object_id_len;   break;
                 default:
                     pthread_mutex_unlock(&t->mu);
                     return FHSM_RV_ARGUMENTS_BAD;
@@ -2717,6 +2794,71 @@ fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
             fhsm_rv_t rv = write_atomic(t);
             pthread_mutex_unlock(&t->mu);
             return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+/* CKA_OBJECT_ID and CKA_KEY_GEN_MECHANISM, persisted by the v5 record. Same
+ * shape as the flags setters: store, persist, and no more. */
+fhsm_rv_t fhsm_token_object_set_object_id(fhsm_token_t *t, uint32_t handle,
+                                          const uint8_t *oid, size_t oid_len) {
+    if (!t || (oid_len && !oid)) return FHSM_RV_ARGUMENTS_BAD;
+    if (oid_len > FHSM_OBJ_OBJECT_ID_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek_live || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            fhsm_object_t *o = &t->objects[i];
+            memset(o->object_id, 0, sizeof o->object_id);
+            if (oid_len) memcpy(o->object_id, oid, oid_len);
+            o->object_id_len = (uint8_t)oid_len;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+fhsm_rv_t fhsm_token_object_set_keygen_mech(fhsm_token_t *t, uint32_t handle,
+                                            uint32_t mechanism) {
+    if (!t) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek_live || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            t->objects[i].keygen_mech = mechanism;
+            t->objects[i].keygen_set  = 1;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+fhsm_rv_t fhsm_token_object_get_keygen_mech(fhsm_token_t *t, uint32_t handle,
+                                            uint32_t *out_mechanism, int *out_set) {
+    if (!t || !out_mechanism || !out_set) return FHSM_RV_ARGUMENTS_BAD;
+    pthread_mutex_lock(&t->mu);
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            *out_mechanism = t->objects[i].keygen_mech;
+            *out_set       = t->objects[i].keygen_set ? 1 : 0;
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_OK;
         }
     }
     pthread_mutex_unlock(&t->mu);

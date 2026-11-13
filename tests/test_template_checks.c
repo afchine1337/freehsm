@@ -34,8 +34,10 @@
  *   (6) C6: CKA_PUBLIC_EXPONENT 65539 makes a key with 65539, where F4 was
  *       made; e = 3, outside FIPS 186-5's 2^16 < e < 2^256, is
  *       CKR_ATTRIBUTE_VALUE_INVALID
- *   (7) C10: a data object with CKA_OBJECT_ID is CKR_ATTRIBUTE_TYPE_INVALID,
- *       not accepted and dropped: the store has no field for it
+ *   (7) C10: a data object with CKA_OBJECT_ID keeps it and reads it back.
+ *       It was accepted and dropped, then refused in 2.7.0, the store having
+ *       no field for it; the v5 record has one (#38). On a key it is still
+ *       CKR_ATTRIBUTE_TYPE_INVALID. tests/test_store_v5.c has the rest.
  *   (8) C_DestroyObject of an unknown handle is CKR_OBJECT_HANDLE_INVALID,
  *       not the store's CKR_KEY_HANDLE_INVALID
  *   (9) a private key asked CKA_SENSITIVE=FALSE, generated or imported, is
@@ -268,7 +270,19 @@ int main(void) {
         CK_ATTRIBUTE dt[] = { { CKA_CLASS, &dc, sizeof dc }, { CKA_VALUE, (void *)"v", 1 },
                               { CKA_OBJECT_ID, oid, sizeof oid } };
         rv = C_CreateObject(s, dt, 3, &h);
-        snprintf(what, sizeof what, "(7) data object with CKA_OBJECT_ID: TYPE_INVALID (0x%lx)", rv);
+        snprintf(what, sizeof what, "(7) data object with CKA_OBJECT_ID: CKR_OK (0x%lx)", rv);
+        ok(rv == CKR_OK, what);
+        CK_BYTE back[16] = { 0 };
+        CK_ATTRIBUTE q = { CKA_OBJECT_ID, back, sizeof back };
+        rv = C_GetAttributeValue(s, h, &q, 1);
+        ok(rv == CKR_OK && q.ulValueLen == sizeof oid && memcmp(back, oid, sizeof oid) == 0,
+           "(7) and it reads back as given");
+        CK_ULONG sc = 4UL /* CKO_SECRET_KEY */, kt = 0x10UL /* CKK_GENERIC_SECRET */;
+        CK_ATTRIBUTE kt_t[] = { { CKA_CLASS, &sc, sizeof sc }, { CKA_KEY_TYPE, &kt, sizeof kt },
+                                { CKA_VALUE, (void *)"0123456789abcdef", 16 },
+                                { CKA_OBJECT_ID, oid, sizeof oid } };
+        rv = C_CreateObject(s, kt_t, 4, &h2);
+        snprintf(what, sizeof what, "(7) a secret key with CKA_OBJECT_ID: TYPE_INVALID (0x%lx)", rv);
         ok(rv == CKR_ATTRIBUTE_TYPE_INVALID, what);
     }
 

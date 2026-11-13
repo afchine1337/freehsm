@@ -171,17 +171,22 @@ Thumbs.db
 *.tok.tpm
 audit.log
 
-# One deliberate exception, and only one.
+# Deliberate exceptions, each named.
 #
 # tests/fixtures/token-v3.tok is a token written by the pre-v4 build and kept
 # so that tests/test_v3_fixture.c can prove a v4 reader still opens it. It
 # holds two AES keys whose bytes are printed in tests/make_v3_fixture.c, under
 # a PIN that is in the same file: it is evidence, not key material.
 #
+# tests/fixtures/token-v4.tok is the same for the v5 reader: written by
+# v2.7.0 with tests/make_v4_fixture.c, which prints its values and PIN, and
+# loaded by tests/test_v4_fixture.c.
+#
 # The rule above stays as it is. A .tok in this tree is normally a real
-# operator token and must never be committed; that is why this exception names
+# operator token and must never be committed; that is why each exception names
 # one path rather than opening a directory.
 !tests/fixtures/token-v3.tok
+!tests/fixtures/token-v4.tok
 
 # FUSE leftovers from editing this tree over a network/desktop mount. Zero-byte
 # files a deleted-while-open inode leaves behind; never ours to commit.
