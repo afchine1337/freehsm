@@ -38,6 +38,28 @@ project adheres to [Semantic Versioning](https://semver.org/).
   before the upgrade if a return to an earlier version must stay possible.
   `docs/TOKEN_STORE_FORMAT.md`, "Objects blob v5". `tests/test_v4_fixture.c`
   loads a token written by v2.7.0.
+* **A secret key created with `CKA_PRIVATE=FALSE` is a public object
+  (#37 K1).** It was accepted and kept private, and read back TRUE where
+  FALSE was asked. It is now what the template says: found and used by a
+  session that is not logged in, as PKCS#11 v3.2 §4.4 has it for a public
+  object. Creating one still needs the user's login, and private keys are
+  unchanged.
+
+  **Compatibility, and what to check.** pkcs11-tool sends
+  `CKA_PRIVATE=FALSE` for the secret keys it generates, imports, derives
+  with HKDF and decapsulates unless `--private` is given, so its plain
+  commands now make public secret keys. Give `--private` for a key that
+  must need a login. A public secret key that is not sensitive is written
+  in clear in the token file's public section, so that it can be found
+  before a login; one that is sensitive (`--sensitive`, or the default of
+  `C_GenerateKey`) is not, and is seen after a login. OpenSC/OpenSC#3950
+  asks for pkcs11-tool to stop sending `CKA_PRIVATE=FALSE` for secret keys.
+  Keys already in a token keep the privacy they had.
+
+  A copy may make a public secret key private, not the reverse: a private
+  secret key copied with `CKA_PRIVATE=FALSE` is `CKR_ATTRIBUTE_READ_ONLY`,
+  as a copy that would weaken `CKA_SENSITIVE` or `CKA_EXTRACTABLE`
+  already is. Reported by Alexandre Laroche. `tests/test_private_attr.c`.
 * **A key has the usages of its type, and derives only when asked (#34).**
   The usages of a new private or public key came from its class alone, and
   only a usage the template named FALSE was left out. A private key started
@@ -174,13 +196,6 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `tests/test_class_type_checks.c`.
 
 ### Documentation
-* **One answer of #37 is left as it is, and why.** A secret key created
-  with `CKA_PRIVATE=FALSE` is accepted and is private all the same (K1).
-  Every secret key here is a private object. pkcs11-tool sends
-  `CKA_PRIVATE=FALSE` for the secret keys it generates, imports, derives
-  and decapsulates unless `--private` is given, so a refusal would fail its
-  plain commands. The attribute then reads back TRUE where FALSE was asked:
-  a deviation, kept for that reason.
 * **Refusing `CKA_SENSITIVE=FALSE` on a private key is this module's choice,
   not a rule of PKCS#11.** The 2.7.0 notes list that refusal among answers
   that now follow PKCS#11 v3.2. What the standard was against is the old

@@ -413,8 +413,15 @@ fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
  * reads the bit as clear and clears it at its next write, which makes a
  * public data object private again: stricter, not looser. A public key or
  * certificate made private would have gone the other way, so CKA_PRIVATE=TRUE
- * on those classes is not recorded; it would need a v5 record. */
-#define FHSM_OBJF3_DATA_PUBLIC       0x08
+ * on those classes is not recorded; it would need a v5 record.
+ *
+ * Since 2.8.0 the bit also marks a secret key created with CKA_PRIVATE=FALSE
+ * (#37 K1). That one is a loosening, and an older build that ignored it
+ * would be stricter; but no older build reads a v5 record at all, which is
+ * what makes it safe to give the bit to a class that never had it. The old
+ * name is kept for tests/make_v4_fixture.c, which builds against v2.7.0. */
+#define FHSM_OBJF3_PUBLIC            0x08
+#define FHSM_OBJF3_DATA_PUBLIC       FHSM_OBJF3_PUBLIC
 
 fhsm_rv_t fhsm_token_object_get_flags3(fhsm_token_t *t, uint32_t handle,
                                         uint8_t *out_flags3);

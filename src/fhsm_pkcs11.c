@@ -2661,9 +2661,11 @@ static CK_RV fhsm_check_ro_token(CK_SESSION_HANDLE hSession,
  * This refused only the public session. The SO could make a private object it
  * could then not see, and a user would later find it as one of its own.
  *
- * Whether the object will be private follows fhsm_obj_private: secret and
- * private keys always, public keys and certificates never, a data object
- * unless its template says CKA_PRIVATE=FALSE. `cls` is the class to assume
+ * Whether the object will be private follows fhsm_obj_private: private keys
+ * always, public keys and certificates never, a data object unless its
+ * template says CKA_PRIVATE=FALSE. A secret key counts as private here even
+ * when its template asks CKA_PRIVATE=FALSE (#37 K1): public or not, it is
+ * the user's to make. `cls` is the class to assume
  * when the template names none (the class the call produces), and
  * `data_default` what a data object is when the template does not say. */
 static CK_RV fhsm_check_private_login_cls(CK_SESSION_HANDLE hSession,
@@ -2811,16 +2813,16 @@ static CK_RV fhsm_apply_obj_meta(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
 }
 
 /* CKA_PRIVATE of object `h` of class `cls`: TRUE but for public keys,
- * certificates and data objects made public (FHSM_OBJF3_DATA_PUBLIC). The
- * same rule as obj_is_private in fhsm_token.c, which the store applies to its
- * own records; C_GetAttributeValue, the access checks before login and
- * C_FindObjects all ask this. */
+ * certificates, and data objects and secret keys made public
+ * (FHSM_OBJF3_PUBLIC). The same rule as obj_is_private in fhsm_token.c, which
+ * the store applies to its own records; C_GetAttributeValue, the access
+ * checks before login and C_FindObjects all ask this. */
 static int fhsm_obj_private(fhsm_token_t *t, CK_OBJECT_HANDLE h, uint32_t cls) {
     if (cls == CKO_PUBLIC_KEY || cls == CKO_CERTIFICATE) return 0;
     uint8_t f3 = 0;
-    if (cls == CKO_DATA
+    if ((cls == CKO_DATA || cls == CKO_SECRET_KEY)
         && fhsm_token_object_get_flags3(t, (uint32_t)h, &f3) == FHSM_RV_OK
-        && (f3 & FHSM_OBJF3_DATA_PUBLIC))
+        && (f3 & FHSM_OBJF3_PUBLIC))
         return 0;
     return 1;
 }
@@ -2885,35 +2887,45 @@ static CK_RV fhsm_check_made_class(CK_ATTRIBUTE *tmpl, CK_ULONG n,
     return CKR_TEMPLATE_INCONSISTENT;
 }
 
-/* Records a data object's CKA_PRIVATE=FALSE.
+/* Records a data object's or a secret key's CKA_PRIVATE=FALSE.
  *
  * The attribute was accepted and ignored: a data object created with
  * CKA_PRIVATE=FALSE read back TRUE, and -- the other half -- every data
  * object was readable before a login all the same, since only secret and
  * private keys were kept from an unauthenticated session. pkcs11-tool sends
  * CKA_PRIVATE=FALSE on every object it makes unless --private is given, so a
- * refusal was not an option.
+ * refusal was not an option. Found by pkcs11-check 0.3.0
+ * (test_logout_object_lifetime_across_two_sessions).
+ *
+ * Secret keys since 2.8.0 (#37 K1). One asked CKA_PRIVATE=FALSE was accepted
+ * and kept private, and read back TRUE: CKR_OK for a template not followed.
+ * It is now a public object, found and used before a login. Not sensitive,
+ * it is also in the token file's public section, which is in clear; a
+ * sensitive one is not (obj_is_public in fhsm_token.c). The cost falls on
+ * pkcs11-tool's default, which asks for exactly this unless --private is
+ * given; OpenSC/OpenSC#3950 asks for that default to change.
+ *
+ * Creating one still needs the user's login (fhsm_check_private_login_cls):
+ * a secret key is the user's to make, public or not (#31).
  *
  * On the other classes the template is ignored, as before, and the class
- * decides (§4.4 leaves the default to the token). A secret or private key
- * usable without a login is not one this module makes. A public key or
- * certificate asked CKA_PRIVATE=TRUE stays public: the store cannot record
- * that restriction in a v4 record without an older build lifting it (see
- * FHSM_OBJF3_DATA_PUBLIC). Found by pkcs11-check 0.3.0
- * (test_logout_object_lifetime_across_two_sessions). */
+ * decides (§4.4 leaves the default to the token). A private key usable
+ * without a login is not one this module makes. A public key or certificate
+ * asked CKA_PRIVATE=TRUE stays public: an older build would read the
+ * restriction as absent (see FHSM_OBJF3_PUBLIC). */
 static void fhsm_apply_private_attr(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
                                     CK_ULONG n, uint32_t handle) {
     long pi = find_attr(tmpl, n, CKA_PRIVATE);
     if (pi < 0 || !tmpl[pi].pValue || tmpl[pi].ulValueLen != 1) return;
     uint32_t cls = 0, kt = 0;
     if (fhsm_token_object_get(t, handle, NULL, NULL, &cls, &kt) != FHSM_RV_OK
-        || cls != CKO_DATA)
+        || (cls != CKO_DATA && cls != CKO_SECRET_KEY))
         return;
     int want_public = ((const unsigned char *)tmpl[pi].pValue)[0] == 0;
     uint8_t f3 = 0;
     (void)fhsm_token_object_get_flags3(t, handle, &f3);
-    uint8_t nf3 = want_public ? (uint8_t)(f3 | FHSM_OBJF3_DATA_PUBLIC)
-                              : (uint8_t)(f3 & ~FHSM_OBJF3_DATA_PUBLIC);
+    uint8_t nf3 = want_public ? (uint8_t)(f3 | FHSM_OBJF3_PUBLIC)
+                              : (uint8_t)(f3 & ~FHSM_OBJF3_PUBLIC);
     if (nf3 != f3) (void)fhsm_token_object_set_flags3(t, handle, nf3);
 }
 
@@ -9663,8 +9675,22 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 copy_flags &= (uint8_t)~FHSM_OBJF_EXTRACTABLE;
                 break;
             }
-            case CKA_TOKEN:
             case CKA_PRIVATE:
+                /* A copy of a private secret key may not be public. PKCS#11
+                 * lets CKA_PRIVATE change in a copy, and a data object may go
+                 * either way here, as at creation. A secret key that went
+                 * public would be usable before a login and, unless
+                 * sensitive, written in clear in the token file: a copy
+                 * would take out a key the user had kept private. One way
+                 * only, as CKA_SENSITIVE and CKA_EXTRACTABLE above, with the
+                 * same answer (#37 K1). */
+                if (a->ulValueLen != 1 || !a->pValue)
+                    return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+                if (src_class == CKO_SECRET_KEY && *(const uint8_t *)a->pValue == 0
+                    && fhsm_obj_private(t, hObject, src_class))
+                    return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
+                break;
+            case CKA_TOKEN:
             case CKA_MODIFIABLE_ATTR:
             case CKA_DESTROYABLE_ATTR:
             case CKA_COPYABLE_ATTR:
@@ -9808,8 +9834,9 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             && src_f3 != 0)
             (void)fhsm_token_object_set_flags3(t, new_handle, src_f3);
         /* CKA_PRIVATE may change in a copy (§4.4, §4.1.3); this module
-         * honours it on a data object, as at creation. After the inherited
-         * byte, so the template wins. */
+         * honours it on a data object and a secret key, as at creation --
+         * for a secret key in one direction only, checked in the template
+         * loop above. After the inherited byte, so the template wins. */
         fhsm_apply_private_attr(t, pTemplate, ulCount, new_handle);
         {
             uint32_t copy_class = 0, copy_kt = 0;

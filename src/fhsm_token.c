@@ -537,19 +537,25 @@ _Static_assert(FHSM_OBJ_OBJECT_ID_MAX <= FHSM_OBJ_LABEL_LEN,
 
 #define FHSM_CKO_DATA         0x00u
 
+#define FHSM_CKO_SECRET_KEY   0x04u
+
 /* CKA_PRIVATE as C_GetAttributeValue reports it: TRUE but for public keys,
- * certificates and data objects carrying FHSM_OBJF3_DATA_PUBLIC.
+ * certificates, and data objects and secret keys carrying FHSM_OBJF3_PUBLIC.
  * fhsm_obj_private in fhsm_pkcs11.c applies the same rule to a handle. */
 static int obj_is_private(const fhsm_object_t *o) {
     if (o->class == FHSM_CKO_PUBLIC_KEY || o->class == FHSM_CKO_CERTIFICATE)
         return 0;
-    if (o->class == FHSM_CKO_DATA && (o->flags3 & FHSM_OBJF3_DATA_PUBLIC))
+    if ((o->class == FHSM_CKO_DATA || o->class == FHSM_CKO_SECRET_KEY)
+        && (o->flags3 & FHSM_OBJF3_PUBLIC))
         return 0;
     return 1;
 }
 
 /* In the public section, and in the view before login: a token object that is
- * not private. A sensitive public key stays out, as it always has. */
+ * not private. A sensitive public key stays out, as it always has, and so
+ * does a sensitive public secret key: the section is in clear, and a value
+ * the caller asked to keep from being revealed is not written there. Such a
+ * key is public, and is seen after a login. */
 static int obj_is_public(const fhsm_object_t *o) {
     return o->owner_session == 0
         && !obj_is_private(o)

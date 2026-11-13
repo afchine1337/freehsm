@@ -146,10 +146,13 @@ sealing.
    plus `8 + len` for the public section; anything else is corruption.
 2. `ct_len` ≡ 8 + k × 5 620 for some 1 ≤ k ≤ 64.
 3. Every write path goes through `write_atomic()` (single rename).
-4. No secret ever touches the file in clear: secret and private keys, and
-   any object flagged sensitive, exist only inside the GCM-protected blob.
-   The public section holds public keys and certificates, and its reader
-   refuses anything else.
+4. No secret ever touches the file in clear, except one the caller made
+   public: private keys, private secret keys, and any object flagged
+   sensitive exist only inside the GCM-protected blob. The public section
+   holds public keys, certificates, and the data objects and secret keys
+   created with `CKA_PRIVATE=FALSE` that are not sensitive; its reader
+   refuses anything else. A secret key there is one the caller asked to be
+   usable without a login (2.8.0, #37 K1).
 5. `objects_blob` absent ⇒ `object_count = 0` (fresh or re-initialized
    token). `fhsm_token_init` and `fhsm_token_reinit` write a token without
    one; `fhsm_token_reinit` empties the store in memory first.
@@ -177,10 +180,12 @@ u8   plaintext[len]        a blob plaintext holding the public objects only
                            (v5 from 2.8.0 on; a v4 one is still read)
 ```
 
-* **What is public.** `CKA_PRIVATE` is derived from the class, and
-  `C_GetAttributeValue` reports it FALSE for public keys and certificates.
-  Those, and only those not flagged sensitive, go into the section; the
-  reader refuses a section holding any other object, and loads nothing.
+* **What is public.** `CKA_PRIVATE` is FALSE for public keys and
+  certificates, and for data objects (2.7.0) and secret keys (2.8.0) created
+  with `CKA_PRIVATE=FALSE`, which carry `FHSM_OBJF3_PUBLIC`. Those, and only
+  those not flagged sensitive, go into the section; the reader refuses a
+  section holding any other object, and loads nothing. A sensitive public
+  object is public all the same, and is seen after a login.
 * **The blob is the store.** A login drops the view and loads the blob. The
   write that re-encrypts the blob writes the section afresh from the same
   store; every other write copies both as they are. The view itself cannot be
@@ -474,7 +479,8 @@ an older record reads as it always did, from the current flags, until the key is
 re-created; a build that predates them clears them and reports the same way.
 Neither attribute restricts anything in the module.
 
-One more since 2.7.0. `FHSM_OBJF3_DATA_PUBLIC` (0x08) marks a data object
+One more since 2.7.0. `FHSM_OBJF3_DATA_PUBLIC` (0x08, `FHSM_OBJF3_PUBLIC`
+since 2.8.0) marks a data object
 created, or copied, with `CKA_PRIVATE=FALSE`. Such an object is public: it is
 found and read before a login, goes into the public section, and survives a
 `C_Logout`. Clear, a data object is private, as every data object reported
@@ -485,6 +491,12 @@ nothing a downgrade does can expose an object. The opposite direction -- a
 public key or certificate made private -- would be a restriction an older
 build silently lifts, so it is not recorded, and `CKA_PRIVATE=TRUE` on those
 classes is ignored as it always was. Recording it needs a v5 record.
+
+Since 2.8.0 the same bit marks a secret key created with `CKA_PRIVATE=FALSE`
+(#37 K1). That is the loosening the paragraph above kept off this byte, and
+it is safe now for the reason it gave: no build that predates the bit reads a
+v5 record, so none can misread it. A copy may make a public secret key
+private, not the reverse (`CKR_ATTRIBUTE_READ_ONLY`).
 
 ## Objects blob v5 (2.8.0 — two attributes without a field)
 

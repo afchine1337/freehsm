@@ -15,17 +15,22 @@
  * The cases:
  *   (1) data objects: CKA_PRIVATE=FALSE reads back FALSE; absent or TRUE
  *       reads back TRUE;
- *   (2) a secret key created with CKA_PRIVATE=FALSE is private all the same;
+ *   (2) a secret key created with CKA_PRIVATE=FALSE is public (#37 K1; it
+ *       was private all the same up to 2.7.0); one created without it is
+ *       private;
  *   (3) a public key asked CKA_PRIVATE=TRUE stays public: the store records
  *       only the data-object direction, which an older build cannot loosen;
  *   (4) C_CopyObject: a private data object copied with CKA_PRIVATE=FALSE is
- *       public; a secret key copied so stays private;
+ *       public; a private secret key copied so is CKR_ATTRIBUTE_READ_ONLY,
+ *       and a public one copied with CKA_PRIVATE=TRUE is private;
  *   (5) after C_Logout: the public data objects and the public key are
  *       found, the private data objects are not; a public session data
  *       object survives the logout and a private one does not;
  *   (6) in a new process image (C_Finalize, C_Initialize), before any login:
  *       the public token data object is found and read from the public
- *       section, the private one is not found;
+ *       section, the private one is not found; a public secret key that is
+ *       not sensitive is found there too, and a sensitive one is not, since
+ *       the section is in clear;
  *   (7) with the SO logged in, which decrypts the store, no handle that the
  *       search hides can be changed (C_SetAttributeValue), copied out with
  *       CKA_PRIVATE=FALSE (C_CopyObject) or destroyed (C_DestroyObject); the
@@ -69,6 +74,7 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKR_KEY_NOT_WRAPPABLE     0x69UL
 #define CKR_KEY_UNEXTRACTABLE     0x6AUL
 #define CKR_TEMPLATE_INCONSISTENT 0xD1UL
+#define CKR_ATTRIBUTE_READ_ONLY   0x10UL
 #define CKO_PUBLIC_KEY            2UL
 #define CKA_SENSITIVE             0x103UL
 #define CKA_WRAP                  0x106UL
@@ -251,7 +257,8 @@ int main(void)
     ok(read_private(s, d_dflt) == 1, "(1) CKA_PRIVATE absent reads back TRUE");
     ok(read_private(s, d_priv) == 1, "(1) CKA_PRIVATE=TRUE reads back TRUE");
 
-    /* (2) A secret key stays private. */
+    /* (2) A secret key's CKA_PRIVATE is the template's (#37 K1). tok-key is
+     * sensitive, the default for a generated key; tok-clearkey is not. */
     CK_ULONG vl = 16;
     CK_ATTRIBUTE kt[] = { { CKA_CLASS, &g_secret, sizeof g_secret },
                           { CKA_KEY_TYPE, &g_aes, sizeof g_aes },
@@ -259,9 +266,23 @@ int main(void)
                           { CKA_PRIVATE, &g_no, 1 },
                           { CKA_LABEL, (void*)"tok-key", 7 } };
     CK_MECHANISM kg = { CKM_AES_KEY_GEN, NULL, 0 };
-    CK_OBJECT_HANDLE key = 0;
-    ok(C_GenerateKey(s, &kg, kt, 6, &key) == CKR_OK && read_private(s, key) == 1,
-       "(2) a secret key asked CKA_PRIVATE=FALSE is private");
+    CK_OBJECT_HANDLE key = 0, key_priv = 0, key_clear = 0;
+    ok(C_GenerateKey(s, &kg, kt, 6, &key) == CKR_OK && read_private(s, key) == 0,
+       "(2) a secret key asked CKA_PRIVATE=FALSE is public");
+    {
+        CK_ATTRIBUTE kp[] = { { CKA_CLASS, &g_secret, sizeof g_secret },
+                              { CKA_KEY_TYPE, &g_aes, sizeof g_aes },
+                              { CKA_VALUE_LEN, &vl, sizeof vl }, { CKA_TOKEN, &g_no, 1 } };
+        ok(C_GenerateKey(s, &kg, kp, 4, &key_priv) == CKR_OK && read_private(s, key_priv) == 1,
+           "(2) one that does not name CKA_PRIVATE is private");
+        CK_ATTRIBUTE kc[] = { { CKA_CLASS, &g_secret, sizeof g_secret },
+                              { CKA_KEY_TYPE, &g_aes, sizeof g_aes },
+                              { CKA_VALUE_LEN, &vl, sizeof vl }, { CKA_TOKEN, &g_yes, 1 },
+                              { CKA_PRIVATE, &g_no, 1 }, { CKA_SENSITIVE, &g_no, 1 },
+                              { CKA_LABEL, (void*)"tok-clearkey", 12 } };
+        ok(C_GenerateKey(s, &kg, kc, 7, &key_clear) == CKR_OK && read_private(s, key_clear) == 0,
+           "(2) and so is one asked CKA_PRIVATE=FALSE, CKA_SENSITIVE=FALSE");
+    }
 
     /* (3) A public key asked CKA_PRIVATE=TRUE stays public: the store records
      * only the data-object direction (FHSM_OBJF3_DATA_PUBLIC). */
@@ -284,8 +305,12 @@ int main(void)
         ok(C_CopyObject(s, d_priv, ct, 2, &c1) == CKR_OK && read_private(s, c1) == 0,
            "(4) a private data object copied CKA_PRIVATE=FALSE is public");
         CK_ATTRIBUTE kc[] = { { CKA_PRIVATE, &g_no, 1 } };
-        ok(C_CopyObject(s, key, kc, 1, &c2) == CKR_OK && read_private(s, c2) == 1,
-           "(4) a secret key copied CKA_PRIVATE=FALSE stays private");
+        ok(C_CopyObject(s, key_priv, kc, 1, &c2) == CKR_ATTRIBUTE_READ_ONLY && c2 == 0,
+           "(4) a private secret key copied CKA_PRIVATE=FALSE: CKR_ATTRIBUTE_READ_ONLY");
+        CK_ATTRIBUTE kt2[] = { { CKA_PRIVATE, &g_yes, 1 }, { CKA_TOKEN, &g_no, 1 } };
+        c2 = 0;
+        ok(C_CopyObject(s, key, kt2, 2, &c2) == CKR_OK && read_private(s, c2) == 1,
+           "(4) a public secret key copied CKA_PRIVATE=TRUE is private");
     }
 
     /* (5) After a logout. */
@@ -313,6 +338,10 @@ int main(void)
        "(6) before a login, the public data object is read from the file");
     ok(find_label(s2, "tok-default", NULL) == 0 && find_label(s2, "tok-private", NULL) == 0,
        "(6) the private ones are not there");
+    ok(find_label(s2, "tok-clearkey", &h) == 1 && read_private(s2, h) == 0,
+       "(6) the public secret key that is not sensitive is there");
+    ok(find_label(s2, "tok-key", NULL) == 0,
+       "(6) the sensitive one is not: the section is in clear");
 
     /* (7) The SO: every handle the search hides is refused. */
     if (C_Login(s2,0,(CK_BYTE*)SO_PIN,strlen(SO_PIN))) { fprintf(stderr,"SO (2)\n"); return 2; }
