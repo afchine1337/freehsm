@@ -2095,6 +2095,9 @@ typedef struct fhsm_op_s {
     uint8_t    *gcm_aad;
     size_t      gcm_aad_len;
     size_t      gcm_tag_len;   /* in BYTES (ulTagBits / 8) */
+    size_t      mac_out_len;   /* *_HMAC_GENERAL: the MAC length asked, in
+                                * bytes, from CK_MAC_GENERAL_PARAMS; 0 for
+                                * the full length */
     /* Post-quantum context string captured at VerifyInit / SignInit.
      * Shared between CK_ML_DSA_PARAMS (PKCS#11 v3.2 §6.18 ; FIPS 204
      * §5.2.1) and CK_SLH_DSA_PARAMS (PKCS#11 v3.2 §6.19 ; FIPS 205
@@ -5048,6 +5051,7 @@ typedef struct CK_SP800_108_FEEDBACK_KDF_PARAMS_s {
 #define FHSM_KBKDF_MAX_PRF_LEN     64u
 
 static int fhsm_hmac_hash_of(uint32_t mech, fhsm_hash_t *hash, size_t *maclen);
+static int fhsm_hmac_is_general(uint32_t mech);
 static const char *hmac_digest_name(fhsm_hash_t h);
 
 /* The shape of the data fields, per the tables of §6.42.3 to §6.42.5. */
@@ -11075,6 +11079,21 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     op->gcm_iv_len = 0;
     op->gcm_aad_len = 0;
     op->gcm_tag_len = 16;        /* default 128-bit tag */
+    /* *_HMAC_GENERAL: CK_MAC_GENERAL_PARAMS, a CK_ULONG, is the MAC length
+     * in bytes, from 1 to the hash's output. Where NIST's rules apply -- the
+     * nist-approved-only build, strict mode -- at least 4 bytes, the 32 bits
+     * SP 800-107 rev. 1 §5.3.3 sets as the floor for a truncated HMAC. */
+    op->mac_out_len = 0;
+    if (fhsm_hmac_is_general((uint32_t)pMechanism->mechanism)) {
+        fhsm_hash_t gh; size_t gfull = 0;
+        (void)fhsm_hmac_hash_of((uint32_t)pMechanism->mechanism, &gh, &gfull);
+        if (!pMechanism->pParameter || pMechanism->ulParameterLen != sizeof(CK_ULONG))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        CK_ULONG want = *(const CK_ULONG *)pMechanism->pParameter;
+        CK_ULONG least = (fhsm_build_fips_strict || fhsm_mode_is_fips()) ? 4 : 1;
+        if (want < least || want > gfull) return FHSM_RV_MECHANISM_PARAM_INVALID;
+        op->mac_out_len = (size_t)want;
+    }
     /* CK_GCM_PARAMS serves CKM_AES_GCM and CKM_AES_GMAC alike.
      *
      * PKCS#11 v3.2 §6.13.6, on CKM_AES_GMAC, verbatim:
@@ -11728,6 +11747,9 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x0251: case 0x0261: case 0x0271: case 0x0256: /* SHA{256,384,512,224}_HMAC */
         case 0x02B1: case 0x02C1: case 0x02D1: case 0x02B6: /* SHA3_{256,384,512,224}_HMAC */
         case 0x0221:                                        /* SHA_1_HMAC */
+        case 0x0222: case 0x0257: case 0x004A: case 0x004E: /* *_HMAC_GENERAL */
+        case 0x0252: case 0x0262: case 0x0272:
+        case 0x02B7: case 0x02B2: case 0x02C2: case 0x02D2:
             want = -2; break;   /* any symmetric secret ; reject asymmetric keys */
         default: want = -1; break;
     }
@@ -12820,7 +12842,34 @@ static int fhsm_hmac_hash_of(uint32_t mech, fhsm_hash_t *hash, size_t *maclen) {
         case CKM_SHA3_256_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA3_256; *maclen = 32; return 1;
         case CKM_SHA3_384_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA3_384; *maclen = 48; return 1;
         case CKM_SHA3_512_HMAC_INIT_VAL: *hash = FHSM_HASH_SHA3_512; *maclen = 64; return 1;
+        /* The *_HMAC_GENERAL mechanisms (PKCS#11 v3.2 §6.x, one per hash):
+         * the same MAC, truncated to the length CK_MAC_GENERAL_PARAMS gives.
+         * *maclen is the full length; op->mac_out_len the one asked. Each is
+         * its HMAC's value plus one, as the OASIS header defines them. */
+        case 0x00000222UL: *hash = FHSM_HASH_SHA1;       *maclen = 20; return 1;
+        case 0x00000257UL: *hash = FHSM_HASH_SHA224;     *maclen = 28; return 1;
+        case 0x0000004AUL: *hash = FHSM_HASH_SHA512_224; *maclen = 28; return 1;
+        case 0x0000004EUL: *hash = FHSM_HASH_SHA512_256; *maclen = 32; return 1;
+        case 0x00000252UL: *hash = FHSM_HASH_SHA256;     *maclen = 32; return 1;
+        case 0x00000262UL: *hash = FHSM_HASH_SHA384;     *maclen = 48; return 1;
+        case 0x00000272UL: *hash = FHSM_HASH_SHA512;     *maclen = 64; return 1;
+        case 0x000002B7UL: *hash = FHSM_HASH_SHA3_224;   *maclen = 28; return 1;
+        case 0x000002B2UL: *hash = FHSM_HASH_SHA3_256;   *maclen = 32; return 1;
+        case 0x000002C2UL: *hash = FHSM_HASH_SHA3_384;   *maclen = 48; return 1;
+        case 0x000002D2UL: *hash = FHSM_HASH_SHA3_512;   *maclen = 64; return 1;
         default: return 0;
+    }
+}
+
+/* Is this one of the *_HMAC_GENERAL mechanisms, which take a length? */
+static int fhsm_hmac_is_general(uint32_t mech) {
+    switch (mech) {
+        case 0x00000222UL: case 0x00000257UL: case 0x0000004AUL: case 0x0000004EUL:
+        case 0x00000252UL: case 0x00000262UL: case 0x00000272UL:
+        case 0x000002B7UL: case 0x000002B2UL: case 0x000002C2UL: case 0x000002D2UL:
+            return 1;
+        default:
+            return 0;
     }
 }
 
@@ -12891,6 +12940,10 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA3_256_HMAC_INIT_VAL:
         case CKM_SHA3_384_HMAC_INIT_VAL:
         case CKM_SHA3_512_HMAC_INIT_VAL:
+        case 0x00000222UL: case 0x00000257UL: case 0x0000004AUL: /* *_HMAC_GENERAL */
+        case 0x0000004EUL: case 0x00000252UL: case 0x00000262UL:
+        case 0x00000272UL: case 0x000002B7UL: case 0x000002B2UL:
+        case 0x000002C2UL: case 0x000002D2UL:
         case CKM_AES_CMAC:
         case CKM_AES_GMAC:
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
@@ -13474,13 +13527,20 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
         fhsm_hash_t hash = hmac_hash;
-        size_t need = hmac_need;
+        /* A *_HMAC_GENERAL MAC is the leftmost op->mac_out_len bytes of the
+         * full one, computed whole and then cut, as GMAC's tag is below. */
+        size_t need = (op->mac_out_len && op->mac_out_len <= hmac_need)
+                      ? op->mac_out_len : hmac_need;
         if (pSignature == NULL) { *pulSignatureLen = need; return FHSM_RV_OK; }
         if (*pulSignatureLen < need) { *pulSignatureLen = need; return 0x00000150UL; }
-        size_t mac_len = *pulSignatureLen;
+        uint8_t full_mac[64];
+        size_t mac_len = sizeof full_mac;
         rv = fhsm_hmac(hash, FHSM_SLICE(kv, kvl),
-                        FHSM_SLICE(pData, ulDataLen), pSignature, &mac_len);
-        *pulSignatureLen = mac_len;
+                        FHSM_SLICE(pData, ulDataLen), full_mac, &mac_len);
+        if (rv == FHSM_RV_OK && mac_len < need) rv = FHSM_RV_FUNCTION_FAILED;
+        if (rv == FHSM_RV_OK) memcpy(pSignature, full_mac, need);
+        OPENSSL_cleanse(full_mac, sizeof full_mac);
+        *pulSignatureLen = rv == FHSM_RV_OK ? need : 0;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
                                 fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
@@ -13607,6 +13667,10 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA3_256_HMAC_INIT_VAL:
         case CKM_SHA3_384_HMAC_INIT_VAL:
         case CKM_SHA3_512_HMAC_INIT_VAL:
+        case 0x00000222UL: case 0x00000257UL: case 0x0000004AUL: /* *_HMAC_GENERAL */
+        case 0x0000004EUL: case 0x00000252UL: case 0x00000262UL:
+        case 0x00000272UL: case 0x000002B7UL: case 0x000002B2UL:
+        case 0x000002C2UL: case 0x000002D2UL:
         case CKM_AES_CMAC:
         case CKM_AES_GMAC:
         case CKM_ECDSA: case CKM_ECDSA_SHA256: case CKM_ECDSA_SHA384: case CKM_ECDSA_SHA512:
@@ -13703,10 +13767,14 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
         rv = fhsm_hmac(vhash, FHSM_SLICE(kv, kvl),
                         FHSM_SLICE(pData, ulDataLen), mac, &mac_len);
         op->active = 0;
-        if (rv != FHSM_RV_OK) return rv;
-        if (ulSigLen != mac_len) return FHSM_RV_SIGNATURE_INVALID;
-        return (fhsm_ct_memcmp(mac, pSig, mac_len) == 0) ? FHSM_RV_OK
-                                                          : FHSM_RV_SIGNATURE_INVALID;
+        if (rv != FHSM_RV_OK) { OPENSSL_cleanse(mac, sizeof mac); return rv; }
+        /* A *_HMAC_GENERAL MAC is compared at the length asked at
+         * C_VerifyInit, and only that length is accepted. */
+        size_t want_len = (op->mac_out_len && op->mac_out_len <= mac_len)
+                          ? op->mac_out_len : mac_len;
+        int vok = ulSigLen == want_len && fhsm_ct_memcmp(mac, pSig, want_len) == 0;
+        OPENSSL_cleanse(mac, sizeof mac);
+        return vok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
     }
 
     if (op->mechanism == CKM_AES_CMAC || op->mechanism == CKM_AES_GMAC) {
@@ -14322,7 +14390,8 @@ static int mech_sign_is_buffered_multipart(uint32_t m) {
  * so adding a MAC meant four edits; they now share mac_stream_open. */
 static size_t mac_stream_len(const fhsm_op_t *op) {
     fhsm_hash_t h; size_t n;
-    if (fhsm_hmac_hash_of(op->mechanism, &h, &n)) return n;
+    if (fhsm_hmac_hash_of(op->mechanism, &h, &n))
+        return (op->mac_out_len && op->mac_out_len <= n) ? op->mac_out_len : n;
     if (op->mechanism == CKM_AES_CMAC) return 16;
     if (op->mechanism == CKM_AES_GMAC)
         return (op->gcm_tag_len && op->gcm_tag_len <= 16) ? op->gcm_tag_len : 16;

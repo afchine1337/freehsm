@@ -8,6 +8,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+* **The `*_HMAC_GENERAL` mechanisms**, for SHA-1, SHA-224, SHA-256,
+  SHA-384, SHA-512, SHA-512/224, SHA-512/256 and the four SHA-3 sizes: the
+  HMAC truncated to the length `CK_MAC_GENERAL_PARAMS` gives, from 1 byte
+  to the hash's output, single-part and in parts. Where NIST's rules apply
+  (the nist-approved-only build, strict mode) the length is at least 4
+  bytes, the 32 bits SP 800-107 rev. 1 sets for a truncated HMAC. A missing
+  parameter or a length out of range is `CKR_MECHANISM_PARAM_INVALID`.
+  `tests/test_hmac_general.c`.
 * **A data object keeps its `CKA_OBJECT_ID` (#38, #33 C10).** PKCS#11 v3.2
   Table 20 gives every data object one. It was accepted and dropped up to
   2.6.1, and refused in 2.7.0, the token file having no field for it. It is

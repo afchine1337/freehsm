@@ -229,6 +229,34 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_SHA3_512_HMAC",      0x000002D1, "HMAC", "sign",    "dispatch_hmac_sha3_512",
          fips="approved", refs=("FIPS 198-1", "FIPS 202")),
 
+    # The *_HMAC_GENERAL mechanisms: the MAC above, truncated to the length
+    # CK_MAC_GENERAL_PARAMS gives (1 to the hash's output, 4 at least where
+    # NIST's rules apply, SP 800-107 rev. 1 §5.3.3). C_SignInit and its
+    # siblings do the work; the handler named is the full-length reference.
+    # Each value is its HMAC's plus one, from the OASIS header.
+    Mech("CKM_SHA_1_HMAC_GENERAL",      0x00000222, "HMAC", "sign", "dispatch_hmac_sha1",
+         fips="approved", refs=("FIPS 198-1", "SP 800-107 rev. 1")),
+    Mech("CKM_SHA224_HMAC_GENERAL",     0x00000257, "HMAC", "sign", "dispatch_hmac_sha224",
+         fips="approved", refs=("FIPS 198-1", "SP 800-107 rev. 1")),
+    Mech("CKM_SHA512_224_HMAC_GENERAL", 0x0000004A, "HMAC", "sign", "dispatch_hmac_sha512_224",
+         fips="approved", refs=("FIPS 198-1", "SP 800-107 rev. 1")),
+    Mech("CKM_SHA512_256_HMAC_GENERAL", 0x0000004E, "HMAC", "sign", "dispatch_hmac_sha512_256",
+         fips="approved", refs=("FIPS 198-1", "SP 800-107 rev. 1")),
+    Mech("CKM_SHA256_HMAC_GENERAL",     0x00000252, "HMAC", "sign", "dispatch_hmac_sha256",
+         fips="approved", refs=("FIPS 198-1", "SP 800-107 rev. 1")),
+    Mech("CKM_SHA384_HMAC_GENERAL",     0x00000262, "HMAC", "sign", "dispatch_hmac_sha384",
+         fips="approved", refs=("FIPS 198-1", "SP 800-107 rev. 1")),
+    Mech("CKM_SHA512_HMAC_GENERAL",     0x00000272, "HMAC", "sign", "dispatch_hmac_sha512",
+         fips="approved", refs=("FIPS 198-1", "SP 800-107 rev. 1")),
+    Mech("CKM_SHA3_224_HMAC_GENERAL",   0x000002B7, "HMAC", "sign", "dispatch_hmac_sha3_224",
+         fips="approved", refs=("FIPS 198-1", "FIPS 202")),
+    Mech("CKM_SHA3_256_HMAC_GENERAL",   0x000002B2, "HMAC", "sign", "dispatch_hmac_sha3_256",
+         fips="approved", refs=("FIPS 198-1", "FIPS 202")),
+    Mech("CKM_SHA3_384_HMAC_GENERAL",   0x000002C2, "HMAC", "sign", "dispatch_hmac_sha3_384",
+         fips="approved", refs=("FIPS 198-1", "FIPS 202")),
+    Mech("CKM_SHA3_512_HMAC_GENERAL",   0x000002D2, "HMAC", "sign", "dispatch_hmac_sha3_512",
+         fips="approved", refs=("FIPS 198-1", "FIPS 202")),
+
     # === RSA ===========================================================
     Mech("CKM_RSA_PKCS_KEY_PAIR_GEN", 0x00000000, "RSA", "keypair",  "dispatch_rsa_keypair",
          fips="approved", key_type="CKK_RSA",
