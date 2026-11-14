@@ -12,9 +12,10 @@
  *     where 2048, 3072 and 4096 alone were taken.
  * The test reads the stated bounds and checks against them, so it means the
  * same in every build and mode:
- *   (E) CKM_EC_KEY_PAIR_GEN states a minimum of 192 or 256; P-192 and P-224
- *       generate and sign when it is 192, and are CKR_CURVE_NOT_SUPPORTED
- *       when it is 256;
+ *   (E) CKM_EC_KEY_PAIR_GEN states a minimum of 192, 224 or 256 (224 where
+ *       the provider builds P-224 and not P-192, as the FIPS provider does);
+ *       P-192 and P-224 generate and sign when they reach the minimum, and
+ *       are CKR_CURVE_NOT_SUPPORTED when they do not;
  *   (R) CKM_RSA_PKCS_KEY_PAIR_GEN states a maximum of 8192; a size between
  *       the old ones (2560) generates; 4608, above the old 4096, generates
  *       and signs (its 576-byte signature did not fit the old 512-byte
@@ -143,16 +144,17 @@ int main(void)
     CK_MECHANISM_INFO ei = { 0, 0, 0 };
     if (C_GetMechanismInfo(0, CKM_EC_KEY_PAIR_GEN, &ei) != CKR_OK) { fprintf(stderr, "EC info\n"); return 2; }
     printf("(E) CKM_EC_KEY_PAIR_GEN states %lu to %lu bits\n", ei.ulMinKeySize, ei.ulMaxKeySize);
-    ok(ei.ulMinKeySize == 192 || ei.ulMinKeySize == 256, "the minimum is 192 or 256");
+    ok(ei.ulMinKeySize == 192 || ei.ulMinKeySize == 224 || ei.ulMinKeySize == 256,
+       "the minimum is 192, 224 or 256");
     {
-        static const struct { const char *name; CK_BYTE oid[12]; CK_ULONG len; } C[] = {
-            { "P-192", { 0x06,0x08,0x2A,0x86,0x48,0xCE,0x3D,0x03,0x01,0x01 }, 10 },
-            { "P-224", { 0x06,0x05,0x2B,0x81,0x04,0x00,0x21 }, 7 },
+        static const struct { const char *name; CK_BYTE oid[12]; CK_ULONG len, bits; } C[] = {
+            { "P-192", { 0x06,0x08,0x2A,0x86,0x48,0xCE,0x3D,0x03,0x01,0x01 }, 10, 192 },
+            { "P-224", { 0x06,0x05,0x2B,0x81,0x04,0x00,0x21 }, 7, 224 },
         };
         CK_MECHANISM ecdsa = { CKM_ECDSA, NULL, 0 };
         for (int i = 0; i < 2; i++) {
             rv = ec_pair(C[i].oid, C[i].len, &pub, &prv);
-            if (ei.ulMinKeySize == 192) {
+            if (C[i].bits >= ei.ulMinKeySize) {
                 snprintf(what, sizeof what, "%s generates (0x%lx)", C[i].name, rv);
                 ok(rv == CKR_OK && pub && prv, what);
                 snprintf(what, sizeof what, "%s signs and verifies", C[i].name);

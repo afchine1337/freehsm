@@ -64,9 +64,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
   permissive mode, Weierstrass curves are taken from 192 bits, where 256
   was the floor: P-192, P-224, brainpoolP192 and P224, secp192k1 and
   secp224k1, and the X9.62 192 and 239-bit curves. The nist-approved-only
-  build and the strict mode keep the 256-bit floor, and so does a module
-  whose loaded provider cannot build P-192, such as the OpenSSL FIPS
-  provider; `C_GetMechanismInfo` states which floor applies. RSA keys are
+  build and the strict mode keep the 256-bit floor. Elsewhere the floor is
+  the smallest of P-192 and P-224 the loaded provider can build: 224 on the
+  OpenSSL FIPS provider, which has P-224 and not P-192.
+  `C_GetMechanismInfo` states which floor applies. RSA keys are
   generated from the minimum (1024 bits in permissive mode, 2048 otherwise)
   to 8192 bits in
   steps of 512, where 2048, 3072 and 4096 alone were taken; the stated
