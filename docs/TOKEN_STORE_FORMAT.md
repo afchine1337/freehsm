@@ -544,8 +544,10 @@ Properties:
   reader takes the unknown magic for a v1 object count, which is out of
   range. Checked with 2.7.0 against a token written by 2.8.0: `C_Login`
   answers `CKR_OK`, since the PIN still unwraps the key, but the objects are
-  not loaded, so the search answers `CKR_USER_NOT_LOGGED_IN`, and the file
-  is byte for byte unchanged. Not loud, but nothing is lost.
+  not loaded, so the search and `C_GenerateKey` answer
+  `CKR_USER_NOT_LOGGED_IN` (invariant 6: no write without the store
+  loaded), and the file is byte for byte unchanged. Not loud, but nothing
+  is lost.
 * **Read v1 / v2 / v3 / v4, write v5.** A v4 record loads with `key_gen_set`
   and `object_id_len` at zero, which is what it means: a key generated before
   v5 has no mechanism on record, and reports `CK_UNAVAILABLE_INFORMATION`
