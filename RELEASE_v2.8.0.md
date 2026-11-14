@@ -253,10 +253,11 @@ this release but for one that needs what FreeHSM does not offer by design,
 permissive mode.
 
 `make tests` in both profiles, green. pkcs11-check 0.2.3: every failure is
-listed in `tests/pkcs11_check_known_failures.txt`, 31 in `all-mechanisms`
-and 30 in `nist-approved-only`. 28 of them ask for a private key that is
-not sensitive (mingulov/pkcs11-check#72); 2.7.0 was released before they
-were listed.
+listed in `tests/pkcs11_check_known_failures.txt`, 3 in `all-mechanisms`
+and 2 in `nist-approved-only`, none of them the module's to fix. 2.7.0 had
+28 more, in both profiles, all asking for a private key that is not
+sensitive (mingulov/pkcs11-check#72); they pass now that such a key is
+made, and are no longer listed.
 
 ## Verifying this release
 
