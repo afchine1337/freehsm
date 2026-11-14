@@ -540,8 +540,12 @@ Properties:
   bit reads it as clear, and for those bits clear is that build's own
   behaviour. Here an older build would rewrite the record at its next
   mutation without the block, and what the caller stored would be gone with
-  no error. A build that predates v5 therefore refuses the blob, loudly: a
-  token written by 2.8.0 is not readable by 2.7.0.
+  no error. A build that predates v5 therefore does not load the blob: its
+  reader takes the unknown magic for a v1 object count, which is out of
+  range. Checked with 2.7.0 against a token written by 2.8.0: `C_Login`
+  answers `CKR_OK`, since the PIN still unwraps the key, but the objects are
+  not loaded, so the search answers `CKR_USER_NOT_LOGGED_IN`, and the file
+  is byte for byte unchanged. Not loud, but nothing is lost.
 * **Read v1 / v2 / v3 / v4, write v5.** A v4 record loads with `key_gen_set`
   and `object_id_len` at zero, which is what it means: a key generated before
   v5 has no mechanism on record, and reports `CK_UNAVAILABLE_INFORMATION`

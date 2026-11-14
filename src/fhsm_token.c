@@ -493,7 +493,8 @@ _Static_assert(FHSM_POLICY_ENTRY_SZ == 8u + FHSM_POLICY_VALUE_MAX,
  *
  * Neither field restricts anything, but an older build that rewrote the
  * record without them would drop what the caller stored, silently. Hence a
- * new magic: a build that predates v5 refuses the blob. v1 to v4 stay
+ * new magic: a build that predates v5 does not load the blob, so it never
+ * writes it back (docs/TOKEN_STORE_FORMAT.md, checked with 2.7.0). v1 to v4 stay
  * readable and load with key_gen_set and object_id_len at zero, which is what
  * those records mean. Every write emits v5. */
 #define FHSM_OBJ_BLOB_V5_MAGIC   0xF5B50005u

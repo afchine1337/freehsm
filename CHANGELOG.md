@@ -33,8 +33,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
   above needed a field each: 72 bytes per object, after the per-object
   policy. **Compatibility:** tokens written by any earlier version are read
   as before, and are rewritten as v5 at their first change. The reverse does
-  not hold: 2.7.0 and earlier refuse a token that 2.8.0 has written, with an
-  error at login, and do not alter it. Keep a copy of the token directory
+  not hold: 2.7.0 cannot use a token that 2.8.0 has written. The login
+  succeeds, then every call that needs the objects answers
+  `CKR_USER_NOT_LOGGED_IN`; the file is not altered. Keep a copy of the token directory
   before the upgrade if a return to an earlier version must stay possible.
   `docs/TOKEN_STORE_FORMAT.md`, "Objects blob v5". `tests/test_v4_fixture.c`
   loads a token written by v2.7.0.
@@ -47,7 +48,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
   **Compatibility, and what to check.** pkcs11-tool sends
   `CKA_PRIVATE=FALSE` for the secret keys it generates, imports, derives
-  with HKDF and decapsulates unless `--private` is given, so its plain
+  with HKDF, encapsulates and decapsulates unless `--private` is given, so its plain
   commands now make public secret keys. Give `--private` for a key that
   must need a login. A public secret key that is not sensitive is written
   in clear in the token file's public section, so that it can be found
