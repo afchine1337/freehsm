@@ -1621,7 +1621,6 @@ static CK_ULONG fhsm_mech_flags_for(const char *op) {
  * enforces in match_curve_ex(). One definition for both, because they were
  * two facts that had to agree and did not: 256..521 was advertised while the
  * all-mechanisms build accepted any curve OpenSSL knew, down to secp112r1. */
-#define FHSM_EC_MIN_BITS 256u
 #define FHSM_EC_MAX_BITS 521u
 
 /* The smallest RSA modulus this module generates, and advertises through
@@ -1637,6 +1636,26 @@ static CK_ULONG rsa_min_bits(void) {
     return (fhsm_build_fips_strict || fhsm_mode_is_fips()) ? 2048 : 1024;
 }
 
+/* The largest RSA modulus generated and advertised. Sizes run from
+ * rsa_min_bits() to this in steps of 512 bits: 2048, 3072 and 4096 alone were
+ * taken, so a caller asking for 2560 or 8192 bits was refused with
+ * CKR_KEY_SIZE_RANGE. 8192 bits signs in 1024 bytes, which sig_family_bound
+ * and the RSA buffers are sized for. */
+#define FHSM_RSA_MAX_BITS 8192u
+#define FHSM_RSA_STEP_BITS 512u
+
+/* The smallest Weierstrass curve accepted and advertised, by the rule that
+ * sets rsa_min_bits: 256 bits where NIST's rules apply, 192 bits in the
+ * all-mechanisms build in permissive mode. P-192 is not an approved curve
+ * (FIPS 186-5 removed it); P-224 is approved and still under the 256 this
+ * module took everywhere. Below 256 bits a curve comes from OpenSSL's
+ * registry, not from the table, so the nist-approved-only build refuses it
+ * as non-approved whatever this says. python-pkcs11's test_derive_key uses
+ * P-192. */
+static unsigned ec_min_bits(void) {
+    return (fhsm_build_fips_strict || fhsm_mode_is_fips()) ? 256u : 192u;
+}
+
 static void fhsm_mech_keysizes_for(const char *fam,
                                     CK_ULONG *mn, CK_ULONG *mx) {
     *mn = 0; *mx = 0;
@@ -1650,9 +1669,10 @@ static void fhsm_mech_keysizes_for(const char *fam,
      * so "DES" keeps its own single length and advertises nothing usable. */
     if (!strcmp(fam, "TDES"))    { *mn = 24;   *mx = 24;   return; }
     if (!strcmp(fam, "DES"))     { *mn = 8;    *mx = 8;    return; }
-    if (!strcmp(fam, "RSA"))     { *mn = rsa_min_bits(); *mx = 4096; return; }
-    if (!strcmp(fam, "EC") || !strcmp(fam, "EdDSA") || !strcmp(fam, "ECM"))
-                                 { *mn = FHSM_EC_MIN_BITS; *mx = FHSM_EC_MAX_BITS; return; }
+    if (!strcmp(fam, "RSA"))     { *mn = rsa_min_bits(); *mx = FHSM_RSA_MAX_BITS; return; }
+    if (!strcmp(fam, "EC"))      { *mn = ec_min_bits(); *mx = FHSM_EC_MAX_BITS; return; }
+    if (!strcmp(fam, "EdDSA") || !strcmp(fam, "ECM"))
+                                 { *mn = 256u; *mx = FHSM_EC_MAX_BITS; return; }
     if (!strcmp(fam, "HMAC") || !strcmp(fam, "KMAC") || !strcmp(fam, "GENERIC")
         || !strcmp(fam, "SP800-108"))
                                  { *mn = 1;    *mx = 64;   return; }
@@ -7338,7 +7358,8 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
  * cannot be declared here. */
 
 /* ---------------------------------------------------------------------------
- * C_GenerateKeyPair --- RSA-2048/3072/4096 or ECDSA P-256/P-384/P-521.
+ * C_GenerateKeyPair --- RSA from rsa_min_bits() to 8192 bits in steps of 512,
+ * or an EC curve from ec_min_bits() to 521 bits.
  *
  * Both keys are stored in the token's object store. The private key is
  * marked FHSM_OBJF_SENSITIVE so C_GetAttributeValue cannot extract it.
@@ -7765,16 +7786,17 @@ static const char *match_curve_ex(const uint8_t *der, size_t len,
      * (TestECKeySizeBoundary::test_ec_below_min_is_refused, 2026-09-28).
      *
      * Two conditions, both taken from what the module says of itself:
-     *   - degree inside [FHSM_EC_MIN_BITS, FHSM_EC_MAX_BITS];
+     *   - degree inside [ec_min_bits(), FHSM_EC_MAX_BITS];
      *   - a prime field. Brainpool is prime, as are the three NIST curves in
      *     the table; the binary-field sect and c2pnb families were never
      *     intended here and nothing advertises them. Accepting them would be
      *     the same contradiction by another route.
-     * Brainpool P256 through P512 survive; P160 through P224 do not. */
+     * Brainpool P256 through P512 survive everywhere, and P192 and P224 too
+     * where ec_min_bits() is 192; P160 never does. */
     int deg = EC_GROUP_get_degree(g);
     int prime = (EC_GROUP_get_field_type(g) == NID_X9_62_prime_field);
     EC_GROUP_free(g);
-    if (!prime || deg < (int)FHSM_EC_MIN_BITS || deg > (int)FHSM_EC_MAX_BITS)
+    if (!prime || deg < (int)ec_min_bits() || deg > (int)FHSM_EC_MAX_BITS)
         return NULL;
     /* SM2 passes both tests -- prime, 256 bits -- and is refused anyway. Its
      * curve is meant for the SM2 signature scheme, which has its own signing
@@ -8077,8 +8099,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (!pPub[i].pValue || pPub[i].ulValueLen != sizeof(CK_ULONG))
             return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         long bits = (long)(*(CK_ULONG*)pPub[i].pValue);
-        if (bits != 2048 && bits != 3072 && bits != 4096
-            && !(bits == 1024 && rsa_min_bits() == 1024))
+        if (bits < (long)rsa_min_bits() || bits > (long)FHSM_RSA_MAX_BITS
+            || bits % (long)FHSM_RSA_STEP_BITS != 0)
             return FHSM_RV_KEY_SIZE_RANGE;
         /* CKA_PUBLIC_EXPONENT, when supplied, is the key's exponent (§6.1.4).
          * It was checked and then replaced by F4: a template asking 65539
@@ -13017,7 +13039,10 @@ static size_t sig_family_bound(uint32_t mech) {
      * is checked before hmldsa_is(), which would give it ML-DSA's bound. */
     if (mech == CKM_SLH_DSA_OP || hm_slh(mech)) return 65536u;
     if (mech == CKM_ML_DSA_OP || hmldsa_is(mech)) return 8192u;
-    return 512u;
+    /* RSA-8192 signs in 1024 bytes. This was 512, RSA-4096's, so a larger
+     * key -- imported, since generation stopped at 4096 -- failed to sign
+     * into the scratch. ECDSA's DER intermediate is well under it. */
+    return 1024u;
 }
 
 static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
@@ -13340,7 +13365,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
     /* Asymmetric : query buffer size if pSignature == NULL. We return a
      * conservative upper bound by family :
      *   ECDSA-P521        ≈ 140 octets
-     *   RSA-4096          = 512 octets
+     *   RSA-8192          = 1024 octets
      *   ML-DSA-87         ≈ 4627 octets
      *   SLH-DSA-256f      ≈ 49856 octets
      * The 64KB worst-case is allocated once by the caller and is

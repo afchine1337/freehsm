@@ -112,6 +112,19 @@ FALSE. That is a deviation, kept because pkcs11-tool asks for such usages
 by default: `CKA_DERIVE` for an Edwards key pair, `CKA_SIGN` for a
 Montgomery one, `CKA_DECRYPT` for any private key it unwraps.
 
+## More EC curves and RSA sizes
+
+- **EC.** The all-mechanisms build in permissive mode takes Weierstrass
+  curves from 192 bits: P-192, P-224 and their neighbours. The
+  nist-approved-only build and the strict mode keep the 256-bit floor.
+  `C_GetMechanismInfo` states which applies.
+- **RSA.** Keys are generated from 1024 bits in permissive mode, 2048
+  otherwise, up to 8192 bits, in steps of 512. Only 2048, 3072 and 4096
+  were taken.
+- **Signing with an RSA key over 4096 bits** works. It failed, the
+  signature buffer having been sized for RSA-4096; an imported key could
+  already be that large.
+
 ## What did not work
 
 - **`C_SetPIN` changes a PIN** (#36). It failed in every session state. An
@@ -198,11 +211,12 @@ New: `tests/test_set_pin.c`, `tests/test_gcm_multipart_decrypt.c`,
 `tests/test_single_part_after_update.c`, `tests/test_usage_defaults.c`,
 `tests/test_len_and_param_rv.c`, `tests/test_class_type_checks.c`,
 `tests/test_store_v5.c` and `tests/test_v4_fixture.c`, with the fixture
-`tests/fixtures/token-v4.tok` written by v2.7.0. Extended:
-`tests/test_private_attr.c`, `tests/test_template_checks.c` and
-`tests/test_finalize_release.c`. python-pkcs11's own suite passes against
-this release but for tests that need what FreeHSM does not offer by design:
-`C_SeedRandom`, and the P-192 curve.
+`tests/fixtures/token-v4.tok` written by v2.7.0. Also new:
+`tests/test_key_sizes.c`. Extended: `tests/test_private_attr.c`,
+`tests/test_template_checks.c` and `tests/test_finalize_release.c`. python-pkcs11's own suite passes against
+this release but for one that needs what FreeHSM does not offer by design,
+`C_SeedRandom`. Its P-192 test passes in the all-mechanisms build in
+permissive mode.
 
 `make tests` in both profiles, green. pkcs11-check 0.2.3: every failure is
 listed in `tests/pkcs11_check_known_failures.txt`, 31 in `all-mechanisms`

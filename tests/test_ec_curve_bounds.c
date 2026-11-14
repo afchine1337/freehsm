@@ -4,7 +4,8 @@
  * ===========================================================================
  * test_ec_curve_bounds.c --- the EC curves accepted are the ones advertised.
  *
- * C_GetMechanismInfo(CKM_EC_KEY_PAIR_GEN) reports 256..521 bits. Until
+ * C_GetMechanismInfo(CKM_EC_KEY_PAIR_GEN) reports 256..521 bits (192..521
+ * in all-mechanisms outside FIPS mode, since 2.8.0). Until
  * 2026-09-28 an all-mechanisms build accepted any curve in OpenSSL's registry
  * -- 82 on the build host, from secp112r1 to sect571k1 -- because
  * match_curve_ex() handed everything outside its three-entry table to
@@ -89,10 +90,19 @@ int main(void) {
     printf("test_ec_curve_bounds : profile = %s\n",
            strict ? "nist-approved-only" : "all-mechanisms");
 
+    /* The floor is ec_min_bits(): 256 in nist-approved-only or in FIPS mode,
+     * 192 in all-mechanisms otherwise (since 2.8.0). Either way the curves
+     * accepted below must agree with what is advertised here. */
     CK_MECHANISM_INFO info = {0};
-    ok(GMI(0, CKM_EC_KEY_PAIR_GEN, &info) == 0
-       && info.ulMinKeySize == 256 && info.ulMaxKeySize == 521,
-       "CKM_EC_KEY_PAIR_GEN advertises 256..521 bits");
+    CK_RV gr = GMI(0, CKM_EC_KEY_PAIR_GEN, &info);
+    if (strict)
+        ok(gr == 0 && info.ulMinKeySize == 256 && info.ulMaxKeySize == 521,
+           "CKM_EC_KEY_PAIR_GEN advertises 256..521 bits");
+    else
+        ok(gr == 0 && (info.ulMinKeySize == 192 || info.ulMinKeySize == 256)
+           && info.ulMaxKeySize == 521,
+           "CKM_EC_KEY_PAIR_GEN advertises 192..521 or, in FIPS mode, 256..521 bits");
+    printf("  (advertised: %lu..%lu)\n", info.ulMinKeySize, info.ulMaxKeySize);
 
     /* In range, NIST: accepted in both profiles. */
     ok(keygen(s, "\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07", 10) == 0,

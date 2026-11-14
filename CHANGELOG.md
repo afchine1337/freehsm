@@ -39,6 +39,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `test_import_ca_certificate`. `tests/test_store_v5.c`, (C).
 
 ### Changed
+* **More EC curves and RSA sizes.** In the all-mechanisms build in
+  permissive mode, Weierstrass curves are taken from 192 bits, where 256
+  was the floor: P-192, P-224, brainpoolP192 and P224, secp192k1 and
+  secp224k1, and the X9.62 192 and 239-bit curves. They are not approved,
+  and the nist-approved-only build and the strict mode keep the 256-bit
+  floor, which `C_GetMechanismInfo` states. RSA keys are generated from the
+  minimum (1024 bits in permissive mode, 2048 otherwise) to 8192 bits in
+  steps of 512, where 2048, 3072 and 4096 alone were taken; the stated
+  maximum is 8192. A signature with an RSA key over 4096 bits failed, since
+  the scratch buffer was sized for RSA-4096; it is sized for RSA-8192 now.
+  That also concerned imported keys, whose size was never limited.
+  `tests/test_key_sizes.c`; `tests/test_ec_curve_refusal.c` now uses
+  secp160r1 as its curve refused everywhere.
 * **The token file is written in a new format, v5.** The two attributes
   above and the two certificate hashes below needed a field each: 208
   bytes per object, after the per-object

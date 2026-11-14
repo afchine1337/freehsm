@@ -13,7 +13,9 @@
  * 2026-10-21).
  *
  * The curves used are refused in every build and profile, so the test means
- * the same everywhere: secp224r1 is under FHSM_EC_MIN_BITS, sect283k1 is a
+ * the same everywhere: secp160r1 is under the 192 bits of the smallest
+ * lower bound (it was secp224r1, under 256, until 2.8.0 let the all-mechanisms
+ * build take curves from 192 bits), sect283k1 is a
  * binary field. What is asserted:
  *   (1) C_CreateObject, EC private key on either: CKR_CURVE_NOT_SUPPORTED
  *   (2) C_CreateObject, EC public key on either: CKR_CURVE_NOT_SUPPORTED
@@ -54,7 +56,7 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define USER_PIN "userpin1234"
 
 static const struct { const char *name; CK_BYTE der[16]; CK_ULONG len; CK_RV want; } PARAMS[] = {
-    { "secp224r1 (224 bits)",  { 0x06,0x05,0x2B,0x81,0x04,0x00,0x21 }, 7, CKR_CURVE_NOT_SUPPORTED },
+    { "secp160r1 (160 bits)",  { 0x06,0x05,0x2B,0x81,0x04,0x00,0x08 }, 7, CKR_CURVE_NOT_SUPPORTED },
     { "sect283k1 (binary)",    { 0x06,0x05,0x2B,0x81,0x04,0x00,0x10 }, 7, CKR_CURVE_NOT_SUPPORTED },
     { "the OID of SHA-256",    { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01 }, 11,
                                CKR_ATTRIBUTE_VALUE_INVALID },
