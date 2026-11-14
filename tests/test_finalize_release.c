@@ -27,6 +27,13 @@
  * Case (0), added for #32: a second C_Initialize before C_Finalize answered
  * CKR_FUNCTION_FAILED (the state machine refusing the transition) instead of
  * CKR_CRYPTOKI_ALREADY_INITIALIZED.
+ *
+ * Case (00), added for 2.8.0: between C_Finalize and C_Initialize the module
+ * answered as if nothing had happened -- C_GetSlotList and C_GetInfo gave
+ * CKR_OK, and a second C_Finalize too. They answer
+ * CKR_CRYPTOKI_NOT_INITIALIZED now; C_GetFunctionList, which an application
+ * calls before C_Initialize, still answers. Found by python-pkcs11's
+ * test_finalize.
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -42,6 +49,7 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKR_USER_ALREADY_LOGGED_IN   0x100UL
 #define CKR_SESSION_HANDLE_INVALID   0xB3UL
 #define CKR_CRYPTOKI_ALREADY_INITIALIZED 0x191UL
+#define CKR_CRYPTOKI_NOT_INITIALIZED 0x190UL
 #define CKF_RW                       6UL
 #define CKA_CLASS                    0UL
 #define CKA_TOKEN                    1UL
@@ -134,6 +142,30 @@ int main(void)
        "(0) and the login it found still holds");
 
     C_Finalize(NULL);
+
+    /* (00) Between C_Finalize and C_Initialize. */
+    {
+        CK_RV (*gsl)(CK_BYTE, CK_SLOT_ID*, CK_ULONG*);
+        CK_RV (*gi)(void*);
+        CK_RV (*gfl)(void**);
+        *(void**)&gsl = dlsym(lib, "C_GetSlotList");
+        *(void**)&gi  = dlsym(lib, "C_GetInfo");
+        *(void**)&gfl = dlsym(lib, "C_GetFunctionList");
+        CK_ULONG n = 0;
+        CK_BYTE info[256];
+        void *fl = NULL;
+        CK_SESSION_HANDLE sx = 0;
+        ok(gsl && gsl(0, NULL, &n) == CKR_CRYPTOKI_NOT_INITIALIZED,
+           "(00) C_GetSlotList: CKR_CRYPTOKI_NOT_INITIALIZED");
+        ok(gi && gi(info) == CKR_CRYPTOKI_NOT_INITIALIZED,
+           "(00) C_GetInfo: the same");
+        ok(C_OpenSession(0, CKF_RW, NULL, NULL, &sx) == CKR_CRYPTOKI_NOT_INITIALIZED,
+           "(00) C_OpenSession: the same");
+        ok(C_Finalize(NULL) == CKR_CRYPTOKI_NOT_INITIALIZED,
+           "(00) a second C_Finalize: the same");
+        ok(gfl && gfl(&fl) == CKR_OK && fl != NULL,
+           "(00) C_GetFunctionList still answers");
+    }
 
     /* (1) The point of the change. This answered CKR_USER_ALREADY_LOGGED_IN:
      *     the token object and its authenticated state outlived the library,

@@ -231,7 +231,9 @@ typedef enum {
     FHSM_OBJ_META_START_DATE = 0,
     FHSM_OBJ_META_END_DATE   = 1,
     FHSM_OBJ_META_APPLICATION = 2,
-    FHSM_OBJ_META_OBJECT_ID   = 3
+    FHSM_OBJ_META_OBJECT_ID   = 3,
+    FHSM_OBJ_META_HASH_SUBJECT_PUBKEY = 4,
+    FHSM_OBJ_META_HASH_ISSUER_PUBKEY  = 5
 } fhsm_obj_meta_t;
 
 /* CKA_START_DATE / CKA_END_DATE / CKA_APPLICATION. NOT persisted: the object
@@ -252,6 +254,16 @@ fhsm_rv_t fhsm_token_object_get_meta(fhsm_token_t *t, uint32_t handle,
 #define FHSM_OBJ_OBJECT_ID_MAX 64u
 fhsm_rv_t fhsm_token_object_set_object_id(fhsm_token_t *t, uint32_t handle,
                                           const uint8_t *oid, size_t oid_len);
+
+/* CKA_HASH_OF_SUBJECT_PUBLIC_KEY and CKA_HASH_OF_ISSUER_PUBLIC_KEY of a
+ * certificate, at most FHSM_OBJ_CERT_HASH_MAX bytes each, stored as given.
+ * Persisted by the v5 record. `which` is FHSM_OBJ_META_HASH_SUBJECT_PUBKEY or
+ * FHSM_OBJ_META_HASH_ISSUER_PUBKEY; read with fhsm_token_object_get_meta.
+ * Empty when never set, the attributes' default. */
+#define FHSM_OBJ_CERT_HASH_MAX 64u
+fhsm_rv_t fhsm_token_object_set_cert_hash(fhsm_token_t *t, uint32_t handle,
+                                          fhsm_obj_meta_t which,
+                                          const uint8_t *h, size_t h_len);
 
 /* CKA_KEY_GEN_MECHANISM: the mechanism that generated the key, recorded by
  * C_GenerateKey and C_GenerateKeyPair. Persisted by the v5 record. *out_set

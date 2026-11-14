@@ -2,8 +2,7 @@
  * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
  * SPDX-License-Identifier: Apache-2.0
  * ===========================================================================
- * test_store_v5.c --- the two attributes the v5 record holds, through
- * PKCS#11.
+ * test_store_v5.c --- the attributes the v5 record holds, through PKCS#11.
  *
  *   (O) CKA_OBJECT_ID of a data object (#38, and #33 C10): kept at creation,
  *       read back, matched by C_FindObjects, changed by C_SetAttributeValue,
@@ -13,8 +12,13 @@
  *       C_GenerateKey or C_GenerateKeyPair was called with, on both halves
  *       of a pair, carried by a copy, CK_UNAVAILABLE_INFORMATION for an
  *       imported key, and not an attribute of a data object;
- *   (R) both are still there after C_Finalize and C_Initialize: they are in
- *       the token file, not only in memory.
+ *   (C) CKA_HASH_OF_SUBJECT_PUBLIC_KEY and CKA_HASH_OF_ISSUER_PUBLIC_KEY of
+ *       a certificate: kept at creation and read back (they were accepted and
+ *       dropped), empty when never set, matched by C_FindObjects, read-only
+ *       afterwards, carried by C_CopyObject, refused past 64 bytes, and not
+ *       attributes of a key;
+ *   (R) all of them are still there after C_Finalize and C_Initialize: they
+ *       are in the token file, not only in memory.
  * tests/test_v4_fixture.c covers the record itself and the older files.
  * ======================================================================== */
 #include <dlfcn.h>
@@ -38,6 +42,11 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKU_USER                       1UL
 #define CKO_DATA                       0UL
 #define CKO_SECRET_KEY                 4UL
+#define CKO_CERTIFICATE                1UL
+#define CKC_X_509                      0UL
+#define CKA_CERTIFICATE_TYPE           0x080UL
+#define CKA_HASH_OF_SUBJECT_PUBLIC_KEY 0x08AUL
+#define CKA_HASH_OF_ISSUER_PUBLIC_KEY  0x08BUL
 #define CKK_AES                        0x1FUL
 #define CKA_CLASS                      0x000UL
 #define CKA_TOKEN                      0x001UL
@@ -90,6 +99,24 @@ static CK_BYTE p256[] = { 0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07 };
 static CK_BYTE lbl_data[] = { 'v','5','-','d','a','t','a' };
 static CK_BYTE lbl_key[]  = { 'v','5','-','k','e','y' };
 static CK_BYTE val[]      = { 'v','a','l','u','e' };
+static CK_BYTE lbl_cert[] = { 'v','5','-','c','e','r','t' };
+/* The module stores a certificate's CKA_VALUE without parsing it, so any
+ * bytes do for these cases. */
+static CK_BYTE certder[]  = { 0x30, 0x03, 0x02, 0x01, 0x00 };
+static CK_BYTE hsubj[20]  = { 0xF9,0xC1,0xB6,0xE3,0x43,0xF3,0xCF,0x4C,0xBA,0x8A,
+                              0x0B,0x66,0x86,0x79,0x35,0xFB,0x52,0x85,0xBF,0xA8 };
+static CK_BYTE hiss[32]   = { 0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,
+                              0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x01,0x02,0x03,0x04,
+                              0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,
+                              0x0F,0x10 };
+
+/* Attribute `type` of h is exactly `want` (wl bytes). */
+static int bytes_attr_is(CK_OBJECT_HANDLE h, CK_ULONG type, const CK_BYTE *want, CK_ULONG wl) {
+    CK_BYTE b[80];
+    CK_ATTRIBUTE q = { type, b, sizeof b };
+    return C_GetAttributeValue(s, h, &q, 1) == CKR_OK && q.ulValueLen == wl
+        && (wl == 0 || memcmp(b, want, wl) == 0);
+}
 
 /* Objects matching the template; *first is the first of them. */
 static CK_ULONG find(CK_ATTRIBUTE *t, CK_ULONG n, CK_OBJECT_HANDLE *first) {
@@ -241,6 +268,55 @@ int main(void)
     ok(get_kgm(d, &m) == CKR_ATTRIBUTE_TYPE_INVALID,
        "CKA_KEY_GEN_MECHANISM of a data object: CKR_ATTRIBUTE_TYPE_INVALID");
 
+    printf("\n(C) the hashes of a certificate\n");
+    CK_ULONG certc = CKO_CERTIFICATE, x509 = CKC_X_509;
+    CK_OBJECT_HANDLE c = 0, c0 = 0;
+    { CK_ATTRIBUTE t[] = { { CKA_CLASS, &certc, sizeof certc },
+                           { CKA_CERTIFICATE_TYPE, &x509, sizeof x509 },
+                           { CKA_TOKEN, &yes, 1 }, { CKA_LABEL, lbl_cert, sizeof lbl_cert },
+                           { CKA_VALUE, certder, sizeof certder },
+                           { CKA_HASH_OF_SUBJECT_PUBLIC_KEY, hsubj, sizeof hsubj },
+                           { CKA_HASH_OF_ISSUER_PUBLIC_KEY, hiss, sizeof hiss } };
+      rv = C_CreateObject(s, t, 7, &c);
+      ok(rv == CKR_OK && c != 0, "C_CreateObject of a certificate with both hashes: CKR_OK"); }
+    ok(bytes_attr_is(c, CKA_HASH_OF_SUBJECT_PUBLIC_KEY, hsubj, sizeof hsubj)
+       && bytes_attr_is(c, CKA_HASH_OF_ISSUER_PUBLIC_KEY, hiss, sizeof hiss),
+       "both read back as given");
+    { CK_ATTRIBUTE t[] = { { CKA_CLASS, &certc, sizeof certc },
+                           { CKA_CERTIFICATE_TYPE, &x509, sizeof x509 },
+                           { CKA_TOKEN, &no, 1 }, { CKA_VALUE, certder, sizeof certder } };
+      rv = C_CreateObject(s, t, 4, &c0);
+      ok(rv == CKR_OK && bytes_attr_is(c0, CKA_HASH_OF_SUBJECT_PUBLIC_KEY, NULL, 0)
+         && bytes_attr_is(c0, CKA_HASH_OF_ISSUER_PUBLIC_KEY, NULL, 0),
+         "a certificate made without them has both empty"); }
+    { CK_ATTRIBUTE f[] = { { CKA_HASH_OF_SUBJECT_PUBLIC_KEY, hsubj, sizeof hsubj } };
+      ok(find(f, 1, &h) == 1 && h == c, "C_FindObjects by CKA_HASH_OF_SUBJECT_PUBLIC_KEY finds it"); }
+    { CK_ATTRIBUTE a = { CKA_HASH_OF_ISSUER_PUBLIC_KEY, hsubj, sizeof hsubj };
+      ok(C_SetAttributeValue(s, c, &a, 1) == CKR_ATTRIBUTE_READ_ONLY
+         && bytes_attr_is(c, CKA_HASH_OF_ISSUER_PUBLIC_KEY, hiss, sizeof hiss),
+         "C_SetAttributeValue of one: CKR_ATTRIBUTE_READ_ONLY, nothing changes"); }
+    { CK_ATTRIBUTE ct = { CKA_TOKEN, &no, 1 };
+      cp = 0; rv = C_CopyObject(s, c, &ct, 1, &cp);
+      ok(rv == CKR_OK && bytes_attr_is(cp, CKA_HASH_OF_SUBJECT_PUBLIC_KEY, hsubj, sizeof hsubj)
+         && bytes_attr_is(cp, CKA_HASH_OF_ISSUER_PUBLIC_KEY, hiss, sizeof hiss),
+         "C_CopyObject carries both"); }
+    { CK_BYTE big[65]; memset(big, 0x5A, sizeof big);
+      CK_ATTRIBUTE t[] = { { CKA_CLASS, &certc, sizeof certc },
+                           { CKA_CERTIFICATE_TYPE, &x509, sizeof x509 },
+                           { CKA_TOKEN, &no, 1 }, { CKA_VALUE, certder, sizeof certder },
+                           { CKA_HASH_OF_SUBJECT_PUBLIC_KEY, big, sizeof big } };
+      h = 0; rv = C_CreateObject(s, t, 5, &h);
+      ok(rv == CKR_ATTRIBUTE_VALUE_INVALID && h == 0, "65 bytes: CKR_ATTRIBUTE_VALUE_INVALID, no object"); }
+    { CK_BYTE hb[80]; CK_ATTRIBUTE q = { CKA_HASH_OF_SUBJECT_PUBLIC_KEY, hb, sizeof hb };
+      ok(C_GetAttributeValue(s, k, &q, 1) == CKR_ATTRIBUTE_TYPE_INVALID,
+         "CKA_HASH_OF_SUBJECT_PUBLIC_KEY of a key: CKR_ATTRIBUTE_TYPE_INVALID");
+      CK_BYTE v[16]; memset(v, 0x44, sizeof v);
+      CK_ATTRIBUTE t[] = { { CKA_CLASS, &secc, sizeof secc }, { CKA_KEY_TYPE, &aesk, sizeof aesk },
+                           { CKA_TOKEN, &no, 1 }, { CKA_VALUE, v, sizeof v },
+                           { CKA_HASH_OF_ISSUER_PUBLIC_KEY, hiss, sizeof hiss } };
+      h = 0; rv = C_CreateObject(s, t, 5, &h);
+      ok(rv == CKR_ATTRIBUTE_TYPE_INVALID && h == 0, "and in the template of a key, the same"); }
+
     printf("\n(R) after C_Finalize and C_Initialize\n");
     C_Finalize(NULL);
     if (C_Initialize(NULL) || !open_user()) { fprintf(stderr, "reopen\n"); return 2; }
@@ -253,6 +329,13 @@ int main(void)
       ok(d && oid_is(d, oid2, sizeof oid2), "the data object has the CKA_OBJECT_ID last set");
       ok(k && get_kgm(k, &m) == CKR_OK && m == CKM_AES_KEY_GEN,
          "the key has its CKA_KEY_GEN_MECHANISM"); }
+    { CK_ATTRIBUTE fc[] = { { CKA_CLASS, &certc, sizeof certc },
+                            { CKA_LABEL, lbl_cert, sizeof lbl_cert } };
+      c = 0;
+      ok(find(fc, 2, &c) == 1
+         && bytes_attr_is(c, CKA_HASH_OF_SUBJECT_PUBLIC_KEY, hsubj, sizeof hsubj)
+         && bytes_attr_is(c, CKA_HASH_OF_ISSUER_PUBLIC_KEY, hiss, sizeof hiss),
+         "the certificate has both hashes"); }
 
     C_Finalize(NULL);
     printf("\n%s\n", fails ? "FAILURES" : "all good");

@@ -28,9 +28,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
   generators do. `C_FindObjects` matches it; it stays read-only.
   Reported by Alexandre Laroche. `tests/test_store_v5.c`.
 
+* **A certificate keeps `CKA_HASH_OF_SUBJECT_PUBLIC_KEY` and
+  `CKA_HASH_OF_ISSUER_PUBLIC_KEY`.** Both were accepted at creation and then
+  answered `CKR_ATTRIBUTE_TYPE_INVALID` when read: the token file had no
+  field for them. They are now stored as given, at most 64 bytes each, read
+  back, matched by `C_FindObjects` and carried by `C_CopyObject`. They are
+  fixed once the certificate exists: `C_SetAttributeValue` answers
+  `CKR_ATTRIBUTE_READ_ONLY`. On any other class they are
+  `CKR_ATTRIBUTE_TYPE_INVALID`. Found by python-pkcs11's
+  `test_import_ca_certificate`. `tests/test_store_v5.c`, (C).
+
 ### Changed
 * **The token file is written in a new format, v5.** The two attributes
-  above needed a field each: 72 bytes per object, after the per-object
+  above and the two certificate hashes below needed a field each: 208
+  bytes per object, after the per-object
   policy. **Compatibility:** tokens written by any earlier version are read
   as before, and are rewritten as v5 at their first change. The reverse does
   not hold: 2.7.0 cannot use a token that 2.8.0 has written. The login
@@ -91,6 +102,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Reported by Alexandre Laroche. `tests/test_usage_defaults.c`.
 
 ### Fixed
+* **Outside `C_Initialize` and `C_Finalize`, the module says it is not
+  initialized.** It never answered `CKR_CRYPTOKI_NOT_INITIALIZED`: the code
+  was defined and returned nowhere. After `C_Finalize`, `C_GetSlotList`,
+  `C_GetInfo` and the rest went on answering `CKR_OK`, and so did a second
+  `C_Finalize`. Every function but `C_Initialize`, `C_GetFunctionList` and
+  the interface functions now answers `CKR_CRYPTOKI_NOT_INITIALIZED` there
+  (§5.4). **Compatibility:** an application that called the module before
+  `C_Initialize`, or after `C_Finalize`, gets that code instead of an
+  answer. Found by python-pkcs11's `test_finalize`.
+  `tests/test_finalize_release.c`, case (00).
+* **The EC mechanisms state what they take.** `C_GetMechanismInfo` set none
+  of the EC capability flags, so a caller reading them concluded that no
+  named curve was accepted. The Weierstrass EC mechanisms now report
+  `CKF_EC_F_P`, `CKF_EC_OID` (the v2.40 `CKF_EC_NAMEDCURVE`) and
+  `CKF_EC_UNCOMPRESS`: prime curves, named by OID, points uncompressed.
+  Edwards and Montgomery mechanisms are unchanged. Found by python-pkcs11's
+  `test_get_mechanism_info_ec`.
 * **`C_SetPIN` changes a PIN (#36).** It could not, in any session state.
   A session that was not logged in was refused with
   `CKR_USER_NOT_LOGGED_IN`, and a logged-in one got

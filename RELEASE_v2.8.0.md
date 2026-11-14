@@ -10,8 +10,9 @@ Laroche's retest of 2.7.0 (#34 to #38, and three neighbours of #33): two
 functions that did not work, `C_SetPIN` and AES-GCM decryption in parts;
 key usages that now follow the key type; templates that are now followed;
 and refusals that now carry the return code that names what is wrong.
-`CKA_OBJECT_ID` and `CKA_KEY_GEN_MECHANISM` are now stored, which takes a
-new token file format.
+`CKA_OBJECT_ID`, `CKA_KEY_GEN_MECHANISM` and two certificate hashes are now
+stored, which takes a new token file format. Running python-pkcs11's test
+suite against FreeHSM found three more items, fixed here as well.
 
 **Upgrade.** Three things to read before upgrading:
 
@@ -51,7 +52,12 @@ plain generators do.
   decapsulated reads `CK_UNAVAILABLE_INFORMATION`. So does a key generated
   by 2.7.0 or earlier, whose mechanism was never stored.
 
-The v5 record is the v4 one with 72 more bytes per object. The magic
+- A certificate keeps `CKA_HASH_OF_SUBJECT_PUBLIC_KEY` and
+  `CKA_HASH_OF_ISSUER_PUBLIC_KEY`. Both were accepted at creation and could
+  not be read back. They are stored as given, at most 64 bytes each, and
+  fixed once the certificate exists.
+
+The v5 record is the v4 one with 208 more bytes per object. The magic
 changes, so a build that predates v5 does not load the objects, and so
 cannot rewrite them without the new fields. Checked with 2.7.0: the login
 succeeds, the search answers `CKR_USER_NOT_LOGGED_IN`, and the file is
@@ -127,6 +133,22 @@ Montgomery one, `CKA_DECRYPT` for any private key it unwraps.
   its own Init named. It took a failed call by the application itself, in
   the same session. Found while testing the item above.
 
+## What python-pkcs11 found
+
+Running python-pkcs11's test suite against FreeHSM, ahead of a proposal to
+add FreeHSM to its CI, found three items beyond the certificate hashes
+above.
+
+- **`CKR_CRYPTOKI_NOT_INITIALIZED`.** The module never answered it. After
+  `C_Finalize`, `C_GetSlotList`, `C_GetInfo` and the rest went on answering
+  `CKR_OK`. Every function but `C_Initialize`, `C_GetFunctionList` and the
+  interface functions now answers `CKR_CRYPTOKI_NOT_INITIALIZED` before
+  `C_Initialize` and after `C_Finalize`. An application that called the
+  module there gets that code instead of an answer.
+- **EC capability flags.** `C_GetMechanismInfo` now reports `CKF_EC_F_P`,
+  `CKF_EC_OID` and `CKF_EC_UNCOMPRESS` for the Weierstrass EC mechanisms.
+  It reported none, which read as "no named curve".
+
 ## Answers that change
 
 **Templates that are now refused.**
@@ -177,7 +199,10 @@ New: `tests/test_set_pin.c`, `tests/test_gcm_multipart_decrypt.c`,
 `tests/test_len_and_param_rv.c`, `tests/test_class_type_checks.c`,
 `tests/test_store_v5.c` and `tests/test_v4_fixture.c`, with the fixture
 `tests/fixtures/token-v4.tok` written by v2.7.0. Extended:
-`tests/test_private_attr.c` and `tests/test_template_checks.c`.
+`tests/test_private_attr.c`, `tests/test_template_checks.c` and
+`tests/test_finalize_release.c`. python-pkcs11's own suite passes against
+this release but for tests that need what FreeHSM does not offer by design:
+`C_SeedRandom`, and the P-192 curve.
 
 `make tests` in both profiles, green. pkcs11-check 0.2.3: every failure is
 listed in `tests/pkcs11_check_known_failures.txt`, 31 in `all-mechanisms`

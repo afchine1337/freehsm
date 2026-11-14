@@ -199,6 +199,13 @@ typedef struct fhsm_object_s {
     uint8_t  keygen_set;
     uint8_t  object_id_len;
     uint8_t  object_id[FHSM_OBJ_OBJECT_ID_MAX];
+    /* A certificate's CKA_HASH_OF_SUBJECT_PUBLIC_KEY and
+     * CKA_HASH_OF_ISSUER_PUBLIC_KEY, also in the v5 record. Empty by default,
+     * as CKA_OBJECT_ID is, so a length is all that presence needs. */
+    uint8_t  hash_subj_len;
+    uint8_t  hash_subj[FHSM_OBJ_CERT_HASH_MAX];
+    uint8_t  hash_iss_len;
+    uint8_t  hash_iss[FHSM_OBJ_CERT_HASH_MAX];
 } fhsm_object_t;
 
 struct fhsm_token_s {
@@ -472,8 +479,12 @@ _Static_assert(FHSM_OBJ_REC_V4_FIXED == 912u, "v4 fixed record is 912 bytes");
 _Static_assert(FHSM_POLICY_ENTRY_SZ == 8u + FHSM_POLICY_VALUE_MAX,
                "policy entry header is 8 bytes");
 
-/* v5 blob : two attributes that had no field, CKA_OBJECT_ID of a data object
- * (#38) and CKA_KEY_GEN_MECHANISM of a generated key (#37 K3).
+/* v5 blob : attributes that had no field. CKA_OBJECT_ID of a data object
+ * (#38), CKA_KEY_GEN_MECHANISM of a generated key (#37 K3), and a
+ * certificate's CKA_HASH_OF_SUBJECT_PUBLIC_KEY and
+ * CKA_HASH_OF_ISSUER_PUBLIC_KEY, which were accepted at creation and could
+ * not be read back (found by python-pkcs11's test_import_ca_certificate;
+ * added before v5 was released, so v5 has a single layout).
  *
  *   ... v4 fixed fields (912) ...
  *   key_gen_mech(4)     the CKM_ that generated the key, u32 LE
@@ -481,9 +492,14 @@ _Static_assert(FHSM_POLICY_ENTRY_SZ == 8u + FHSM_POLICY_VALUE_MAX,
  *   object_id_len(1)    <= 64
  *   pad(2)              zero
  *   object_id(64)       DER of the object identifier, over object_id_len
+ *   hash_subj_len(1)    <= 64
+ *   hash_iss_len(1)     <= 64
+ *   pad(6)              zero
+ *   hash_subj(64)       CKA_HASH_OF_SUBJECT_PUBLIC_KEY, over hash_subj_len
+ *   hash_iss(64)        CKA_HASH_OF_ISSUER_PUBLIC_KEY, over hash_iss_len
  *   value[value_len]
  *
- * = 912 + 72 = 984 bytes of fixed record.
+ * = 912 + 208 = 1120 bytes of fixed record.
  *
  * key_gen_set is a byte of its own because every mechanism number is a valid
  * value, CKM_RSA_PKCS_KEY_PAIR_GEN being zero: the field alone cannot say
@@ -498,9 +514,14 @@ _Static_assert(FHSM_POLICY_ENTRY_SZ == 8u + FHSM_POLICY_VALUE_MAX,
  * readable and load with key_gen_set and object_id_len at zero, which is what
  * those records mean. Every write emits v5. */
 #define FHSM_OBJ_BLOB_V5_MAGIC   0xF5B50005u
-#define FHSM_OBJ_REC_V5_EXT      (4u + 1u + 1u + 2u + FHSM_OBJ_OBJECT_ID_MAX)
+#define FHSM_OBJ_REC_V5_HASHES   (8u + FHSM_OBJ_OBJECT_ID_MAX)   /* offset of hash_subj_len */
+#define FHSM_OBJ_REC_V5_EXT      (FHSM_OBJ_REC_V5_HASHES + 1u + 1u + 6u \
+                                  + 2u * FHSM_OBJ_CERT_HASH_MAX)
 #define FHSM_OBJ_REC_V5_FIXED    (FHSM_OBJ_REC_V4_FIXED + FHSM_OBJ_REC_V5_EXT)
-_Static_assert(FHSM_OBJ_REC_V5_FIXED == 984u, "v5 fixed record is 984 bytes");
+_Static_assert(FHSM_OBJ_REC_V5_FIXED == 1120u, "v5 fixed record is 1120 bytes");
+_Static_assert(FHSM_OBJ_CERT_HASH_MAX <= FHSM_OBJ_LABEL_LEN,
+               "fhsm_token_object_get_meta copies the certificate hashes into a "
+               "FHSM_OBJ_LABEL_LEN buffer");
 _Static_assert(FHSM_OBJ_OBJECT_ID_MAX <= FHSM_OBJ_LABEL_LEN,
                "fhsm_token_object_get_meta copies CKA_OBJECT_ID into a "
                "FHSM_OBJ_LABEL_LEN buffer");
@@ -727,6 +748,15 @@ static size_t serialize_objects(const fhsm_token_t *t, uint8_t *out,
             p[4] = o->keygen_set ? 1 : 0;
             p[5] = n;
             memcpy(p + 8, o->object_id, n);
+            uint8_t *q = p + FHSM_OBJ_REC_V5_HASHES;
+            uint8_t hs = o->hash_subj_len > FHSM_OBJ_CERT_HASH_MAX
+                             ? (uint8_t)FHSM_OBJ_CERT_HASH_MAX : o->hash_subj_len;
+            uint8_t hi = o->hash_iss_len > FHSM_OBJ_CERT_HASH_MAX
+                             ? (uint8_t)FHSM_OBJ_CERT_HASH_MAX : o->hash_iss_len;
+            q[0] = hs;
+            q[1] = hi;
+            memcpy(q + 8, o->hash_subj, hs);
+            memcpy(q + 8 + FHSM_OBJ_CERT_HASH_MAX, o->hash_iss, hi);
         }
         memcpy(out + off + FHSM_OBJ_REC_V5_FIXED, o->value, o->value_len);
         off += rec_len;
@@ -988,6 +1018,13 @@ static fhsm_rv_t parse_objects_v4(fhsm_token_t *t, const uint8_t *buf, size_t le
             o->keygen_mech   = o->keygen_set ? get_u32_le(p + 0) : 0u;
             o->object_id_len = p[5];
             memcpy(o->object_id, p + 8, o->object_id_len);
+            const uint8_t *q = p + FHSM_OBJ_REC_V5_HASHES;
+            if (q[0] > FHSM_OBJ_CERT_HASH_MAX || q[1] > FHSM_OBJ_CERT_HASH_MAX)
+                return FHSM_RV_FUNCTION_FAILED;
+            o->hash_subj_len = q[0];
+            o->hash_iss_len  = q[1];
+            memcpy(o->hash_subj, q + 8, o->hash_subj_len);
+            memcpy(o->hash_iss, q + 8 + FHSM_OBJ_CERT_HASH_MAX, o->hash_iss_len);
         }
         if (o->value_len) {
             fhsm_rv_t ar = obj_alloc_value(o, o->value_len,
@@ -2351,6 +2388,10 @@ fhsm_rv_t fhsm_token_object_get_meta(fhsm_token_t *t, uint32_t handle,
                     src = o->application; *out_len = o->application_len; break;
                 case FHSM_OBJ_META_OBJECT_ID:
                     src = o->object_id;   *out_len = o->object_id_len;   break;
+                case FHSM_OBJ_META_HASH_SUBJECT_PUBKEY:
+                    src = o->hash_subj;   *out_len = o->hash_subj_len;   break;
+                case FHSM_OBJ_META_HASH_ISSUER_PUBKEY:
+                    src = o->hash_iss;    *out_len = o->hash_iss_len;    break;
                 default:
                     pthread_mutex_unlock(&t->mu);
                     return FHSM_RV_ARGUMENTS_BAD;
@@ -2824,6 +2865,37 @@ fhsm_rv_t fhsm_token_object_set_object_id(fhsm_token_t *t, uint32_t handle,
             memset(o->object_id, 0, sizeof o->object_id);
             if (oid_len) memcpy(o->object_id, oid, oid_len);
             o->object_id_len = (uint8_t)oid_len;
+            t->objects_dirty = 1;
+            fhsm_rv_t rv = write_atomic(t);
+            pthread_mutex_unlock(&t->mu);
+            return rv;
+        }
+    }
+    pthread_mutex_unlock(&t->mu);
+    return FHSM_RV_KEY_HANDLE_INVALID;
+}
+
+fhsm_rv_t fhsm_token_object_set_cert_hash(fhsm_token_t *t, uint32_t handle,
+                                          fhsm_obj_meta_t which,
+                                          const uint8_t *h, size_t h_len) {
+    if (!t || (h_len && !h)) return FHSM_RV_ARGUMENTS_BAD;
+    if (which != FHSM_OBJ_META_HASH_SUBJECT_PUBKEY
+        && which != FHSM_OBJ_META_HASH_ISSUER_PUBKEY) return FHSM_RV_ARGUMENTS_BAD;
+    if (h_len > FHSM_OBJ_CERT_HASH_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    pthread_mutex_lock(&t->mu);
+    if (!t->dek_live || !t->objects_loaded) {
+        pthread_mutex_unlock(&t->mu);
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        if (t->objects[i].handle == handle) {
+            fhsm_object_t *o = &t->objects[i];
+            uint8_t *dst = (which == FHSM_OBJ_META_HASH_SUBJECT_PUBKEY)
+                               ? o->hash_subj : o->hash_iss;
+            memset(dst, 0, FHSM_OBJ_CERT_HASH_MAX);
+            if (h_len) memcpy(dst, h, h_len);
+            if (which == FHSM_OBJ_META_HASH_SUBJECT_PUBKEY) o->hash_subj_len = (uint8_t)h_len;
+            else                                            o->hash_iss_len  = (uint8_t)h_len;
             t->objects_dirty = 1;
             fhsm_rv_t rv = write_atomic(t);
             pthread_mutex_unlock(&t->mu);

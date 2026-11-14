@@ -498,14 +498,17 @@ it is safe now for the reason it gave: no build that predates the bit reads a
 v5 record, so none can misread it. A copy may make a public secret key
 private, not the reverse (`CKR_ATTRIBUTE_READ_ONLY`).
 
-## Objects blob v5 (2.8.0 — two attributes without a field)
+## Objects blob v5 (2.8.0 — attributes without a field)
 
 `CKA_OBJECT_ID` of a data object and `CKA_KEY_GEN_MECHANISM` of a key had
 nowhere to live. The first was accepted and dropped up to 2.6.1, then refused
 in 2.7.0 (#33 C10, #38). The second could not be read at all (#37 K3): the
 key type does not tell the mechanism, since `CKM_PKCS5_PBKD2` makes AES and
-generic secret keys through `C_GenerateKey` as the plain generators do. v5 is
-v4 with a 72-byte block inserted between the policy block and the value.
+generic secret keys through `C_GenerateKey` as the plain generators do. A
+certificate's `CKA_HASH_OF_SUBJECT_PUBLIC_KEY` and
+`CKA_HASH_OF_ISSUER_PUBLIC_KEY` were accepted at creation and could not be
+read back; they were added before v5 was released, so v5 has one layout. v5
+is v4 with a 208-byte block inserted between the policy block and the value.
 
 ```
 u32  magic = 0xF5B50005
@@ -517,10 +520,22 @@ object_count x records:
     u8   object_id_len       <= 64
     u8   pad[2]              zero
     u8   object_id[64]       DER of the object identifier, over object_id_len
+    u8   hash_subj_len       <= 64
+    u8   hash_iss_len        <= 64
+    u8   pad[6]              zero
+    u8   hash_subj[64]       CKA_HASH_OF_SUBJECT_PUBLIC_KEY, over hash_subj_len
+    u8   hash_iss[64]        CKA_HASH_OF_ISSUER_PUBLIC_KEY, over hash_iss_len
     u8   value[value_len]
 ```
 
-`FHSM_OBJ_REC_V5_FIXED` = 912 + 72 = **984**, pinned by a `_Static_assert`.
+`FHSM_OBJ_REC_V5_FIXED` = 912 + 208 = **1120**, pinned by a `_Static_assert`.
+
+The two hashes are a certificate's only, stored as the caller gives them:
+the module does not recompute them from the certificate. Like
+`CKA_OBJECT_ID`, they are empty by default, so a length is all their
+presence needs. They are fixed once the certificate exists:
+`C_SetAttributeValue` and a copy template naming them answer
+`CKR_ATTRIBUTE_READ_ONLY`.
 
 Properties:
 
@@ -563,7 +578,7 @@ Properties:
   public data object carries its `CKA_OBJECT_ID` there, so it is read and
   matched before a login.
 * Loader bound: `FHSM_OBJ_BLOB_MAX` is derived from `FHSM_OBJ_REC_V5_FIXED`.
-* A 32-byte AES key record is 1 020 bytes on disk (4 + 984 + 32), against 948
+* A 32-byte AES key record is 1 156 bytes on disk (4 + 1120 + 32), against 948
   under v4.
 
 `tests/test_store_v5.c` covers both attributes through PKCS#11, across a
