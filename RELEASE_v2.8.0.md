@@ -116,8 +116,9 @@ Montgomery one, `CKA_DECRYPT` for any private key it unwraps.
 
 - **EC.** The all-mechanisms build in permissive mode takes Weierstrass
   curves from 192 bits: P-192, P-224 and their neighbours. The
-  nist-approved-only build and the strict mode keep the 256-bit floor.
-  `C_GetMechanismInfo` states which applies.
+  nist-approved-only build and the strict mode keep the 256-bit floor, and
+  so does a module whose loaded provider cannot build P-192, such as the
+  OpenSSL FIPS provider. `C_GetMechanismInfo` states which applies.
 - **RSA.** Keys are generated from 1024 bits in permissive mode, 2048
   otherwise, up to 8192 bits, in steps of 512. Only 2048, 3072 and 4096
   were taken.

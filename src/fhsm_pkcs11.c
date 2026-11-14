@@ -1651,9 +1651,18 @@ static CK_ULONG rsa_min_bits(void) {
  * module took everywhere. Below 256 bits a curve comes from OpenSSL's
  * registry, not from the table, so the nist-approved-only build refuses it
  * as non-approved whatever this says. python-pkcs11's test_derive_key uses
- * P-192. */
+ * P-192.
+ *
+ * 192 is stated only where a loaded provider can build P-192. The OpenSSL
+ * FIPS provider cannot, so a signed all-mechanisms module in permissive mode
+ * stated 192 and refused P-192 with CKR_CURVE_NOT_SUPPORTED -- the
+ * self-contradiction match_curve_ex() exists to prevent, caught by
+ * test_key_sizes in CI's test-fips-provider job on 2026-11-14. There the
+ * floor stays 256, as before 2.8.0. */
+static int fhsm_ec_group_served(const char *group);
 static unsigned ec_min_bits(void) {
-    return (fhsm_build_fips_strict || fhsm_mode_is_fips()) ? 256u : 192u;
+    if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return 256u;
+    return fhsm_ec_group_served("prime192v1") ? 192u : 256u;
 }
 
 static void fhsm_mech_keysizes_for(const char *fam,
