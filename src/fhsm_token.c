@@ -559,6 +559,7 @@ _Static_assert(FHSM_OBJ_OBJECT_ID_MAX <= FHSM_OBJ_LABEL_LEN,
 
 #define FHSM_CKO_DATA         0x00u
 
+#define FHSM_CKO_PRIVATE_KEY  0x03u
 #define FHSM_CKO_SECRET_KEY   0x04u
 
 /* CKA_PRIVATE as C_GetAttributeValue reports it: TRUE but for public keys,
@@ -619,7 +620,11 @@ static fhsm_rv_t obj_alloc_value(fhsm_object_t *o, size_t len, int sensitive) {
     o->value = NULL;
     o->value_secure = 0;
     if (len == 0) return FHSM_RV_OK;
-    if (sensitive) {
+    /* A private key goes to the secure heap whether or not it is sensitive:
+     * since 2.8.0 one may be made CKA_SENSITIVE=FALSE, which lets its value be
+     * read, and says nothing about leaving it pageable while it is held.
+     * Callers set o->class before calling. */
+    if (sensitive || o->class == FHSM_CKO_PRIVATE_KEY) {
         o->value = fhsm_secure_malloc(len);
         if (!o->value) return FHSM_RV_DEVICE_MEMORY;   /* raise secure_heap_kb */
         o->value_secure = 1;

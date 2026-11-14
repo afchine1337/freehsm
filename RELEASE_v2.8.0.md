@@ -87,6 +87,32 @@ keys. Give `--private` for a key that must need a login, and `--sensitive`
 for one that must not be written in clear. OpenSC/OpenSC#3950 proposes that
 pkcs11-tool stop sending `CKA_PRIVATE=FALSE` for secret keys.
 
+## Private keys that are not sensitive
+
+PKCS#11 leaves `CKA_SENSITIVE` to the caller. 2.7.0 refused a private key
+asked `CKA_SENSITIVE=FALSE`, with `CKR_TEMPLATE_INCONSISTENT`; earlier
+versions accepted the template and made the key sensitive anyway. It is now
+made as asked, by `C_GenerateKeyPair`, `C_CreateObject` and `C_UnwrapKey`,
+in both build profiles.
+
+- A private key that does not name `CKA_SENSITIVE` is sensitive, as before.
+- When the key is also `CKA_EXTRACTABLE=TRUE`, `C_GetAttributeValue` gives
+  its private value in the form PKCS#11 v3.2 defines: the six RSA
+  components, from `CKA_PRIVATE_EXPONENT` to `CKA_COEFFICIENT`; the scalar
+  d of an EC key in `CKA_VALUE`; the raw private key of an Edwards,
+  Montgomery, ML-KEM, ML-DSA or SLH-DSA key in `CKA_VALUE`. `CKA_SEED` is
+  not given.
+- A key that is not sensitive but not extractable withholds them:
+  `CKR_ATTRIBUTE_SENSITIVE`.
+- `CKA_SENSITIVE` can still be set to TRUE afterwards, and not back.
+- **In strict mode** the template is refused, as in 2.7.0, and no private
+  value is given, not even from a key made not sensitive in permissive mode
+  on the same token.
+- The composite ML-DSA-65 + Ed25519 key has no private value the standard
+  defines, and is refused not sensitive in every mode.
+- A private key's value is kept in the secure heap whether it is sensitive
+  or not.
+
 ## Key usages follow the key type
 
 The usages of a new private or public key came from its class alone (#34).
@@ -175,6 +201,12 @@ above.
 - `C_CreateObject` of an AES key whose value is not 16, 24 or 32 bytes:
   `CKR_ATTRIBUTE_VALUE_INVALID` (#37 K2).
 
+**Templates that are now accepted.**
+
+- A private key asked `CKA_SENSITIVE=FALSE`, outside strict mode: made as
+  asked, where 2.7.0 answered `CKR_TEMPLATE_INCONSISTENT`. See *Private keys
+  that are not sensitive*.
+
 **Return codes.**
 
 - AES-ECB or AES-CBC without padding, encrypting a partial block:
@@ -213,8 +245,9 @@ New: `tests/test_set_pin.c`, `tests/test_gcm_multipart_decrypt.c`,
 `tests/test_len_and_param_rv.c`, `tests/test_class_type_checks.c`,
 `tests/test_store_v5.c` and `tests/test_v4_fixture.c`, with the fixture
 `tests/fixtures/token-v4.tok` written by v2.7.0. Also new:
-`tests/test_key_sizes.c`. Extended: `tests/test_private_attr.c`,
-`tests/test_template_checks.c` and `tests/test_finalize_release.c`. python-pkcs11's own suite passes against
+`tests/test_key_sizes.c` and `tests/test_private_not_sensitive.c`.
+Extended: `tests/test_private_attr.c`, `tests/test_template_checks.c` and
+`tests/test_finalize_release.c`. python-pkcs11's own suite passes against
 this release but for one that needs what FreeHSM does not offer by design,
 `C_SeedRandom`. Its P-192 test passes in the all-mechanisms build in
 permissive mode.

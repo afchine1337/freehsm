@@ -10,7 +10,9 @@
  *       exponents and coefficient) was CKR_ATTRIBUTE_TYPE_INVALID: the
  *       attributes had no case at all. PKCS#11 v3.2 §5.7.5 makes it
  *       CKR_ATTRIBUTE_SENSITIVE, as a sensitive EC key's CKA_VALUE already
- *       was. Every private key here is sensitive, so they always are.
+ *       was. Since 2.8.0 a key made CKA_SENSITIVE=FALSE and extractable
+ *       gives them, outside strict mode; test_private_not_sensitive covers
+ *       that.
  *   C3  C_SetAttributeValue of an RSA public key's CKA_MODULUS was
  *       CKR_ATTRIBUTE_TYPE_INVALID, "no such attribute", for an attribute
  *       C_GetAttributeValue reads: §4.1.2, CKR_ATTRIBUTE_READ_ONLY.
@@ -21,9 +23,10 @@
  *
  * What is asserted:
  *   (1) C2: a sensitive key's six private components are
- *       CKR_ATTRIBUTE_SENSITIVE; a private key asked CKA_SENSITIVE=FALSE is
- *       not made (private keys are always sensitive here); a public key
- *       does not have them (CKR_ATTRIBUTE_TYPE_INVALID)
+ *       CKR_ATTRIBUTE_SENSITIVE; a private key asked CKA_SENSITIVE=FALSE and
+ *       extractable is made (permissive mode, the suite's) and gives its
+ *       private exponent; a public key does not have them
+ *       (CKR_ATTRIBUTE_TYPE_INVALID)
  *   (2) C3: CKA_MODULUS of the public key, CKA_PRIME_1 of the private key,
  *       CKA_VALUE_LEN of an AES key are CKR_ATTRIBUTE_READ_ONLY;
  *       CKA_MODULUS of the AES key stays CKR_ATTRIBUTE_TYPE_INVALID
@@ -145,9 +148,13 @@ int main(void) {
         for (CK_ULONG a = 0x123; a <= 0x128; a++)
             all &= get(sprv, a, &l) == CKR_ATTRIBUTE_SENSITIVE && l == (CK_ULONG)-1;
         ok(all, "(1) sensitive key: the six private components are SENSITIVE");
-        /* A private key here is always sensitive, so one asked
-         * CKA_SENSITIVE=FALSE is not made: the template is refused. */
-        ok(!rsa_pair(0, &opub, &oprv), "(1) a private key asked not sensitive is not made");
+        /* Since 2.8.0 a private key asked CKA_SENSITIVE=FALSE is made, in
+         * permissive mode, and its components are given when it is also
+         * extractable. Strict mode is test_private_not_sensitive's. */
+        ok(rsa_pair(0, &opub, &oprv), "(1) a private key asked not sensitive is made");
+        rv = get(oprv, CKA_PRIVATE_EXPONENT, &l);
+        snprintf(what, sizeof what, "(1) and gives its private exponent (0x%lx, %lu bytes)", rv, l);
+        ok(rv == CKR_OK && l > 0 && l <= 256, what);
         rv = get(spub, CKA_PRIVATE_EXPONENT, &l);
         snprintf(what, sizeof what, "(1) a public key has no private exponent: TYPE_INVALID (0x%lx)", rv);
         ok(rv == CKR_ATTRIBUTE_TYPE_INVALID, what);

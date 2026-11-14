@@ -40,9 +40,12 @@
  *       CKR_ATTRIBUTE_TYPE_INVALID. tests/test_store_v5.c has the rest.
  *   (8) C_DestroyObject of an unknown handle is CKR_OBJECT_HANDLE_INVALID,
  *       not the store's CKR_KEY_HANDLE_INVALID
- *   (9) a private key asked CKA_SENSITIVE=FALSE, generated or imported, is
- *       CKR_TEMPLATE_INCONSISTENT: private keys here are always sensitive,
- *       and the template was accepted and overridden
+ *   (9) a private key asked CKA_SENSITIVE=FALSE: refused
+ *       CKR_TEMPLATE_INCONSISTENT in 2.7.0, where it had been accepted and
+ *       overridden; made as asked since 2.8.0 outside strict mode. Here, in
+ *       the suite's permissive mode, a generated pair is made;
+ *       tests/test_private_not_sensitive.c has the rest, strict mode
+ *       included.
  *   (10) an EC or Edwards key pair without CKA_EC_PARAMS is
  *       CKR_TEMPLATE_INCOMPLETE, not a P-256 or Ed25519 key chosen silently
  * ========================================================================= */
@@ -298,14 +301,8 @@ int main(void) {
         CK_ATTRIBUTE vt[] = { { CKA_SIGN, &yes, 1 }, { CKA_SENSITIVE, &no, 1 } };
         CK_MECHANISM m = { CKM_EC_KEY_PAIR_GEN, NULL, 0 };
         rv = C_GenerateKeyPair(s, &m, pt, 2, vt, 2, &h, &h2);
-        snprintf(what, sizeof what, "(9) EC pair, private CKA_SENSITIVE=FALSE: INCONSISTENT (0x%lx)", rv);
-        ok(rv == CKR_TEMPLATE_INCONSISTENT, what);
-        CK_ULONG pc = CKO_PRIVATE_KEY, ec = 3UL /* CKK_EC */;
-        CK_ATTRIBUTE ct[] = { { CKA_CLASS, &pc, sizeof pc }, { CKA_KEY_TYPE, &ec, sizeof ec },
-                              { CKA_SENSITIVE, &no, 1 } };
-        rv = C_CreateObject(s, ct, 3, &h);
-        snprintf(what, sizeof what, "(9) imported private key, CKA_SENSITIVE=FALSE: INCONSISTENT (0x%lx)", rv);
-        ok(rv == CKR_TEMPLATE_INCONSISTENT, what);
+        snprintf(what, sizeof what, "(9) EC pair, private CKA_SENSITIVE=FALSE: made (0x%lx)", rv);
+        ok(rv == CKR_OK, what);
     }
 
     /* (10) An EC or Edwards pair without CKA_EC_PARAMS. */

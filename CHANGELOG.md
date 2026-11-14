@@ -39,14 +39,36 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `test_import_ca_certificate`. `tests/test_store_v5.c`, (C).
 
 ### Changed
+* **A private key can be made not sensitive.** PKCS#11 leaves
+  `CKA_SENSITIVE` to the caller, and a private key asked
+  `CKA_SENSITIVE=FALSE` is now made so by `C_GenerateKeyPair`,
+  `C_CreateObject` and `C_UnwrapKey`, in both build profiles. 2.7.0 refused
+  that template with `CKR_TEMPLATE_INCONSISTENT`; earlier versions accepted
+  it and made the key sensitive anyway. A key that does not name the
+  attribute is sensitive, as before. When the key is also
+  `CKA_EXTRACTABLE=TRUE`, `C_GetAttributeValue` gives its private value in
+  the form PKCS#11 v3.2 defines for its type: the six RSA components
+  (`CKA_PRIVATE_EXPONENT` to `CKA_COEFFICIENT`); for EC, the scalar d in
+  `CKA_VALUE`; for Edwards, Montgomery, ML-KEM, ML-DSA and SLH-DSA, the raw
+  private key in `CKA_VALUE`. `CKA_SEED` is not given. A key that is not
+  sensitive but not extractable withholds them, `CKR_ATTRIBUTE_SENSITIVE`.
+  `CKA_SENSITIVE` stays one-way: it can be set to TRUE afterwards, not back.
+  **In strict mode** the template is still refused, and no private value is
+  given, including from a key made not sensitive in permissive mode on the
+  same token. The composite ML-DSA-65 + Ed25519 key, which has no standard
+  private value, is refused not sensitive in every mode. A private key's
+  value stays in the secure heap whether or not it is sensitive.
+  `tests/test_private_not_sensitive.c`; `test_attr_rv`,
+  `test_template_checks` and `test_template_id` follow.
 * **More EC curves and RSA sizes.** In the all-mechanisms build in
   permissive mode, Weierstrass curves are taken from 192 bits, where 256
   was the floor: P-192, P-224, brainpoolP192 and P224, secp192k1 and
   secp224k1, and the X9.62 192 and 239-bit curves. The nist-approved-only
   build and the strict mode keep the 256-bit floor, and so does a module
   whose loaded provider cannot build P-192, such as the OpenSSL FIPS
-  provider; `C_GetMechanismInfo` states which floor applies. RSA keys are generated from the
-  minimum (1024 bits in permissive mode, 2048 otherwise) to 8192 bits in
+  provider; `C_GetMechanismInfo` states which floor applies. RSA keys are
+  generated from the minimum (1024 bits in permissive mode, 2048 otherwise)
+  to 8192 bits in
   steps of 512, where 2048, 3072 and 4096 alone were taken; the stated
   maximum is 8192. A signature with an RSA key over 4096 bits failed, since
   the scratch buffer was sized for RSA-4096; it is sized for RSA-8192 now.

@@ -2746,18 +2746,58 @@ static CK_RV fhsm_check_private_login(CK_SESSION_HANDLE hSession,
     return fhsm_check_private_login_cls(hSession, tmpl, n, 0xFFFFFFFFUL, 1);
 }
 
-/* A private key here is always sensitive: generated or imported, its value
- * leaves the token wrapped, never in clear. A template asking
- * CKA_SENSITIVE=FALSE was accepted and the key made sensitive anyway -- CKR_OK
- * for a template the module did not follow. It contradicts what the module
- * contributes, CKR_TEMPLATE_INCONSISTENT (§4.1.1), and nothing is made.
- * pkcs11-tool sends CKA_SENSITIVE=TRUE for generated and imported private keys. */
-static CK_RV fhsm_check_private_key_sensitive(CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+/* Does the template say CKA_SENSITIVE=FALSE in so many words? A private key
+ * that does not name the attribute is sensitive: the default is
+ * token-specific (PKCS#11 v3.2, the attribute tables' footnote), and this
+ * token's is TRUE. */
+static int tmpl_asks_not_sensitive(CK_ATTRIBUTE *tmpl, CK_ULONG n) {
     long si = find_attr(tmpl, n, CKA_SENSITIVE);
-    if (si >= 0 && tmpl[si].pValue && tmpl[si].ulValueLen >= 1
-        && ((unsigned char *)tmpl[si].pValue)[0] == 0)
+    return si >= 0 && tmpl[si].pValue && tmpl[si].ulValueLen >= 1
+           && ((const unsigned char *)tmpl[si].pValue)[0] == 0;
+}
+
+/* A private key asked CKA_SENSITIVE=FALSE.
+ *
+ * PKCS#11 does not forbid it, and since 2.8.0 it is honoured except in strict
+ * mode: the key is made not sensitive, and if it is also CKA_EXTRACTABLE=TRUE
+ * C_GetAttributeValue gives its private value in the form the specification
+ * defines for its type. Until then every private key here was sensitive; 2.7.0
+ * (#33) refused the template where earlier versions accepted it and made the
+ * key sensitive anyway. pkcs11-check's ML-KEM tests and its RSA-OAEP
+ * cross-verification ask for such keys (mingulov/pkcs11-check#72).
+ *
+ * In strict mode a private value never leaves the module in clear, so the
+ * template is still refused, CKR_TEMPLATE_INCONSISTENT (§4.1.1), and nothing
+ * is made. That is the runtime mode, not the build profile: a
+ * nist-approved-only build in permissive mode honours it too.
+ *
+ * The composite ML-DSA-65 + Ed25519 key is refused in every mode: the
+ * specification defines no CKA_VALUE for it, so a non-sensitive one would have
+ * nothing standard to give. Pass its key type as `kt`, or 0 where it is not
+ * known yet. */
+static CK_RV fhsm_check_private_key_sensitive_kt(CK_ATTRIBUTE *tmpl, CK_ULONG n,
+                                                 CK_ULONG kt) {
+    if (!tmpl_asks_not_sensitive(tmpl, n)) return FHSM_RV_OK;
+    if (fhsm_mode_is_fips()) return CKR_TEMPLATE_INCONSISTENT;
+    if (kt == 0x80004202UL /* CKK_COMPOSITE_MLDSA65_ED25519 */)
         return CKR_TEMPLATE_INCONSISTENT;
+    {
+        long ki = find_attr(tmpl, n, CKA_KEY_TYPE);
+        if (ki >= 0 && tmpl[ki].pValue && tmpl[ki].ulValueLen == sizeof(CK_ULONG)
+            && *(CK_ULONG *)tmpl[ki].pValue == 0x80004202UL)
+            return CKR_TEMPLATE_INCONSISTENT;
+    }
     return FHSM_RV_OK;
+}
+
+static CK_RV fhsm_check_private_key_sensitive(CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    return fhsm_check_private_key_sensitive_kt(tmpl, n, 0);
+}
+
+/* The flags a new private key starts from: sensitive unless the template
+ * asked otherwise, once fhsm_check_private_key_sensitive has let it. */
+static uint8_t private_key_sensitive_flag(CK_ATTRIBUTE *tmpl, CK_ULONG n) {
+    return tmpl_asks_not_sensitive(tmpl, n) ? 0 : FHSM_OBJF_SENSITIVE;
 }
 
 /* Apply CKA_TOKEN scope after creating an object : if the template does
@@ -4116,8 +4156,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     { CK_RV cr = fhsm_check_trusted_attr(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_bool_attr_lengths(pTemplate, ulCount);  if (cr != FHSM_RV_OK) return cr; }
     { CK_RV cr = fhsm_check_ulong_attr_lengths(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
-    /* An imported private key is sensitive whatever the template says: one
-     * asking CKA_SENSITIVE=FALSE is refused rather than quietly overridden. */
+    /* An imported private key asking CKA_SENSITIVE=FALSE: honoured, except in
+     * strict mode, where it is refused rather than quietly overridden. */
     { long ci = find_attr(pTemplate, ulCount, CKA_CLASS);
       if (ci >= 0 && pTemplate[ci].pValue && pTemplate[ci].ulValueLen == sizeof(CK_ULONG)
           && *(CK_ULONG *)pTemplate[ci].pValue == CKO_PRIVATE_KEY) {
@@ -4230,7 +4270,9 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * template asked for exactly that. A private key stays sensitive
      * whatever is asked, as before -- this only ever adds protection or the
      * extractability the caller requested. Both default to FALSE, as they
-     * did. */
+     * did. Since 2.8.0 a private key asked CKA_SENSITIVE=FALSE outside
+     * strict mode is made not sensitive, see
+     * fhsm_check_private_key_sensitive_kt. */
     int tmpl_sensitive = 0, tmpl_extractable = 0;
     {
         long ti = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
@@ -4251,7 +4293,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (a.cko == CKO_SECRET_KEY && a.ckk == CKK_AES && a.value_data
             && a.value_len != 16 && a.value_len != 24 && a.value_len != 32)
             return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-        uint8_t flags = (a.cko == CKO_PRIVATE_KEY) ? FHSM_OBJF_SENSITIVE : 0;
+        uint8_t flags = (a.cko == CKO_PRIVATE_KEY)
+                        ? private_key_sensitive_flag(pTemplate, ulCount) : 0;
         if (a.cko == CKO_SECRET_KEY && tmpl_sensitive) flags |= FHSM_OBJF_SENSITIVE;
         if ((a.cko == CKO_SECRET_KEY || a.cko == CKO_PRIVATE_KEY) && tmpl_extractable)
             flags |= FHSM_OBJF_EXTRACTABLE;
@@ -4706,7 +4749,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * CKA_ALWAYS_AUTHENTICATE when the template asked for it. CKA_LOCAL stays
      * FALSE: imported, not generated. */
     uint8_t import_flags = trusted_flag;
-    if (is_priv) import_flags |= (uint8_t)(FHSM_OBJF_SENSITIVE | always_auth_flag);
+    if (is_priv) import_flags |= (uint8_t)(private_key_sensitive_flag(pTemplate, ulCount)
+                                           | always_auth_flag);
     if (is_priv && tmpl_extractable) import_flags |= FHSM_OBJF_EXTRACTABLE;
 
     uint32_t handle = 0;
@@ -6771,9 +6815,11 @@ static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
 
     /* The blob is a PKCS#8 PrivateKeyInfo, the form C_WrapKey gives. It is
      * stored as every reader here expects it, i2d_PrivateKey's form, and
-     * sensitive whatever the template says, as an imported private key is.
-     * The key type is checked against the key: the blob carries one, and the
-     * template only claims one. */
+     * sensitive unless the template asked CKA_SENSITIVE=FALSE, as an imported
+     * private key is: C_UnwrapKey has refused that request already in strict
+     * mode, and the CKA_UNWRAP_TEMPLATE rule above applies to it as to a
+     * secret key. The key type is checked against the key: the blob carries
+     * one, and the template only claims one. */
     const unsigned char *pp = pt;
     PKCS8_PRIV_KEY_INFO *inf = d2i_PKCS8_PRIV_KEY_INFO(NULL, &pp, (long)pt_len);
     EVP_PKEY *pk = (inf && pp == pt + pt_len) ? EVP_PKCS82PKEY(inf) : NULL;
@@ -6789,7 +6835,7 @@ static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
     } else {
         rv = fhsm_token_object_add(t, CKO_PRIVATE_KEY, key_type, label,
                                     der, (size_t)dl, id, id_len,
-                                    obj_flags | FHSM_OBJF_SENSITIVE, handle);
+                                    obj_flags, handle);
     }
     EVP_PKEY_free(pk);
     OPENSSL_clear_free(der, dl > 0 ? (size_t)dl : 0);
@@ -6852,8 +6898,8 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     /* A secret or private key is the user's to make, not the SO's (#31). */
     { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
-    /* An unwrapped private key is sensitive, as an imported one is: a template
-     * asking CKA_SENSITIVE=FALSE is refused before anything is decrypted. */
+    /* An unwrapped private key asking CKA_SENSITIVE=FALSE, as an imported one:
+     * in strict mode it is refused before anything is decrypted. */
     { long ci = find_attr(pTemplate, ulCount, CKA_CLASS);
       if (ci >= 0 && pTemplate[ci].pValue && pTemplate[ci].ulValueLen == sizeof(CK_ULONG)
           && *(CK_ULONG *)pTemplate[ci].pValue == CKO_PRIVATE_KEY) {
@@ -8015,7 +8061,11 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     /* A secret or private key is the user's to make, not the SO's (#31). */
     { CK_RV pl = fhsm_check_private_login_cls(hSession, pPriv, ulPriv, CKO_PRIVATE_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
-    { CK_RV sr = fhsm_check_private_key_sensitive(pPriv, ulPriv);
+    /* CKA_SENSITIVE=FALSE on the private half: honoured outside strict mode,
+     * except for the composite pair, which has no standard private value. */
+    { CK_RV sr = fhsm_check_private_key_sensitive_kt(pPriv, ulPriv,
+                     (pMechanism && pMechanism->mechanism == CKM_COMPOSITE_MLDSA65_ED25519)
+                     ? CKK_COMPOSITE_MLDSA65_ED25519 : 0);
       if (sr != FHSM_RV_OK) return sr; }
     /* The mechanism decides the class of each half and the key type of both.
      * A template that names another -- CKK_RSA in a CKM_EC_KEY_PAIR_GEN
@@ -8340,7 +8390,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     uint32_t hp = 0, hk = 0;
     /* Both halves are generated on the token -> CKA_LOCAL = TRUE (§4.9). The
      * private key also honours CKA_ALWAYS_AUTHENTICATE from its template. */
-    uint8_t priv_flags = FHSM_OBJF_SENSITIVE | FHSM_OBJF_LOCAL;
+    uint8_t priv_flags = (uint8_t)(private_key_sensitive_flag(pPriv, ulPriv) | FHSM_OBJF_LOCAL);
     {
         long ai = find_attr(pPriv, ulPriv, CKA_ALWAYS_AUTHENTICATE_TMPL);
         if (ai >= 0 && pPriv[ai].pValue && pPriv[ai].ulValueLen == 1
@@ -8354,8 +8404,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * unextractable and C_WrapKey refused it with CKR_KEY_UNEXTRACTABLE,
          * whatever its owner had asked for -- OpenSC's unwrap-wrap test
          * generates an RSA key --extractable and wraps it under AES-KWP and
-         * AES-CBC-PAD. CKA_SENSITIVE stays TRUE: the value leaves the token
-         * wrapped, never in clear, as for an imported private key. */
+         * AES-CBC-PAD. CKA_SENSITIVE is TRUE unless the template asked
+         * FALSE outside strict mode (fhsm_check_private_key_sensitive_kt). */
         long ei = find_attr(pPriv, ulPriv, CKA_EXTRACTABLE);
         if (ei >= 0 && pPriv[ei].pValue && pPriv[ei].ulValueLen >= 1
             && *(unsigned char *)pPriv[ei].pValue)
@@ -8677,6 +8727,74 @@ static int extract_cert_attr(fhsm_token_t *t, uint32_t handle,
     return rc;
 }
 
+/* The largest private value given below: ML-DSA-87's private key, 4896 bytes
+ * (FIPS 204, Table 2). ML-KEM-1024's decapsulation key is 3168, an RSA-8192
+ * component at most 1024. */
+#define FHSM_PRIV_VALUE_MAX 4896u
+
+/* A private key's value in the form PKCS#11 v3.2 defines for its type, read
+ * from the module's stored form (i2d_PrivateKey's, read back with
+ * d2i_AutoPrivateKey):
+ *   - RSA: CKA_PRIVATE_EXPONENT, CKA_PRIME_1, CKA_PRIME_2, CKA_EXPONENT_1,
+ *     CKA_EXPONENT_2, CKA_COEFFICIENT, each a big-endian integer; no CKA_VALUE;
+ *   - EC: CKA_VALUE, the private scalar d, big-endian, padded to the order's
+ *     length;
+ *   - Edwards, Montgomery, ML-KEM, ML-DSA, SLH-DSA: CKA_VALUE, the raw private
+ *     key (RFC 8032 / RFC 7748; FIPS 203, 204, 205).
+ * Given only for a key that is neither sensitive nor unextractable, outside
+ * strict mode; the caller checks that. Returns 0 with *out_len set, -1 when
+ * the key type has no such attribute, -3 when the stored key will not give
+ * it. `out` holds FHSM_PRIV_VALUE_MAX bytes and is cleansed on failure. */
+static int private_value_of(const uint8_t *der, size_t der_len, CK_ULONG ckk,
+                            CK_ATTRIBUTE_TYPE type, uint8_t *out, size_t *out_len) {
+    const char *bn_name = NULL;
+    int raw = 0, ec_scalar = 0;
+    if (ckk == 0x00000000UL /* CKK_RSA */) {
+        switch (type) {
+            case 0x123UL: bn_name = OSSL_PKEY_PARAM_RSA_D; break;
+            case 0x124UL: bn_name = OSSL_PKEY_PARAM_RSA_FACTOR1; break;
+            case 0x125UL: bn_name = OSSL_PKEY_PARAM_RSA_FACTOR2; break;
+            case 0x126UL: bn_name = OSSL_PKEY_PARAM_RSA_EXPONENT1; break;
+            case 0x127UL: bn_name = OSSL_PKEY_PARAM_RSA_EXPONENT2; break;
+            case 0x128UL: bn_name = OSSL_PKEY_PARAM_RSA_COEFFICIENT1; break;
+            default: return -1;
+        }
+    } else if (type != CKA_VALUE) {
+        return -1;
+    } else if (ckk == 0x00000003UL /* CKK_EC */) {
+        bn_name = OSSL_PKEY_PARAM_PRIV_KEY; ec_scalar = 1;
+    } else if (ckk == 0x00000040UL /* CKK_EC_EDWARDS */
+               || ckk == 0x00000041UL /* CKK_EC_MONTGOMERY */
+               || ckk == 0x00000049UL /* CKK_ML_KEM */
+               || ckk == 0x0000004AUL /* CKK_ML_DSA */
+               || ckk == 0x0000004BUL /* CKK_SLH_DSA */) {
+        raw = 1;
+    } else {
+        return -1;
+    }
+    const unsigned char *p = der;
+    EVP_PKEY *pk = d2i_AutoPrivateKey(NULL, &p, (long)der_len);
+    if (!pk) return -3;
+    int rc = -3;
+    if (raw) {
+        size_t l = FHSM_PRIV_VALUE_MAX;
+        if (EVP_PKEY_get_raw_private_key(pk, out, &l) == 1) { *out_len = l; rc = 0; }
+    } else {
+        BIGNUM *bn = NULL;
+        if (EVP_PKEY_get_bn_param(pk, bn_name, &bn) == 1 && bn) {
+            int want = ec_scalar ? (EVP_PKEY_get_bits(pk) + 7) / 8 : BN_num_bytes(bn);
+            if (want > 0 && (size_t)want <= FHSM_PRIV_VALUE_MAX
+                && BN_bn2binpad(bn, out, want) == want) {
+                *out_len = (size_t)want; rc = 0;
+            }
+        }
+        BN_clear_free(bn);
+    }
+    EVP_PKEY_free(pk);
+    if (rc != 0) OPENSSL_cleanse(out, FHSM_PRIV_VALUE_MAX);
+    return rc;
+}
+
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                            CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount) {
     FHSM_API_SHARED(); FHSM_REQUIRE_INITIALIZED();
@@ -8713,6 +8831,10 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
          * switch. 2592 is ML-DSA-87, the largest of the six raw public keys,
          * measured with tests/probe_pqc_pub_lengths. */
         uint8_t pqc_raw[2592];
+        /* And for a non-sensitive private key's value, cleansed after the
+         * copy below whenever it was filled. */
+        uint8_t priv_raw[FHSM_PRIV_VALUE_MAX];
+        int priv_used = 0;
         /* Same reason, for CKA_ALLOWED_MECHANISMS: the value is assembled in
          * the case and copied after the switch, so it has to outlive the
          * case block. */
@@ -8758,11 +8880,28 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 uint8_t of = 0;
                 int have = fhsm_token_object_get_flags(t, (uint32_t)hObject, &of) == FHSM_RV_OK;
                 int secret = cko_class == CKO_PRIVATE_KEY || cko_class == CKO_SECRET_KEY;
+                /* A private key's value never leaves in clear in strict mode,
+                 * whatever its flags: a key made not sensitive in permissive
+                 * mode on the same token is withheld there too. */
                 if ((have && (of & FHSM_OBJF_SENSITIVE))
-                    || (secret && (!have || !(of & FHSM_OBJF_EXTRACTABLE)))) {
+                    || (secret && (!have || !(of & FHSM_OBJF_EXTRACTABLE)))
+                    || (cko_class == CKO_PRIVATE_KEY && fhsm_mode_is_fips())) {
                     pTemplate[i].ulValueLen = (CK_ULONG)-1;
                     fhsm_sensitive = 1;
                     continue;
+                }
+                /* A private key that may be read (2.8.0): its value in the
+                 * form the specification defines for its type, never the
+                 * module's stored DER. An RSA key has no CKA_VALUE; its
+                 * components are the attributes below. */
+                if (cko_class == CKO_PRIVATE_KEY) {
+                    size_t pl = 0;
+                    int pr = private_value_of(value, value_len, ckk_type, CKA_VALUE,
+                                              priv_raw, &pl);
+                    if (pr != 0) { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue; }
+                    priv_used = 1;
+                    src = priv_raw; src_len = pl;
+                    break;
                 }
                 /* PKCS#11 v3.2 defines CKA_VALUE of an ML-KEM, ML-DSA or
                  * SLH-DSA public key as the *raw* key -- for SLH-DSA, "Public
@@ -8985,14 +9124,28 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 /* The private components of an RSA key. They had no case and
                  * fell to the default, so the private exponent was
                  * CKR_ATTRIBUTE_TYPE_INVALID where a sensitive EC key's
-                 * CKA_VALUE is CKR_ATTRIBUTE_SENSITIVE (#33 C2). Every private
-                 * key here is sensitive -- generated or imported, its value
-                 * leaves the token wrapped, never in clear -- so they are
-                 * always withheld. Any other object has no such attribute. */
-                pTemplate[i].ulValueLen = (CK_ULONG)-1;
-                if (cko_class == CKO_PRIVATE_KEY && ckk_type == CKK_RSA) fhsm_sensitive = 1;
-                else fhsm_type_invalid = 1;
-                continue;
+                 * CKA_VALUE is CKR_ATTRIBUTE_SENSITIVE (#33 C2). Withheld as
+                 * CKA_VALUE is: when the key is sensitive or unextractable,
+                 * and always in strict mode. Since 2.8.0 a key that is
+                 * neither gives them (fhsm_check_private_key_sensitive_kt).
+                 * Any other object has no such attribute. */
+                if (!(cko_class == CKO_PRIVATE_KEY && ckk_type == CKK_RSA)) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
+                }
+                uint8_t of = 0;
+                int have = fhsm_token_object_get_flags(t, (uint32_t)hObject, &of) == FHSM_RV_OK;
+                if (!have || (of & FHSM_OBJF_SENSITIVE) || !(of & FHSM_OBJF_EXTRACTABLE)
+                    || fhsm_mode_is_fips()) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_sensitive = 1; continue;
+                }
+                size_t pl = 0;
+                if (private_value_of(value, value_len, ckk_type, pTemplate[i].type,
+                                     priv_raw, &pl) != 0) {
+                    pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue;
+                }
+                priv_used = 1;
+                src = priv_raw; src_len = pl;
+                break;
             }
             case CKA_MODULUS_BITS:
             case CKA_MODULUS:
@@ -9234,6 +9387,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             memcpy(pTemplate[i].pValue, src, src_len);
             pTemplate[i].ulValueLen = (CK_ULONG)src_len;
         }
+        if (priv_used) OPENSSL_cleanse(priv_raw, sizeof priv_raw);
     }
     /* PKCS#11 v3.2 C_GetAttributeValue : if any requested attribute did
      * not fit the supplied buffer, return CKR_BUFFER_TOO_SMALL (#125). */

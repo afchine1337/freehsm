@@ -231,10 +231,17 @@ int main(void)
                                 { CKA_KEY_TYPE, &ec, sizeof ec }, { CKA_TOKEN, &no, 1 } };
         ok(C_UnwrapKey(s, &kwp, kek, w, wlen, ec_t, 3, &bad) == 0x63UL,
            "(5) unwrapped as CKK_EC: CKR_KEY_TYPE_INCONSISTENT");
-        /* A private key here is always sensitive: asking otherwise is refused,
-         * where it was accepted and overridden. */
-        ok(C_UnwrapKey(s, &kwp, kek, w, wlen, up_t, 6, &bad) == 0xD1UL,
-           "(5) unwrapped asking CKA_SENSITIVE=FALSE: CKR_TEMPLATE_INCONSISTENT");
+        /* Asking CKA_SENSITIVE=FALSE: refused in 2.7.0, made as asked since
+         * 2.8.0 outside strict mode (test_private_not_sensitive). Under an
+         * ID of its own, so the search by CKA_ID below finds one key. */
+        {
+            CK_BYTE idn[] = { 0x51 };
+            CK_ATTRIBUTE ns_t[6];
+            memcpy(ns_t, up_t, sizeof ns_t);
+            ns_t[3].pValue = idn; ns_t[3].ulValueLen = sizeof idn;
+            ok(C_UnwrapKey(s, &kwp, kek, w, wlen, ns_t, 6, &bad) == CKR_OK,
+               "(5) unwrapped asking CKA_SENSITIVE=FALSE: made");
+        }
         rv = C_UnwrapKey(s, &kwp, kek, w, wlen, up_t, 5, &up);
         ok(rv == CKR_OK && has_id(s, up, idp, sizeof idp),
            "(5) unwrapped as CKK_RSA, found by its CKA_ID");
