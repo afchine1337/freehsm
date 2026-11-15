@@ -102,7 +102,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `CKR_DATA_LEN_RANGE` rather than a counter carried into the nonce.
   Poly1305 gives a 16-byte tag; that its key is used once is the caller's
   to keep. Single-part and in parts. Not approved: all-mechanisms in
-  permissive mode only. `tests/test_chacha20_poly1305.c`.
+  permissive mode only, and only where a loaded provider serves them -- the
+  FIPS provider has neither, and there they are neither listed nor
+  accepted. `tests/test_chacha20_poly1305.c`.
+* **`CKM_CHACHA20_POLY1305`**, the AEAD of RFC 8439 2.8, on a
+  `CKK_CHACHA20` key: `CK_SALSA20_CHACHA20_POLY1305_PARAMS` with a 12-byte
+  nonce and optional AAD, the 16-byte tag appended to the ciphertext as for
+  GCM, single-part and in parts. A 64-bit nonce is
+  `CKR_MECHANISM_PARAM_INVALID`. A tag that does not verify is
+  `CKR_ENCRYPTED_DATA_INVALID` and no plaintext is returned. Not approved:
+  all-mechanisms in permissive mode only.
+  `tests/test_chacha20_poly1305_aead.c`.
 * **A partial block at `C_EncryptFinal` is `CKR_DATA_LEN_RANGE`.** ECB and
   CBC without padding, AES as 3DES, encrypted in parts with a total that
   is not whole blocks, answered `CKR_FUNCTION_FAILED` at Final, OpenSSL's

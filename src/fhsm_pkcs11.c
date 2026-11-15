@@ -1558,6 +1558,44 @@ static int fhsm_md_available(const char *name) {
     return ok;
 }
 
+/* The same question for ChaCha20 and Poly1305 (2.8.0). The FIPS provider
+ * has neither, and a signed all-mechanisms module in permissive mode
+ * advertised all five mechanisms, accepted C_EncryptInit and C_SignInit, and
+ * failed C_Encrypt and C_Sign with CKR_MECHANISM_INVALID: pkcs11-check's
+ * test_salsa20.py, six tests, and the FIPS-provider job of the C suite, on
+ * the commit that added them. The digests above had taught it, and it was
+ * not applied: a new algorithm needs the check when it is added. */
+static int fhsm_cipher_available(const char *name) {
+    ERR_set_mark();
+    EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, name, NULL);
+    int ok = (c != NULL);
+    EVP_CIPHER_free(c);
+    ERR_pop_to_mark();
+    return ok;
+}
+static int fhsm_mac_available(const char *name) {
+    ERR_set_mark();
+    EVP_MAC *m = EVP_MAC_fetch(NULL, name, NULL);
+    int ok = (m != NULL);
+    EVP_MAC_free(m);
+    ERR_pop_to_mark();
+    return ok;
+}
+/* 1 when the providers serve what the mechanism needs; 1 for any mechanism
+ * outside the ChaCha20 and Poly1305 family. */
+static int fhsm_chacha_mech_available(CK_ULONG m) {
+    switch (m) {
+        case 0x00001225UL: case 0x00001226UL:   /* CKM_CHACHA20_KEY_GEN, CKM_CHACHA20 */
+            return fhsm_cipher_available("ChaCha20");
+        case 0x00004021UL:                      /* CKM_CHACHA20_POLY1305 */
+            return fhsm_cipher_available("ChaCha20-Poly1305");
+        case 0x00001227UL: case 0x00001228UL:   /* CKM_POLY1305_KEY_GEN, CKM_POLY1305 */
+            return fhsm_mac_available("POLY1305");
+        default:
+            return 1;
+    }
+}
+
 static int digest_mech_to_hash(CK_ULONG mech, fhsm_hash_t *h, int *non_approved);
 
 /* Advertised means operational in THIS process, not merely compiled in:
@@ -1566,6 +1604,7 @@ static int fhsm_mech_advertised(const fhsm_mech_entry_t *e) {
     if (e == NULL || e->handler == dispatch_reject_fips) return 0;
     if (e->family && strcmp(e->family, "ECM") == 0 && !fhsm_ecm_available())
         return 0;
+    if (!fhsm_chacha_mech_available((CK_ULONG)e->ckm_value)) return 0;
     /* A digest, asked by the name C_Digest will fetch it under. */
     if (e->operation && strcmp(e->operation, "digest") == 0) {
         fhsm_hash_t h;
@@ -3512,7 +3551,9 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         /* 2.8.0: a CKK_CHACHA20 or CKK_POLY1305 key, 32 bytes. CKA_VALUE_LEN
          * absent or 32, as for 3DES above. Not approved: refused where
          * NIST's rules apply. */
-        if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return FHSM_RV_MECHANISM_INVALID;
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips()
+            || !fhsm_chacha_mech_available(pMechanism->mechanism))
+            return FHSM_RV_MECHANISM_INVALID;
         { long vl = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
           if (vl >= 0) {
               CK_ULONG req = 0;
@@ -11575,6 +11616,38 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             op->gcm_have    = 1;
         }
     }
+    /* CKM_CHACHA20_POLY1305 (2.8.0): CK_SALSA20_CHACHA20_POLY1305_PARAMS
+     *   { CK_BYTE_PTR pNonce; CK_ULONG ulNonceLen; CK_BYTE_PTR pAAD; CK_ULONG ulAADLen; }
+     * The AEAD of RFC 8439 2.8, a 12-byte nonce and a 16-byte tag appended
+     * to the ciphertext, as for GCM -- and it runs on GCM's path: the nonce,
+     * AAD and tag length go where CK_GCM_PARAMS puts them. A 64-bit nonce is
+     * refused rather than read one of the ways implementations have padded
+     * it. Not approved: refused where NIST's rules apply. */
+    if (pMechanism->mechanism == 0x00004021UL /* CKM_CHACHA20_POLY1305 */) {
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips()
+            || !fhsm_chacha_mech_available(pMechanism->mechanism))
+            return FHSM_RV_MECHANISM_INVALID;
+        typedef struct { unsigned char *pNonce; CK_ULONG ulNonceLen;
+                         unsigned char *pAAD; CK_ULONG ulAADLen; } chacha20_poly1305_params_t;
+        if (!pMechanism->pParameter
+            || pMechanism->ulParameterLen < sizeof(chacha20_poly1305_params_t))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        chacha20_poly1305_params_t cp;
+        memcpy(&cp, pMechanism->pParameter, sizeof cp);
+        if (cp.ulNonceLen != 12 || !cp.pNonce || (cp.ulAADLen && !cp.pAAD)
+            || cp.ulAADLen > FHSM_AAD_MAX)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        memcpy(op->gcm_iv, cp.pNonce, 12);
+        if (cp.ulAADLen) {
+            op->gcm_aad = OPENSSL_malloc((size_t)cp.ulAADLen);
+            if (!op->gcm_aad) return FHSM_RV_HOST_MEMORY;
+            memcpy(op->gcm_aad, cp.pAAD, (size_t)cp.ulAADLen);
+        }
+        op->gcm_iv_len  = 12;
+        op->gcm_aad_len = (size_t)cp.ulAADLen;
+        op->gcm_tag_len = 16;
+        op->gcm_have    = 1;
+    }
     /* AES-CBC/CBC-PAD, and the OFB and CFB modes, use a 16-byte IV passed
      * directly as pParameter. */
     if ((pMechanism->mechanism == CKM_AES_CBC ||
@@ -11664,8 +11737,15 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * CKR_DATA_LEN_RANGE, through ctr_take, where OpenSSL would carry the
      * counter into the nonce. Not approved: refused where NIST's rules
      * apply. */
+    /* CKM_POLY1305: no parameter; refused here, at C_SignInit and
+     * C_VerifyInit, where the providers do not serve it. */
+    if (pMechanism->mechanism == 0x00001228UL /* CKM_POLY1305 */
+        && !fhsm_chacha_mech_available(pMechanism->mechanism))
+        return FHSM_RV_MECHANISM_INVALID;
     if (pMechanism->mechanism == 0x00001226UL /* CKM_CHACHA20 */) {
-        if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return FHSM_RV_MECHANISM_INVALID;
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips()
+            || !fhsm_chacha_mech_available(pMechanism->mechanism))
+            return FHSM_RV_MECHANISM_INVALID;
         typedef struct { unsigned char *pBlockCounter; CK_ULONG blockCounterBits;
                          unsigned char *pNonce; CK_ULONG ulNonceBits; } chacha20_params_t;
         if (!pMechanism->pParameter || pMechanism->ulParameterLen < sizeof(chacha20_params_t))
@@ -12096,6 +12176,7 @@ static int fhsm_nonfips_enc_rejected(CK_ULONG mech) {
         case 0x00000133UL: /* CKM_DES3_CBC */
         case 0x00000136UL: /* CKM_DES3_CBC_PAD */
         case 0x00001226UL: /* CKM_CHACHA20 */
+        case 0x00004021UL: /* CKM_CHACHA20_POLY1305 */
         case CKM_RSA_PKCS:
         case CKM_RSA_X_509:
             return 1;
@@ -12432,6 +12513,7 @@ static int fhsm_cipher_mech_valid(CK_ULONG mech) {
         case CKM_AES_CTS:       /* 0x1089 */
         case CKM_AES_XTS:       /* 0x1071 */
         case 0x00001226UL:      /* CKM_CHACHA20 */
+        case 0x00004021UL:      /* CKM_CHACHA20_POLY1305 */
         case CKM_AES_GCM:       /* 0x1087 */
         case 0x00001088UL:      /* CKM_AES_CCM */
         case 0x00000132UL:      /* CKM_DES3_ECB */
@@ -12503,6 +12585,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
             want = 0x1F; break;                             /* CKK_AES */
         case 0x1071: want = 0x35; break;                    /* AES_XTS -> CKK_AES_XTS */
         case 0x1226: want = 0x33; break;                    /* CHACHA20 -> CKK_CHACHA20 */
+        case 0x4021: want = 0x33; break;                    /* CHACHA20_POLY1305 -> CKK_CHACHA20 */
         case 0x1228: want = 0x34; break;                    /* POLY1305 -> CKK_POLY1305 */
         case 0x0132: case 0x0133: case 0x0136:              /* DES3 ECB/CBC/CBC_PAD */
         case 0x0134: case 0x0135: case 0x0137: case 0x0138: /* DES3 MAC/_GENERAL, CMAC_GENERAL/CMAC */
@@ -12990,7 +13073,8 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
      * so it did not match the caller's IV) and an EMPTY AAD, producing the
      * wrong ciphertext/tag whenever a non-default IV or any AAD was present
      * (#125 TestAESGCM*, TestMechEncryptKAT[AES_GCM], roundtrip). */
-    if (op->mechanism != CKM_AES_GCM || kt != CKK_AES) {
+    const int cpoly = op->mechanism == 0x00004021UL;   /* CKM_CHACHA20_POLY1305 */
+    if (cpoly ? kt != 0x33u : (op->mechanism != CKM_AES_GCM || kt != CKK_AES)) {
         op->active = 0; return FHSM_RV_MECHANISM_INVALID;
     }
     size_t etag_len = op->gcm_tag_len ? op->gcm_tag_len : 16;
@@ -13007,7 +13091,10 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         if (!op->gcm_iv_len && !op->have_iv) {
             fhsm_rng_bytes(op->iv, 12); eiv_ptr = op->iv; eiv_len = 12;
         }
-        switch (kvl) {
+        if (cpoly) {
+            if (kvl != 32) { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
+            ecph = EVP_chacha20_poly1305();
+        } else switch (kvl) {
             case 16: ecph = EVP_aes_128_gcm(); break;
             case 24: ecph = EVP_aes_192_gcm(); break;
             case 32: ecph = EVP_aes_256_gcm(); break;
@@ -13530,7 +13617,8 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
      * gives us the combined buffer. The tag length is taken from the
      * CK_GCM_PARAMS struct (default 16 bytes) and the IV/AAD come from
      * the same struct (captured at DecryptInit). */
-    if (op->mechanism != CKM_AES_GCM || kt != CKK_AES) {
+    const int cpoly = op->mechanism == 0x00004021UL;   /* CKM_CHACHA20_POLY1305 */
+    if (cpoly ? kt != 0x33u : (op->mechanism != CKM_AES_GCM || kt != CKK_AES)) {
         op->active = 0; return FHSM_RV_MECHANISM_INVALID;
     }
     size_t tag_len = op->gcm_tag_len ? op->gcm_tag_len : 16;
@@ -13551,7 +13639,10 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
     size_t iv_len = op->gcm_iv_len ? op->gcm_iv_len : 12;
 
     const EVP_CIPHER *cipher = NULL;
-    switch (kvl) {
+    if (cpoly) {
+        if (kvl != 32) { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
+        cipher = EVP_chacha20_poly1305();
+    } else switch (kvl) {
         case 16: cipher = EVP_aes_128_gcm(); break;
         case 24: cipher = EVP_aes_192_gcm(); break;
         case 32: cipher = EVP_aes_256_gcm(); break;
@@ -15906,6 +15997,7 @@ static int op_cipher_kind(uint32_t mech) {
         case 0x00000133UL:    return 2;                     /* CKM_DES3_CBC */
         case 0x00000136UL:    return 3;                     /* CKM_DES3_CBC_PAD */
         case 0x00001226UL:    return 1;                     /* CKM_CHACHA20, a stream */
+        case 0x00004021UL:    return 0;                     /* CKM_CHACHA20_POLY1305, AEAD as GCM */
         default:              return -1;
     }
 }
@@ -15927,7 +16019,8 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
     const int des3 = des3_mode(op->mechanism);
-    const int chacha = op->mechanism == 0x00001226UL;   /* CKM_CHACHA20 */
+    const int chacha = op->mechanism == 0x00001226UL    /* CKM_CHACHA20 */
+                    || op->mechanism == 0x00004021UL;   /* CKM_CHACHA20_POLY1305 */
     if (chacha ? kt != 0x33u
                : (des3 ? !is_des3_key_type(kt) : kt != (uint32_t)CKK_AES))
         return FHSM_RV_MECHANISM_INVALID;
@@ -15939,7 +16032,7 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
              : (kvl == 16) ? 0 : (kvl == 24) ? 1 : (kvl == 32) ? 2 : -1;
     if (ksel < 0) return FHSM_RV_KEY_SIZE_RANGE;
     /* GCM here; every other mode by the name single-part uses. */
-    const char *cname = chacha ? "ChaCha20"
+    const char *cname = chacha ? (op->mechanism == 0x00004021UL ? "ChaCha20-Poly1305" : "ChaCha20")
                       : des3 ? (op->mechanism == 0x00000132UL ? "DES-EDE3-ECB" : "DES-EDE3-CBC")
                       : (kind == 0) ? gcm[ksel]
                       : aes_mode_cipher_name(op->mechanism, kvl);

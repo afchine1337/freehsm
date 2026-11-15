@@ -236,7 +236,11 @@ int main(void) {
 
     const char *mode = getenv("FHSM_MODE");
     const int nist_build = !listed(CKM_RSA_PKCS);
-    const int nist = nist_build || (mode && (!strcmp(mode, "strict") || !strcmp(mode, "fips")));
+    /* The FIPS provider serves neither ChaCha20 nor Poly1305: then the
+     * module neither lists nor accepts them, as where NIST's rules apply. */
+    const int served = listed(CKM_CHACHA20);
+    const int nist = nist_build || !served
+                     || (mode && (!strcmp(mode, "strict") || !strcmp(mode, "fips")));
 
     CK_BYTE kv[32], pk[32], pt[130];
     for (int i = 0; i < 32; i++) { kv[i] = (CK_BYTE)i; pk[i] = (CK_BYTE)(0x40 + i); }

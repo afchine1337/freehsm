@@ -153,6 +153,8 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="non-approved", key_type="CKK_CHACHA20", refs=("RFC 8439",)),
     Mech("CKM_CHACHA20",           0x00001226, "CHACHA20", "encrypt", "dispatch_aes_cbc",
          fips="non-approved", key_type="CKK_CHACHA20", refs=("RFC 8439",)),
+    Mech("CKM_CHACHA20_POLY1305",  0x00004021, "CHACHA20", "encrypt", "dispatch_aes_cbc",
+         fips="non-approved", key_type="CKK_CHACHA20", refs=("RFC 8439 2.8",)),
     Mech("CKM_POLY1305_KEY_GEN",   0x00001227, "POLY1305", "keygen", "dispatch_aes_keygen",
          fips="non-approved", key_type="CKK_POLY1305", refs=("RFC 8439",)),
     Mech("CKM_POLY1305",           0x00001228, "POLY1305", "sign",   "dispatch_aes_cmac",
