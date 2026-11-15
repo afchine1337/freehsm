@@ -5595,17 +5595,31 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV tr = fhsm_check_nested_tmpl(fhsm_session_token(hSession), hBaseKey,
                                         FHSM_TMPL_DERIVE, pTemplate, ulCount);
       if (tr != FHSM_RV_OK) return tr; }
-    { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hBaseKey, FHSM_USAGE_DERIVE); if (uc != FHSM_RV_OK) return uc; }
+    /* CKA_DERIVE, except for CKM_PUB_KEY_FROM_PRIV_KEY (2.8.0). That one
+     * discloses the public key, which CKA_DERIVE never protected, and takes
+     * every type of private key -- RSA, Edwards, ML-DSA among them, which
+     * cannot have CKA_DERIVE here (fhsm_usage_possible: no other derivation
+     * takes them), so it would refuse them all. CKA_ALLOWED_MECHANISMS and
+     * CKA_DERIVE_TEMPLATE above still apply to it. */
+    if (pMechanism->mechanism != 0x0000403AUL /* CKM_PUB_KEY_FROM_PRIV_KEY */) {
+        CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hBaseKey, FHSM_USAGE_DERIVE);
+        if (uc != FHSM_RV_OK) return uc;
+    }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
     if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
         return FHSM_RV_USER_NOT_LOGGED_IN;
-    /* A secret key, or for CKM_HKDF_DATA a data object; nothing else. */
-    { CK_RV mc = fhsm_check_made_class(pTemplate, ulCount, 0,
-                                       pMechanism->mechanism == CKM_HKDF_DATA_OP);
-      if (mc != FHSM_RV_OK) return mc; }
+    /* A secret key, or for CKM_HKDF_DATA a data object; nothing else. A
+     * public key for CKM_PUB_KEY_FROM_PRIV_KEY, which checks its own class. */
+    const int pub_from_priv = pMechanism->mechanism == 0x0000403AUL;
+    if (!pub_from_priv) {
+        CK_RV mc = fhsm_check_made_class(pTemplate, ulCount, 0,
+                                         pMechanism->mechanism == CKM_HKDF_DATA_OP);
+        if (mc != FHSM_RV_OK) return mc;
+    }
     /* A secret or private key is the user's to make, not the SO's (#31). */
-    { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
+    { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount,
+                                              pub_from_priv ? CKO_PUBLIC_KEY : CKO_SECRET_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
     if (pMechanism->mechanism == CKM_SP800_108_COUNTER_KDF_OP
         || pMechanism->mechanism == CKM_SP800_108_FEEDBACK_KDF_OP
@@ -5897,6 +5911,148 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             OPENSSL_cleanse(dig, sizeof dig);
             return srv;
         }
+    }
+
+    /* CKM_EXTRACT_KEY_FROM_KEY (2.8.0): the derived key is a run of bits of
+     * the base key, from the bit CK_EXTRACT_PARAMS names, wrapping round the
+     * end of the base key if it must. Bits are numbered from the most
+     * significant bit of the first byte, as in PKCS#11's own example (base
+     * 0x329F84A9, bit 21, two bytes: 0x9526). The length is the key type's,
+     * or CKA_VALUE_LEN, which a type without its own length must give. The
+     * base is a generic secret, as for the combiners, and the derived key
+     * holds its bits, so it keeps its protection (combines = 1). Not an
+     * approved derivation: refused where NIST's rules apply. */
+    if (pMechanism->mechanism == 0x00000365UL /* CKM_EXTRACT_KEY_FROM_KEY */) {
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips())
+            return FHSM_RV_MECHANISM_INVALID;
+        const uint8_t *bv = NULL; size_t bvl = 0;
+        uint32_t bcl = 0, bkt = 0;
+        fhsm_rv_t brv = fhsm_token_object_get(t, (uint32_t)hBaseKey,
+                                               &bv, &bvl, &bcl, &bkt);
+        if (brv != FHSM_RV_OK) return brv;
+        if (bcl != CKO_SECRET_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        { CK_RV tc = fhsm_check_key_mech_type(t, hBaseKey, pMechanism->mechanism);
+          if (tc != FHSM_RV_OK) return tc; }
+        if (!pMechanism->pParameter || pMechanism->ulParameterLen < sizeof(CK_ULONG))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        CK_ULONG first = 0;
+        memcpy(&first, pMechanism->pParameter, sizeof first);
+        const uint64_t nbits = (uint64_t)bvl * 8u;
+        if (nbits == 0 || (uint64_t)first >= nbits) return FHSM_RV_MECHANISM_PARAM_INVALID;
+        CK_ULONG kt = CKK_GENERIC_SECRET;
+        { long ki = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+          if (ki >= 0 && pTemplate[ki].pValue && pTemplate[ki].ulValueLen == sizeof(CK_ULONG))
+              memcpy(&kt, pTemplate[ki].pValue, sizeof kt); }
+        const int fixed = kt == 0x13UL || kt == 0x14UL || kt == 0x15UL || kt == 0x1EUL;
+        if (!fixed && find_attr(pTemplate, ulCount, CKA_VALUE_LEN) < 0)
+            return CKR_TEMPLATE_INCOMPLETE;
+        size_t klen = 0;
+        { CK_RV lr = ecdh_key_len(pTemplate, ulCount, FHSM_DERIVE_MAX, &klen);
+          if (lr != FHSM_RV_OK) return lr; }
+        uint8_t *xb = OPENSSL_zalloc(klen);
+        if (!xb) return FHSM_RV_HOST_MEMORY;
+        for (uint64_t i = 0; i < (uint64_t)klen * 8u; ++i) {
+            const uint64_t src = ((uint64_t)first + i) % nbits;
+            const unsigned bit = (bv[src / 8] >> (7u - (unsigned)(src % 8))) & 1u;
+            xb[i / 8] = (uint8_t)(xb[i / 8] | (bit << (7u - (unsigned)(i % 8))));
+        }
+        CK_RV xrv = derive_store_secret(t, hSession, pTemplate, ulCount, xb, klen,
+                                        CKO_SECRET_KEY, hBaseKey, 0, 1, phKey);
+        OPENSSL_clear_free(xb, klen);
+        return xrv;
+    }
+
+    /* CKM_PUB_KEY_FROM_PRIV_KEY (PKCS#11 v3.2, 2.8.0): the public key of a
+     * private key, as a new CKO_PUBLIC_KEY object. No parameter. The private
+     * key is read from the module's stored form and its public half written
+     * as the SubjectPublicKeyInfo every public key here is stored as, so the
+     * object is the one C_GenerateKeyPair would have made, and its
+     * attributes (CKA_EC_POINT, CKA_MODULUS, CKA_PARAMETER_SET...) come from
+     * it the same way. The template may name the class and key type; another
+     * class, or another key type than the private key's, is
+     * CKR_TEMPLATE_INCONSISTENT. A composite key, whose stored form is not a
+     * single OpenSSL key, is CKR_KEY_TYPE_INCONSISTENT. CKA_LOCAL is FALSE:
+     * the object was derived, not generated. */
+    if (pub_from_priv) {
+        if (pMechanism->pParameter || pMechanism->ulParameterLen)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        const uint8_t *bv = NULL; size_t bvl = 0;
+        uint32_t bcl = 0, bkt = 0;
+        fhsm_rv_t brv = fhsm_token_object_get(t, (uint32_t)hBaseKey,
+                                               &bv, &bvl, &bcl, &bkt);
+        if (brv != FHSM_RV_OK) return brv;
+        if (bcl != CKO_PRIVATE_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        { CK_RV cr = fhsm_reject_mech_supplied(pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
+        { long ci = find_attr(pTemplate, ulCount, CKA_CLASS);
+          if (ci >= 0) {
+              CK_ULONG c = 0;
+              if (!pTemplate[ci].pValue || pTemplate[ci].ulValueLen != sizeof c)
+                  return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+              memcpy(&c, pTemplate[ci].pValue, sizeof c);
+              if (c != CKO_PUBLIC_KEY) return CKR_TEMPLATE_INCONSISTENT;
+          }
+          long ki = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+          if (ki >= 0) {
+              CK_ULONG k = 0;
+              if (!pTemplate[ki].pValue || pTemplate[ki].ulValueLen != sizeof k)
+                  return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+              memcpy(&k, pTemplate[ki].pValue, sizeof k);
+              if (k != (CK_ULONG)bkt) return CKR_TEMPLATE_INCONSISTENT;
+          } }
+        const unsigned char *pp = bv;
+        EVP_PKEY *pk = d2i_AutoPrivateKey(NULL, &pp, (long)bvl);
+        if (!pk) { ERR_clear_error(); return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        unsigned char *pder = NULL;
+        int pdl = i2d_PUBKEY(pk, &pder);
+        EVP_PKEY_free(pk);
+        if (pdl <= 0) { OPENSSL_free(pder); return FHSM_RV_FUNCTION_FAILED; }
+        char plabel[64] = "";
+        { long li = find_attr(pTemplate, ulCount, CKA_LABEL);
+          if (li >= 0 && pTemplate[li].pValue) {
+              size_t n = pTemplate[li].ulValueLen;
+              if (n >= sizeof plabel) n = sizeof plabel - 1;
+              memcpy(plabel, pTemplate[li].pValue, n); plabel[n] = '\0';
+          } }
+        size_t pid_len = 0;
+        const uint8_t *pid = fhsm_template_id(pTemplate, ulCount, &pid_len);
+        uint32_t ph = 0;
+        fhsm_rv_t prv = fhsm_token_object_add(t, CKO_PUBLIC_KEY, bkt, plabel,
+                                               pder, (size_t)pdl, pid, pid_len, 0, &ph);
+        OPENSSL_free(pder);
+        if (prv != FHSM_RV_OK) return prv;
+        CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, ph);
+        if (ar == FHSM_RV_OK)
+            ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, ph,
+                                        CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
+        if (ar == FHSM_RV_OK)
+            ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, ph,
+                                        CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE);
+        if (ar == FHSM_RV_OK)
+            ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, ph,
+                                        CKA_WRAP_TEMPLATE_ATTR, FHSM_TMPL_WRAP);
+        if (ar == FHSM_RV_OK)
+            ar = fhsm_apply_encap_flags(t, pTemplate, ulCount, ph, CKO_PUBLIC_KEY);
+        /* An Edwards key given its curve as a curveName reports it so; the
+         * public half carries the private half's choice, as a generated
+         * pair's two halves do. */
+        if (ar == FHSM_RV_OK) {
+            uint8_t bf3 = 0, nf3 = 0;
+            (void)fhsm_token_object_get_flags3(t, (uint32_t)hBaseKey, &bf3);
+            if (bf3 & FHSM_OBJF3_ED_CURVE_NAME) {
+                (void)fhsm_token_object_get_flags3(t, ph, &nf3);
+                ar = fhsm_token_object_set_flags3(t, ph, (uint8_t)(nf3 | FHSM_OBJF3_ED_CURVE_NAME));
+            }
+        }
+        if (ar == FHSM_RV_OK) {
+            fhsm_apply_token_scope(t, hSession, pTemplate, ulCount, ph);
+            ar = fhsm_apply_obj_meta(t, hSession, pTemplate, ulCount, ph);
+        }
+        if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, ph); return ar; }
+        fhsm_object_init_usage(t, ph, CKO_PUBLIC_KEY, pTemplate, ulCount);
+        (void)fhsm_audit_event(FHSM_EV_DERIVE, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
+        *phKey = ph;
+        return FHSM_RV_OK;
     }
 
     /* Key derivation by encryption (2.8.0): CKM_AES_ECB_ENCRYPT_DATA,
@@ -12592,6 +12748,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x1102: case 0x1103:                           /* DES3 ECB/CBC_ENCRYPT_DATA */
             want = 0x15; break;                             /* CKK_DES3 */
         case 0x0360: case 0x0362: case 0x0363: case 0x0364: /* v3.2 §6.20 combiners */
+        case 0x0365:                                        /* EXTRACT_KEY_FROM_KEY */
             /* The base key of a combiner is a CKK_GENERIC_SECRET. This is the
              * mirror of the AES rule below -- if a generic secret is not a
              * substitute for a typed key, a typed key is not a substitute for

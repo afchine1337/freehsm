@@ -60,9 +60,13 @@ int main(void) {
         if (l[i] == 0x002D) seen_slhdsa_kg = 1;
         if (l[i] == 0x1057) seen_eddsa = 1;
         if (l[i] == 0x402A) seen_hkdf = 1;
-        /* (3) phantoms must not appear */
+        /* (3) phantoms must not appear. 0x4021 left the list in 2.8.0: it
+         * is CKM_CHACHA20_POLY1305 in the OASIS header, and the module now
+         * offers that mechanism at that value. The rest of 0x4021..0x4029
+         * stay phantoms here -- 0x4022 is CKM_SALSA20_POLY1305, not
+         * offered. */
         if (l[i] == 0x403F || l[i] == 0x403E || l[i] == 0x4040
-            || l[i] == 0x4021 || l[i] == 0x4022 || l[i] == 0x4023
+            || l[i] == 0x4022 || l[i] == 0x4023
             || l[i] == 0x4024 || l[i] == 0x4025 || l[i] == 0x4026
             || l[i] == 0x4027 || l[i] == 0x4029
             || l[i] == 0xC0001000UL || l[i] == 0xC0001001UL) {

@@ -758,6 +758,18 @@ MECHANISMS: tuple[Mech, ...] = (
          "dispatch_xor_base_and_data", fips="non-approved", key_type="CKK_DES3",
          refs=("SP 800-67 rev. 2",)),
 
+    # === PKCS#11 v3.2 key utilities (2.8.0) ============================
+    # Computed in C_DeriveKey; the handler named is only a reference.
+    # EXTRACT_KEY_FROM_KEY: a run of the base key's bits; not an approved
+    # derivation. PUB_KEY_FROM_PRIV_KEY: the public half of a private key, as
+    # a new object; no cryptographic operation of its own.
+    Mech("CKM_EXTRACT_KEY_FROM_KEY",      0x00000365, "KDF-concat", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved",
+         refs=("PKCS#11 v3.2 6.43",)),
+    Mech("CKM_PUB_KEY_FROM_PRIV_KEY",     0x0000403A, "KDF-pub", "derive",
+         "dispatch_xor_base_and_data", fips="approved",
+         refs=("PKCS#11 v3.2",)),
+
     # === Key derivation by digesting the base key ======================
     # The *_KEY_DERIVATION mechanisms (SHA3_* and SHAKE_* are also named
     # *_KEY_DERIVE in the OASIS header, same values). C_DeriveKey computes

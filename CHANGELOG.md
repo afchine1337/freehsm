@@ -113,6 +113,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `CKR_ENCRYPTED_DATA_INVALID` and no plaintext is returned. Not approved:
   all-mechanisms in permissive mode only.
   `tests/test_chacha20_poly1305_aead.c`.
+* **`CKM_PUB_KEY_FROM_PRIV_KEY`** (PKCS#11 v3.2): `C_DeriveKey` on a private
+  key gives its public key as a new `CKO_PUBLIC_KEY` object, the one
+  `C_GenerateKeyPair` would have made, with `CKA_LOCAL` FALSE. For every
+  key type the module stores as one OpenSSL key: RSA, EC, Edwards,
+  Montgomery, ML-KEM, ML-DSA, SLH-DSA. No parameter; a template naming
+  another class or key type is `CKR_TEMPLATE_INCONSISTENT`. The private key
+  need not have `CKA_DERIVE`: the result is public, and most of these key
+  types cannot have it here. In both builds.
+* **`CKM_EXTRACT_KEY_FROM_KEY`**: a run of the bits of a generic secret,
+  from the bit `CK_EXTRACT_PARAMS` names, wrapping round its end, numbered
+  from the most significant bit as in PKCS#11's example. The derived key
+  keeps the base key's protection. Not approved: all-mechanisms in
+  permissive mode only. `tests/test_extract_pub_from_priv.c`.
 * **A partial block at `C_EncryptFinal` is `CKR_DATA_LEN_RANGE`.** ECB and
   CBC without padding, AES as 3DES, encrypted in parts with a total that
   is not whole blocks, answered `CKR_FUNCTION_FAILED` at Final, OpenSSL's
