@@ -11510,7 +11510,8 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * The profile check in C_EncryptInit / C_DecryptInit runs before this, so
      * a nist-approved-only build still answers CKR_MECHANISM_INVALID for 3DES
      * rather than complaining about a parameter it would never use. */
-    if (pMechanism->mechanism == 0x00000133UL /* CKM_DES3_CBC */) {
+    if (pMechanism->mechanism == 0x00000133UL /* CKM_DES3_CBC */
+        || pMechanism->mechanism == 0x00000136UL /* CKM_DES3_CBC_PAD */) {
         if (!pMechanism->pParameter || pMechanism->ulParameterLen != 8)
             return FHSM_RV_MECHANISM_PARAM_INVALID;
         memcpy(op->iv, pMechanism->pParameter, 8);
@@ -11962,7 +11963,9 @@ static int fhsm_nonfips_enc_rejected(CK_ULONG mech) {
         /* AES-ECB is FIPS-approved (NIST SP 800-38A) and now allowed in
          * nist-approved-only ; only genuinely non-approved encryption mechanisms
          * are rejected here. */
+        case 0x00000132UL: /* CKM_DES3_ECB */
         case 0x00000133UL: /* CKM_DES3_CBC */
+        case 0x00000136UL: /* CKM_DES3_CBC_PAD */
         case CKM_RSA_PKCS:
         case CKM_RSA_X_509:
             return 1;
@@ -12155,6 +12158,42 @@ static fhsm_rv_t aes_xts_crypt(const uint8_t *kv, size_t kvl, const uint8_t *twe
     return ok ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
 
+/* 3DES in ECB, CBC and CBC-PAD (SP 800-67, not approved): the modes the
+ * module offers for CKK_DES3 keys, single-part here and multipart through
+ * ensure_cipher_ctx with an 8-byte block. */
+static int des3_mode(CK_ULONG m) {
+    return m == 0x00000132UL || m == 0x00000133UL || m == 0x00000136UL;
+}
+/* One call. The caller has checked the lengths -- whole blocks, at least one
+ * to decrypt with padding -- and that `out` holds the input plus a block. A
+ * padding that does not check out is CKR_ENCRYPTED_DATA_INVALID, and what
+ * had been written of the plaintext is cleansed. */
+static fhsm_rv_t des3_crypt(CK_ULONG m, const uint8_t *kv, const uint8_t *iv, int enc,
+                            const uint8_t *in, size_t len, uint8_t *out, size_t *outl) {
+    if (len > 0x7FFFFFF0u)
+        return enc ? FHSM_RV_DATA_LEN_RANGE : FHSM_RV_ENCRYPTED_DATA_LEN_RANGE;
+    const int ecb = m == 0x00000132UL, pad = m == 0x00000136UL;
+    EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, ecb ? "DES-EDE3-ECB" : "DES-EDE3-CBC", NULL);
+    if (!c) return FHSM_RV_MECHANISM_INVALID;
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
+    int ol = 0, fl = 0;
+    int ok = EVP_CipherInit_ex2(ctx, c, kv, ecb ? NULL : iv, enc, NULL) == 1
+          && EVP_CIPHER_CTX_set_padding(ctx, pad) == 1
+          && EVP_CipherUpdate(ctx, out, &ol, in, (int)len) == 1;
+    int fin = ok && EVP_CipherFinal_ex(ctx, out + ol, &fl) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    EVP_CIPHER_free(c);
+    if (!ok) return FHSM_RV_FUNCTION_FAILED;
+    if (!fin) {
+        if (enc) return FHSM_RV_FUNCTION_FAILED;
+        if (ol > 0) OPENSSL_cleanse(out, (size_t)ol);
+        return FHSM_RV_ENCRYPTED_DATA_INVALID;
+    }
+    *outl = (size_t)ol + (size_t)fl;
+    return FHSM_RV_OK;
+}
+
 /* CTS and XTS: the whole message in one pass, output as long as the input,
  * at least one block. The key type each one takes, and the one call. */
 static int aes_whole_msg_mech(CK_ULONG m) {
@@ -12190,7 +12229,9 @@ static int fhsm_cipher_mech_valid(CK_ULONG mech) {
         case CKM_AES_XTS:       /* 0x1071 */
         case CKM_AES_GCM:       /* 0x1087 */
         case 0x00001088UL:      /* CKM_AES_CCM */
+        case 0x00000132UL:      /* CKM_DES3_ECB */
         case 0x00000133UL:      /* CKM_DES3_CBC */
+        case 0x00000136UL:      /* CKM_DES3_CBC_PAD */
         case CKM_RSA_PKCS:      /* 0x0001 */
         case CKM_RSA_X_509:     /* 0x0003 */
         case CKM_RSA_PKCS_OAEP: /* 0x0009 */
@@ -12256,7 +12297,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x1104: case 0x1105:                           /* AES ECB/CBC_ENCRYPT_DATA */
             want = 0x1F; break;                             /* CKK_AES */
         case 0x1071: want = 0x35; break;                    /* AES_XTS -> CKK_AES_XTS */
-        case 0x0133:                                        /* DES3_CBC */
+        case 0x0132: case 0x0133: case 0x0136:              /* DES3 ECB/CBC/CBC_PAD */
         case 0x1102: case 0x1103:                           /* DES3 ECB/CBC_ENCRYPT_DATA */
             want = 0x15; break;                             /* CKK_DES3 */
         case 0x0360: case 0x0362: case 0x0363: case 0x0364: /* v3.2 §6.20 combiners */
@@ -12639,38 +12680,31 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         return FHSM_RV_OK;
     }
 
-    /* --- 3DES-CBC (non-FIPS ; all-mechanisms only) --- */
-    if (op->mechanism == 0x00000133UL /* CKM_DES3_CBC */) {
+    /* --- 3DES ECB, CBC and CBC-PAD (non-FIPS ; all-mechanisms only) --- */
+    if (des3_mode(op->mechanism)) {
         if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         if (kt != CKK_DES3) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         /* Unreachable since op_init refuses a missing IV with
          * CKR_MECHANISM_PARAM_INVALID. Kept as a second line, not as the check. */
-        if (!op->have_iv)   { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+        if (op->mechanism != 0x00000132UL && !op->have_iv) {
+            op->active = 0; return FHSM_RV_ARGUMENTS_BAD;
+        }
         if (kvl != 24)      { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
-        EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "DES-EDE3-CBC", NULL);
-        if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
-        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-        if (!ctx) { EVP_CIPHER_free(c); op->active = 0; return FHSM_RV_HOST_MEMORY; }
-        if (EVP_EncryptInit_ex2(ctx, c, kv, op->iv, NULL) != 1) {
-            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
-            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
-        }
-        EVP_CIPHER_CTX_set_padding(ctx, 0);
-        size_t need = ulDataLen;   /* no padding : 8-aligned in, equal out */
-        if (pEnc == NULL) { *pulEncLen = need; EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c); return FHSM_RV_OK; }
-        if (*pulEncLen < need) { *pulEncLen = need; EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c); return 0x00000150UL; }
-        int outl = 0, finl = 0;
-        if (EVP_EncryptUpdate(ctx, pEnc, &outl, pData, (int)ulDataLen) != 1
-            || EVP_EncryptFinal_ex(ctx, pEnc + outl, &finl) != 1) {
-            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
-            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
-        }
-        *pulEncLen = (CK_ULONG)(outl + finl);
-        EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+        const int pad = op->mechanism == 0x00000136UL;
+        /* ECB and CBC take whole blocks, refused on the length alone as for
+         * AES (#37 B1). CBC-PAD adds 1 to 8 bytes of padding. */
+        if (!pad && (ulDataLen % 8) != 0) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
+        size_t need = pad ? ((size_t)ulDataLen / 8 + 1) * 8 : (size_t)ulDataLen;
+        if (pEnc == NULL) { *pulEncLen = need; return FHSM_RV_OK; }
+        if (*pulEncLen < need) { *pulEncLen = need; return 0x00000150UL; }
+        size_t got = 0;
+        fhsm_rv_t drv = des3_crypt(op->mechanism, kv, op->iv, 1,
+                                   pData, (size_t)ulDataLen, pEnc, &got);
+        *pulEncLen = drv == FHSM_RV_OK ? (CK_ULONG)got : 0;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
-        return FHSM_RV_OK;
+                                fhsm_session_role(hSession), drv, FHSM_AUDIT_END);
+        return drv;
     }
 
     /* --- AES-CCM path (SP 800-38C, symmetric) ---
@@ -13166,37 +13200,33 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         return FHSM_RV_OK;
     }
 
-    /* --- 3DES-CBC (non-FIPS ; all-mechanisms only) --- */
-    if (op->mechanism == 0x00000133UL /* CKM_DES3_CBC */) {
+    /* --- 3DES ECB, CBC and CBC-PAD (non-FIPS ; all-mechanisms only) --- */
+    if (des3_mode(op->mechanism)) {
         if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         if (kt != CKK_DES3) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
-        /* Unreachable since op_init refuses a missing IV with
-         * CKR_MECHANISM_PARAM_INVALID. Kept as a second line, not as the check. */
-        if (!op->have_iv)   { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
+        if (op->mechanism != 0x00000132UL && !op->have_iv) {
+            op->active = 0; return FHSM_RV_ARGUMENTS_BAD;
+        }
         if (kvl != 24)      { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
-        EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "DES-EDE3-CBC", NULL);
-        if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
-        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-        if (!ctx) { EVP_CIPHER_free(c); op->active = 0; return FHSM_RV_HOST_MEMORY; }
-        if (EVP_DecryptInit_ex2(ctx, c, kv, op->iv, NULL) != 1) {
-            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
-            op->active = 0; return FHSM_RV_FUNCTION_FAILED;
+        const int pad = op->mechanism == 0x00000136UL;
+        /* A ciphertext is whole blocks, and with padding at least one; any
+         * other length is refused before the bytes are looked at (#37 B2).
+         * Without the check a partial block reached OpenSSL and came back
+         * CKR_ENCRYPTED_DATA_INVALID. */
+        if ((ulEncLen % 8) != 0 || (pad && ulEncLen == 0)) {
+            op->active = 0; return FHSM_RV_ENCRYPTED_DATA_LEN_RANGE;
         }
-        EVP_CIPHER_CTX_set_padding(ctx, 0);
-        if (pData == NULL) { *pulDataLen = ulEncLen; EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c); return FHSM_RV_OK; }
-        if (*pulDataLen < ulEncLen) { *pulDataLen = ulEncLen; EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c); return 0x00000150UL; }
-        int outl = 0, finl = 0;
-        if (EVP_DecryptUpdate(ctx, pData, &outl, pEnc, (int)ulEncLen) != 1
-            || EVP_DecryptFinal_ex(ctx, pData + outl, &finl) != 1) {
-            EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
-            op->active = 0; return FHSM_RV_ENCRYPTED_DATA_INVALID;
-        }
-        *pulDataLen = (CK_ULONG)(outl + finl);
-        EVP_CIPHER_CTX_free(ctx); EVP_CIPHER_free(c);
+        /* The ciphertext length bounds the plaintext, as on the AES path. */
+        if (pData == NULL) { *pulDataLen = ulEncLen; return FHSM_RV_OK; }
+        if (*pulDataLen < ulEncLen) { *pulDataLen = ulEncLen; return 0x00000150UL; }
+        size_t got = 0;
+        fhsm_rv_t drv = des3_crypt(op->mechanism, kv, op->iv, 0,
+                                   pEnc, (size_t)ulEncLen, pData, &got);
+        *pulDataLen = drv == FHSM_RV_OK ? (CK_ULONG)got : 0;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
-                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
-        return FHSM_RV_OK;
+                                fhsm_session_role(hSession), drv, FHSM_AUDIT_END);
+        return drv;
     }
 
     /* --- AES-CCM path (SP 800-38C, symmetric) ---
@@ -15542,8 +15572,17 @@ static int op_cipher_kind(uint32_t mech) {
         case CKM_AES_ECB:
         case CKM_AES_CBC:     return 2;
         case CKM_AES_CBC_PAD: return 3;
+        case 0x00000132UL:                                  /* CKM_DES3_ECB */
+        case 0x00000133UL:    return 2;                     /* CKM_DES3_CBC */
+        case 0x00000136UL:    return 3;                     /* CKM_DES3_CBC_PAD */
         default:              return -1;
     }
+}
+
+/* The block length the multipart bounds are counted in: 8 for 3DES, 16 for
+ * AES. It was 16 everywhere while AES was the only block cipher here. */
+static size_t op_block_len(uint32_t mech) {
+    return des3_mode(mech) ? 8u : 16u;
 }
 
 /* Build the multipart EVP context for the operation's mechanism (not just
@@ -15556,14 +15595,17 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl=0, kt=0;
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
-    if (kt != CKK_AES) return FHSM_RV_MECHANISM_INVALID;
+    const int des3 = des3_mode(op->mechanism);
+    if (kt != (des3 ? (uint32_t)CKK_DES3 : (uint32_t)CKK_AES)) return FHSM_RV_MECHANISM_INVALID;
     int kind = op_cipher_kind(op->mechanism);
     if (kind < 0) return FHSM_RV_MECHANISM_INVALID;
     static const char *gcm[3] = { "AES-128-GCM", "AES-192-GCM", "AES-256-GCM" };
-    int ksel = (kvl == 16) ? 0 : (kvl == 24) ? 1 : (kvl == 32) ? 2 : -1;
+    int ksel = des3 ? (kvl == 24 ? 0 : -1)
+             : (kvl == 16) ? 0 : (kvl == 24) ? 1 : (kvl == 32) ? 2 : -1;
     if (ksel < 0) return FHSM_RV_KEY_SIZE_RANGE;
     /* GCM here; every other mode by the name single-part uses. */
-    const char *cname = (kind == 0) ? gcm[ksel]
+    const char *cname = des3 ? (op->mechanism == 0x00000132UL ? "DES-EDE3-ECB" : "DES-EDE3-CBC")
+                      : (kind == 0) ? gcm[ksel]
                       : aes_mode_cipher_name(op->mechanism, kvl);
     if (!cname) return FHSM_RV_MECHANISM_INVALID;
     EVP_CIPHER *cipher = EVP_CIPHER_fetch(NULL, cname, NULL);
@@ -15586,7 +15628,8 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
             ok = enc ? EVP_EncryptUpdate(ctx, NULL, &exl, op->gcm_aad, (int)op->gcm_aad_len)
                      : EVP_DecryptUpdate(ctx, NULL, &exl, op->gcm_aad, (int)op->gcm_aad_len);
     } else {
-        const uint8_t *iv = (op->mechanism == CKM_AES_ECB) ? NULL : op->iv;
+        const uint8_t *iv = (op->mechanism == CKM_AES_ECB
+                             || op->mechanism == 0x00000132UL /* CKM_DES3_ECB */) ? NULL : op->iv;
         ok = enc ? EVP_EncryptInit_ex2(ctx, cipher, kv, iv, NULL)
                  : EVP_DecryptInit_ex2(ctx, cipher, kv, iv, NULL);
         /* PKCS#7 padding only for CBC-PAD ; ECB/CBC/CTR are raw so multipart
@@ -15664,7 +15707,8 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
      * number, as C_DecryptUpdate's does. */
     int ek = op_cipher_kind(op->mechanism);
     int block = (ek == 2 || ek == 3);
-    { size_t need = block ? ((op->enc_pending + (size_t)ulPartLen) / 16) * 16
+    const size_t bs = op_block_len(op->mechanism);
+    { size_t need = block ? ((op->enc_pending + (size_t)ulPartLen) / bs) * bs
                           : ulPartLen;
       if (pEnc == NULL) { *pulEncLen = need; return FHSM_RV_OK; }
       if (*pulEncLen < need) { *pulEncLen = need; return 0x00000150UL; }
@@ -15675,7 +15719,7 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     if (EVP_EncryptUpdate(op->cipher_ctx, pEnc, &out_len, pPart, (int)ulPartLen) != 1) {
         op->active = 0; return FHSM_RV_FUNCTION_FAILED;
     }
-    if (block) op->enc_pending = (uint32_t)((op->enc_pending + ulPartLen) % 16);
+    if (block) op->enc_pending = (uint32_t)((op->enc_pending + ulPartLen) % bs);
     *pulEncLen = (CK_ULONG)out_len;
     return FHSM_RV_OK;
 }
@@ -15693,7 +15737,15 @@ CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
      * nothing (#125 #57 generic multipart). */
     int fkind = op_cipher_kind(op->mechanism);
     size_t ftag = (fkind == 0) ? (op->gcm_tag_len ? op->gcm_tag_len : 16) : 0;
-    size_t fmax = (fkind == 0) ? ftag : (fkind == 3) ? 16 : 0;
+    size_t fmax = (fkind == 0) ? ftag : (fkind == 3) ? op_block_len(op->mechanism) : 0;
+    /* ECB and CBC without padding take whole blocks. A partial one still held
+     * at Final is the caller's length, CKR_DATA_LEN_RANGE, as single-part
+     * answers (#37 B1); OpenSSL's refusal came out as CKR_FUNCTION_FAILED. */
+    if (fkind == 2 && op->enc_pending != 0) {
+        if (op->cipher_ctx) { EVP_CIPHER_CTX_free(op->cipher_ctx); op->cipher_ctx = NULL; }
+        op->active = 0;
+        return FHSM_RV_DATA_LEN_RANGE;
+    }
     if (pLast == NULL) { *pulLastLen = fmax; return FHSM_RV_OK; }
     if (*pulLastLen < fmax) { *pulLastLen = fmax; return 0x00000150UL; }
     /* Init then Final with no Update in between is zero bytes of input, not
@@ -15897,7 +15949,7 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
         return FHSM_RV_OK;
     }
     { int dk = op_cipher_kind(op->mechanism);
-      size_t bound = (dk == 2 || dk == 3) ? ulEncLen + 16 : ulEncLen;
+      size_t bound = (dk == 2 || dk == 3) ? ulEncLen + op_block_len(op->mechanism) : ulEncLen;
       if (pPart == NULL) { *pulPartLen = bound; return FHSM_RV_OK; }
       if (*pulPartLen < bound) {
           size_t exact = 0;
@@ -15962,7 +16014,7 @@ CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
      * setup first, so the overflow sat behind a defect that happened to
      * shadow it. */
     int dk = op_cipher_kind(op->mechanism);
-    size_t bound = (dk == 3) ? 16u : 0u;
+    size_t bound = (dk == 3) ? op_block_len(op->mechanism) : 0u;
     if (pLast == NULL) { *pulLastLen = bound; return FHSM_RV_OK; }
 
     if (*pulLastLen < bound) {

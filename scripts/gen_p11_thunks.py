@@ -897,6 +897,12 @@ MECHANISMS: tuple[Mech, ...] = (
          notes="Triple-DES disallowed for encryption after Dec 31 2023 (SP 800-131A rev. 2)."),
     Mech("CKM_DES3_CBC",           0x00000133, "TDES", "encrypt", "dispatch_des3_cbc",
          fips="non-approved"),
+    # 2.8.0: ECB and CBC with PKCS#7 padding beside CBC, single-part and in
+    # parts. C_Encrypt computes them; the handler named is only a reference.
+    Mech("CKM_DES3_ECB",           0x00000132, "TDES", "encrypt", "dispatch_des3_cbc",
+         fips="non-approved", refs=("SP 800-67 rev. 2",)),
+    Mech("CKM_DES3_CBC_PAD",       0x00000136, "TDES", "encrypt", "dispatch_des3_cbc",
+         fips="non-approved", refs=("SP 800-67 rev. 2", "RFC 5652 6.3")),
     Mech("CKM_RC4",                0x00000111, "RC4",  "encrypt", "dispatch_reject_fips",
          fips="non-approved"),
     Mech("CKM_DH_PKCS_KEY_PAIR_GEN", 0x00000020, "DH",  "keypair", "dispatch_reject_fips",

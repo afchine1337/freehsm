@@ -68,6 +68,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
   a `CK_KEY_DERIVATION_STRING_DATA`, the CBC forms the IV and the data. Not
   approved: all-mechanisms in permissive mode only.
   `tests/test_encrypt_data_derive.c`.
+* **`CKM_DES3_ECB` and `CKM_DES3_CBC_PAD`**, beside `CKM_DES3_CBC`, and all
+  three in parts as well as single-part; `CKM_DES3_CBC` was single-part
+  only. ECB and CBC take whole blocks: another length is
+  `CKR_DATA_LEN_RANGE` to encrypt and `CKR_ENCRYPTED_DATA_LEN_RANGE` to
+  decrypt, where a 3DES-CBC ciphertext that was not whole blocks came back
+  `CKR_ENCRYPTED_DATA_INVALID`. Not approved: all-mechanisms only.
+  `tests/test_des3_modes.c`.
+* **A partial block at `C_EncryptFinal` is `CKR_DATA_LEN_RANGE`.** ECB and
+  CBC without padding, AES as 3DES, encrypted in parts with a total that
+  is not whole blocks, answered `CKR_FUNCTION_FAILED` at Final, OpenSSL's
+  refusal passed on. Single-part already answered `CKR_DATA_LEN_RANGE`
+  (#37 B1).
 * **A data object keeps its `CKA_OBJECT_ID` (#38, #33 C10).** PKCS#11 v3.2
   Table 20 gives every data object one. It was accepted and dropped up to
   2.6.1, and refused in 2.7.0, the token file having no field for it. It is
