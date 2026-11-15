@@ -6,6 +6,7 @@
 #   - lint       : SPDX header presence on every .c/.h
 #   - build      : Debian 13 image with OpenSSL 3.5 FIPS provider
 #   - sanitizers : the whole suite under AddressSanitizer + UBSan
+#   - test-default-provider : the whole suite, plain build, both profiles
 #   - test-smoke : the built-in static smoke test
 #   - test-cov   : full PKCS#11 coverage matrix (27 PASS / 5 SKIP target)
 #   - repro      : two-build reproducibility check
@@ -344,6 +345,63 @@ jobs:
         with:
           name: asan-log
           path: asan.log
+          retention-days: 14
+
+  # The whole suite, plain build, OpenSSL's default provider, both profiles.
+  #
+  # No job did this. `build` builds the default profile and runs the smoke
+  # test, the integrity check, the audit switch and the OCSP script -- never
+  # `make tests`. test-fips-provider runs both profiles, but under the FIPS
+  # provider, where ChaCha20 and Poly1305 are not served and so not
+  # advertised. test-coverage-matrix runs tests/coverage_matrix.sh only. So
+  # all-mechanisms against the default provider -- the build that advertises
+  # the most -- had no suite run at all.
+  #
+  # Found 2026-11-15: cf7759d put CKM_CHACHA20_POLY1305 on 0x4021, which
+  # tests/test_mech_advertise.c lists as a code point nothing may advertise.
+  # The test failed on the first `make PROFILE=all-mechanisms test` on the
+  # workstation; CI had stayed green, because nothing in it ran that test in
+  # the one configuration where 0x4021 is offered.
+  #
+  # nist-approved-only is in the matrix too. Its only full-suite run against
+  # the default provider was `make asan` in the sanitizers job: -O1, no
+  # _FORTIFY_SOURCE, no stack protector. That is the right build for finding
+  # memory bugs and the wrong one for saying the shipping build passes --
+  # what -O2 and the hardening set change is exactly what it does not see.
+  #
+  # The stamp is removed and the sources regenerated first: src/gen is
+  # committed for the default profile, and check-profile refuses a tree whose
+  # generated dispatch disagrees with PROFILE. PROFILE is spelled out on every
+  # make, for the reason the Makefile gives above `generate`.
+  test-default-provider:
+    runs-on: ubuntu-latest
+    needs: lint
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [nist-approved-only, all-mechanisms]
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/freehsm-c-build:debian13-20261006
+      options: --user root
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Generate, build and run the suite (${{ matrix.profile }})
+        run: |
+          set -o pipefail
+          P=${{ matrix.profile }}
+          rm -f src/gen/.profile.stamp
+          make PROFILE=$P generate 2>&1 | tee suite.log
+          make PROFILE=$P 2>&1 | tee -a suite.log
+          make PROFILE=$P test 2>&1 | tee -a suite.log
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: suite-default-provider-${{ matrix.profile }}
+          path: suite.log
           retention-days: 14
 
   # The concurrency tests under ThreadSanitizer (#111-prep). They also run in
