@@ -1671,11 +1671,22 @@ static unsigned ec_min_bits(void) {
     return 256u;
 }
 
+/* An XTS key: 32 or 64 bytes, two halves that differ (SP 800-38E, IEEE
+ * 1619-2018 5.1). Shared by every path that makes or takes one. */
+static int xts_key_ok(const uint8_t *k, size_t n) {
+    if (!k || (n != 32 && n != 64)) return 0;
+    return CRYPTO_memcmp(k, k + n / 2, n / 2) != 0;
+}
+
 static void fhsm_mech_keysizes_for(const char *fam,
                                     CK_ULONG *mn, CK_ULONG *mx) {
     *mn = 0; *mx = 0;
     if (!fam) return;
     if (!strcmp(fam, "AES"))     { *mn = 16;   *mx = 32;   return; }
+    /* An XTS key is two AES keys of the same length end to end (SP 800-38E):
+     * 32 bytes for XTS-AES-128, 64 for XTS-AES-256. XTS-AES-192 is not
+     * defined. */
+    if (!strcmp(fam, "AES-XTS")) { *mn = 32;   *mx = 64;   return; }
     /* 3DES has one key length. Grouped with single DES as 8..24 until
      * 2026-09-28, which advertised 8-byte 3DES keys the module has never
      * made -- key generation fixes key_len at 24 and C_Encrypt refuses any
@@ -3468,6 +3479,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     } else {
         switch (pMechanism->mechanism) {
             case CKM_AES_KEY_GEN:            key_type = CKK_AES;            break;
+            case 0x00001072UL: key_type = 0x35; break;   /* CKM_AES_XTS_KEY_GEN    -> CKK_AES_XTS */
             case CKM_GENERIC_SECRET_KEY_GEN: key_type = CKK_GENERIC_SECRET; break;
             /* CKM_HKDF_KEY_GEN (PKCS#11 v3.2 §6.32.1): random key material
              * for use as HKDF input, typed CKK_HKDF (0x42). Advertised with
@@ -3528,6 +3540,9 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             CK_ULONG mn = 0, mx = 0;
             fhsm_mech_keysizes_for("GENERIC", &mn, &mx);
             if (req < mn || req > mx) return FHSM_RV_KEY_SIZE_RANGE;
+        } else if (key_type == 0x35) {
+            /* CKK_AES_XTS: two AES-128 or two AES-256 keys. */
+            if (req != 32 && req != 64) return FHSM_RV_KEY_SIZE_RANGE;
         } else if (req != 16 && req != 24 && req != 32) {
             return FHSM_RV_KEY_SIZE_RANGE;
         }
@@ -3599,8 +3614,14 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         rv = FHSM_RV_OK;
     } else {
         rv = fhsm_rng_bytes(key, key_len);
+        /* The two halves of an XTS key must differ (SP 800-38E, and OpenSSL
+         * refuses such a key). Equal halves from the generator mean it is
+         * broken, not unlucky: refused, not retried. */
+        if (rv == FHSM_RV_OK && key_type == 0x35
+            && CRYPTO_memcmp(key, key + key_len / 2, key_len / 2) == 0)
+            rv = FHSM_RV_FUNCTION_FAILED;
     }
-    if (rv != FHSM_RV_OK) return rv;
+    if (rv != FHSM_RV_OK) { fhsm_zeroize(key, sizeof(key)); return rv; }
 
     uint32_t handle = 0;
     rv = fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
@@ -4329,6 +4350,10 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
          * the import did not (#37 K2). */
         if (a.cko == CKO_SECRET_KEY && a.ckk == CKK_AES && a.value_data
             && a.value_len != 16 && a.value_len != 24 && a.value_len != 32)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        /* An XTS key is 32 or 64 bytes, and its two halves differ. */
+        if (a.cko == CKO_SECRET_KEY && a.ckk == 0x35 /* CKK_AES_XTS */ && a.value_data
+            && !xts_key_ok(a.value_data, a.value_len))
             return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         uint8_t flags = (a.cko == CKO_PRIVATE_KEY)
                         ? private_key_sensitive_flag(pTemplate, ulCount) : 0;
@@ -6935,6 +6960,8 @@ static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     if (key_type == 0x15 /* CKK_DES3 */ && pt_len != 24)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (key_type == 0x35 /* CKK_AES_XTS */ && !xts_key_ok(pt, pt_len))
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
     { long vli = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
       if (vli >= 0 && pTemplate[vli].pValue
           && pTemplate[vli].ulValueLen == sizeof(CK_ULONG)) {
@@ -7185,6 +7212,8 @@ static CK_RV kem_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     if (new_ckk == CKK_AES && out_len != 16 && out_len != 24 && out_len != 32)
         return CKR_TEMPLATE_INCONSISTENT;
     if (new_ckk == 0x15 /* CKK_DES3 */ && out_len != 24)
+        return CKR_TEMPLATE_INCONSISTENT;
+    if (new_ckk == 0x35 /* CKK_AES_XTS */ && !xts_key_ok(ss, out_len))
         return CKR_TEMPLATE_INCONSISTENT;
 
     uint32_t handle = 0;
@@ -10577,6 +10606,9 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
 #ifndef CKM_AES_CTS
 #define CKM_AES_CTS               0x00001089UL
 #endif
+#ifndef CKM_AES_XTS
+#define CKM_AES_XTS               0x00001071UL
+#endif
 #ifndef CKM_AES_CMAC
 #define CKM_AES_CMAC              0x0000108AUL
 #endif
@@ -11358,6 +11390,7 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     if ((pMechanism->mechanism == CKM_AES_CBC ||
          pMechanism->mechanism == CKM_AES_CBC_PAD ||
          pMechanism->mechanism == 0x00001089UL /* CKM_AES_CTS */ ||
+         pMechanism->mechanism == 0x00001071UL /* CKM_AES_XTS: the tweak */ ||
          aes_is_feedback_mode(pMechanism->mechanism)) &&
         pMechanism->pParameter && pMechanism->ulParameterLen == 16) {
         memcpy(op->iv, pMechanism->pParameter, 16);
@@ -11814,8 +11847,9 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     if ((pMechanism->mechanism == CKM_AES_CBC ||
          pMechanism->mechanism == CKM_AES_CBC_PAD ||
          pMechanism->mechanism == 0x00001089UL /* CKM_AES_CTS */ ||
+         pMechanism->mechanism == 0x00001071UL /* CKM_AES_XTS */ ||
          aes_is_feedback_mode(pMechanism->mechanism)) && !op->have_iv)
-        return FHSM_RV_MECHANISM_PARAM_INVALID;   /* CBC, CTS, OFB, CFB: a 16-byte IV */
+        return FHSM_RV_MECHANISM_PARAM_INVALID;   /* CBC, CTS, OFB, CFB: a 16-byte IV; XTS: tweak */
     if (pMechanism->mechanism == CKM_AES_GCM &&
         (!op->gcm_have || op->gcm_iv_len < 12))
         return FHSM_RV_MECHANISM_PARAM_INVALID;   /* NIST SP 800-38D : IV >= 96 bits */
@@ -12001,6 +12035,48 @@ static fhsm_rv_t aes_cts_crypt(const uint8_t *kv, size_t kvl, const uint8_t *iv,
     return ok ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
 
+/* CKM_AES_XTS (SP 800-38E, IEEE 1619): one data unit per operation, the
+ * 16-byte tweak as the mechanism parameter, ciphertext stealing for a partial
+ * last block. Like CTS the cipher takes the data unit in one update, so the
+ * multipart forms collect it. At least one block and at most 2^20 blocks,
+ * the data unit limit of SP 800-38E. */
+#define FHSM_XTS_MAX_UNIT ((size_t)16 << 20)
+static fhsm_rv_t aes_xts_crypt(const uint8_t *kv, size_t kvl, const uint8_t *tweak,
+                               int enc, const uint8_t *in, size_t len, uint8_t *out) {
+    const char *cn = (kvl == 32) ? "AES-128-XTS" : (kvl == 64) ? "AES-256-XTS" : NULL;
+    if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
+    if (!xts_key_ok(kv, kvl)) return FHSM_RV_KEY_FUNCTION_NOT_PERMITTED;
+    if (len > FHSM_XTS_MAX_UNIT)
+        return enc ? FHSM_RV_DATA_LEN_RANGE : FHSM_RV_ENCRYPTED_DATA_LEN_RANGE;
+    EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cn, NULL);
+    if (!c) return FHSM_RV_MECHANISM_INVALID;
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
+    int ol = 0, fl = 0;
+    int ok = EVP_CipherInit_ex2(ctx, c, kv, tweak, enc, NULL) == 1
+          && EVP_CipherUpdate(ctx, out, &ol, in, (int)len) == 1
+          && EVP_CipherFinal_ex(ctx, out + ol, &fl) == 1
+          && (size_t)ol + (size_t)fl == len;
+    EVP_CIPHER_CTX_free(ctx);
+    EVP_CIPHER_free(c);
+    return ok ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+/* CTS and XTS: the whole message in one pass, output as long as the input,
+ * at least one block. The key type each one takes, and the one call. */
+static int aes_whole_msg_mech(CK_ULONG m) {
+    return m == CKM_AES_CTS || m == CKM_AES_XTS;
+}
+static uint32_t aes_whole_msg_key_type(CK_ULONG m) {
+    return m == CKM_AES_XTS ? 0x35u /* CKK_AES_XTS */ : (uint32_t)CKK_AES;
+}
+static fhsm_rv_t aes_whole_msg_crypt(CK_ULONG m, const uint8_t *kv, size_t kvl,
+                                     const uint8_t *iv, int enc, const uint8_t *in,
+                                     size_t len, uint8_t *out) {
+    return m == CKM_AES_XTS ? aes_xts_crypt(kv, kvl, iv, enc, in, len, out)
+                            : aes_cts_crypt(kv, kvl, iv, enc, in, len, out);
+}
+
 /* Positive whitelist of mechanisms that C_Encrypt / C_Decrypt actually
  * implement. C_EncryptInit / C_DecryptInit with any other mechanism --- a
  * digest (CKM_SHA256), a signature, or an advertised-but-unimplemented
@@ -12018,6 +12094,7 @@ static int fhsm_cipher_mech_valid(CK_ULONG mech) {
         case CKM_AES_CFB128:    /* 0x2107 */
         case CKM_AES_CFB1:      /* 0x2108 */
         case CKM_AES_CTS:       /* 0x1089 */
+        case CKM_AES_XTS:       /* 0x1071 */
         case CKM_AES_GCM:       /* 0x1087 */
         case 0x00001088UL:      /* CKM_AES_CCM */
         case 0x00000133UL:      /* CKM_DES3_CBC */
@@ -12084,6 +12161,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x108A: case 0x108E:                           /* AES CMAC/GMAC */
         case 0x108B: case 0x1083: case 0x1084:              /* AES CMAC_GENERAL/MAC/MAC_GENERAL */
             want = 0x1F; break;                             /* CKK_AES */
+        case 0x1071: want = 0x35; break;                    /* AES_XTS -> CKK_AES_XTS */
         case 0x0133: want = 0x15; break;                    /* DES3_CBC -> CKK_DES3 */
         case 0x0360: case 0x0362: case 0x0363: case 0x0364: /* v3.2 §6.20 combiners */
             /* The base key of a combiner is a CKK_GENERIC_SECRET. This is the
@@ -12388,13 +12466,16 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         return FHSM_RV_OK;
     }
 
-    /* --- AES-CTS: at least one block, output as long as the input --- */
-    if (op->mechanism == CKM_AES_CTS) {
-        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+    /* --- AES-CTS, AES-XTS: at least one block, output as long as the input --- */
+    if (aes_whole_msg_mech(op->mechanism)) {
+        if (kt != aes_whole_msg_key_type(op->mechanism)) {
+            op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        }
         if (ulDataLen < 16) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
         if (pEnc == NULL) { *pulEncLen = ulDataLen; return FHSM_RV_OK; }
         if (*pulEncLen < ulDataLen) { *pulEncLen = ulDataLen; return 0x00000150UL; }
-        fhsm_rv_t crv = aes_cts_crypt(kv, kvl, op->iv, 1, pData, (size_t)ulDataLen, pEnc);
+        fhsm_rv_t crv = aes_whole_msg_crypt(op->mechanism, kv, kvl, op->iv, 1,
+                                            pData, (size_t)ulDataLen, pEnc);
         *pulEncLen = crv == FHSM_RV_OK ? ulDataLen : 0;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
@@ -12913,13 +12994,16 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         return FHSM_RV_OK;
     }
 
-    /* --- AES-CTS: a ciphertext is at least one block --- */
-    if (op->mechanism == CKM_AES_CTS) {
-        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+    /* --- AES-CTS, AES-XTS: a ciphertext is at least one block --- */
+    if (aes_whole_msg_mech(op->mechanism)) {
+        if (kt != aes_whole_msg_key_type(op->mechanism)) {
+            op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        }
         if (ulEncLen < 16) { op->active = 0; return FHSM_RV_ENCRYPTED_DATA_LEN_RANGE; }
         if (pData == NULL) { *pulDataLen = ulEncLen; return FHSM_RV_OK; }
         if (*pulDataLen < ulEncLen) { *pulDataLen = ulEncLen; return 0x00000150UL; }
-        fhsm_rv_t crv = aes_cts_crypt(kv, kvl, op->iv, 0, pEnc, (size_t)ulEncLen, pData);
+        fhsm_rv_t crv = aes_whole_msg_crypt(op->mechanism, kv, kvl, op->iv, 0,
+                                            pEnc, (size_t)ulEncLen, pData);
         *pulDataLen = crv == FHSM_RV_OK ? ulEncLen : 0;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
@@ -15419,9 +15503,9 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     return FHSM_RV_OK;
 }
 
-/* C_EncryptFinal / C_DecryptFinal for AES-CTS: the parts collected, in one
- * pass. CKR_BUFFER_TOO_SMALL keeps them for the retry (§5.2); any other
- * return ends the operation and drops them. */
+/* C_EncryptFinal / C_DecryptFinal for AES-CTS and AES-XTS: the parts
+ * collected, in one pass. CKR_BUFFER_TOO_SMALL keeps them for the retry
+ * (§5.2); any other return ends the operation and drops them. */
 static CK_RV cts_final(CK_SESSION_HANDLE hSession, fhsm_op_t *op, int enc,
                        unsigned char *pLast, CK_ULONG *pulLastLen) {
     const size_t n = op->mp_len;
@@ -15435,8 +15519,10 @@ static CK_RV cts_final(CK_SESSION_HANDLE hSession, fhsm_op_t *op, int enc,
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
     fhsm_rv_t rv = t ? fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt)
                      : FHSM_RV_SESSION_HANDLE_INVALID;
-    if (rv == FHSM_RV_OK && kt != CKK_AES) rv = FHSM_RV_KEY_TYPE_INCONSISTENT;
-    if (rv == FHSM_RV_OK) rv = aes_cts_crypt(kv, kvl, op->iv, enc, op->mp_buf, n, pLast);
+    if (rv == FHSM_RV_OK && kt != aes_whole_msg_key_type(op->mechanism))
+        rv = FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (rv == FHSM_RV_OK)
+        rv = aes_whole_msg_crypt(op->mechanism, kv, kvl, op->iv, enc, op->mp_buf, n, pLast);
     *pulLastLen = rv == FHSM_RV_OK ? (CK_ULONG)n : 0;
     op_free_multipart(op);
     op->active = 0;
@@ -15458,9 +15544,10 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     /* The length is passed to EVP as an int ; a value beyond INT_MAX would be
      * silently truncated (#125 TestIsizeMaxUpdateLength). Reject it. */
     if (ulPartLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
-    /* AES-CTS: the parts are kept and encrypted whole at C_EncryptFinal,
-     * since stealing needs the last two blocks. Nothing is output here. */
-    if (op->mechanism == CKM_AES_CTS) {
+    /* AES-CTS and AES-XTS: the parts are kept and encrypted whole at
+     * C_EncryptFinal, since stealing needs the last two blocks and an XTS
+     * data unit is one cipher call. Nothing is output here. */
+    if (aes_whole_msg_mech(op->mechanism)) {
         if (pEnc == NULL) { *pulEncLen = 0; return FHSM_RV_OK; }
         *pulEncLen = 0;
         return op_append_multipart(op, pPart, (size_t)ulPartLen);
@@ -15503,7 +15590,7 @@ CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
-    if (op->mechanism == CKM_AES_CTS)
+    if (aes_whole_msg_mech(op->mechanism))
         return cts_final(hSession, op, 1, pLast, pulLastLen);
     /* Final output upper bound depends on the mechanism : GCM appends its
      * auth tag ; CBC-PAD flushes one padding block ; ECB/CBC/CTR emit
@@ -15634,8 +15721,9 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
      * than crash (#125, same class as the C_Decrypt fix). */
     if (!pulPartLen || (!pEnc && ulEncLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     if (ulEncLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
-    /* AES-CTS: as in C_EncryptUpdate, decrypted whole at C_DecryptFinal. */
-    if (op->mechanism == CKM_AES_CTS) {
+    /* AES-CTS and AES-XTS: as in C_EncryptUpdate, decrypted whole at
+     * C_DecryptFinal. */
+    if (aes_whole_msg_mech(op->mechanism)) {
         if (pPart == NULL) { *pulPartLen = 0; return FHSM_RV_OK; }
         *pulPartLen = 0;
         return op_append_multipart(op, pEnc, (size_t)ulEncLen);
@@ -15744,7 +15832,7 @@ CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
     { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
-    if (op->mechanism == CKM_AES_CTS)
+    if (aes_whole_msg_mech(op->mechanism))
         return cts_final(hSession, op, 0, pLast, pulLastLen);
     /* No multipart context : C_DecryptInit was called but no
      * C_DecryptUpdate ever created the cipher context. EVP_DecryptFinal_ex

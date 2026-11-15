@@ -52,6 +52,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   of data, output as long as the input. In parts, the output comes at
   `C_EncryptFinal` / `C_DecryptFinal`. Approved, in both builds.
   `tests/test_aes_cts.c`.
+* **`CKM_AES_XTS` and `CKM_AES_XTS_KEY_GEN`**, XTS-AES (SP 800-38E, IEEE
+  1619) on `CKK_AES_XTS` keys: 32 bytes for XTS-AES-128, 64 for
+  XTS-AES-256, two halves that differ. The 16-byte tweak is the parameter;
+  one data unit per operation, from 16 bytes to 2^20 blocks, a partial last
+  block by ciphertext stealing. In parts, the output comes at
+  `C_EncryptFinal` / `C_DecryptFinal`. `C_GenerateKey`, `C_CreateObject`,
+  `C_UnwrapKey` and `C_DecapsulateKey` take the new key type and hold it to
+  those lengths. Approved, in both builds. `tests/test_aes_xts.c`.
 * **A data object keeps its `CKA_OBJECT_ID` (#38, #33 C10).** PKCS#11 v3.2
   Table 20 gives every data object one. It was accepted and dropped up to
   2.6.1, and refused in 2.7.0, the token file having no field for it. It is

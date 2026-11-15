@@ -146,6 +146,16 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197", "SP 800-38A Addendum", "RFC 3962")),
+    # XTS-AES (2.8.0): a CKK_AES_XTS key, two AES keys end to end, 32 or 64
+    # bytes; the 16-byte tweak as the parameter; one data unit per operation.
+    Mech("CKM_AES_XTS",            0x00001071, "AES-XTS", "encrypt", "dispatch_aes_cbc",
+         fips="approved", key_type="CKK_AES_XTS",
+         min_key_bits=256, max_key_bits=512,
+         refs=("FIPS 197", "SP 800-38E", "IEEE 1619")),
+    Mech("CKM_AES_XTS_KEY_GEN",    0x00001072, "AES-XTS", "keygen", "dispatch_aes_keygen",
+         fips="approved", key_type="CKK_AES_XTS",
+         min_key_bits=256, max_key_bits=512,
+         refs=("SP 800-38E", "SP 800-133 rev. 2")),
     Mech("CKM_AES_KEY_WRAP",       0x00002109, "AES",  "wrap+encrypt", "dispatch_aes_kw",
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
