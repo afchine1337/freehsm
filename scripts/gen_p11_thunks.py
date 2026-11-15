@@ -590,6 +590,30 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", key_type="CKK_GENERIC_SECRET",
          min_key_bits=128, max_key_bits=4096,
          refs=("SP 800-133 rev. 2",)),
+    # The HMAC key generators: random key material typed CKK_SHA*_HMAC, of
+    # CKA_VALUE_LEN bytes in the GENERIC range. C_GenerateKey does the work.
+    Mech("CKM_SHA_1_KEY_GEN",      0x00004003, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA_1_HMAC", refs=("SP 800-133 rev. 2",)),
+    Mech("CKM_SHA224_KEY_GEN",     0x00004004, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA224_HMAC", refs=("SP 800-133 rev. 2",)),
+    Mech("CKM_SHA256_KEY_GEN",     0x00004005, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA256_HMAC", refs=("SP 800-133 rev. 2",)),
+    Mech("CKM_SHA384_KEY_GEN",     0x00004006, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA384_HMAC", refs=("SP 800-133 rev. 2",)),
+    Mech("CKM_SHA512_KEY_GEN",     0x00004007, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA512_HMAC", refs=("SP 800-133 rev. 2",)),
+    Mech("CKM_SHA512_224_KEY_GEN", 0x00004008, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA512_224_HMAC", refs=("SP 800-133 rev. 2",)),
+    Mech("CKM_SHA512_256_KEY_GEN", 0x00004009, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA512_256_HMAC", refs=("SP 800-133 rev. 2",)),
+    Mech("CKM_SHA3_224_KEY_GEN",   0x000002B8, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA3_224_HMAC", refs=("SP 800-133 rev. 2",)),
+    Mech("CKM_SHA3_256_KEY_GEN",   0x000002B3, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA3_256_HMAC", refs=("SP 800-133 rev. 2",)),
+    Mech("CKM_SHA3_384_KEY_GEN",   0x000002C3, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA3_384_HMAC", refs=("SP 800-133 rev. 2",)),
+    Mech("CKM_SHA3_512_KEY_GEN",   0x000002D3, "GENERIC", "keygen", "dispatch_generic_secret_keygen",
+         fips="approved", key_type="CKK_SHA3_512_HMAC", refs=("SP 800-133 rev. 2",)),
 
     # === Concatenation KDFs (PKCS#11 v3.2 §6.20) =====================
     Mech("CKM_CONCATENATE_BASE_AND_KEY",  0x00000360, "KDF-concat", "derive",
@@ -609,6 +633,38 @@ MECHANISMS: tuple[Mech, ...] = (
          "dispatch_xor_base_and_data",
          fips="approved",
          refs=("PKCS#11 v3.2 §6.20.4",)),
+
+    # === Key derivation by digesting the base key ======================
+    # The *_KEY_DERIVATION mechanisms (SHA3_* and SHAKE_* are also named
+    # *_KEY_DERIVE in the OASIS header, same values). C_DeriveKey computes
+    # them; the handler named is only a reference. Not an approved key
+    # derivation: all-mechanisms in permissive mode only.
+    Mech("CKM_SHA1_KEY_DERIVATION",       0x00000392, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 180-4",)),
+    Mech("CKM_SHA224_KEY_DERIVATION",     0x00000396, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 180-4",)),
+    Mech("CKM_SHA256_KEY_DERIVATION",     0x00000393, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 180-4",)),
+    Mech("CKM_SHA384_KEY_DERIVATION",     0x00000394, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 180-4",)),
+    Mech("CKM_SHA512_KEY_DERIVATION",     0x00000395, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 180-4",)),
+    Mech("CKM_SHA512_224_KEY_DERIVATION", 0x0000004B, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 180-4",)),
+    Mech("CKM_SHA512_256_KEY_DERIVATION", 0x0000004F, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 180-4",)),
+    Mech("CKM_SHA3_224_KEY_DERIVATION",   0x00000398, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 202",)),
+    Mech("CKM_SHA3_256_KEY_DERIVATION",   0x00000397, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 202",)),
+    Mech("CKM_SHA3_384_KEY_DERIVATION",   0x00000399, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 202",)),
+    Mech("CKM_SHA3_512_KEY_DERIVATION",   0x0000039A, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 202",)),
+    Mech("CKM_SHAKE_128_KEY_DERIVATION",  0x0000039B, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 202",)),
+    Mech("CKM_SHAKE_256_KEY_DERIVATION",  0x0000039C, "KDF-hash", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", refs=("FIPS 202",)),
 
     # === KMAC: removed, 2026-09-14 ====================================
     #

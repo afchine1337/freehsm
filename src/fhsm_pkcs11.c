@@ -3469,6 +3469,21 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
              * first run after the extension, having been invisible for as
              * long as the mechanism has been in the table. */
             case CKM_HKDF_KEY_GEN_OP:        key_type = CKK_HKDF_KT;        break;
+            /* The HMAC key generators (PKCS#11 v3.2, one per hash): random
+             * key material typed for its HMAC, CKK_SHA*_HMAC, of the length
+             * CKA_VALUE_LEN gives in bytes. The HMAC mechanisms take any
+             * secret key, as before; the type records what the key is for. */
+            case 0x00004003UL: key_type = 0x28; break;   /* CKM_SHA_1_KEY_GEN      -> CKK_SHA_1_HMAC */
+            case 0x00004004UL: key_type = 0x2E; break;   /* CKM_SHA224_KEY_GEN     -> CKK_SHA224_HMAC */
+            case 0x00004005UL: key_type = 0x2B; break;   /* CKM_SHA256_KEY_GEN     -> CKK_SHA256_HMAC */
+            case 0x00004006UL: key_type = 0x2C; break;   /* CKM_SHA384_KEY_GEN     -> CKK_SHA384_HMAC */
+            case 0x00004007UL: key_type = 0x2D; break;   /* CKM_SHA512_KEY_GEN     -> CKK_SHA512_HMAC */
+            case 0x00004008UL: key_type = 0x43; break;   /* CKM_SHA512_224_KEY_GEN -> CKK_SHA512_224_HMAC */
+            case 0x00004009UL: key_type = 0x44; break;   /* CKM_SHA512_256_KEY_GEN -> CKK_SHA512_256_HMAC */
+            case 0x000002B8UL: key_type = 0x36; break;   /* CKM_SHA3_224_KEY_GEN   -> CKK_SHA3_224_HMAC */
+            case 0x000002B3UL: key_type = 0x37; break;   /* CKM_SHA3_256_KEY_GEN   -> CKK_SHA3_256_HMAC */
+            case 0x000002C3UL: key_type = 0x38; break;   /* CKM_SHA3_384_KEY_GEN   -> CKK_SHA3_384_HMAC */
+            case 0x000002D3UL: key_type = 0x39; break;   /* CKM_SHA3_512_KEY_GEN   -> CKK_SHA3_512_HMAC */
             default:                          return FHSM_RV_MECHANISM_INVALID;
         }
         long j = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
@@ -3490,9 +3505,15 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
              * ordinary 20- or 64-byte secret. */
             if (req == 0 || req > FHSM_PBKDF2_MAX_OUT)
                 return FHSM_RV_KEY_SIZE_RANGE;
-        } else if (key_type == CKK_GENERIC_SECRET) {
-            /* A generic secret has no block size either -- an HMAC key is
-             * as long as the caller needs. The 16/24/32 rule refused a
+        } else if (key_type == CKK_GENERIC_SECRET
+                   || (key_type >= 0x28 && key_type <= 0x2E && key_type != 0x29
+                       && key_type != 0x2A)
+                   || (key_type >= 0x36 && key_type <= 0x39)
+                   || key_type == 0x43 || key_type == 0x44) {
+            /* A generic secret, or an HMAC key typed CKK_SHA*_HMAC (0x28,
+             * 0x2B to 0x2E, 0x36 to 0x39, 0x43, 0x44), has no block size
+             * either -- an HMAC key is as long as the caller needs, and
+             * the typed generators take the same range. The 16/24/32 rule refused a
              * 64-byte one that C_GetMechanismInfo advertises (GENERIC, 1 to
              * 64 bytes): pkcs11-check's TestGenericSecretKeyGen asked for
              * 512 bits and got CKR_KEY_SIZE_RANGE. The bounds are the ones
@@ -5634,6 +5655,91 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * each in src/dispatch/fhsm_dispatch_concat.c that nothing called: this
      * entry point named CKM_ECDH1_DERIVE and its cofactor variant and refused
      * everything else. See tests/test_advertised_operational. */
+    /* Key derivation by digesting the base key (PKCS#11 v3.2, the
+     * *_KEY_DERIVATION mechanisms; SHA3_* and SHAKE_* also go by
+     * *_KEY_DERIVE). The derived key is the digest of the base key's value:
+     *   - its type and length follow the template as for ECDH under CKD_NULL
+     *     (ecdh_key_len): generic secret of the digest's length by default,
+     *     a DES type's own length, an AES length, or CKA_VALUE_LEN up to the
+     *     digest's length;
+     *   - a shorter key is the digest's leading bytes, the trailing end being
+     *     discarded, as the derivation by data encryption does;
+     *   - SHAKE128 and SHAKE256 have no fixed length, so the template must
+     *     give one (CKA_VALUE_LEN, or a DES type), up to 128 bytes;
+     *   - the template sets CKA_SENSITIVE and CKA_EXTRACTABLE freely, as for
+     *     a KDF; CKA_ALWAYS_SENSITIVE and CKA_NEVER_EXTRACTABLE carry the base
+     *     key's history (derive_store_secret, combines = 0).
+     * Not an approved key derivation, so all-mechanisms in permissive mode
+     * only. No parameter is taken. */
+    {
+        const char *dname = NULL;
+        size_t dlen = 0;   /* 0: an XOF, the template gives the length */
+        switch (pMechanism->mechanism) {
+            case 0x00000392UL: dname = "SHA1";         dlen = 20; break;
+            case 0x00000396UL: dname = "SHA2-224";     dlen = 28; break;
+            case 0x00000393UL: dname = "SHA2-256";     dlen = 32; break;
+            case 0x00000394UL: dname = "SHA2-384";     dlen = 48; break;
+            case 0x00000395UL: dname = "SHA2-512";     dlen = 64; break;
+            case 0x0000004BUL: dname = "SHA2-512/224"; dlen = 28; break;
+            case 0x0000004FUL: dname = "SHA2-512/256"; dlen = 32; break;
+            case 0x00000398UL: dname = "SHA3-224";     dlen = 28; break;
+            case 0x00000397UL: dname = "SHA3-256";     dlen = 32; break;
+            case 0x00000399UL: dname = "SHA3-384";     dlen = 48; break;
+            case 0x0000039AUL: dname = "SHA3-512";     dlen = 64; break;
+            case 0x0000039BUL: dname = "SHAKE128";     dlen = 0;  break;
+            case 0x0000039CUL: dname = "SHAKE256";     dlen = 0;  break;
+            default: break;
+        }
+        if (dname) {
+            if (fhsm_build_fips_strict || fhsm_mode_is_fips())
+                return FHSM_RV_MECHANISM_INVALID;
+            if (pMechanism->pParameter || pMechanism->ulParameterLen)
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            const uint8_t *bv = NULL; size_t bvl = 0;
+            uint32_t bcl = 0, bkt = 0;
+            fhsm_rv_t brv = fhsm_token_object_get(t, (uint32_t)hBaseKey,
+                                                   &bv, &bvl, &bcl, &bkt);
+            if (brv != FHSM_RV_OK) return brv;
+            if (bcl != CKO_SECRET_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+            size_t klen = 0;
+            if (dlen) {
+                CK_RV lr = ecdh_key_len(pTemplate, ulCount, dlen, &klen);
+                if (lr != FHSM_RV_OK) return lr;
+            } else {
+                CK_ULONG kt = CKK_GENERIC_SECRET;
+                long ki = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+                if (ki >= 0 && pTemplate[ki].pValue
+                    && pTemplate[ki].ulValueLen == sizeof(CK_ULONG))
+                    memcpy(&kt, pTemplate[ki].pValue, sizeof kt);
+                int fixed = kt == 0x13UL || kt == 0x14UL || kt == 0x15UL || kt == 0x1EUL;
+                if (!fixed && find_attr(pTemplate, ulCount, CKA_VALUE_LEN) < 0)
+                    return CKR_TEMPLATE_INCOMPLETE;
+                CK_RV lr = ecdh_key_len(pTemplate, ulCount, 128, &klen);
+                if (lr != FHSM_RV_OK) return lr;
+            }
+            uint8_t dig[128];
+            unsigned int dl = 0;
+            int dok = 0;
+            EVP_MD *md = EVP_MD_fetch(NULL, dname, NULL);
+            const int have_md = md != NULL;
+            EVP_MD_CTX *mc = md ? EVP_MD_CTX_new() : NULL;
+            if (mc && EVP_DigestInit_ex(mc, md, NULL) == 1
+                && EVP_DigestUpdate(mc, bv, bvl) == 1) {
+                if (dlen) dok = EVP_DigestFinal_ex(mc, dig, &dl) == 1 && dl == dlen;
+                else      dok = EVP_DigestFinalXOF(mc, dig, klen) == 1;
+            }
+            EVP_MD_CTX_free(mc);
+            EVP_MD_free(md);
+            if (!have_md) { OPENSSL_cleanse(dig, sizeof dig); return FHSM_RV_MECHANISM_INVALID; }
+            CK_RV srv = dok ? derive_store_secret(t, hSession, pTemplate, ulCount,
+                                                  dig, klen, CKO_SECRET_KEY,
+                                                  hBaseKey, 0, 0, phKey)
+                            : FHSM_RV_FUNCTION_FAILED;
+            OPENSSL_cleanse(dig, sizeof dig);
+            return srv;
+        }
+    }
+
     if (pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY_OP
         || pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA_OP
         || pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE_OP

@@ -16,6 +16,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
   bytes, the 32 bits SP 800-107 rev. 1 sets for a truncated HMAC. A missing
   parameter or a length out of range is `CKR_MECHANISM_PARAM_INVALID`.
   `tests/test_hmac_general.c`.
+* **The HMAC key generators**, `CKM_SHA_1_KEY_GEN` to
+  `CKM_SHA512_256_KEY_GEN` and `CKM_SHA3_*_KEY_GEN`: a random key typed
+  `CKK_SHA*_HMAC`, of 1 to 64 bytes as `CKA_VALUE_LEN` asks. The HMAC
+  mechanisms take any secret key, as before.
+* **Key derivation by digest**, the `*_KEY_DERIVATION` mechanisms for
+  SHA-1, SHA-2, SHA-3, SHAKE128 and SHAKE256 (the SHA-3 and SHAKE ones are
+  also named `*_KEY_DERIVE`). The derived key is the digest of the base
+  key's value: a generic secret of the digest's length by default,
+  otherwise the type and length the template asks, taken from the digest's
+  leading bytes. SHAKE needs the length from the template, up to 128 bytes.
+  They are not approved key derivations: all-mechanisms in permissive mode
+  only. `tests/test_hmac_keygen_derive.c`.
 * **A data object keeps its `CKA_OBJECT_ID` (#38, #33 C10).** PKCS#11 v3.2
   Table 20 gives every data object one. It was accepted and dropped up to
   2.6.1, and refused in 2.7.0, the token file having no field for it. It is
