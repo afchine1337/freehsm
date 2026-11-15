@@ -2218,6 +2218,13 @@ static uint64_t ctr_blocks_avail(const uint8_t cb[16], unsigned bits) {
     return lo == 0 ? UINT64_MAX : (~lo) + 1;            /* 2^64 - lo */
 }
 
+/* The SP 800-38A feedback modes: OFB, CFB1, CFB8, CFB128. Stream modes with
+ * a 16-byte IV: any data length, output the length of the input. */
+static int aes_is_feedback_mode(CK_ULONG m) {
+    return m == 0x00002104UL || m == 0x00002106UL      /* OFB, CFB8 */
+        || m == 0x00002107UL || m == 0x00002108UL;     /* CFB128, CFB1 */
+}
+
 /* 1 when `len` more bytes stay within the counter room of an AES-CTR
  * operation, and counts them; 0 when they would overflow it. A partial last
  * block uses a counter value like a whole one. Other mechanisms: always 1. */
@@ -10553,6 +10560,20 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
 #ifndef CKM_AES_CTR
 #define CKM_AES_CTR               0x00001086UL
 #endif
+/* The SP 800-38A feedback modes (2.8.0). CFB64 (0x2105) has no OpenSSL
+ * cipher and is not offered. */
+#ifndef CKM_AES_OFB
+#define CKM_AES_OFB               0x00002104UL
+#endif
+#ifndef CKM_AES_CFB8
+#define CKM_AES_CFB8              0x00002106UL
+#endif
+#ifndef CKM_AES_CFB128
+#define CKM_AES_CFB128            0x00002107UL
+#endif
+#ifndef CKM_AES_CFB1
+#define CKM_AES_CFB1              0x00002108UL
+#endif
 #ifndef CKM_AES_CMAC
 #define CKM_AES_CMAC              0x0000108AUL
 #endif
@@ -11301,9 +11322,11 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             op->gcm_have    = 1;
         }
     }
-    /* AES-CBC/CBC-PAD use a 16-byte IV passed directly as pParameter. */
+    /* AES-CBC/CBC-PAD, and the OFB and CFB modes, use a 16-byte IV passed
+     * directly as pParameter. */
     if ((pMechanism->mechanism == CKM_AES_CBC ||
-         pMechanism->mechanism == CKM_AES_CBC_PAD) &&
+         pMechanism->mechanism == CKM_AES_CBC_PAD ||
+         aes_is_feedback_mode(pMechanism->mechanism)) &&
         pMechanism->pParameter && pMechanism->ulParameterLen == 16) {
         memcpy(op->iv, pMechanism->pParameter, 16);
         op->have_iv = 1;
@@ -11757,8 +11780,9 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * deferring to the operation (pkcs11-check test_mechanism_param_invalid,
      * TestGcmIvWeakness, TestBadParameters). */
     if ((pMechanism->mechanism == CKM_AES_CBC ||
-         pMechanism->mechanism == CKM_AES_CBC_PAD) && !op->have_iv)
-        return FHSM_RV_MECHANISM_PARAM_INVALID;   /* CBC requires a 16-byte IV */
+         pMechanism->mechanism == CKM_AES_CBC_PAD ||
+         aes_is_feedback_mode(pMechanism->mechanism)) && !op->have_iv)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;   /* CBC, OFB, CFB: a 16-byte IV */
     if (pMechanism->mechanism == CKM_AES_GCM &&
         (!op->gcm_have || op->gcm_iv_len < 12))
         return FHSM_RV_MECHANISM_PARAM_INVALID;   /* NIST SP 800-38D : IV >= 96 bits */
@@ -11787,6 +11811,31 @@ static int fhsm_nonfips_enc_rejected(CK_ULONG mech) {
     }
 }
 
+/* The OpenSSL cipher for an AES mode that needs nothing but a key and an IV:
+ * ECB, CBC, CBC-PAD (CBC, padding set apart), CTR, OFB and the CFB modes.
+ * NULL for any other mechanism or a key that is not 16, 24 or 32 bytes. */
+static const char *aes_mode_cipher_name(uint32_t mech, size_t kvl) {
+    int k = (kvl == 16) ? 0 : (kvl == 24) ? 1 : (kvl == 32) ? 2 : -1;
+    if (k < 0) return NULL;
+    static const char *const ecb[3]  = { "AES-128-ECB",  "AES-192-ECB",  "AES-256-ECB" };
+    static const char *const cbc[3]  = { "AES-128-CBC",  "AES-192-CBC",  "AES-256-CBC" };
+    static const char *const ctr[3]  = { "AES-128-CTR",  "AES-192-CTR",  "AES-256-CTR" };
+    static const char *const ofb[3]  = { "AES-128-OFB",  "AES-192-OFB",  "AES-256-OFB" };
+    static const char *const cfb1[3] = { "AES-128-CFB1", "AES-192-CFB1", "AES-256-CFB1" };
+    static const char *const cfb8[3] = { "AES-128-CFB8", "AES-192-CFB8", "AES-256-CFB8" };
+    static const char *const cfb[3]  = { "AES-128-CFB",  "AES-192-CFB",  "AES-256-CFB" };
+    switch (mech) {
+        case CKM_AES_ECB:                       return ecb[k];
+        case CKM_AES_CBC: case CKM_AES_CBC_PAD: return cbc[k];
+        case CKM_AES_CTR:                       return ctr[k];
+        case CKM_AES_OFB:                       return ofb[k];
+        case CKM_AES_CFB1:                      return cfb1[k];
+        case CKM_AES_CFB8:                      return cfb8[k];
+        case CKM_AES_CFB128:                    return cfb[k];
+        default:                                return NULL;
+    }
+}
+
 /* Positive whitelist of mechanisms that C_Encrypt / C_Decrypt actually
  * implement. C_EncryptInit / C_DecryptInit with any other mechanism --- a
  * digest (CKM_SHA256), a signature, or an advertised-but-unimplemented
@@ -11799,6 +11848,10 @@ static int fhsm_cipher_mech_valid(CK_ULONG mech) {
         case CKM_AES_CBC:       /* 0x1082 */
         case CKM_AES_CBC_PAD:   /* 0x1085 */
         case CKM_AES_CTR:       /* 0x1086 */
+        case CKM_AES_OFB:       /* 0x2104 */
+        case CKM_AES_CFB8:      /* 0x2106 */
+        case CKM_AES_CFB128:    /* 0x2107 */
+        case CKM_AES_CFB1:      /* 0x2108 */
         case CKM_AES_GCM:       /* 0x1087 */
         case 0x00001088UL:      /* CKM_AES_CCM */
         case 0x00000133UL:      /* CKM_DES3_CBC */
@@ -11859,6 +11912,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x003E: case 0x003F:                           /* HASH_SLH_DSA_SHAKE* */
             want = 0x4B; break;                             /* CKK_SLH_DSA */
         case 0x1081: case 0x1082: case 0x1085: case 0x1086: /* AES ECB/CBC/CBC_PAD/CTR */
+        case 0x2104: case 0x2106: case 0x2107: case 0x2108: /* AES OFB/CFB8/CFB128/CFB1 */
         case 0x1087: case 0x1088:                           /* AES GCM/CCM */
         case 0x108A: case 0x108E:                           /* AES CMAC/GMAC */
             want = 0x1F; break;                             /* CKK_AES */
@@ -12169,7 +12223,8 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
     /* --- AES-ECB / AES-CBC / AES-CBC-PAD / AES-CTR path ---
      * AES-ECB is non-FIPS : executable only in the all-mechanisms build. */
     if (op->mechanism == CKM_AES_ECB || op->mechanism == CKM_AES_CBC
-        || op->mechanism == CKM_AES_CBC_PAD || op->mechanism == CKM_AES_CTR) {
+        || op->mechanism == CKM_AES_CBC_PAD || op->mechanism == CKM_AES_CTR
+        || aes_is_feedback_mode(op->mechanism)) {
         int is_ecb = (op->mechanism == CKM_AES_ECB);
         /* AES-ECB is FIPS-approved (SP 800-38A) and allowed in both profiles. */
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
@@ -12182,17 +12237,8 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         if ((is_ecb || op->mechanism == CKM_AES_CBC) && (ulDataLen % 16) != 0) {
             op->active = 0; return FHSM_RV_DATA_LEN_RANGE;
         }
-        const char *cname = NULL;
-        if (op->mechanism == CKM_AES_CTR) {
-            cname = (kvl == 16) ? "AES-128-CTR" :
-                    (kvl == 24) ? "AES-192-CTR" : "AES-256-CTR";
-        } else if (is_ecb) {
-            cname = (kvl == 16) ? "AES-128-ECB" :
-                    (kvl == 24) ? "AES-192-ECB" : "AES-256-ECB";
-        } else {
-            cname = (kvl == 16) ? "AES-128-CBC" :
-                    (kvl == 24) ? "AES-192-CBC" : "AES-256-CBC";
-        }
+        const char *cname = aes_mode_cipher_name(op->mechanism, kvl);
+        if (!cname) { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
         EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cname, NULL);
         if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -12688,7 +12734,8 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
     /* --- AES-ECB / AES-CBC / AES-CBC-PAD / AES-CTR path ---
      * AES-ECB is non-FIPS : executable only in the all-mechanisms build. */
     if (op->mechanism == CKM_AES_ECB || op->mechanism == CKM_AES_CBC
-        || op->mechanism == CKM_AES_CBC_PAD || op->mechanism == CKM_AES_CTR) {
+        || op->mechanism == CKM_AES_CBC_PAD || op->mechanism == CKM_AES_CTR
+        || aes_is_feedback_mode(op->mechanism)) {
         int is_ecb = (op->mechanism == CKM_AES_ECB);
         /* AES-ECB is FIPS-approved (SP 800-38A) and allowed in both profiles. */
         if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
@@ -12698,22 +12745,13 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
          * ciphertext, and is CKR_ENCRYPTED_DATA_LEN_RANGE on the length alone;
          * it was CKR_ENCRYPTED_DATA_INVALID, as if the bytes had been looked
          * at (#37 B2). */
-        if (op->mechanism != CKM_AES_CTR
+        if (op->mechanism != CKM_AES_CTR && !aes_is_feedback_mode(op->mechanism)
             && ((ulEncLen % 16) != 0
                 || (op->mechanism == CKM_AES_CBC_PAD && ulEncLen == 0))) {
             op->active = 0; return FHSM_RV_ENCRYPTED_DATA_LEN_RANGE;
         }
-        const char *cname = NULL;
-        if (op->mechanism == CKM_AES_CTR) {
-            cname = (kvl == 16) ? "AES-128-CTR" :
-                    (kvl == 24) ? "AES-192-CTR" : "AES-256-CTR";
-        } else if (is_ecb) {
-            cname = (kvl == 16) ? "AES-128-ECB" :
-                    (kvl == 24) ? "AES-192-ECB" : "AES-256-ECB";
-        } else {
-            cname = (kvl == 16) ? "AES-128-CBC" :
-                    (kvl == 24) ? "AES-192-CBC" : "AES-256-CBC";
-        }
+        const char *cname = aes_mode_cipher_name(op->mechanism, kvl);
+        if (!cname) { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
         EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cname, NULL);
         if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
         EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -15018,6 +15056,8 @@ static int op_cipher_kind(uint32_t mech) {
     switch (mech) {
         case CKM_AES_GCM:     return 0;
         case CKM_AES_CTR:     return 1;
+        case CKM_AES_OFB: case CKM_AES_CFB1:
+        case CKM_AES_CFB8: case CKM_AES_CFB128: return 1;   /* stream, like CTR */
         case CKM_AES_ECB:
         case CKM_AES_CBC:     return 2;
         case CKM_AES_CBC_PAD: return 3;
@@ -15038,16 +15078,13 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     if (kt != CKK_AES) return FHSM_RV_MECHANISM_INVALID;
     int kind = op_cipher_kind(op->mechanism);
     if (kind < 0) return FHSM_RV_MECHANISM_INVALID;
-    static const char *names[4][3] = {
-        { "AES-128-GCM", "AES-192-GCM", "AES-256-GCM" }, /* 0 GCM */
-        { "AES-128-CTR", "AES-192-CTR", "AES-256-CTR" }, /* 1 CTR */
-        { "AES-128-CBC", "AES-192-CBC", "AES-256-CBC" }, /* 2 ECB/CBC (see below) */
-        { "AES-128-CBC", "AES-192-CBC", "AES-256-CBC" }, /* 3 CBC-PAD */
-    };
-    static const char *ecb[3] = { "AES-128-ECB", "AES-192-ECB", "AES-256-ECB" };
+    static const char *gcm[3] = { "AES-128-GCM", "AES-192-GCM", "AES-256-GCM" };
     int ksel = (kvl == 16) ? 0 : (kvl == 24) ? 1 : (kvl == 32) ? 2 : -1;
     if (ksel < 0) return FHSM_RV_KEY_SIZE_RANGE;
-    const char *cname = (op->mechanism == CKM_AES_ECB) ? ecb[ksel] : names[kind][ksel];
+    /* GCM here; every other mode by the name single-part uses. */
+    const char *cname = (kind == 0) ? gcm[ksel]
+                      : aes_mode_cipher_name(op->mechanism, kvl);
+    if (!cname) return FHSM_RV_MECHANISM_INVALID;
     EVP_CIPHER *cipher = EVP_CIPHER_fetch(NULL, cname, NULL);
     if (!cipher) return FHSM_RV_MECHANISM_INVALID;
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();

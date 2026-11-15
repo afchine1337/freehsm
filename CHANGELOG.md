@@ -35,6 +35,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
   digest. Approved, in both builds. `CKM_ECDSA_SHA1` too, in the
   all-mechanisms build only, as `CKM_SHA1_RSA_PKCS` is.
   `tests/test_sig_sha3_family.c`.
+* **AES in OFB and CFB modes**, `CKM_AES_OFB`, `CKM_AES_CFB1`,
+  `CKM_AES_CFB8` and `CKM_AES_CFB128` (SP 800-38A): a 16-byte IV, any
+  data length, single-part and in parts. Approved, in both builds.
+  `CKM_AES_CFB64` is not offered: OpenSSL has no such cipher.
+  `tests/test_aes_feedback_modes.c`.
 * **A data object keeps its `CKA_OBJECT_ID` (#38, #33 C10).** PKCS#11 v3.2
   Table 20 gives every data object one. It was accepted and dropped up to
   2.6.1, and refused in 2.7.0, the token file having no field for it. It is
