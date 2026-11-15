@@ -40,6 +40,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
   data length, single-part and in parts. Approved, in both builds.
   `CKM_AES_CFB64` is not offered: OpenSSL has no such cipher.
   `tests/test_aes_feedback_modes.c`.
+* **`CKM_AES_CMAC_GENERAL`**, CMAC truncated to the length
+  `CK_MAC_GENERAL_PARAMS` gives, 1 to 16 bytes, at least 8 where NIST's
+  rules apply (SP 800-38B Appendix A). Approved, in both builds.
+* **`CKM_AES_MAC` and `CKM_AES_MAC_GENERAL`**, the CBC-MAC of PKCS#11's
+  general block cipher MAC: zero IV, data padded with zero bytes, 8 bytes
+  or the length asked. Not approved: all-mechanisms in permissive mode
+  only. All three single-part and in parts. `tests/test_aes_mac_family.c`.
 * **A data object keeps its `CKA_OBJECT_ID` (#38, #33 C10).** PKCS#11 v3.2
   Table 20 gives every data object one. It was accepted and dropped up to
   2.6.1, and refused in 2.7.0, the token file having no field for it. It is

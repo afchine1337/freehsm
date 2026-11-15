@@ -163,6 +163,25 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197", "SP 800-38B")),
+    # CMAC truncated to CK_MAC_GENERAL_PARAMS bytes (2.8.0): 1 to 16, at
+    # least 8 where NIST's rules apply.
+    Mech("CKM_AES_CMAC_GENERAL",   0x0000108B, "AES",  "sign",    "dispatch_aes_cmac",
+         fips="approved", key_type="CKK_AES",
+         min_key_bits=128, max_key_bits=256,
+         refs=("FIPS 197", "SP 800-38B")),
+    # CBC-MAC, the general block cipher MAC of PKCS#11 (2.8.0): zero IV, data
+    # padded with zero bytes, CKM_AES_MAC 8 bytes, CKM_AES_MAC_GENERAL 1 to
+    # 16 as CK_MAC_GENERAL_PARAMS asks.
+    Mech("CKM_AES_MAC",            0x00001083, "AES",  "sign",    "dispatch_aes_cmac",
+         fips="non-approved", key_type="CKK_AES",
+         min_key_bits=128, max_key_bits=256,
+         notes="CBC-MAC: superseded by CMAC (SP 800-38B), which corrects its "
+               "weakness on messages of varying length. Refused in the "
+               "nist-approved-only profile."),
+    Mech("CKM_AES_MAC_GENERAL",    0x00001084, "AES",  "sign",    "dispatch_aes_cmac",
+         fips="non-approved", key_type="CKK_AES",
+         min_key_bits=128, max_key_bits=256,
+         notes="CBC-MAC truncated to the length asked; see CKM_AES_MAC."),
     # Implemented since #125 and advertised only from 2026-09-09. C_Sign has
     # handled CKM_AES_GMAC all along; this table did not list it, so
     # C_GetMechanismList never mentioned it and pkcs11-check -- which gates on
