@@ -5669,6 +5669,10 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      *   - the template sets CKA_SENSITIVE and CKA_EXTRACTABLE freely, as for
      *     a KDF; CKA_ALWAYS_SENSITIVE and CKA_NEVER_EXTRACTABLE carry the base
      *     key's history (derive_store_secret, combines = 0).
+     *   - the base key is a generic secret, or one typed for HMAC
+     *     (CKK_SHA*_HMAC, a generic secret made for a hash); a cipher key
+     *     (AES, DES, ...) is CKR_KEY_TYPE_INCONSISTENT. pkcs11-check derives
+     *     from an AES key and expects the refusal.
      * Not an approved key derivation, so all-mechanisms in permissive mode
      * only. No parameter is taken. */
     {
@@ -5701,6 +5705,16 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                                                    &bv, &bvl, &bcl, &bkt);
             if (brv != FHSM_RV_OK) return brv;
             if (bcl != CKO_SECRET_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+            switch (bkt) {
+                case 0x10u:                                 /* CKK_GENERIC_SECRET */
+                case 0x28u: case 0x2Bu: case 0x2Cu:         /* SHA_1 / 256 / 384 HMAC */
+                case 0x2Du: case 0x2Eu:                     /* SHA512 / 224 HMAC */
+                case 0x43u: case 0x44u:                     /* SHA512_224 / 256 HMAC */
+                case 0x36u: case 0x37u: case 0x38u: case 0x39u: /* SHA3_* HMAC */
+                    break;
+                default:
+                    return FHSM_RV_KEY_TYPE_INCONSISTENT;
+            }
             size_t klen = 0;
             if (dlen) {
                 CK_RV lr = ecdh_key_len(pTemplate, ulCount, dlen, &klen);

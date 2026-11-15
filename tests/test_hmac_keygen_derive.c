@@ -15,6 +15,8 @@
  *       one (CKR_TEMPLATE_INCOMPLETE); a length past the digest is
  *       CKR_ATTRIBUTE_VALUE_INVALID; a parameter is
  *       CKR_MECHANISM_PARAM_INVALID; an AES key from SHA-256 is the digest.
+ *       The base key may be a generic secret or an HMAC-typed key; an AES
+ *       base key is CKR_KEY_TYPE_INCONSISTENT.
  *       The expected values were computed with Python's hashlib, not with
  *       OpenSSL. Where NIST's rules apply (the nist-approved-only build,
  *       strict mode) the derivations are CKR_MECHANISM_INVALID.
@@ -33,6 +35,7 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 #define CKR_OK                       0x000UL
 #define CKR_ATTRIBUTE_VALUE_INVALID  0x013UL
 #define CKR_KEY_SIZE_RANGE           0x062UL
+#define CKR_KEY_TYPE_INCONSISTENT    0x063UL
 #define CKR_MECHANISM_INVALID        0x070UL
 #define CKR_MECHANISM_PARAM_INVALID  0x071UL
 #define CKR_TEMPLATE_INCOMPLETE      0x0D0UL
@@ -250,6 +253,22 @@ int main(void) {
         rv = derive(0x393, base, CKK_AES, 0, NULL, 0, got, &gl);
         snprintf(what, sizeof what, "(D) SHA-256 to an AES key: AES-256, the digest (0x%lx)", rv);
         ok(rv == CKR_OK && gl == 32 && memcmp(got, want, 32) == 0, what);
+
+        /* The same bytes as a CKK_SHA256_HMAC key derive the same; as an
+         * AES key they are refused. */
+        CK_ULONG hkt = 0x2BUL, akt = CKK_AES;
+        bt[1].pValue = &hkt;
+        CK_OBJECT_HANDLE hbase = 0;
+        rv = C_CreateObject(s, bt, 5, &hbase);
+        if (rv == CKR_OK) rv = derive(0x393, hbase, 0, 0, NULL, 0, got, &gl);
+        snprintf(what, sizeof what, "(D) SHA-256 from a CKK_SHA256_HMAC base: the digest (0x%lx)", rv);
+        ok(rv == CKR_OK && gl == 32 && memcmp(got, want, 32) == 0, what);
+        bt[1].pValue = &akt;
+        CK_OBJECT_HANDLE abase = 0;
+        rv = C_CreateObject(s, bt, 5, &abase);
+        if (rv == CKR_OK) rv = derive(0x393, abase, 0, 0, NULL, 0, got, &gl);
+        snprintf(what, sizeof what, "(D) SHA-256 from an AES base: KEY_TYPE_INCONSISTENT (0x%lx)", rv);
+        ok(rv == CKR_KEY_TYPE_INCONSISTENT, what);
     }
 
     C_Finalize(NULL);
