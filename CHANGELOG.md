@@ -75,6 +75,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   decrypt, where a 3DES-CBC ciphertext that was not whole blocks came back
   `CKR_ENCRYPTED_DATA_INVALID`. Not approved: all-mechanisms only.
   `tests/test_des3_modes.c`.
+* **`CKM_DES3_CMAC`, `CKM_DES3_CMAC_GENERAL`, `CKM_DES3_MAC` and
+  `CKM_DES3_MAC_GENERAL`**, the AES MACs' 3DES counterparts on an 8-byte
+  block: CMAC of 8 bytes or the length `CK_MAC_GENERAL_PARAMS` gives (1 to
+  8), and the CBC-MAC of the general block cipher MAC, zero IV and zero
+  padding, of 4 bytes or the length asked. Single-part and in parts, sign
+  and verify. Not approved: all-mechanisms in permissive mode only, as
+  `CKM_DES3_CMAC` already was as a KBKDF PRF.
+  `tests/test_des3_mac_family.c`.
 * **A partial block at `C_EncryptFinal` is `CKR_DATA_LEN_RANGE`.** ECB and
   CBC without padding, AES as 3DES, encrypted in parts with a total that
   is not whole blocks, answered `CKR_FUNCTION_FAILED` at Final, OpenSSL's

@@ -11381,6 +11381,17 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * bytes, and takes no parameter. */
     if (pMechanism->mechanism == 0x00001083UL /* CKM_AES_MAC */) {
         op->mac_out_len = 8;
+    } else if (pMechanism->mechanism == 0x00000134UL /* CKM_DES3_MAC */) {
+        op->mac_out_len = 4;   /* half of the 8-byte block, as AES_MAC is of 16 */
+    } else if (pMechanism->mechanism == 0x00000135UL /* CKM_DES3_MAC_GENERAL */
+               || pMechanism->mechanism == 0x00000137UL /* CKM_DES3_CMAC_GENERAL */) {
+        /* CK_MAC_GENERAL_PARAMS, 1 to the 8-byte block. Not approved, so no
+         * NIST floor: the mechanisms are refused where NIST's rules apply. */
+        if (!pMechanism->pParameter || pMechanism->ulParameterLen != sizeof(CK_ULONG))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        CK_ULONG want = *(const CK_ULONG *)pMechanism->pParameter;
+        if (want < 1 || want > 8) return FHSM_RV_MECHANISM_PARAM_INVALID;
+        op->mac_out_len = (size_t)want;
     } else if (pMechanism->mechanism == 0x00001084UL /* CKM_AES_MAC_GENERAL */
                || pMechanism->mechanism == 0x0000108BUL /* CKM_AES_CMAC_GENERAL */) {
         if (!pMechanism->pParameter || pMechanism->ulParameterLen != sizeof(CK_ULONG))
@@ -11999,9 +12010,27 @@ static const char *aes_mode_cipher_name(uint32_t mech, size_t kvl) {
     }
 }
 
-/* CMAC, whole or truncated. */
+/* The four 3DES MACs (2.8.0): CKM_DES3_MAC, CKM_DES3_MAC_GENERAL,
+ * CKM_DES3_CMAC_GENERAL and CKM_DES3_CMAC, 0x134, 0x135, 0x137, 0x138. They
+ * run on the AES MAC paths with an 8-byte block and a CKK_DES3 key. */
+static int mech_is_des3_mac(uint32_t m) {
+    return m == 0x134u || m == 0x135u || m == 0x137u || m == 0x138u;
+}
+
+/* CMAC, whole or truncated, over AES or 3DES. */
 static int mech_is_cmac(uint32_t m) {
-    return m == CKM_AES_CMAC || m == CKM_AES_CMAC_GENERAL;
+    return m == CKM_AES_CMAC || m == CKM_AES_CMAC_GENERAL
+        || m == 0x137u /* CKM_DES3_CMAC_GENERAL */ || m == 0x138u /* CKM_DES3_CMAC */;
+}
+
+/* The CMAC length: the whole block for CKM_AES_CMAC and CKM_DES3_CMAC, the
+ * length CK_MAC_GENERAL_PARAMS asked for the GENERAL forms. */
+static size_t cmac_tag_len(const fhsm_op_t *op) {
+    const size_t bl = mech_is_des3_mac(op->mechanism) ? 8u : 16u;
+    if ((op->mechanism == CKM_AES_CMAC_GENERAL || op->mechanism == 0x137u)
+        && op->mac_out_len && op->mac_out_len <= bl)
+        return op->mac_out_len;
+    return bl;
 }
 
 /* CKM_AES_MAC and CKM_AES_MAC_GENERAL: the CBC-MAC of the general block
@@ -12018,15 +12047,25 @@ static int mech_is_cmac(uint32_t m) {
  * the chaining block, dec_tail the bytes of an incomplete block, and
  * ctr_bytes_done the bytes taken, to tell the empty message apart. */
 static int mech_is_cbcmac(uint32_t m) {
-    return m == CKM_AES_MAC || m == CKM_AES_MAC_GENERAL;
+    return m == CKM_AES_MAC || m == CKM_AES_MAC_GENERAL
+        || m == 0x134u /* CKM_DES3_MAC */ || m == 0x135u /* CKM_DES3_MAC_GENERAL */;
+}
+
+/* CKM_DES3_MAC and CKM_DES3_MAC_GENERAL are the same construction over
+ * 3DES-ECB, with 8-byte blocks. */
+static size_t cbcmac_block_len(const fhsm_op_t *op) {
+    return mech_is_des3_mac(op->mechanism) ? 8u : 16u;
 }
 
 static fhsm_rv_t cbcmac_open(fhsm_token_t *t, fhsm_op_t *op) {
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
-    if (kt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
-    const char *cn = aes_mode_cipher_name(CKM_AES_ECB, kvl);
+    const int des3 = mech_is_des3_mac(op->mechanism);
+    if (kt != (des3 ? (uint32_t)CKK_DES3 : (uint32_t)CKK_AES))
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    const char *cn = des3 ? (kvl == 24 ? "DES-EDE3-ECB" : NULL)
+                          : aes_mode_cipher_name(CKM_AES_ECB, kvl);
     if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
     EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cn, NULL);
     if (!c) return FHSM_RV_MECHANISM_INVALID;
@@ -12046,24 +12085,26 @@ static fhsm_rv_t cbcmac_open(fhsm_token_t *t, fhsm_op_t *op) {
 
 /* One block into the chain: iv = AES(iv XOR block). */
 static fhsm_rv_t cbcmac_block(fhsm_op_t *op, const uint8_t *blk) {
+    const size_t bl = cbcmac_block_len(op);
     uint8_t x[16];
-    for (size_t i = 0; i < 16; i++) x[i] = (uint8_t)(op->iv[i] ^ blk[i]);
+    for (size_t i = 0; i < bl; i++) x[i] = (uint8_t)(op->iv[i] ^ blk[i]);
     int ol = 0;
-    int ok = EVP_EncryptUpdate((EVP_CIPHER_CTX *)op->cipher_ctx, op->iv, &ol, x, 16) == 1
-          && ol == 16;
+    int ok = EVP_EncryptUpdate((EVP_CIPHER_CTX *)op->cipher_ctx, op->iv, &ol, x, (int)bl) == 1
+          && (size_t)ol == bl;
     OPENSSL_cleanse(x, sizeof x);
     return ok ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
 
 static fhsm_rv_t cbcmac_update(fhsm_op_t *op, const uint8_t *p, size_t n) {
+    const size_t bl = cbcmac_block_len(op);
     op->ctr_bytes_done += (uint64_t)n;
     while (n) {
-        size_t take = 16 - op->dec_tail_len;
+        size_t take = bl - op->dec_tail_len;
         if (take > n) take = n;
         memcpy(op->dec_tail + op->dec_tail_len, p, take);
         op->dec_tail_len += (uint32_t)take;
         p += take; n -= take;
-        if (op->dec_tail_len == 16) {
+        if (op->dec_tail_len == bl) {
             fhsm_rv_t rv = cbcmac_block(op, op->dec_tail);
             op->dec_tail_len = 0;
             if (rv != FHSM_RV_OK) return rv;
@@ -12072,14 +12113,16 @@ static fhsm_rv_t cbcmac_update(fhsm_op_t *op, const uint8_t *p, size_t n) {
     return FHSM_RV_OK;
 }
 
-/* The full last block into mac[16]; the context is released. */
+/* The full last block into mac[16] (its first 8 bytes for 3DES); the
+ * context is released. */
 static fhsm_rv_t cbcmac_final(fhsm_op_t *op, uint8_t mac[16]) {
+    const size_t bl = cbcmac_block_len(op);
     fhsm_rv_t rv = FHSM_RV_OK;
     if (op->dec_tail_len || op->ctr_bytes_done == 0) {
-        memset(op->dec_tail + op->dec_tail_len, 0, 16 - op->dec_tail_len);
+        memset(op->dec_tail + op->dec_tail_len, 0, bl - op->dec_tail_len);
         rv = cbcmac_block(op, op->dec_tail);
     }
-    if (rv == FHSM_RV_OK) memcpy(mac, op->iv, 16);
+    if (rv == FHSM_RV_OK) memcpy(mac, op->iv, bl);
     OPENSSL_cleanse(op->iv, sizeof op->iv);
     OPENSSL_cleanse(op->dec_tail, sizeof op->dec_tail);
     op->dec_tail_len = 0;
@@ -12298,6 +12341,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
             want = 0x1F; break;                             /* CKK_AES */
         case 0x1071: want = 0x35; break;                    /* AES_XTS -> CKK_AES_XTS */
         case 0x0132: case 0x0133: case 0x0136:              /* DES3 ECB/CBC/CBC_PAD */
+        case 0x0134: case 0x0135: case 0x0137: case 0x0138: /* DES3 MAC/_GENERAL, CMAC_GENERAL/CMAC */
         case 0x1102: case 0x1103:                           /* DES3 ECB/CBC_ENCRYPT_DATA */
             want = 0x15; break;                             /* CKK_DES3 */
         case 0x0360: case 0x0362: case 0x0363: case 0x0364: /* v3.2 §6.20 combiners */
@@ -13565,6 +13609,8 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             break;
         case CKM_AES_MAC:           /* CBC-MAC, not approved: refused in */
         case CKM_AES_MAC_GENERAL:   /* the nist build and in strict mode */
+        case 0x00000134UL: case 0x00000135UL:   /* CKM_DES3_MAC, _GENERAL */
+        case 0x00000137UL: case 0x00000138UL:   /* CKM_DES3_CMAC_GENERAL, _CMAC */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -13702,6 +13748,31 @@ static fhsm_rv_t aes_cmac(const uint8_t *key, size_t key_len,
     int ok = EVP_MAC_final(ctx, out, &out_len, 16);
     EVP_MAC_CTX_free(ctx);
     return ok == 1 && out_len == 16 ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+/* 3DES-CMAC (SP 800-38B over TDEA, not approved): the 8-byte tag into
+ * out[0..7], with the cipher the KBKDF's CKM_DES3_CMAC PRF names. */
+static fhsm_rv_t des3_cmac(const uint8_t *key, size_t key_len,
+                           const uint8_t *data, size_t data_len, uint8_t out[16]) {
+    if (key_len != 24) return FHSM_RV_KEY_SIZE_RANGE;
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "CMAC", NULL);
+    if (!mac) return FHSM_RV_MECHANISM_INVALID;
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);
+    if (!ctx) return FHSM_RV_HOST_MEMORY;
+    char cipher_name[] = "DES-EDE3-CBC";
+    OSSL_PARAM params[2] = {
+        OSSL_PARAM_construct_utf8_string("cipher", cipher_name, 0),
+        OSSL_PARAM_construct_end()
+    };
+    if (EVP_MAC_init(ctx, key, key_len, params) != 1
+        || EVP_MAC_update(ctx, data, data_len) != 1) {
+        EVP_MAC_CTX_free(ctx); return FHSM_RV_FUNCTION_FAILED;
+    }
+    size_t out_len = 0;
+    int ok = EVP_MAC_final(ctx, out, &out_len, 16);
+    EVP_MAC_CTX_free(ctx);
+    return ok == 1 && out_len == 8 ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
 
 /* Map mechanism → hash name for EVP_DigestSign. NULL = no prehash
@@ -14179,7 +14250,10 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
         fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
-        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        const int des3 = mech_is_des3_mac(op->mechanism);
+        if (kt != (des3 ? (uint32_t)CKK_DES3 : (uint32_t)CKK_AES)) {
+            op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        }
         /* The tag length is the mechanism's, not a constant.
          *
          * PKCS#11 v3.2 §6.13.6: "the tag's length is determined by the
@@ -14194,8 +14268,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
          * §6.2: the tag is MSB_Tlen of the last block). */
         size_t mac_len = (op->mechanism == CKM_AES_GMAC && op->gcm_tag_len)
                          ? op->gcm_tag_len
-                         : (op->mechanism == CKM_AES_CMAC_GENERAL && op->mac_out_len)
-                         ? op->mac_out_len : 16;
+                         : (op->mechanism == CKM_AES_GMAC) ? 16 : cmac_tag_len(op);
         if (pSignature == NULL) { *pulSignatureLen = mac_len; return FHSM_RV_OK; }
         if (*pulSignatureLen < mac_len) {
             *pulSignatureLen = mac_len; return 0x00000150UL;
@@ -14213,7 +14286,8 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
             OPENSSL_cleanse(full_tag, sizeof full_tag);
         } else {
             uint8_t full_mac[16];
-            rv = aes_cmac(kv, kvl, pData, ulDataLen, full_mac);
+            rv = des3 ? des3_cmac(kv, kvl, pData, ulDataLen, full_mac)
+                      : aes_cmac(kv, kvl, pData, ulDataLen, full_mac);
             if (rv == FHSM_RV_OK) memcpy(pSignature, full_mac, mac_len);
             OPENSSL_cleanse(full_mac, sizeof full_mac);
         }
@@ -14338,6 +14412,8 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             break;
         case CKM_AES_MAC:           /* CBC-MAC, not approved: refused in */
         case CKM_AES_MAC_GENERAL:   /* the nist build and in strict mode */
+        case 0x00000134UL: case 0x00000135UL:   /* CKM_DES3_MAC, _GENERAL */
+        case 0x00000137UL: case 0x00000138UL:   /* CKM_DES3_CMAC_GENERAL, _CMAC */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -14436,7 +14512,10 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
     }
 
     if (mech_is_cmac(op->mechanism) || op->mechanism == CKM_AES_GMAC) {
-        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        const int des3 = mech_is_des3_mac(op->mechanism);
+        if (kt != (des3 ? (uint32_t)CKK_DES3 : (uint32_t)CKK_AES)) {
+            op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        }
         uint8_t mac[16];
         if (op->mechanism == CKM_AES_GMAC) {
             if (!op->gcm_have || op->gcm_iv_len == 0) {
@@ -14445,7 +14524,8 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
             rv = aes_gmac(kv, kvl, op->gcm_iv, op->gcm_iv_len,
                           pData, ulDataLen, mac);
         } else {
-            rv = aes_cmac(kv, kvl, pData, ulDataLen, mac);
+            rv = des3 ? des3_cmac(kv, kvl, pData, ulDataLen, mac)
+                      : aes_cmac(kv, kvl, pData, ulDataLen, mac);
         }
         op->active = 0;
         if (rv != FHSM_RV_OK) return rv;
@@ -14455,8 +14535,7 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
          * is the kind of asymmetry that gets found by a user and not by us. */
         size_t mac_len = (op->mechanism == CKM_AES_GMAC && op->gcm_tag_len)
                          ? op->gcm_tag_len
-                         : (op->mechanism == CKM_AES_CMAC_GENERAL && op->mac_out_len)
-                         ? op->mac_out_len : 16;
+                         : (op->mechanism == CKM_AES_GMAC) ? 16 : cmac_tag_len(op);
         if (ulSigLen != mac_len) { OPENSSL_cleanse(mac, sizeof mac); return FHSM_RV_SIGNATURE_INVALID; }
         return (fhsm_ct_memcmp(mac, pSig, mac_len) == 0) ? FHSM_RV_OK
                                                           : FHSM_RV_SIGNATURE_INVALID;
@@ -15031,7 +15110,7 @@ static int mech_sign_is_buffered_multipart(uint32_t m) {
     fhsm_hash_t h; size_t n;
     if (m == CKM_COMPOSITE_MLDSA65_ED25519) return 0;  /* streams its own PH */
     if (m == CKM_AES_CMAC || m == CKM_AES_GMAC) return 0;  /* stream via EVP_MAC */
-    if (m == CKM_AES_CMAC_GENERAL) return 0;                 /* likewise */
+    if (mech_is_cmac(m)) return 0;                           /* likewise, AES and 3DES */
     if (mech_is_cbcmac(m)) return 0;                         /* cbcmac_update */
     if (fhsm_hmac_hash_of(m, &h, &n)) return 0;            /* streams via EVP_MAC */
     return 1;
@@ -15054,9 +15133,7 @@ static size_t mac_stream_len(const fhsm_op_t *op) {
     fhsm_hash_t h; size_t n;
     if (fhsm_hmac_hash_of(op->mechanism, &h, &n))
         return (op->mac_out_len && op->mac_out_len <= n) ? op->mac_out_len : n;
-    if (op->mechanism == CKM_AES_CMAC) return 16;
-    if (op->mechanism == CKM_AES_CMAC_GENERAL)
-        return (op->mac_out_len && op->mac_out_len <= 16) ? op->mac_out_len : 16;
+    if (mech_is_cmac(op->mechanism)) return cmac_tag_len(op);
     if (op->mechanism == CKM_AES_GMAC)
         return (op->gcm_tag_len && op->gcm_tag_len <= 16) ? op->gcm_tag_len : 16;
     return 0;
@@ -15084,10 +15161,13 @@ static fhsm_rv_t mac_stream_open(fhsm_token_t *t, fhsm_op_t *op) {
         mac_name = "HMAC";
     } else if (mech_is_cmac(op->mechanism) || op->mechanism == CKM_AES_GMAC) {
         const int gmac = (op->mechanism == CKM_AES_GMAC);
-        if (kt != CKK_AES) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        const int des3 = mech_is_des3_mac(op->mechanism);
+        if (kt != (des3 ? (uint32_t)CKK_DES3 : (uint32_t)CKK_AES))
+            return FHSM_RV_KEY_TYPE_INCONSISTENT;
         /* GMAC without an IV is refused, as on the one-shot path. */
         if (gmac && (!op->gcm_have || op->gcm_iv_len == 0)) return FHSM_RV_ARGUMENTS_BAD;
-        const char *cn = aes_mac_cipher_name(kvl, gmac ? 0 : 1);
+        const char *cn = des3 ? (kvl == 24 ? "DES-EDE3-CBC" : NULL)
+                              : aes_mac_cipher_name(kvl, gmac ? 0 : 1);
         if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
         snprintf(name, sizeof name, "%s", cn);
         params[np++] = OSSL_PARAM_construct_utf8_string("cipher", name, 0);
