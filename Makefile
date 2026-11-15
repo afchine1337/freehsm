@@ -1125,6 +1125,10 @@ tests/test_aes_cts: tests/test_aes_cts.c libfreehsm.so
 tests/test_aes_xts: tests/test_aes_xts.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Key derivation by encryption, AES and 3DES (2.8.0).
+tests/test_encrypt_data_derive: tests/test_encrypt_data_derive.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # A class and a key type that disagree are refused by C_GenerateKeyPair and
 # C_CreateObject; an EC private key without its curve is incomplete; a copy
 # with a new CKA_VALUE is read-only (three neighbours of #33 C3 and C7).
@@ -1409,6 +1413,7 @@ TEST_BINS = \
 	tests/test_aes_mac_family \
 	tests/test_aes_cts \
 	tests/test_aes_xts \
+	tests/test_encrypt_data_derive \
 	tests/test_finalize_release \
 	tests/test_apilock \
 	tests/test_concurrency \
@@ -1621,6 +1626,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_aes_cts
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_aes_xts
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_encrypt_data_derive
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_finalize_release
 # The concurrency tests (#111-prep) were run by hand under TSAN=1 and by

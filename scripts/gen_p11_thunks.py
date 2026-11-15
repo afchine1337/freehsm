@@ -728,6 +728,23 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved",
          refs=("PKCS#11 v3.2 §6.20.4",)),
 
+    # === Key derivation by encrypting data under the base key (2.8.0) ==
+    # The derived key is the data encrypted under the base key, no padding.
+    # C_DeriveKey computes them; the handler named is only a reference. Not
+    # an approved key derivation, and refused where NIST's rules apply.
+    Mech("CKM_AES_ECB_ENCRYPT_DATA",      0x00001104, "AES",  "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", key_type="CKK_AES",
+         min_key_bits=128, max_key_bits=256, refs=("FIPS 197",)),
+    Mech("CKM_AES_CBC_ENCRYPT_DATA",      0x00001105, "AES",  "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", key_type="CKK_AES",
+         min_key_bits=128, max_key_bits=256, refs=("FIPS 197", "SP 800-38A")),
+    Mech("CKM_DES3_ECB_ENCRYPT_DATA",     0x00001102, "TDES", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", key_type="CKK_DES3",
+         refs=("SP 800-67 rev. 2",)),
+    Mech("CKM_DES3_CBC_ENCRYPT_DATA",     0x00001103, "TDES", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved", key_type="CKK_DES3",
+         refs=("SP 800-67 rev. 2",)),
+
     # === Key derivation by digesting the base key ======================
     # The *_KEY_DERIVATION mechanisms (SHA3_* and SHAKE_* are also named
     # *_KEY_DERIVE in the OASIS header, same values). C_DeriveKey computes

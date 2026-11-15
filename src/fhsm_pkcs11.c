@@ -5786,6 +5786,99 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         }
     }
 
+    /* Key derivation by encryption (2.8.0): CKM_AES_ECB_ENCRYPT_DATA,
+     * CKM_AES_CBC_ENCRYPT_DATA, CKM_DES3_ECB_ENCRYPT_DATA and
+     * CKM_DES3_CBC_ENCRYPT_DATA. The derived key's value is the data
+     * encrypted under the base key, without padding: the data is whole
+     * blocks, and the key takes the leading bytes the template asks for --
+     * by key type, then CKA_VALUE_LEN, as for a digest derivation. The ECB
+     * forms take a CK_KEY_DERIVATION_STRING_DATA; the CBC forms the IV and
+     * the data, CK_AES_CBC_ENCRYPT_DATA_PARAMS or CK_DES_CBC_ENCRYPT_DATA_PARAMS.
+     * Not an approved key derivation (SP 800-108 and SP 800-56C name none
+     * of this shape), and 3DES besides: refused where NIST's rules apply. */
+    if (pMechanism->mechanism >= 0x00001102UL && pMechanism->mechanism <= 0x00001105UL) {
+        const CK_ULONG em = pMechanism->mechanism;
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips())
+            return FHSM_RV_MECHANISM_INVALID;
+        const int des3 = em == 0x00001102UL || em == 0x00001103UL;
+        const int cbc  = em == 0x00001103UL || em == 0x00001105UL;
+        const size_t bs = des3 ? 8u : 16u;
+        const uint8_t *bv = NULL; size_t bvl = 0;
+        uint32_t bcl = 0, bkt = 0;
+        fhsm_rv_t brv = fhsm_token_object_get(t, (uint32_t)hBaseKey,
+                                               &bv, &bvl, &bcl, &bkt);
+        if (brv != FHSM_RV_OK) return brv;
+        if (bcl != CKO_SECRET_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        { CK_RV tc = fhsm_check_key_mech_type(t, hBaseKey, em);
+          if (tc != FHSM_RV_OK) return tc; }
+        const char *cn = NULL;
+        if (des3)            cn = bvl == 24 ? (cbc ? "DES-EDE3-CBC" : "DES-EDE3-ECB") : NULL;
+        else if (bvl == 16)  cn = cbc ? "AES-128-CBC" : "AES-128-ECB";
+        else if (bvl == 24)  cn = cbc ? "AES-192-CBC" : "AES-192-ECB";
+        else if (bvl == 32)  cn = cbc ? "AES-256-CBC" : "AES-256-ECB";
+        if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
+
+        /* The parameter. Every way it can be wrong -- missing, short, no
+         * data, data that is not whole blocks or past the derivation
+         * ceiling -- is CKR_MECHANISM_PARAM_INVALID. */
+        typedef struct { unsigned char iv[16]; unsigned char *pData; CK_ULONG length; }
+            aes_cbc_encrypt_data_params_t;
+        typedef struct { unsigned char iv[8];  unsigned char *pData; CK_ULONG length; }
+            des_cbc_encrypt_data_params_t;
+        const unsigned char *data = NULL; CK_ULONG dlen = 0;
+        unsigned char iv[16] = { 0 };
+        if (!pMechanism->pParameter) return FHSM_RV_MECHANISM_PARAM_INVALID;
+        if (!cbc) {
+            if (pMechanism->ulParameterLen < sizeof(CK_KEY_DERIVATION_STRING_DATA))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            CK_KEY_DERIVATION_STRING_DATA sd;
+            memcpy(&sd, pMechanism->pParameter, sizeof sd);
+            data = sd.pData; dlen = sd.ulLen;
+        } else if (des3) {
+            if (pMechanism->ulParameterLen < sizeof(des_cbc_encrypt_data_params_t))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            des_cbc_encrypt_data_params_t cp;
+            memcpy(&cp, pMechanism->pParameter, sizeof cp);
+            memcpy(iv, cp.iv, 8);
+            data = cp.pData; dlen = cp.length;
+        } else {
+            if (pMechanism->ulParameterLen < sizeof(aes_cbc_encrypt_data_params_t))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+            aes_cbc_encrypt_data_params_t cp;
+            memcpy(&cp, pMechanism->pParameter, sizeof cp);
+            memcpy(iv, cp.iv, 16);
+            data = cp.pData; dlen = cp.length;
+        }
+        if (!data || dlen == 0 || (dlen % bs) != 0 || dlen > FHSM_DERIVE_MAX)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+        size_t klen = 0;
+        { CK_RV lr = ecdh_key_len(pTemplate, ulCount, (size_t)dlen, &klen);
+          if (lr != FHSM_RV_OK) return lr; }
+        EVP_CIPHER *ec = EVP_CIPHER_fetch(NULL, cn, NULL);
+        if (!ec) return FHSM_RV_MECHANISM_INVALID;
+        EVP_CIPHER_CTX *ectx = EVP_CIPHER_CTX_new();
+        uint8_t *ct = OPENSSL_malloc((size_t)dlen);
+        int ol = 0, fl = 0;
+        int eok = ectx && ct
+               && EVP_EncryptInit_ex2(ectx, ec, bv, cbc ? iv : NULL, NULL) == 1
+               && EVP_CIPHER_CTX_set_padding(ectx, 0) == 1
+               && EVP_EncryptUpdate(ectx, ct, &ol, data, (int)dlen) == 1
+               && EVP_EncryptFinal_ex(ectx, ct + ol, &fl) == 1
+               && (size_t)ol + (size_t)fl == (size_t)dlen;
+        EVP_CIPHER_CTX_free(ectx);
+        EVP_CIPHER_free(ec);
+        OPENSSL_cleanse(iv, sizeof iv);
+        if (!ct) return FHSM_RV_HOST_MEMORY;
+        CK_RV srv = eok ? derive_store_secret(t, hSession, pTemplate, ulCount,
+                                              ct, klen, CKO_SECRET_KEY,
+                                              hBaseKey, 0, 0, phKey)
+                        : FHSM_RV_FUNCTION_FAILED;
+        OPENSSL_cleanse(ct, (size_t)dlen);
+        OPENSSL_free(ct);
+        return srv;
+    }
+
     if (pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY_OP
         || pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA_OP
         || pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE_OP
@@ -12160,9 +12253,12 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x1087: case 0x1088:                           /* AES GCM/CCM */
         case 0x108A: case 0x108E:                           /* AES CMAC/GMAC */
         case 0x108B: case 0x1083: case 0x1084:              /* AES CMAC_GENERAL/MAC/MAC_GENERAL */
+        case 0x1104: case 0x1105:                           /* AES ECB/CBC_ENCRYPT_DATA */
             want = 0x1F; break;                             /* CKK_AES */
         case 0x1071: want = 0x35; break;                    /* AES_XTS -> CKK_AES_XTS */
-        case 0x0133: want = 0x15; break;                    /* DES3_CBC -> CKK_DES3 */
+        case 0x0133:                                        /* DES3_CBC */
+        case 0x1102: case 0x1103:                           /* DES3 ECB/CBC_ENCRYPT_DATA */
+            want = 0x15; break;                             /* CKK_DES3 */
         case 0x0360: case 0x0362: case 0x0363: case 0x0364: /* v3.2 §6.20 combiners */
             /* The base key of a combiner is a CKK_GENERIC_SECRET. This is the
              * mirror of the AES rule below -- if a generic secret is not a

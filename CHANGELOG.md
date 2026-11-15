@@ -60,6 +60,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `C_EncryptFinal` / `C_DecryptFinal`. `C_GenerateKey`, `C_CreateObject`,
   `C_UnwrapKey` and `C_DecapsulateKey` take the new key type and hold it to
   those lengths. Approved, in both builds. `tests/test_aes_xts.c`.
+* **`CKM_AES_ECB_ENCRYPT_DATA`, `CKM_AES_CBC_ENCRYPT_DATA`,
+  `CKM_DES3_ECB_ENCRYPT_DATA` and `CKM_DES3_CBC_ENCRYPT_DATA`**, key
+  derivation by encryption: the derived key's value is the data, whole
+  blocks, encrypted under the base key without padding, and the key takes
+  the leading bytes its type or `CKA_VALUE_LEN` asks for. The ECB forms take
+  a `CK_KEY_DERIVATION_STRING_DATA`, the CBC forms the IV and the data. Not
+  approved: all-mechanisms in permissive mode only.
+  `tests/test_encrypt_data_derive.c`.
 * **A data object keeps its `CKA_OBJECT_ID` (#38, #33 C10).** PKCS#11 v3.2
   Table 20 gives every data object one. It was accepted and dropped up to
   2.6.1, and refused in 2.7.0, the token file having no field for it. It is
