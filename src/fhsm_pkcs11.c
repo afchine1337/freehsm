@@ -10574,6 +10574,9 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
 #ifndef CKM_AES_CFB1
 #define CKM_AES_CFB1              0x00002108UL
 #endif
+#ifndef CKM_AES_CTS
+#define CKM_AES_CTS               0x00001089UL
+#endif
 #ifndef CKM_AES_CMAC
 #define CKM_AES_CMAC              0x0000108AUL
 #endif
@@ -11354,6 +11357,7 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * directly as pParameter. */
     if ((pMechanism->mechanism == CKM_AES_CBC ||
          pMechanism->mechanism == CKM_AES_CBC_PAD ||
+         pMechanism->mechanism == 0x00001089UL /* CKM_AES_CTS */ ||
          aes_is_feedback_mode(pMechanism->mechanism)) &&
         pMechanism->pParameter && pMechanism->ulParameterLen == 16) {
         memcpy(op->iv, pMechanism->pParameter, 16);
@@ -11809,8 +11813,9 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * TestGcmIvWeakness, TestBadParameters). */
     if ((pMechanism->mechanism == CKM_AES_CBC ||
          pMechanism->mechanism == CKM_AES_CBC_PAD ||
+         pMechanism->mechanism == 0x00001089UL /* CKM_AES_CTS */ ||
          aes_is_feedback_mode(pMechanism->mechanism)) && !op->have_iv)
-        return FHSM_RV_MECHANISM_PARAM_INVALID;   /* CBC, OFB, CFB: a 16-byte IV */
+        return FHSM_RV_MECHANISM_PARAM_INVALID;   /* CBC, CTS, OFB, CFB: a 16-byte IV */
     if (pMechanism->mechanism == CKM_AES_GCM &&
         (!op->gcm_have || op->gcm_iv_len < 12))
         return FHSM_RV_MECHANISM_PARAM_INVALID;   /* NIST SP 800-38D : IV >= 96 bits */
@@ -11966,6 +11971,36 @@ static fhsm_rv_t cbcmac_oneshot(fhsm_token_t *t, fhsm_op_t *op,
     return rv;
 }
 
+/* CKM_AES_CTS: CBC with ciphertext stealing, variant CS3 of the SP 800-38A
+ * addendum -- the last two ciphertext blocks swapped whenever there are two,
+ * as in RFC 3962 and NSS. Data of at least one block; the output is as long
+ * as the input. OpenSSL's CBC-CTS cipher takes the whole message in one
+ * update, so the multipart forms collect the parts and run this at Final.
+ * enc = 1 to encrypt. len >= 16 is the caller's to check, with the return
+ * code of its direction. */
+static fhsm_rv_t aes_cts_crypt(const uint8_t *kv, size_t kvl, const uint8_t *iv,
+                               int enc, const uint8_t *in, size_t len, uint8_t *out) {
+    const char *cn = (kvl == 16) ? "AES-128-CBC-CTS" : (kvl == 24) ? "AES-192-CBC-CTS"
+                   : (kvl == 32) ? "AES-256-CBC-CTS" : NULL;
+    if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
+    if (len > 0x7FFFFFFFu) return FHSM_RV_DATA_LEN_RANGE;
+    EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cn, NULL);
+    if (!c) return FHSM_RV_MECHANISM_INVALID;
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
+    char mode[] = "CS3";
+    OSSL_PARAM prm[2] = { OSSL_PARAM_construct_utf8_string("cts_mode", mode, 0),
+                          OSSL_PARAM_construct_end() };
+    int ol = 0, fl = 0;
+    int ok = EVP_CipherInit_ex2(ctx, c, kv, iv, enc, prm) == 1
+          && EVP_CipherUpdate(ctx, out, &ol, in, (int)len) == 1
+          && EVP_CipherFinal_ex(ctx, out + ol, &fl) == 1
+          && (size_t)ol + (size_t)fl == len;
+    EVP_CIPHER_CTX_free(ctx);
+    EVP_CIPHER_free(c);
+    return ok ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
 /* Positive whitelist of mechanisms that C_Encrypt / C_Decrypt actually
  * implement. C_EncryptInit / C_DecryptInit with any other mechanism --- a
  * digest (CKM_SHA256), a signature, or an advertised-but-unimplemented
@@ -11982,6 +12017,7 @@ static int fhsm_cipher_mech_valid(CK_ULONG mech) {
         case CKM_AES_CFB8:      /* 0x2106 */
         case CKM_AES_CFB128:    /* 0x2107 */
         case CKM_AES_CFB1:      /* 0x2108 */
+        case CKM_AES_CTS:       /* 0x1089 */
         case CKM_AES_GCM:       /* 0x1087 */
         case 0x00001088UL:      /* CKM_AES_CCM */
         case 0x00000133UL:      /* CKM_DES3_CBC */
@@ -12043,6 +12079,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
             want = 0x4B; break;                             /* CKK_SLH_DSA */
         case 0x1081: case 0x1082: case 0x1085: case 0x1086: /* AES ECB/CBC/CBC_PAD/CTR */
         case 0x2104: case 0x2106: case 0x2107: case 0x2108: /* AES OFB/CFB8/CFB128/CFB1 */
+        case 0x1089:                                        /* AES CTS */
         case 0x1087: case 0x1088:                           /* AES GCM/CCM */
         case 0x108A: case 0x108E:                           /* AES CMAC/GMAC */
         case 0x108B: case 0x1083: case 0x1084:              /* AES CMAC_GENERAL/MAC/MAC_GENERAL */
@@ -12349,6 +12386,20 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
                                 fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
+    }
+
+    /* --- AES-CTS: at least one block, output as long as the input --- */
+    if (op->mechanism == CKM_AES_CTS) {
+        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (ulDataLen < 16) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
+        if (pEnc == NULL) { *pulEncLen = ulDataLen; return FHSM_RV_OK; }
+        if (*pulEncLen < ulDataLen) { *pulEncLen = ulDataLen; return 0x00000150UL; }
+        fhsm_rv_t crv = aes_cts_crypt(kv, kvl, op->iv, 1, pData, (size_t)ulDataLen, pEnc);
+        *pulEncLen = crv == FHSM_RV_OK ? ulDataLen : 0;
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), crv, FHSM_AUDIT_END);
+        return crv;
     }
 
     /* --- AES-ECB / AES-CBC / AES-CBC-PAD / AES-CTR path ---
@@ -12860,6 +12911,20 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
                                 fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
+    }
+
+    /* --- AES-CTS: a ciphertext is at least one block --- */
+    if (op->mechanism == CKM_AES_CTS) {
+        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (ulEncLen < 16) { op->active = 0; return FHSM_RV_ENCRYPTED_DATA_LEN_RANGE; }
+        if (pData == NULL) { *pulDataLen = ulEncLen; return FHSM_RV_OK; }
+        if (*pulDataLen < ulEncLen) { *pulDataLen = ulEncLen; return 0x00000150UL; }
+        fhsm_rv_t crv = aes_cts_crypt(kv, kvl, op->iv, 0, pEnc, (size_t)ulEncLen, pData);
+        *pulDataLen = crv == FHSM_RV_OK ? ulEncLen : 0;
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), crv, FHSM_AUDIT_END);
+        return crv;
     }
 
     /* --- AES-ECB / AES-CBC / AES-CBC-PAD / AES-CTR path ---
@@ -15354,6 +15419,30 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     return FHSM_RV_OK;
 }
 
+/* C_EncryptFinal / C_DecryptFinal for AES-CTS: the parts collected, in one
+ * pass. CKR_BUFFER_TOO_SMALL keeps them for the retry (§5.2); any other
+ * return ends the operation and drops them. */
+static CK_RV cts_final(CK_SESSION_HANDLE hSession, fhsm_op_t *op, int enc,
+                       unsigned char *pLast, CK_ULONG *pulLastLen) {
+    const size_t n = op->mp_len;
+    if (n < 16) {
+        op_free_multipart(op); op->active = 0;
+        return enc ? FHSM_RV_DATA_LEN_RANGE : FHSM_RV_ENCRYPTED_DATA_LEN_RANGE;
+    }
+    if (pLast == NULL) { *pulLastLen = (CK_ULONG)n; return FHSM_RV_OK; }
+    if (*pulLastLen < n) { *pulLastLen = (CK_ULONG)n; return 0x00000150UL; }
+    fhsm_token_t *t = fhsm_session_token(hSession);
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = t ? fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt)
+                     : FHSM_RV_SESSION_HANDLE_INVALID;
+    if (rv == FHSM_RV_OK && kt != CKK_AES) rv = FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (rv == FHSM_RV_OK) rv = aes_cts_crypt(kv, kvl, op->iv, enc, op->mp_buf, n, pLast);
+    *pulLastLen = rv == FHSM_RV_OK ? (CK_ULONG)n : 0;
+    op_free_multipart(op);
+    op->active = 0;
+    return rv;
+}
+
 CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
                       CK_ULONG ulPartLen, unsigned char *pEnc, CK_ULONG *pulEncLen) {
     FHSM_API_SHARED(); FHSM_REQUIRE_INITIALIZED();
@@ -15369,6 +15458,13 @@ CK_RV C_EncryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     /* The length is passed to EVP as an int ; a value beyond INT_MAX would be
      * silently truncated (#125 TestIsizeMaxUpdateLength). Reject it. */
     if (ulPartLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
+    /* AES-CTS: the parts are kept and encrypted whole at C_EncryptFinal,
+     * since stealing needs the last two blocks. Nothing is output here. */
+    if (op->mechanism == CKM_AES_CTS) {
+        if (pEnc == NULL) { *pulEncLen = 0; return FHSM_RV_OK; }
+        *pulEncLen = 0;
+        return op_append_multipart(op, pPart, (size_t)ulPartLen);
+    }
     fhsm_rv_t rv = ensure_cipher_ctx(op, t, 1);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
     /* Output length : stream ciphers (GCM/CTR) emit exactly ulPartLen ; block
@@ -15407,6 +15503,8 @@ CK_RV C_EncryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
     fhsm_op_t *op = op_slot(g_op_enc, hSession);
     if (!op || !op->active) return FHSM_RV_OPERATION_NOT_INITIALIZED;
     if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
+    if (op->mechanism == CKM_AES_CTS)
+        return cts_final(hSession, op, 1, pLast, pulLastLen);
     /* Final output upper bound depends on the mechanism : GCM appends its
      * auth tag ; CBC-PAD flushes one padding block ; ECB/CBC/CTR emit
      * nothing (#125 #57 generic multipart). */
@@ -15536,6 +15634,12 @@ CK_RV C_DecryptUpdate(CK_SESSION_HANDLE hSession, unsigned char *pEnc,
      * than crash (#125, same class as the C_Decrypt fix). */
     if (!pulPartLen || (!pEnc && ulEncLen)) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
     if (ulEncLen > 0x7FFFFFFFUL) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
+    /* AES-CTS: as in C_EncryptUpdate, decrypted whole at C_DecryptFinal. */
+    if (op->mechanism == CKM_AES_CTS) {
+        if (pPart == NULL) { *pulPartLen = 0; return FHSM_RV_OK; }
+        *pulPartLen = 0;
+        return op_append_multipart(op, pEnc, (size_t)ulEncLen);
+    }
     fhsm_rv_t rv = ensure_cipher_ctx(op, t, 0);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
     /* Refuse an undersized buffer before EVP writes, rather than overrun
@@ -15640,6 +15744,8 @@ CK_RV C_DecryptFinal(CK_SESSION_HANDLE hSession, unsigned char *pLast,
     /* CKA_ALWAYS_AUTHENTICATE (§5.6), before anything reads the key. */
     { CK_RV ca = op_require_ctx_auth(op); if (ca != FHSM_RV_OK) return ca; }
     if (!pulLastLen) return FHSM_RV_ARGUMENTS_BAD;
+    if (op->mechanism == CKM_AES_CTS)
+        return cts_final(hSession, op, 0, pLast, pulLastLen);
     /* No multipart context : C_DecryptInit was called but no
      * C_DecryptUpdate ever created the cipher context. EVP_DecryptFinal_ex
      * on NULL segfaults (#125, pkcs11-check crash: test_mech_flags

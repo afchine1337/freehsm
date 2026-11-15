@@ -47,6 +47,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
   general block cipher MAC: zero IV, data padded with zero bytes, 8 bytes
   or the length asked. Not approved: all-mechanisms in permissive mode
   only. All three single-part and in parts. `tests/test_aes_mac_family.c`.
+* **`CKM_AES_CTS`**, CBC with ciphertext stealing, variant CS3 of the
+  SP 800-38A addendum (the RFC 3962 one): a 16-byte IV, at least one block
+  of data, output as long as the input. In parts, the output comes at
+  `C_EncryptFinal` / `C_DecryptFinal`. Approved, in both builds.
+  `tests/test_aes_cts.c`.
 * **A data object keeps its `CKA_OBJECT_ID` (#38, #33 C10).** PKCS#11 v3.2
   Table 20 gives every data object one. It was accepted and dropped up to
   2.6.1, and refused in 2.7.0, the token file having no field for it. It is

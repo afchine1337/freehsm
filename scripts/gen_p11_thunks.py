@@ -140,6 +140,12 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197", "SP 800-38A §6.3")),
+    # CBC with ciphertext stealing, variant CS3 (2.8.0): a 16-byte IV, at
+    # least one block of data, output as long as the input.
+    Mech("CKM_AES_CTS",            0x00001089, "AES",  "encrypt", "dispatch_aes_cbc",
+         fips="approved", key_type="CKK_AES",
+         min_key_bits=128, max_key_bits=256,
+         refs=("FIPS 197", "SP 800-38A Addendum", "RFC 3962")),
     Mech("CKM_AES_KEY_WRAP",       0x00002109, "AES",  "wrap+encrypt", "dispatch_aes_kw",
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
