@@ -146,6 +146,17 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="approved", key_type="CKK_AES",
          min_key_bits=128, max_key_bits=256,
          refs=("FIPS 197", "SP 800-38A Addendum", "RFC 3962")),
+    # ChaCha20 and Poly1305 (2.8.0, RFC 8439): CKK_CHACHA20 and CKK_POLY1305
+    # keys of 32 bytes. Computed in fhsm_pkcs11.c; the handlers named are only
+    # references. Not approved: refused where NIST's rules apply.
+    Mech("CKM_CHACHA20_KEY_GEN",   0x00001225, "CHACHA20", "keygen", "dispatch_aes_keygen",
+         fips="non-approved", key_type="CKK_CHACHA20", refs=("RFC 8439",)),
+    Mech("CKM_CHACHA20",           0x00001226, "CHACHA20", "encrypt", "dispatch_aes_cbc",
+         fips="non-approved", key_type="CKK_CHACHA20", refs=("RFC 8439",)),
+    Mech("CKM_POLY1305_KEY_GEN",   0x00001227, "POLY1305", "keygen", "dispatch_aes_keygen",
+         fips="non-approved", key_type="CKK_POLY1305", refs=("RFC 8439",)),
+    Mech("CKM_POLY1305",           0x00001228, "POLY1305", "sign",   "dispatch_aes_cmac",
+         fips="non-approved", key_type="CKK_POLY1305", refs=("RFC 8439",)),
     # XTS-AES (2.8.0): a CKK_AES_XTS key, two AES keys end to end, 32 or 64
     # bytes; the 16-byte tweak as the parameter; one data unit per operation.
     Mech("CKM_AES_XTS",            0x00001071, "AES-XTS", "encrypt", "dispatch_aes_cbc",

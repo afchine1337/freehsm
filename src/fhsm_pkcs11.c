@@ -1716,6 +1716,9 @@ static void fhsm_mech_keysizes_for(const char *fam,
     if (!strcmp(fam, "TDES"))    { *mn = 24;   *mx = 24;   return; }
     if (!strcmp(fam, "DES"))     { *mn = 8;    *mx = 8;    return; }
     if (!strcmp(fam, "DES2"))    { *mn = 16;   *mx = 16;   return; }
+    /* ChaCha20 and Poly1305 keys are 256 bits and only 256 (RFC 8439). */
+    if (!strcmp(fam, "CHACHA20") || !strcmp(fam, "POLY1305"))
+                                 { *mn = 32;   *mx = 32;   return; }
     if (!strcmp(fam, "RSA"))     { *mn = rsa_min_bits(); *mx = FHSM_RSA_MAX_BITS; return; }
     if (!strcmp(fam, "EC"))      { *mn = ec_min_bits(); *mx = FHSM_EC_MAX_BITS; return; }
     if (!strcmp(fam, "EdDSA") || !strcmp(fam, "ECM"))
@@ -2261,10 +2264,13 @@ static int aes_is_feedback_mode(CK_ULONG m) {
  * operation, and counts them; 0 when they would overflow it. A partial last
  * block uses a counter value like a whole one. Other mechanisms: always 1. */
 static int ctr_take(fhsm_op_t *op, size_t len) {
-    if (op->mechanism != 0x00001086UL /* CKM_AES_CTR */) return 1;
+    /* AES-CTR counts 16-byte blocks, ChaCha20 (2.8.0) 64-byte ones. */
+    const uint64_t bs = op->mechanism == 0x00001086UL /* CKM_AES_CTR */  ? 16u
+                      : op->mechanism == 0x00001226UL /* CKM_CHACHA20 */ ? 64u : 0u;
+    if (bs == 0) return 1;
     uint64_t total = op->ctr_bytes_done + (uint64_t)len;
     if (total < op->ctr_bytes_done) return 0;
-    uint64_t blocks = total / 16 + (total % 16 != 0);
+    uint64_t blocks = total / bs + (total % bs != 0);
     if (blocks > op->ctr_blocks_max) return 0;
     op->ctr_bytes_done = total;
     return 1;
@@ -3501,6 +3507,23 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
               if (req != dl) return FHSM_RV_TEMPLATE_INCONSISTENT;
           } }
         key_type = dl == 16u ? 0x14u /* CKK_DES2 */ : (uint32_t)CKK_DES3; key_len = dl;
+    } else if (pMechanism->mechanism == 0x00001225UL /* CKM_CHACHA20_KEY_GEN */
+               || pMechanism->mechanism == 0x00001227UL /* CKM_POLY1305_KEY_GEN */) {
+        /* 2.8.0: a CKK_CHACHA20 or CKK_POLY1305 key, 32 bytes. CKA_VALUE_LEN
+         * absent or 32, as for 3DES above. Not approved: refused where
+         * NIST's rules apply. */
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return FHSM_RV_MECHANISM_INVALID;
+        { long vl = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+          if (vl >= 0) {
+              CK_ULONG req = 0;
+              if (!pTemplate[vl].pValue || pTemplate[vl].ulValueLen != sizeof(CK_ULONG))
+                  return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+              memcpy(&req, pTemplate[vl].pValue, sizeof(CK_ULONG));
+              if (req != 32) return FHSM_RV_TEMPLATE_INCONSISTENT;
+          } }
+        key_type = pMechanism->mechanism == 0x00001225UL ? 0x33u /* CKK_CHACHA20 */
+                                                         : 0x34u /* CKK_POLY1305 */;
+        key_len = 32;
     } else {
         switch (pMechanism->mechanism) {
             case CKM_AES_KEY_GEN:            key_type = CKK_AES;            break;
@@ -4396,7 +4419,9 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
          * no 3DES mechanism could take, as for AES above. */
         if (a.cko == CKO_SECRET_KEY && a.value_data
             && ((a.ckk == 0x14 /* CKK_DES2 */ && a.value_len != 16)
-                || (a.ckk == 0x15 /* CKK_DES3 */ && a.value_len != 24)))
+                || (a.ckk == 0x15 /* CKK_DES3 */ && a.value_len != 24)
+                || ((a.ckk == 0x33 /* CKK_CHACHA20 */ || a.ckk == 0x34 /* CKK_POLY1305 */)
+                    && a.value_len != 32)))
             return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         /* An XTS key is 32 or 64 bytes, and its two halves differ. */
         if (a.cko == CKO_SECRET_KEY && a.ckk == 0x35 /* CKK_AES_XTS */ && a.value_data
@@ -7106,6 +7131,9 @@ static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     if (key_type == 0x14 /* CKK_DES2 */ && pt_len != 16)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if ((key_type == 0x33 /* CKK_CHACHA20 */ || key_type == 0x34 /* CKK_POLY1305 */)
+        && pt_len != 32)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
     if (key_type == 0x35 /* CKK_AES_XTS */ && !xts_key_ok(pt, pt_len))
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     { long vli = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
@@ -7360,6 +7388,9 @@ static CK_RV kem_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     if (new_ckk == 0x15 /* CKK_DES3 */ && out_len != 24)
         return CKR_TEMPLATE_INCONSISTENT;
     if (new_ckk == 0x14 /* CKK_DES2 */ && out_len != 16)
+        return CKR_TEMPLATE_INCONSISTENT;
+    if ((new_ckk == 0x33 /* CKK_CHACHA20 */ || new_ckk == 0x34 /* CKK_POLY1305 */)
+        && out_len != 32)
         return CKR_TEMPLATE_INCONSISTENT;
     if (new_ckk == 0x35 /* CKK_AES_XTS */ && !xts_key_ok(ss, out_len))
         return CKR_TEMPLATE_INCONSISTENT;
@@ -11622,6 +11653,38 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
             return FHSM_RV_MECHANISM_PARAM_INVALID;
         }
     }
+    /* CKM_CHACHA20 (2.8.0): CK_CHACHA20_PARAMS
+     *   { CK_BYTE_PTR pBlockCounter; CK_ULONG blockCounterBits;
+     *     CK_BYTE_PTR pNonce; CK_ULONG ulNonceBits; }
+     * in one of the two layouts ChaCha20 has: a 32-bit counter and a 96-bit
+     * nonce (RFC 8439), or a 64-bit counter and a 64-bit nonce (the
+     * original). The counter bytes are read little-endian, as the cipher
+     * state holds them; counter then nonce are state words 12 to 15, which
+     * is op->iv as OpenSSL's ChaCha20 takes it. Data past the counter is
+     * CKR_DATA_LEN_RANGE, through ctr_take, where OpenSSL would carry the
+     * counter into the nonce. Not approved: refused where NIST's rules
+     * apply. */
+    if (pMechanism->mechanism == 0x00001226UL /* CKM_CHACHA20 */) {
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return FHSM_RV_MECHANISM_INVALID;
+        typedef struct { unsigned char *pBlockCounter; CK_ULONG blockCounterBits;
+                         unsigned char *pNonce; CK_ULONG ulNonceBits; } chacha20_params_t;
+        if (!pMechanism->pParameter || pMechanism->ulParameterLen < sizeof(chacha20_params_t))
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        chacha20_params_t cp;
+        memcpy(&cp, pMechanism->pParameter, sizeof cp);
+        if (!((cp.blockCounterBits == 32 && cp.ulNonceBits == 96)
+              || (cp.blockCounterBits == 64 && cp.ulNonceBits == 64))
+            || !cp.pBlockCounter || !cp.pNonce)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        const size_t cb = (size_t)cp.blockCounterBits / 8;
+        memcpy(op->iv, cp.pBlockCounter, cb);
+        memcpy(op->iv + cb, cp.pNonce, 16 - cb);
+        op->have_iv = 1;
+        uint64_t start = 0;
+        for (size_t i = cb; i-- > 0;) start = (start << 8) | op->iv[i];
+        op->ctr_blocks_max = cb == 4 ? (((uint64_t)1 << 32) - start) : (UINT64_MAX - start);
+        op->ctr_bytes_done = 0;
+    }
     /* The key-wrap IV of §6.16.2, captured here for the C_Encrypt / C_Decrypt
      * half of the pair.
      *
@@ -12032,6 +12095,7 @@ static int fhsm_nonfips_enc_rejected(CK_ULONG mech) {
         case 0x00000132UL: /* CKM_DES3_ECB */
         case 0x00000133UL: /* CKM_DES3_CBC */
         case 0x00000136UL: /* CKM_DES3_CBC_PAD */
+        case 0x00001226UL: /* CKM_CHACHA20 */
         case CKM_RSA_PKCS:
         case CKM_RSA_X_509:
             return 1;
@@ -12296,6 +12360,44 @@ static fhsm_rv_t des3_crypt(CK_ULONG m, const uint8_t *kv, const uint8_t *iv, in
     return FHSM_RV_OK;
 }
 
+/* ChaCha20 over len bytes with the 32-byte key and the state words 12..15
+ * op_init built; encryption and decryption are the same operation. */
+static fhsm_rv_t chacha20_crypt(const uint8_t *kv, const uint8_t iv[16],
+                                const uint8_t *in, size_t len, uint8_t *out) {
+    if (len > 0x7FFFFFFFu) return FHSM_RV_DATA_LEN_RANGE;
+    EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "ChaCha20", NULL);
+    if (!c) return FHSM_RV_MECHANISM_INVALID;
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
+    int ol = 0, fl = 0;
+    int ok = EVP_EncryptInit_ex2(ctx, c, kv, iv, NULL) == 1
+          && EVP_EncryptUpdate(ctx, out, &ol, in, (int)len) == 1
+          && EVP_EncryptFinal_ex(ctx, out + ol, &fl) == 1
+          && (size_t)ol + (size_t)fl == len;
+    EVP_CIPHER_CTX_free(ctx);
+    EVP_CIPHER_free(c);
+    return ok ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+/* Poly1305 (RFC 8439 2.5): the 16-byte tag of data under a 32-byte one-time
+ * key. That the key is used once is the caller's to keep, as PKCS#11 has it;
+ * the module cannot tell a second message from a first. */
+static fhsm_rv_t poly1305_mac(const uint8_t *kv, size_t kvl,
+                              const uint8_t *data, size_t len, uint8_t out[16]) {
+    if (kvl != 32) return FHSM_RV_KEY_SIZE_RANGE;
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "POLY1305", NULL);
+    if (!mac) return FHSM_RV_MECHANISM_INVALID;
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);
+    if (!ctx) return FHSM_RV_HOST_MEMORY;
+    size_t ol = 0;
+    int ok = EVP_MAC_init(ctx, kv, kvl, NULL) == 1
+          && EVP_MAC_update(ctx, data, len) == 1
+          && EVP_MAC_final(ctx, out, &ol, 16) == 1 && ol == 16;
+    EVP_MAC_CTX_free(ctx);
+    return ok ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
 /* CTS and XTS: the whole message in one pass, output as long as the input,
  * at least one block. The key type each one takes, and the one call. */
 static int aes_whole_msg_mech(CK_ULONG m) {
@@ -12329,6 +12431,7 @@ static int fhsm_cipher_mech_valid(CK_ULONG mech) {
         case CKM_AES_CFB1:      /* 0x2108 */
         case CKM_AES_CTS:       /* 0x1089 */
         case CKM_AES_XTS:       /* 0x1071 */
+        case 0x00001226UL:      /* CKM_CHACHA20 */
         case CKM_AES_GCM:       /* 0x1087 */
         case 0x00001088UL:      /* CKM_AES_CCM */
         case 0x00000132UL:      /* CKM_DES3_ECB */
@@ -12399,6 +12502,8 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x1104: case 0x1105:                           /* AES ECB/CBC_ENCRYPT_DATA */
             want = 0x1F; break;                             /* CKK_AES */
         case 0x1071: want = 0x35; break;                    /* AES_XTS -> CKK_AES_XTS */
+        case 0x1226: want = 0x33; break;                    /* CHACHA20 -> CKK_CHACHA20 */
+        case 0x1228: want = 0x34; break;                    /* POLY1305 -> CKK_POLY1305 */
         case 0x0132: case 0x0133: case 0x0136:              /* DES3 ECB/CBC/CBC_PAD */
         case 0x0134: case 0x0135: case 0x0137: case 0x0138: /* DES3 MAC/_GENERAL, CMAC_GENERAL/CMAC */
         case 0x1102: case 0x1103:                           /* DES3 ECB/CBC_ENCRYPT_DATA */
@@ -12706,6 +12811,21 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
                                 fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
         return FHSM_RV_OK;
+    }
+
+    /* --- ChaCha20 (2.8.0, not approved): a stream, output as long as the input --- */
+    if (op->mechanism == 0x00001226UL /* CKM_CHACHA20 */) {
+        if (kt != 0x33u) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (kvl != 32)   { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
+        if (pEnc == NULL) { *pulEncLen = ulDataLen; return FHSM_RV_OK; }
+        if (*pulEncLen < ulDataLen) { *pulEncLen = ulDataLen; return 0x00000150UL; }
+        if (!ctr_take(op, (size_t)ulDataLen)) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
+        fhsm_rv_t crv = chacha20_crypt(kv, op->iv, pData, (size_t)ulDataLen, pEnc);
+        *pulEncLen = crv == FHSM_RV_OK ? ulDataLen : 0;
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), crv, FHSM_AUDIT_END);
+        return crv;
     }
 
     /* --- AES-CTS, AES-XTS: at least one block, output as long as the input --- */
@@ -13232,6 +13352,21 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         return FHSM_RV_OK;
     }
 
+    /* --- ChaCha20 (2.8.0, not approved): as C_Encrypt --- */
+    if (op->mechanism == 0x00001226UL /* CKM_CHACHA20 */) {
+        if (kt != 0x33u) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (kvl != 32)   { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
+        if (pData == NULL) { *pulDataLen = ulEncLen; return FHSM_RV_OK; }
+        if (*pulDataLen < ulEncLen) { *pulDataLen = ulEncLen; return 0x00000150UL; }
+        if (!ctr_take(op, (size_t)ulEncLen)) { op->active = 0; return FHSM_RV_DATA_LEN_RANGE; }
+        fhsm_rv_t crv = chacha20_crypt(kv, op->iv, pEnc, (size_t)ulEncLen, pData);
+        *pulDataLen = crv == FHSM_RV_OK ? ulEncLen : 0;
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
+                                fhsm_session_role(hSession), crv, FHSM_AUDIT_END);
+        return crv;
+    }
+
     /* --- AES-CTS, AES-XTS: a ciphertext is at least one block --- */
     if (aes_whole_msg_mech(op->mechanism)) {
         if (kt != aes_whole_msg_key_type(op->mechanism)) {
@@ -13678,6 +13813,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_AES_MAC_GENERAL:   /* the nist build and in strict mode */
         case 0x00000134UL: case 0x00000135UL:   /* CKM_DES3_MAC, _GENERAL */
         case 0x00000137UL: case 0x00000138UL:   /* CKM_DES3_CMAC_GENERAL, _CMAC */
+        case 0x00001228UL:                      /* CKM_POLY1305 */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -14302,6 +14438,22 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         return rv;
     }
 
+    /* Poly1305 (2.8.0): 16 bytes under a CKK_POLY1305 key. */
+    if (op->mechanism == 0x00001228UL /* CKM_POLY1305 */) {
+        const uint8_t *pkv = NULL; size_t pkvl = 0; uint32_t pcl = 0, pkt = 0;
+        fhsm_rv_t prv = fhsm_token_object_get(t, op->key_handle, &pkv, &pkvl, &pcl, &pkt);
+        if (prv != FHSM_RV_OK) { op->active = 0; return prv; }
+        if (pkt != 0x34u) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (pSignature == NULL) { *pulSignatureLen = 16; return FHSM_RV_OK; }
+        if (*pulSignatureLen < 16) { *pulSignatureLen = 16; return 0x00000150UL; }
+        prv = poly1305_mac(pkv, pkvl, pData, (size_t)ulDataLen, pSignature);
+        *pulSignatureLen = prv == FHSM_RV_OK ? 16 : 0;
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_SIGN, -1, (int)hSession,
+                                fhsm_session_role(hSession), prv, FHSM_AUDIT_END);
+        return prv;
+    }
+
     if (mech_is_cbcmac(op->mechanism)) {
         size_t mac_len = op->mac_out_len;
         if (pSignature == NULL) { *pulSignatureLen = mac_len; return FHSM_RV_OK; }
@@ -14487,6 +14639,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_AES_MAC_GENERAL:   /* the nist build and in strict mode */
         case 0x00000134UL: case 0x00000135UL:   /* CKM_DES3_MAC, _GENERAL */
         case 0x00000137UL: case 0x00000138UL:   /* CKM_DES3_CMAC_GENERAL, _CMAC */
+        case 0x00001228UL:                      /* CKM_POLY1305 */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -14570,6 +14723,17 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
                           ? op->mac_out_len : mac_len;
         int vok = ulSigLen == want_len && fhsm_ct_memcmp(mac, pSig, want_len) == 0;
         OPENSSL_cleanse(mac, sizeof mac);
+        return vok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
+    }
+
+    if (op->mechanism == 0x00001228UL /* CKM_POLY1305 */) {
+        if (kt != 0x34u) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        uint8_t mac[16];
+        rv = poly1305_mac(kv, kvl, pData, (size_t)ulDataLen, mac);
+        op->active = 0;
+        int vok = rv == FHSM_RV_OK && ulSigLen == 16 && fhsm_ct_memcmp(mac, pSig, 16) == 0;
+        OPENSSL_cleanse(mac, sizeof mac);
+        if (rv != FHSM_RV_OK) return rv;
         return vok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
     }
 
@@ -15184,6 +15348,7 @@ static int mech_sign_is_buffered_multipart(uint32_t m) {
     if (m == CKM_COMPOSITE_MLDSA65_ED25519) return 0;  /* streams its own PH */
     if (m == CKM_AES_CMAC || m == CKM_AES_GMAC) return 0;  /* stream via EVP_MAC */
     if (mech_is_cmac(m)) return 0;                           /* likewise, AES and 3DES */
+    if (m == 0x00001228UL) return 0;                         /* CKM_POLY1305, EVP_MAC */
     if (mech_is_cbcmac(m)) return 0;                         /* cbcmac_update */
     if (fhsm_hmac_hash_of(m, &h, &n)) return 0;            /* streams via EVP_MAC */
     return 1;
@@ -15207,6 +15372,7 @@ static size_t mac_stream_len(const fhsm_op_t *op) {
     if (fhsm_hmac_hash_of(op->mechanism, &h, &n))
         return (op->mac_out_len && op->mac_out_len <= n) ? op->mac_out_len : n;
     if (mech_is_cmac(op->mechanism)) return cmac_tag_len(op);
+    if (op->mechanism == 0x00001228UL /* CKM_POLY1305 */) return 16;
     if (op->mechanism == CKM_AES_GMAC)
         return (op->gcm_tag_len && op->gcm_tag_len <= 16) ? op->gcm_tag_len : 16;
     return 0;
@@ -15247,6 +15413,10 @@ static fhsm_rv_t mac_stream_open(fhsm_token_t *t, fhsm_op_t *op) {
         if (gmac)
             params[np++] = OSSL_PARAM_construct_octet_string("iv", op->gcm_iv, op->gcm_iv_len);
         mac_name = gmac ? "GMAC" : "CMAC";
+    } else if (op->mechanism == 0x00001228UL /* CKM_POLY1305 */) {
+        if (kt != 0x34u) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+        if (kvl != 32) return FHSM_RV_KEY_SIZE_RANGE;
+        mac_name = "POLY1305";
     } else {
         return FHSM_RV_MECHANISM_INVALID;
     }
@@ -15735,6 +15905,7 @@ static int op_cipher_kind(uint32_t mech) {
         case 0x00000132UL:                                  /* CKM_DES3_ECB */
         case 0x00000133UL:    return 2;                     /* CKM_DES3_CBC */
         case 0x00000136UL:    return 3;                     /* CKM_DES3_CBC_PAD */
+        case 0x00001226UL:    return 1;                     /* CKM_CHACHA20, a stream */
         default:              return -1;
     }
 }
@@ -15756,15 +15927,20 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
     const int des3 = des3_mode(op->mechanism);
-    if ((des3 ? !is_des3_key_type(kt) : kt != (uint32_t)CKK_AES)) return FHSM_RV_MECHANISM_INVALID;
+    const int chacha = op->mechanism == 0x00001226UL;   /* CKM_CHACHA20 */
+    if (chacha ? kt != 0x33u
+               : (des3 ? !is_des3_key_type(kt) : kt != (uint32_t)CKK_AES))
+        return FHSM_RV_MECHANISM_INVALID;
     int kind = op_cipher_kind(op->mechanism);
     if (kind < 0) return FHSM_RV_MECHANISM_INVALID;
     static const char *gcm[3] = { "AES-128-GCM", "AES-192-GCM", "AES-256-GCM" };
-    int ksel = des3 ? (des3_key24(kt, kv, kvl, NULL) ? 0 : -1)
+    int ksel = chacha ? (kvl == 32 ? 0 : -1)
+             : des3 ? (des3_key24(kt, kv, kvl, NULL) ? 0 : -1)
              : (kvl == 16) ? 0 : (kvl == 24) ? 1 : (kvl == 32) ? 2 : -1;
     if (ksel < 0) return FHSM_RV_KEY_SIZE_RANGE;
     /* GCM here; every other mode by the name single-part uses. */
-    const char *cname = des3 ? (op->mechanism == 0x00000132UL ? "DES-EDE3-ECB" : "DES-EDE3-CBC")
+    const char *cname = chacha ? "ChaCha20"
+                      : des3 ? (op->mechanism == 0x00000132UL ? "DES-EDE3-ECB" : "DES-EDE3-CBC")
                       : (kind == 0) ? gcm[ksel]
                       : aes_mode_cipher_name(op->mechanism, kvl);
     if (!cname) return FHSM_RV_MECHANISM_INVALID;

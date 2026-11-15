@@ -94,6 +94,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
   generation mechanisms set odd parity on every byte, as `C_DeriveKey`
   already did for these types; the bytes came out of the generator as
   random as the rest. The cipher ignores them, so no result changes.
+* **`CKM_CHACHA20` and `CKM_POLY1305`, with `CKM_CHACHA20_KEY_GEN`,
+  `CKM_POLY1305_KEY_GEN` and the `CKK_CHACHA20` and `CKK_POLY1305` key
+  types** (RFC 8439), keys of 32 bytes. ChaCha20 takes `CK_CHACHA20_PARAMS`
+  with a 32-bit counter and a 96-bit nonce or a 64-bit counter and a 64-bit
+  nonce, the counter bytes little-endian; data past the counter is
+  `CKR_DATA_LEN_RANGE` rather than a counter carried into the nonce.
+  Poly1305 gives a 16-byte tag; that its key is used once is the caller's
+  to keep. Single-part and in parts. Not approved: all-mechanisms in
+  permissive mode only. `tests/test_chacha20_poly1305.c`.
 * **A partial block at `C_EncryptFinal` is `CKR_DATA_LEN_RANGE`.** ECB and
   CBC without padding, AES as 3DES, encrypted in parts with a total that
   is not whole blocks, answered `CKR_FUNCTION_FAILED` at Final, OpenSSL's
