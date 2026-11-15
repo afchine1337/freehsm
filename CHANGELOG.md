@@ -83,6 +83,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   and verify. Not approved: all-mechanisms in permissive mode only, as
   `CKM_DES3_CMAC` already was as a KBKDF PRF.
   `tests/test_des3_mac_family.c`.
+* **`CKM_DES2_KEY_GEN` and `CKK_DES2` keys.** A 16-byte key K1 K2, which
+  every DES3 mechanism -- the ciphers, the MACs, single-part and in parts,
+  and `CKM_DES3_*_ENCRYPT_DATA` -- takes as K1 K2 K1 (SP 800-67 keying
+  option 2). `C_CreateObject` holds a `CKK_DES2` key to 16 bytes and a
+  `CKK_DES3` key to 24; `C_UnwrapKey` and `C_DecapsulateKey` the same. The
+  `CKM_DES3_CMAC` PRF of the SP 800-108 KDFs still takes `CKK_DES3` only.
+  Not approved: all-mechanisms only. `tests/test_des2_keys.c`.
+* **DES2 and DES3 key generation set the parity bits.** The DES key
+  generation mechanisms set odd parity on every byte, as `C_DeriveKey`
+  already did for these types; the bytes came out of the generator as
+  random as the rest. The cipher ignores them, so no result changes.
 * **A partial block at `C_EncryptFinal` is `CKR_DATA_LEN_RANGE`.** ECB and
   CBC without padding, AES as 3DES, encrypted in parts with a total that
   is not whole blocks, answered `CKR_FUNCTION_FAILED` at Final, OpenSSL's

@@ -895,6 +895,11 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_DES3_KEY_GEN",       0x00000131, "TDES", "keygen",  "dispatch_des3_keygen",
          fips="non-approved",
          notes="Triple-DES disallowed for encryption after Dec 31 2023 (SP 800-131A rev. 2)."),
+    # 2.8.0: a CKK_DES2 key, 16 bytes, which every DES3 mechanism takes as
+    # K1 K2 K1. Not approved: two-key TDEA is disallowed altogether.
+    Mech("CKM_DES2_KEY_GEN",       0x00000130, "DES2", "keygen",  "dispatch_des3_keygen",
+         fips="non-approved", key_type="CKK_DES2",
+         notes="Two-key Triple-DES disallowed (SP 800-131A rev. 2)."),
     Mech("CKM_DES3_CBC",           0x00000133, "TDES", "encrypt", "dispatch_des3_cbc",
          fips="non-approved"),
     # 2.8.0: ECB and CBC with PKCS#7 padding beside CBC, single-part and in

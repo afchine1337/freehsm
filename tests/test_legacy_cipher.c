@@ -81,8 +81,8 @@ int main(void) {
      * FIPS-approved (SP 800-38A) and available in both profiles.
      *
      * The constant here was 0x130 for a long time. That is CKM_DES2_KEY_GEN.
-     * CKM_DES3_KEY_GEN is 0x131, and the module never advertises 0x130 in
-     * either profile -- so the search always failed, the test always believed
+     * CKM_DES3_KEY_GEN is 0x131, and the module did not advertise 0x130 in
+     * either profile until 2.8.0 -- so the search always failed, the test always believed
      * it was in nist-approved-only, and the interop branch below had never run once.
      * Both nist-approved-only assertions still passed, for reasons that had nothing
      * to do with the profile: one used a mechanism that does not exist, the

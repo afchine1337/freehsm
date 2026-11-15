@@ -1671,6 +1671,26 @@ static unsigned ec_min_bits(void) {
     return 256u;
 }
 
+/* A 3DES key as the cipher takes it, 24 bytes (2.8.0). CKK_DES3 is that
+ * already; CKK_DES2 is K1 K2 and runs as K1 K2 K1, SP 800-67 keying option
+ * 2, which is how PKCS#11 has every DES3 mechanism take a double-length key.
+ * 1 and the 24 bytes in out (when out is not NULL), or 0 for any other type
+ * or length. The caller cleanses out. */
+static int is_des3_key_type(uint32_t kt) {
+    return kt == 0x15u /* CKK_DES3 */ || kt == 0x14u /* CKK_DES2 */;
+}
+static int des3_key24(uint32_t kt, const uint8_t *kv, size_t kvl, uint8_t *out) {
+    if (kt == 0x15u && kvl == 24) {
+        if (out) memcpy(out, kv, 24);
+        return 1;
+    }
+    if (kt == 0x14u && kvl == 16) {
+        if (out) { memcpy(out, kv, 16); memcpy(out + 16, kv, 8); }
+        return 1;
+    }
+    return 0;
+}
+
 /* An XTS key: 32 or 64 bytes, two halves that differ (SP 800-38E, IEEE
  * 1619-2018 5.1). Shared by every path that makes or takes one. */
 static int xts_key_ok(const uint8_t *k, size_t n) {
@@ -1695,6 +1715,7 @@ static void fhsm_mech_keysizes_for(const char *fam,
      * so "DES" keeps its own single length and advertises nothing usable. */
     if (!strcmp(fam, "TDES"))    { *mn = 24;   *mx = 24;   return; }
     if (!strcmp(fam, "DES"))     { *mn = 8;    *mx = 8;    return; }
+    if (!strcmp(fam, "DES2"))    { *mn = 16;   *mx = 16;   return; }
     if (!strcmp(fam, "RSA"))     { *mn = rsa_min_bits(); *mx = FHSM_RSA_MAX_BITS; return; }
     if (!strcmp(fam, "EC"))      { *mn = ec_min_bits(); *mx = FHSM_EC_MAX_BITS; return; }
     if (!strcmp(fam, "EdDSA") || !strcmp(fam, "ECM"))
@@ -3458,8 +3479,12 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         CK_ULONG req = 0; memcpy(&req, pTemplate[j].pValue, sizeof(CK_ULONG));
         if (req == 0 || req > FHSM_PBKDF2_MAX_OUT) return FHSM_RV_KEY_SIZE_RANGE;
         key_len = (uint32_t)req;
-    } else if (pMechanism->mechanism == 0x00000131UL) {
+    } else if (pMechanism->mechanism == 0x00000131UL
+               || pMechanism->mechanism == 0x00000130UL /* CKM_DES2_KEY_GEN */) {
         if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
+        /* CKM_DES2_KEY_GEN (2.8.0): a CKK_DES2 key, 16 bytes, by the same
+         * rule as below. */
+        const uint32_t dl = pMechanism->mechanism == 0x00000130UL ? 16u : 24u;
         /* A 3DES key is 24 bytes and only 24. CKA_VALUE_LEN was ignored here:
          * a template asking for 7 bytes got a 24-byte key and CKR_OK, so the
          * caller was told its request had been met when it had been
@@ -3473,9 +3498,9 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
               if (!pTemplate[vl].pValue || pTemplate[vl].ulValueLen != sizeof(CK_ULONG))
                   return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
               memcpy(&req, pTemplate[vl].pValue, sizeof(CK_ULONG));
-              if (req != 24) return FHSM_RV_TEMPLATE_INCONSISTENT;
+              if (req != dl) return FHSM_RV_TEMPLATE_INCONSISTENT;
           } }
-        key_type = CKK_DES3; key_len = 24;
+        key_type = dl == 16u ? 0x14u /* CKK_DES2 */ : (uint32_t)CKK_DES3; key_len = dl;
     } else {
         switch (pMechanism->mechanism) {
             case CKM_AES_KEY_GEN:            key_type = CKK_AES;            break;
@@ -3620,6 +3645,22 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (rv == FHSM_RV_OK && key_type == 0x35
             && CRYPTO_memcmp(key, key + key_len / 2, key_len / 2) == 0)
             rv = FHSM_RV_FUNCTION_FAILED;
+        /* A DES2 or DES3 key carries odd parity in the low bit of each byte:
+         * the DES key generation mechanisms set the parity bits (PKCS#11,
+         * FIPS 46-3), as C_DeriveKey does for these types. They came out of
+         * the generator as random as the rest. And equal 8-byte parts reduce
+         * the key to single DES; from the generator that again means it is
+         * broken, so refused rather than retried. */
+        if (rv == FHSM_RV_OK && (key_type == 0x14u || key_type == (uint32_t)CKK_DES3)) {
+            for (size_t pi = 0; pi < key_len; ++pi) {
+                uint8_t b = key[pi] & 0xFE, ones = 0;
+                for (uint8_t v = b; v; v &= (uint8_t)(v - 1)) ones++;
+                key[pi] = (uint8_t)(b | ((ones & 1) ? 0 : 1));
+            }
+            if (CRYPTO_memcmp(key, key + 8, 8) == 0
+                || (key_len == 24 && CRYPTO_memcmp(key + 8, key + 16, 8) == 0))
+                rv = FHSM_RV_FUNCTION_FAILED;
+        }
     }
     if (rv != FHSM_RV_OK) { fhsm_zeroize(key, sizeof(key)); return rv; }
 
@@ -4350,6 +4391,12 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
          * the import did not (#37 K2). */
         if (a.cko == CKO_SECRET_KEY && a.ckk == CKK_AES && a.value_data
             && a.value_len != 16 && a.value_len != 24 && a.value_len != 32)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        /* A DES2 key is 16 bytes and a DES3 key 24: any other length is a key
+         * no 3DES mechanism could take, as for AES above. */
+        if (a.cko == CKO_SECRET_KEY && a.value_data
+            && ((a.ckk == 0x14 /* CKK_DES2 */ && a.value_len != 16)
+                || (a.ckk == 0x15 /* CKK_DES3 */ && a.value_len != 24)))
             return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         /* An XTS key is 32 or 64 bytes, and its two halves differ. */
         if (a.cko == CKO_SECRET_KEY && a.ckk == 0x35 /* CKK_AES_XTS */ && a.value_data
@@ -5812,7 +5859,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         { CK_RV tc = fhsm_check_key_mech_type(t, hBaseKey, em);
           if (tc != FHSM_RV_OK) return tc; }
         const char *cn = NULL;
-        if (des3)            cn = bvl == 24 ? (cbc ? "DES-EDE3-CBC" : "DES-EDE3-ECB") : NULL;
+        if (des3)            cn = des3_key24(bkt, bv, bvl, NULL)   /* DES2 or DES3 */
+                                  ? (cbc ? "DES-EDE3-CBC" : "DES-EDE3-ECB") : NULL;
         else if (bvl == 16)  cn = cbc ? "AES-128-CBC" : "AES-128-ECB";
         else if (bvl == 24)  cn = cbc ? "AES-192-CBC" : "AES-192-ECB";
         else if (bvl == 32)  cn = cbc ? "AES-256-CBC" : "AES-256-ECB";
@@ -5857,6 +5905,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
           if (lr != FHSM_RV_OK) return lr; }
         EVP_CIPHER *ec = EVP_CIPHER_fetch(NULL, cn, NULL);
         if (!ec) return FHSM_RV_MECHANISM_INVALID;
+        uint8_t dk24[24];
+        if (des3) { (void)des3_key24(bkt, bv, bvl, dk24); bv = dk24; }
         EVP_CIPHER_CTX *ectx = EVP_CIPHER_CTX_new();
         uint8_t *ct = OPENSSL_malloc((size_t)dlen);
         int ol = 0, fl = 0;
@@ -5869,6 +5919,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         EVP_CIPHER_CTX_free(ectx);
         EVP_CIPHER_free(ec);
         OPENSSL_cleanse(iv, sizeof iv);
+        OPENSSL_cleanse(dk24, sizeof dk24);
         if (!ct) return FHSM_RV_HOST_MEMORY;
         CK_RV srv = eok ? derive_store_secret(t, hSession, pTemplate, ulCount,
                                               ct, klen, CKO_SECRET_KEY,
@@ -7053,6 +7104,8 @@ static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     if (key_type == 0x15 /* CKK_DES3 */ && pt_len != 24)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (key_type == 0x14 /* CKK_DES2 */ && pt_len != 16)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
     if (key_type == 0x35 /* CKK_AES_XTS */ && !xts_key_ok(pt, pt_len))
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     { long vli = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
@@ -7305,6 +7358,8 @@ static CK_RV kem_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     if (new_ckk == CKK_AES && out_len != 16 && out_len != 24 && out_len != 32)
         return CKR_TEMPLATE_INCONSISTENT;
     if (new_ckk == 0x15 /* CKK_DES3 */ && out_len != 24)
+        return CKR_TEMPLATE_INCONSISTENT;
+    if (new_ckk == 0x14 /* CKK_DES2 */ && out_len != 16)
         return CKR_TEMPLATE_INCONSISTENT;
     if (new_ckk == 0x35 /* CKK_AES_XTS */ && !xts_key_ok(ss, out_len))
         return CKR_TEMPLATE_INCONSISTENT;
@@ -12062,17 +12117,21 @@ static fhsm_rv_t cbcmac_open(fhsm_token_t *t, fhsm_op_t *op) {
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
     const int des3 = mech_is_des3_mac(op->mechanism);
-    if (kt != (des3 ? (uint32_t)CKK_DES3 : (uint32_t)CKK_AES))
+    if ((des3 ? !is_des3_key_type(kt) : kt != (uint32_t)CKK_AES))
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
-    const char *cn = des3 ? (kvl == 24 ? "DES-EDE3-ECB" : NULL)
+    const char *cn = des3 ? (des3_key24(kt, kv, kvl, NULL) ? "DES-EDE3-ECB" : NULL)
                           : aes_mode_cipher_name(CKM_AES_ECB, kvl);
     if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
     EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cn, NULL);
     if (!c) return FHSM_RV_MECHANISM_INVALID;
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     if (!ctx) { EVP_CIPHER_free(c); return FHSM_RV_HOST_MEMORY; }
-    int ok = EVP_EncryptInit_ex2(ctx, c, kv, NULL, NULL) == 1
+    uint8_t k24[24];
+    const uint8_t *ikey = kv;
+    if (des3 && des3_key24(kt, kv, kvl, k24)) ikey = k24;
+    int ok = EVP_EncryptInit_ex2(ctx, c, ikey, NULL, NULL) == 1
           && EVP_CIPHER_CTX_set_padding(ctx, 0) == 1;
+    OPENSSL_cleanse(k24, sizeof k24);
     EVP_CIPHER_free(c);
     if (!ok) { EVP_CIPHER_CTX_free(ctx); return FHSM_RV_FUNCTION_FAILED; }
     if (op->cipher_ctx) EVP_CIPHER_CTX_free((EVP_CIPHER_CTX *)op->cipher_ctx);
@@ -12370,6 +12429,8 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
             return FHSM_RV_KEY_TYPE_INCONSISTENT;
         return FHSM_RV_OK;
     }
+    /* Every mechanism that takes CKK_DES3 takes CKK_DES2 too (2.8.0). */
+    if (want == 0x15 && kt == 0x14) return FHSM_RV_OK;
     if (want >= 0 && (uint32_t)want != kt) {
         /* A CKK_GENERIC_SECRET is NOT a substitute for a typed symmetric key:
          * PKCS#11 requires CKR_KEY_TYPE_INCONSISTENT when the key's
@@ -12727,13 +12788,13 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
     /* --- 3DES ECB, CBC and CBC-PAD (non-FIPS ; all-mechanisms only) --- */
     if (des3_mode(op->mechanism)) {
         if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
-        if (kt != CKK_DES3) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (!is_des3_key_type(kt)) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         /* Unreachable since op_init refuses a missing IV with
          * CKR_MECHANISM_PARAM_INVALID. Kept as a second line, not as the check. */
         if (op->mechanism != 0x00000132UL && !op->have_iv) {
             op->active = 0; return FHSM_RV_ARGUMENTS_BAD;
         }
-        if (kvl != 24)      { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
+        if (!des3_key24(kt, kv, kvl, NULL)) { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
         const int pad = op->mechanism == 0x00000136UL;
         /* ECB and CBC take whole blocks, refused on the length alone as for
          * AES (#37 B1). CBC-PAD adds 1 to 8 bytes of padding. */
@@ -12742,8 +12803,11 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         if (pEnc == NULL) { *pulEncLen = need; return FHSM_RV_OK; }
         if (*pulEncLen < need) { *pulEncLen = need; return 0x00000150UL; }
         size_t got = 0;
-        fhsm_rv_t drv = des3_crypt(op->mechanism, kv, op->iv, 1,
+        uint8_t k24[24];
+        (void)des3_key24(kt, kv, kvl, k24);
+        fhsm_rv_t drv = des3_crypt(op->mechanism, k24, op->iv, 1,
                                    pData, (size_t)ulDataLen, pEnc, &got);
+        OPENSSL_cleanse(k24, sizeof k24);
         *pulEncLen = drv == FHSM_RV_OK ? (CK_ULONG)got : 0;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_ENCRYPT, -1, (int)hSession,
@@ -13247,11 +13311,11 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
     /* --- 3DES ECB, CBC and CBC-PAD (non-FIPS ; all-mechanisms only) --- */
     if (des3_mode(op->mechanism)) {
         if (fhsm_build_fips_strict) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
-        if (kt != CKK_DES3) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (!is_des3_key_type(kt)) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         if (op->mechanism != 0x00000132UL && !op->have_iv) {
             op->active = 0; return FHSM_RV_ARGUMENTS_BAD;
         }
-        if (kvl != 24)      { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
+        if (!des3_key24(kt, kv, kvl, NULL)) { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
         const int pad = op->mechanism == 0x00000136UL;
         /* A ciphertext is whole blocks, and with padding at least one; any
          * other length is refused before the bytes are looked at (#37 B2).
@@ -13264,8 +13328,11 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         if (pData == NULL) { *pulDataLen = ulEncLen; return FHSM_RV_OK; }
         if (*pulDataLen < ulEncLen) { *pulDataLen = ulEncLen; return 0x00000150UL; }
         size_t got = 0;
-        fhsm_rv_t drv = des3_crypt(op->mechanism, kv, op->iv, 0,
+        uint8_t k24[24];
+        (void)des3_key24(kt, kv, kvl, k24);
+        fhsm_rv_t drv = des3_crypt(op->mechanism, k24, op->iv, 0,
                                    pEnc, (size_t)ulEncLen, pData, &got);
+        OPENSSL_cleanse(k24, sizeof k24);
         *pulDataLen = drv == FHSM_RV_OK ? (CK_ULONG)got : 0;
         op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_DECRYPT, -1, (int)hSession,
@@ -13751,10 +13818,14 @@ static fhsm_rv_t aes_cmac(const uint8_t *key, size_t key_len,
 }
 
 /* 3DES-CMAC (SP 800-38B over TDEA, not approved): the 8-byte tag into
- * out[0..7], with the cipher the KBKDF's CKM_DES3_CMAC PRF names. */
-static fhsm_rv_t des3_cmac(const uint8_t *key, size_t key_len,
+ * out[0..7], with the cipher the KBKDF's CKM_DES3_CMAC PRF names. The
+ * caller has checked the key type; 16 bytes is a DES2 key, 24 a DES3 one. */
+static fhsm_rv_t des3_cmac(const uint8_t *key_in, size_t key_len_in,
                            const uint8_t *data, size_t data_len, uint8_t out[16]) {
-    if (key_len != 24) return FHSM_RV_KEY_SIZE_RANGE;
+    uint8_t key[24];
+    if (!des3_key24(key_len_in == 16 ? 0x14u : 0x15u, key_in, key_len_in, key))
+        return FHSM_RV_KEY_SIZE_RANGE;
+    const size_t key_len = sizeof key;
     EVP_MAC *mac = EVP_MAC_fetch(NULL, "CMAC", NULL);
     if (!mac) return FHSM_RV_MECHANISM_INVALID;
     EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
@@ -13767,11 +13838,13 @@ static fhsm_rv_t des3_cmac(const uint8_t *key, size_t key_len,
     };
     if (EVP_MAC_init(ctx, key, key_len, params) != 1
         || EVP_MAC_update(ctx, data, data_len) != 1) {
-        EVP_MAC_CTX_free(ctx); return FHSM_RV_FUNCTION_FAILED;
+        EVP_MAC_CTX_free(ctx); OPENSSL_cleanse(key, sizeof key);
+        return FHSM_RV_FUNCTION_FAILED;
     }
     size_t out_len = 0;
     int ok = EVP_MAC_final(ctx, out, &out_len, 16);
     EVP_MAC_CTX_free(ctx);
+    OPENSSL_cleanse(key, sizeof key);
     return ok == 1 && out_len == 8 ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
 
@@ -14251,7 +14324,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, unsigned char *pData, CK_ULONG ulDataLe
         fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
         if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
         const int des3 = mech_is_des3_mac(op->mechanism);
-        if (kt != (des3 ? (uint32_t)CKK_DES3 : (uint32_t)CKK_AES)) {
+        if ((des3 ? !is_des3_key_type(kt) : kt != (uint32_t)CKK_AES)) {
             op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
         }
         /* The tag length is the mechanism's, not a constant.
@@ -14513,7 +14586,7 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession, unsigned char *pData,
 
     if (mech_is_cmac(op->mechanism) || op->mechanism == CKM_AES_GMAC) {
         const int des3 = mech_is_des3_mac(op->mechanism);
-        if (kt != (des3 ? (uint32_t)CKK_DES3 : (uint32_t)CKK_AES)) {
+        if ((des3 ? !is_des3_key_type(kt) : kt != (uint32_t)CKK_AES)) {
             op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
         }
         uint8_t mac[16];
@@ -15162,11 +15235,11 @@ static fhsm_rv_t mac_stream_open(fhsm_token_t *t, fhsm_op_t *op) {
     } else if (mech_is_cmac(op->mechanism) || op->mechanism == CKM_AES_GMAC) {
         const int gmac = (op->mechanism == CKM_AES_GMAC);
         const int des3 = mech_is_des3_mac(op->mechanism);
-        if (kt != (des3 ? (uint32_t)CKK_DES3 : (uint32_t)CKK_AES))
+        if ((des3 ? !is_des3_key_type(kt) : kt != (uint32_t)CKK_AES))
             return FHSM_RV_KEY_TYPE_INCONSISTENT;
         /* GMAC without an IV is refused, as on the one-shot path. */
         if (gmac && (!op->gcm_have || op->gcm_iv_len == 0)) return FHSM_RV_ARGUMENTS_BAD;
-        const char *cn = des3 ? (kvl == 24 ? "DES-EDE3-CBC" : NULL)
+        const char *cn = des3 ? (des3_key24(kt, kv, kvl, NULL) ? "DES-EDE3-CBC" : NULL)
                               : aes_mac_cipher_name(kvl, gmac ? 0 : 1);
         if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
         snprintf(name, sizeof name, "%s", cn);
@@ -15183,7 +15256,14 @@ static fhsm_rv_t mac_stream_open(fhsm_token_t *t, fhsm_op_t *op) {
     EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
     EVP_MAC_free(mac);
     if (!ctx) return FHSM_RV_HOST_MEMORY;
-    if (EVP_MAC_init(ctx, kv, kvl, params) != 1) {
+    uint8_t k24[24];
+    const uint8_t *mkey = kv; size_t mkl = kvl;
+    if (mech_is_des3_mac(op->mechanism) && des3_key24(kt, kv, kvl, k24)) {
+        mkey = k24; mkl = 24;
+    }
+    int mok = EVP_MAC_init(ctx, mkey, mkl, params) == 1;
+    OPENSSL_cleanse(k24, sizeof k24);
+    if (!mok) {
         EVP_MAC_CTX_free(ctx);
         return FHSM_RV_FUNCTION_FAILED;
     }
@@ -15676,11 +15756,11 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
     const int des3 = des3_mode(op->mechanism);
-    if (kt != (des3 ? (uint32_t)CKK_DES3 : (uint32_t)CKK_AES)) return FHSM_RV_MECHANISM_INVALID;
+    if ((des3 ? !is_des3_key_type(kt) : kt != (uint32_t)CKK_AES)) return FHSM_RV_MECHANISM_INVALID;
     int kind = op_cipher_kind(op->mechanism);
     if (kind < 0) return FHSM_RV_MECHANISM_INVALID;
     static const char *gcm[3] = { "AES-128-GCM", "AES-192-GCM", "AES-256-GCM" };
-    int ksel = des3 ? (kvl == 24 ? 0 : -1)
+    int ksel = des3 ? (des3_key24(kt, kv, kvl, NULL) ? 0 : -1)
              : (kvl == 16) ? 0 : (kvl == 24) ? 1 : (kvl == 32) ? 2 : -1;
     if (ksel < 0) return FHSM_RV_KEY_SIZE_RANGE;
     /* GCM here; every other mode by the name single-part uses. */
@@ -15710,8 +15790,12 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     } else {
         const uint8_t *iv = (op->mechanism == CKM_AES_ECB
                              || op->mechanism == 0x00000132UL /* CKM_DES3_ECB */) ? NULL : op->iv;
-        ok = enc ? EVP_EncryptInit_ex2(ctx, cipher, kv, iv, NULL)
-                 : EVP_DecryptInit_ex2(ctx, cipher, kv, iv, NULL);
+        uint8_t k24[24];
+        const uint8_t *ikey = kv;
+        if (des3 && des3_key24(kt, kv, kvl, k24)) ikey = k24;
+        ok = enc ? EVP_EncryptInit_ex2(ctx, cipher, ikey, iv, NULL)
+                 : EVP_DecryptInit_ex2(ctx, cipher, ikey, iv, NULL);
+        OPENSSL_cleanse(k24, sizeof k24);
         /* PKCS#7 padding only for CBC-PAD ; ECB/CBC/CTR are raw so multipart
          * output matches the single-shot path exactly. */
         if (ok) EVP_CIPHER_CTX_set_padding(ctx, kind == 3 ? 1 : 0);
