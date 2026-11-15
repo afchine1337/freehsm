@@ -11569,6 +11569,10 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                 case 0x00000043UL: want = 0x00000250UL; break; /* SHA256 -> CKM_SHA256  */
                 case 0x00000044UL: want = 0x00000260UL; break; /* SHA384 -> CKM_SHA384  */
                 case 0x00000045UL: want = 0x00000270UL; break; /* SHA512 -> CKM_SHA512  */
+                case 0x00000067UL: want = 0x000002B5UL; break; /* SHA3-224 -> CKM_SHA3_224 */
+                case 0x00000063UL: want = 0x000002B0UL; break; /* SHA3-256 -> CKM_SHA3_256 */
+                case 0x00000064UL: want = 0x000002C0UL; break; /* SHA3-384 -> CKM_SHA3_384 */
+                case 0x00000065UL: want = 0x000002D0UL; break; /* SHA3-512 -> CKM_SHA3_512 */
                 default: break;
             }
             if (want && p[0] != want) return FHSM_RV_MECHANISM_PARAM_INVALID;
@@ -11821,9 +11825,13 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x0040: case 0x0041: case 0x0042:              /* SHA{256,384,512}_RSA_PKCS */
         case 0x0043: case 0x0044: case 0x0045:              /* SHA{256,384,512}_RSA_PKCS_PSS */
         case 0x000E: case 0x0047:                           /* SHA{1,224}_RSA_PKCS_PSS */
+        case 0x0046:                                        /* SHA224_RSA_PKCS */
+        case 0x0060: case 0x0061: case 0x0062: case 0x0066: /* SHA3_*_RSA_PKCS */
+        case 0x0063: case 0x0064: case 0x0065: case 0x0067: /* SHA3_*_RSA_PKCS_PSS */
             want = 0x00; break;                             /* CKK_RSA */
         case 0x1041: case 0x1042: case 0x1043:              /* ECDSA / ECDSA_SHA1 / SHA224 */
         case 0x1044: case 0x1045: case 0x1046:              /* ECDSA_SHA{256,384,512} */
+        case 0x1047: case 0x1048: case 0x1049: case 0x104A: /* ECDSA_SHA3_* */
             want = 0x03; break;                             /* CKK_EC */
         case 0x1057: want = 0x40; break;                    /* EDDSA -> CKK_EC_EDWARDS */
         case 0x001D: case 0x001F:                           /* ML_DSA, HASH_ML_DSA */
@@ -13028,6 +13036,21 @@ static const char *hmac_digest_name(fhsm_hash_t h) {
 #ifndef CKM_SHA1_RSA_PKCS_PSS
 #define CKM_SHA1_RSA_PKCS_PSS     0x0000000EUL
 #endif
+/* The SHA-3 PSS mechanisms interleave with the SHA-3 PKCS ones (OASIS
+ * pkcs11t.h): 0x63-0x65 for 256/384/512, and 0x67 for 224, after
+ * CKM_SHA3_224_RSA_PKCS at 0x66. */
+#ifndef CKM_SHA3_256_RSA_PKCS_PSS
+#define CKM_SHA3_256_RSA_PKCS_PSS 0x00000063UL
+#endif
+#ifndef CKM_SHA3_384_RSA_PKCS_PSS
+#define CKM_SHA3_384_RSA_PKCS_PSS 0x00000064UL
+#endif
+#ifndef CKM_SHA3_512_RSA_PKCS_PSS
+#define CKM_SHA3_512_RSA_PKCS_PSS 0x00000065UL
+#endif
+#ifndef CKM_SHA3_224_RSA_PKCS_PSS
+#define CKM_SHA3_224_RSA_PKCS_PSS 0x00000067UL
+#endif
 
 CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                   CK_OBJECT_HANDLE hKey) {
@@ -13061,6 +13084,11 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA224_RSA_PKCS:
         case CKM_SHA3_224_RSA_PKCS: case CKM_SHA3_256_RSA_PKCS:
         case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS:
+        case CKM_SHA3_224_RSA_PKCS_PSS: case CKM_SHA3_256_RSA_PKCS_PSS:
+        case CKM_SHA3_384_RSA_PKCS_PSS: case CKM_SHA3_512_RSA_PKCS_PSS:
+        case CKM_ECDSA_SHA224:
+        case CKM_ECDSA_SHA3_224: case CKM_ECDSA_SHA3_256:
+        case CKM_ECDSA_SHA3_384: case CKM_ECDSA_SHA3_512:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
         case CKM_HASH_ML_DSA_OP:
         case 0x23UL: case 0x24UL: case 0x25UL: case 0x26UL: /* CKM_HASH_ML_DSA_SHA{224..512} */
@@ -13073,6 +13101,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
         case CKM_SHA1_RSA_PKCS_PSS: /* non-FIPS : all-mechanisms only */
+        case CKM_ECDSA_SHA1:        /* non-FIPS : all-mechanisms only */
         case CKM_RSA_X_509:     /* raw RSA, no padding : all-mechanisms only */
         case CKM_COMPOSITE_MLDSA65_ED25519: /* Composite ML-DSA (#112) : all-mechanisms only */
             if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;
@@ -13221,10 +13250,16 @@ static const char *mech_hash_name(uint32_t m) {
         case CKM_SHA384_RSA_PKCS_PSS:                            return "SHA384";
         case CKM_ECDSA_SHA512: case CKM_SHA512_RSA_PKCS:
         case CKM_SHA512_RSA_PKCS_PSS:                            return "SHA512";
-        case CKM_SHA3_224_RSA_PKCS:                              return "SHA3-224";
-        case CKM_SHA3_256_RSA_PKCS:                              return "SHA3-256";
-        case CKM_SHA3_384_RSA_PKCS:                              return "SHA3-384";
-        case CKM_SHA3_512_RSA_PKCS:                              return "SHA3-512";
+        case CKM_ECDSA_SHA1:                                     return "SHA1";
+        case CKM_ECDSA_SHA224:                                   return "SHA224";
+        case CKM_SHA3_224_RSA_PKCS: case CKM_SHA3_224_RSA_PKCS_PSS:
+        case CKM_ECDSA_SHA3_224:                                 return "SHA3-224";
+        case CKM_SHA3_256_RSA_PKCS: case CKM_SHA3_256_RSA_PKCS_PSS:
+        case CKM_ECDSA_SHA3_256:                                 return "SHA3-256";
+        case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_384_RSA_PKCS_PSS:
+        case CKM_ECDSA_SHA3_384:                                 return "SHA3-384";
+        case CKM_SHA3_512_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS_PSS:
+        case CKM_ECDSA_SHA3_512:                                 return "SHA3-512";
         default:                                                   return NULL;
     }
 }
@@ -13248,7 +13283,11 @@ static int mech_is_pss(uint32_t m) {
         || m == CKM_SHA384_RSA_PKCS_PSS
         || m == CKM_SHA512_RSA_PKCS_PSS
         || m == CKM_SHA224_RSA_PKCS_PSS
-        || m == CKM_SHA1_RSA_PKCS_PSS;
+        || m == CKM_SHA1_RSA_PKCS_PSS
+        || m == CKM_SHA3_224_RSA_PKCS_PSS
+        || m == CKM_SHA3_256_RSA_PKCS_PSS
+        || m == CKM_SHA3_384_RSA_PKCS_PSS
+        || m == CKM_SHA3_512_RSA_PKCS_PSS;
 }
 
 /* Apply the caller's CK_RSA_PKCS_PSS_PARAMS to an EVP context: padding, salt
@@ -13788,6 +13827,11 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case CKM_SHA224_RSA_PKCS:
         case CKM_SHA3_224_RSA_PKCS: case CKM_SHA3_256_RSA_PKCS:
         case CKM_SHA3_384_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS:
+        case CKM_SHA3_224_RSA_PKCS_PSS: case CKM_SHA3_256_RSA_PKCS_PSS:
+        case CKM_SHA3_384_RSA_PKCS_PSS: case CKM_SHA3_512_RSA_PKCS_PSS:
+        case CKM_ECDSA_SHA224:
+        case CKM_ECDSA_SHA3_224: case CKM_ECDSA_SHA3_256:
+        case CKM_ECDSA_SHA3_384: case CKM_ECDSA_SHA3_512:
         case CKM_ML_DSA_OP: case CKM_SLH_DSA_OP:
         case CKM_HASH_ML_DSA_OP:
         case 0x23UL: case 0x24UL: case 0x25UL: case 0x26UL: /* CKM_HASH_ML_DSA_SHA{224..512} */
@@ -13800,6 +13844,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
         case CKM_SHA1_RSA_PKCS_PSS: /* non-FIPS : all-mechanisms only */
+        case CKM_ECDSA_SHA1:        /* non-FIPS : all-mechanisms only */
         case CKM_RSA_X_509:     /* raw RSA, no padding : all-mechanisms only */
         case CKM_COMPOSITE_MLDSA65_ED25519: /* Composite ML-DSA (#112) : all-mechanisms only */
             if (fhsm_build_fips_strict) return FHSM_RV_MECHANISM_INVALID;

@@ -41,6 +41,24 @@
 #ifndef CKM_ECDSA_SHA512
 #define CKM_ECDSA_SHA512          0x00001046UL
 #endif
+#ifndef CKM_ECDSA_SHA1
+#define CKM_ECDSA_SHA1            0x00001042UL
+#endif
+#ifndef CKM_ECDSA_SHA224
+#define CKM_ECDSA_SHA224          0x00001043UL
+#endif
+#ifndef CKM_ECDSA_SHA3_224
+#define CKM_ECDSA_SHA3_224        0x00001047UL
+#endif
+#ifndef CKM_ECDSA_SHA3_256
+#define CKM_ECDSA_SHA3_256        0x00001048UL
+#endif
+#ifndef CKM_ECDSA_SHA3_384
+#define CKM_ECDSA_SHA3_384        0x00001049UL
+#endif
+#ifndef CKM_ECDSA_SHA3_512
+#define CKM_ECDSA_SHA3_512        0x0000104AUL
+#endif
 
 #ifdef __cplusplus
 extern "C" {

@@ -28,6 +28,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
   leading bytes. SHAKE needs the length from the template, up to 128 bytes.
   They are not approved key derivations: all-mechanisms in permissive mode
   only. `tests/test_hmac_keygen_derive.c`.
+* **ECDSA with SHA-224 and SHA-3**, `CKM_ECDSA_SHA224` and
+  `CKM_ECDSA_SHA3_224` to `CKM_ECDSA_SHA3_512`, and **RSASSA-PSS with
+  SHA-3**, `CKM_SHA3_224_RSA_PKCS_PSS` to `CKM_SHA3_512_RSA_PKCS_PSS`,
+  single-part and in parts; the PSS `hashAlg` must name the mechanism's
+  digest. Approved, in both builds. `CKM_ECDSA_SHA1` too, in the
+  all-mechanisms build only, as `CKM_SHA1_RSA_PKCS` is.
+  `tests/test_sig_sha3_family.c`.
 * **A data object keeps its `CKA_OBJECT_ID` (#38, #33 C10).** PKCS#11 v3.2
   Table 20 gives every data object one. It was accepted and dropped up to
   2.6.1, and refused in 2.7.0, the token file having no field for it. It is

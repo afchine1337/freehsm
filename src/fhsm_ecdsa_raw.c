@@ -19,7 +19,13 @@ int fhsm_mech_is_ecdsa(uint32_t mech) {
     return mech == CKM_ECDSA
         || mech == CKM_ECDSA_SHA256
         || mech == CKM_ECDSA_SHA384
-        || mech == CKM_ECDSA_SHA512;
+        || mech == CKM_ECDSA_SHA512
+        || mech == CKM_ECDSA_SHA1
+        || mech == CKM_ECDSA_SHA224
+        || mech == CKM_ECDSA_SHA3_224
+        || mech == CKM_ECDSA_SHA3_256
+        || mech == CKM_ECDSA_SHA3_384
+        || mech == CKM_ECDSA_SHA3_512;
 }
 
 size_t fhsm_ecdsa_der_to_raw(const uint8_t *der, size_t der_len,
