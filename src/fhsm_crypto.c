@@ -351,7 +351,7 @@ size_t fhsm_hash_size(fhsm_hash_t h) {
         case FHSM_HASH_SHA384: case FHSM_HASH_SHA3_384: return 48;
         case FHSM_HASH_SHA512: case FHSM_HASH_SHA3_512: return 64;
         case FHSM_HASH_SHA224: case FHSM_HASH_SHA512_224: case FHSM_HASH_SHA3_224: return 28;
-        case FHSM_HASH_SHA1: return 20;
+        case FHSM_HASH_SHA1: case FHSM_HASH_RIPEMD160: return 20;
         case FHSM_HASH_MD5:  return 16;
         default: return 0;
     }
@@ -371,6 +371,7 @@ static const char *hash_name(fhsm_hash_t h) {
         case FHSM_HASH_SHA512_256: return "SHA512-256";
         case FHSM_HASH_SHA1:     return "SHA1";
         case FHSM_HASH_MD5:      return "MD5";
+        case FHSM_HASH_RIPEMD160: return "RIPEMD160";
         default:                 return NULL;
     }
 }

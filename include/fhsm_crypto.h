@@ -130,7 +130,10 @@ typedef enum fhsm_hash_e {
     FHSM_HASH_SHA224     = 9,
     FHSM_HASH_SHA512_224 = 10,
     FHSM_HASH_SHA512_256 = 11,
-    FHSM_HASH_SHA3_224   = 12
+    FHSM_HASH_SHA3_224   = 12,
+    /* RIPEMD-160 (ISO/IEC 10118-3), 2.8.0: not approved, all-mechanisms
+     * only, and where the loaded provider serves it. */
+    FHSM_HASH_RIPEMD160  = 13
 } fhsm_hash_t;
 
 size_t fhsm_hash_size(fhsm_hash_t h);

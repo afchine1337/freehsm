@@ -131,6 +131,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
   module's DRBG reduced to d = (c mod (n - 1)) + 1 -- on the curves
   `CKM_EC_KEY_PAIR_GEN` takes, with the same templates and the same
   pair-wise check. In both builds. `tests/test_ec_extra_bits.c`.
+* **RIPEMD-160**: `CKM_RIPEMD160`, `CKM_RIPEMD160_HMAC`,
+  `CKM_RIPEMD160_HMAC_GENERAL` and `CKM_RIPEMD160_RSA_PKCS`, single-part
+  and in parts. Not approved: all-mechanisms in permissive mode only, and
+  where the loaded provider serves RIPEMD-160 -- the FIPS provider does not.
+  `tests/test_ripemd160.c`.
+* **A mechanism no loaded provider serves is refused at its Init.** Every
+  `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
+  answers `CKR_MECHANISM_INVALID` rather than failing at the first
+  operation.
 * **A partial block at `C_EncryptFinal` is `CKR_DATA_LEN_RANGE`.** ECB and
   CBC without padding, AES as 3DES, encrypted in parts with a total that
   is not whole blocks, answered `CKR_FUNCTION_FAILED` at Final, OpenSSL's

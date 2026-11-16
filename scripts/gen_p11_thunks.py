@@ -910,6 +910,18 @@ MECHANISMS: tuple[Mech, ...] = (
     #  above CKM_COMPOSITE_MLDSA65_ED25519.)
 
     # === Legacy / non-approved (rejected in nist-approved-only) ==============
+    # RIPEMD-160 (2.8.0): digest, HMAC and RSA PKCS#1 v1.5. Not approved,
+    # and served by the default provider, not the FIPS one: offered only
+    # where it can run (fhsm_provider_mech_available). The handlers named are
+    # references; C_Digest, C_Sign and C_Verify compute them.
+    Mech("CKM_RIPEMD160",          0x00000240, "RIPEMD", "digest", "dispatch_md5",
+         fips="non-approved", refs=("ISO/IEC 10118-3",)),
+    Mech("CKM_RIPEMD160_HMAC",     0x00000241, "HMAC", "sign",    "dispatch_hmac_sha1",
+         fips="non-approved", refs=("RFC 2286",)),
+    Mech("CKM_RIPEMD160_HMAC_GENERAL", 0x00000242, "HMAC", "sign", "dispatch_hmac_sha1",
+         fips="non-approved", refs=("RFC 2286",)),
+    Mech("CKM_RIPEMD160_RSA_PKCS", 0x00000008, "RSA",  "sign",    "dispatch_sha1_rsa",
+         fips="non-approved", key_type="CKK_RSA", refs=("RFC 8017",)),
     Mech("CKM_MD5",                0x00000210, "MD5",  "digest",  "dispatch_md5",
          fips="non-approved",
          refs=("RFC 1321",),

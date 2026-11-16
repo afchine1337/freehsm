@@ -1582,9 +1582,14 @@ static int fhsm_mac_available(const char *name) {
     return ok;
 }
 /* 1 when the providers serve what the mechanism needs; 1 for any mechanism
- * outside the ChaCha20 and Poly1305 family. */
-static int fhsm_chacha_mech_available(CK_ULONG m) {
+ * that needs nothing beyond what every provider has. Grown family by family
+ * since 2.8.0: each algorithm the FIPS provider lacks is listed here when it
+ * is added, and op_init asks it for every operation. */
+static int fhsm_provider_mech_available(CK_ULONG m) {
     switch (m) {
+        case 0x00000240UL: case 0x00000241UL:   /* CKM_RIPEMD160, _HMAC */
+        case 0x00000242UL: case 0x00000008UL:   /* _HMAC_GENERAL, CKM_RIPEMD160_RSA_PKCS */
+            return fhsm_md_available("RIPEMD160");
         case 0x00001225UL: case 0x00001226UL:   /* CKM_CHACHA20_KEY_GEN, CKM_CHACHA20 */
             return fhsm_cipher_available("ChaCha20");
         case 0x00004021UL:                      /* CKM_CHACHA20_POLY1305 */
@@ -1604,7 +1609,7 @@ static int fhsm_mech_advertised(const fhsm_mech_entry_t *e) {
     if (e == NULL || e->handler == dispatch_reject_fips) return 0;
     if (e->family && strcmp(e->family, "ECM") == 0 && !fhsm_ecm_available())
         return 0;
-    if (!fhsm_chacha_mech_available((CK_ULONG)e->ckm_value)) return 0;
+    if (!fhsm_provider_mech_available((CK_ULONG)e->ckm_value)) return 0;
     /* A digest, asked by the name C_Digest will fetch it under. */
     if (e->operation && strcmp(e->operation, "digest") == 0) {
         fhsm_hash_t h;
@@ -3268,6 +3273,10 @@ static int digest_mech_to_hash(CK_ULONG mech, fhsm_hash_t *h, int *non_approved)
         case 0x00000210UL: *h = FHSM_HASH_MD5;
                            *non_approved = FHSM_HASH_NA_DIGEST | FHSM_HASH_NA_HMAC;
                            return 1;
+        /* RIPEMD-160 (2.8.0): not approved, in any use. */
+        case 0x00000240UL: *h = FHSM_HASH_RIPEMD160;
+                           *non_approved = FHSM_HASH_NA_DIGEST | FHSM_HASH_NA_HMAC;
+                           return 1;
         default: return 0;
     }
 }
@@ -3552,7 +3561,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * absent or 32, as for 3DES above. Not approved: refused where
          * NIST's rules apply. */
         if (fhsm_build_fips_strict || fhsm_mode_is_fips()
-            || !fhsm_chacha_mech_available(pMechanism->mechanism))
+            || !fhsm_provider_mech_available(pMechanism->mechanism))
             return FHSM_RV_MECHANISM_INVALID;
         { long vl = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
           if (vl >= 0) {
@@ -11647,6 +11656,11 @@ static CK_RV fhsm_check_usage(fhsm_token_t *t, CK_OBJECT_HANDLE hKey, uint8_t bi
 static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                          CK_MECHANISM *pMechanism, CK_OBJECT_HANDLE hKey) {
     if (op->active) return FHSM_RV_OPERATION_ACTIVE;
+    /* A mechanism whose algorithm no loaded provider serves is refused here,
+     * at its Init, as C_GetMechanismList leaves it out -- not at the first
+     * C_Sign or C_Encrypt that would fail to fetch it. */
+    if (pMechanism && !fhsm_provider_mech_available(pMechanism->mechanism))
+        return FHSM_RV_MECHANISM_INVALID;
     /* The slot is being reused. Whatever AAD the previous operation left is
      * released here -- the one place that has to do it, because the slots
      * are static and no exit path destroys them. The multipart buffer has
@@ -11832,7 +11846,7 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * it. Not approved: refused where NIST's rules apply. */
     if (pMechanism->mechanism == 0x00004021UL /* CKM_CHACHA20_POLY1305 */) {
         if (fhsm_build_fips_strict || fhsm_mode_is_fips()
-            || !fhsm_chacha_mech_available(pMechanism->mechanism))
+            || !fhsm_provider_mech_available(pMechanism->mechanism))
             return FHSM_RV_MECHANISM_INVALID;
         typedef struct { unsigned char *pNonce; CK_ULONG ulNonceLen;
                          unsigned char *pAAD; CK_ULONG ulAADLen; } chacha20_poly1305_params_t;
@@ -11947,11 +11961,11 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
     /* CKM_POLY1305: no parameter; refused here, at C_SignInit and
      * C_VerifyInit, where the providers do not serve it. */
     if (pMechanism->mechanism == 0x00001228UL /* CKM_POLY1305 */
-        && !fhsm_chacha_mech_available(pMechanism->mechanism))
+        && !fhsm_provider_mech_available(pMechanism->mechanism))
         return FHSM_RV_MECHANISM_INVALID;
     if (pMechanism->mechanism == 0x00001226UL /* CKM_CHACHA20 */) {
         if (fhsm_build_fips_strict || fhsm_mode_is_fips()
-            || !fhsm_chacha_mech_available(pMechanism->mechanism))
+            || !fhsm_provider_mech_available(pMechanism->mechanism))
             return FHSM_RV_MECHANISM_INVALID;
         typedef struct { unsigned char *pBlockCounter; CK_ULONG blockCounterBits;
                          unsigned char *pNonce; CK_ULONG ulNonceBits; } chacha20_params_t;
@@ -12764,6 +12778,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x0043: case 0x0044: case 0x0045:              /* SHA{256,384,512}_RSA_PKCS_PSS */
         case 0x000E: case 0x0047:                           /* SHA{1,224}_RSA_PKCS_PSS */
         case 0x0046:                                        /* SHA224_RSA_PKCS */
+        case 0x0008:                                        /* RIPEMD160_RSA_PKCS */
         case 0x0060: case 0x0061: case 0x0062: case 0x0066: /* SHA3_*_RSA_PKCS */
         case 0x0063: case 0x0064: case 0x0065: case 0x0067: /* SHA3_*_RSA_PKCS_PSS */
             want = 0x00; break;                             /* CKK_RSA */
@@ -12814,6 +12829,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x0222: case 0x0257: case 0x004A: case 0x004E: /* *_HMAC_GENERAL */
         case 0x0252: case 0x0262: case 0x0272:
         case 0x02B7: case 0x02B2: case 0x02C2: case 0x02D2:
+        case 0x0241: case 0x0242:                           /* RIPEMD160_HMAC, _GENERAL */
             want = -2; break;   /* any symmetric secret ; reject asymmetric keys */
         default: want = -1; break;
     }
@@ -13974,6 +13990,9 @@ static int fhsm_hmac_hash_of(uint32_t mech, fhsm_hash_t *hash, size_t *maclen) {
         case 0x000002B2UL: *hash = FHSM_HASH_SHA3_256;   *maclen = 32; return 1;
         case 0x000002C2UL: *hash = FHSM_HASH_SHA3_384;   *maclen = 48; return 1;
         case 0x000002D2UL: *hash = FHSM_HASH_SHA3_512;   *maclen = 64; return 1;
+        /* CKM_RIPEMD160_HMAC and _GENERAL (2.8.0, not approved). */
+        case 0x00000241UL: *hash = FHSM_HASH_RIPEMD160;  *maclen = 20; return 1;
+        case 0x00000242UL: *hash = FHSM_HASH_RIPEMD160;  *maclen = 20; return 1;
         default: return 0;
     }
 }
@@ -13984,6 +14003,7 @@ static int fhsm_hmac_is_general(uint32_t mech) {
         case 0x00000222UL: case 0x00000257UL: case 0x0000004AUL: case 0x0000004EUL:
         case 0x00000252UL: case 0x00000262UL: case 0x00000272UL:
         case 0x000002B7UL: case 0x000002B2UL: case 0x000002C2UL: case 0x000002D2UL:
+        case 0x00000242UL:                                  /* CKM_RIPEMD160_HMAC_GENERAL */
             return 1;
         default:
             return 0;
@@ -14004,6 +14024,7 @@ static const char *hmac_digest_name(fhsm_hash_t h) {
         case FHSM_HASH_SHA3_256: return "SHA3-256";
         case FHSM_HASH_SHA3_384: return "SHA3-384";
         case FHSM_HASH_SHA3_512: return "SHA3-512";
+        case FHSM_HASH_RIPEMD160: return "RIPEMD160";
         default:                 return NULL;
     }
 }
@@ -14113,6 +14134,8 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x00000134UL: case 0x00000135UL:   /* CKM_DES3_MAC, _GENERAL */
         case 0x00000137UL: case 0x00000138UL:   /* CKM_DES3_CMAC_GENERAL, _CMAC */
         case 0x00001228UL:                      /* CKM_POLY1305 */
+        case 0x00000241UL: case 0x00000242UL:   /* CKM_RIPEMD160_HMAC, _GENERAL */
+        case 0x00000008UL:                      /* CKM_RIPEMD160_RSA_PKCS */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -14288,6 +14311,7 @@ static fhsm_rv_t des3_cmac(const uint8_t *key_in, size_t key_len_in,
 static const char *mech_hash_name(uint32_t m) {
     switch (m) {
         case CKM_SHA1_RSA_PKCS: case CKM_SHA1_RSA_PKCS_PSS:     return "SHA1";
+        case 0x00000008UL: /* CKM_RIPEMD160_RSA_PKCS */          return "RIPEMD160";
         case CKM_SHA224_RSA_PKCS: case CKM_SHA224_RSA_PKCS_PSS:  return "SHA224";
         case CKM_ECDSA_SHA256: case CKM_SHA256_RSA_PKCS:
         case CKM_SHA256_RSA_PKCS_PSS:                            return "SHA256";
@@ -14939,6 +14963,8 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x00000134UL: case 0x00000135UL:   /* CKM_DES3_MAC, _GENERAL */
         case 0x00000137UL: case 0x00000138UL:   /* CKM_DES3_CMAC_GENERAL, _CMAC */
         case 0x00001228UL:                      /* CKM_POLY1305 */
+        case 0x00000241UL: case 0x00000242UL:   /* CKM_RIPEMD160_HMAC, _GENERAL */
+        case 0x00000008UL:                      /* CKM_RIPEMD160_RSA_PKCS */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
