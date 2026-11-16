@@ -38,12 +38,35 @@ extern "C" {
 #define CKM_AES_GCM                          0x00001087u
 #define CKM_AES_CCM                          0x00001088u
 #define CKM_AES_CTR                          0x00001086u
+#define CKM_AES_OFB                          0x00002104u
+#define CKM_AES_CFB8                         0x00002106u
+#define CKM_AES_CFB128                       0x00002107u
+#define CKM_AES_CFB1                         0x00002108u
+#define CKM_AES_CTS                          0x00001089u
 #define CKM_AES_KEY_WRAP                     0x00002109u
 #define CKM_AES_KEY_WRAP_PAD                 0x0000210Au
 #define CKM_AES_KEY_WRAP_KWP                 0x0000210Bu
 #define CKM_AES_CMAC                         0x0000108Au
+#define CKM_AES_CMAC_GENERAL                 0x0000108Bu
+#define CKM_AES_MAC                          0x00001083u
+#define CKM_AES_MAC_GENERAL                  0x00001084u
 #define CKM_AES_GMAC                         0x0000108Eu
 #define CKM_AES_ECB                          0x00001081u
+#define CKM_AES_ECB_ENCRYPT_DATA             0x00001104u
+#define CKM_AES_CBC_ENCRYPT_DATA             0x00001105u
+
+/* --- CHACHA20 --- */
+#define CKM_CHACHA20_KEY_GEN                 0x00001225u
+#define CKM_CHACHA20                         0x00001226u
+#define CKM_CHACHA20_POLY1305                0x00004021u
+
+/* --- POLY1305 --- */
+#define CKM_POLY1305_KEY_GEN                 0x00001227u
+#define CKM_POLY1305                         0x00001228u
+
+/* --- AES-XTS --- */
+#define CKM_AES_XTS                          0x00001071u
+#define CKM_AES_XTS_KEY_GEN                  0x00001072u
 
 /* --- SHA2 --- */
 #define CKM_SHA256                           0x00000250u
@@ -71,6 +94,17 @@ extern "C" {
 #define CKM_SHA3_256_HMAC                    0x000002B1u
 #define CKM_SHA3_384_HMAC                    0x000002C1u
 #define CKM_SHA3_512_HMAC                    0x000002D1u
+#define CKM_SHA_1_HMAC_GENERAL               0x00000222u
+#define CKM_SHA224_HMAC_GENERAL              0x00000257u
+#define CKM_SHA512_224_HMAC_GENERAL          0x0000004Au
+#define CKM_SHA512_256_HMAC_GENERAL          0x0000004Eu
+#define CKM_SHA256_HMAC_GENERAL              0x00000252u
+#define CKM_SHA384_HMAC_GENERAL              0x00000262u
+#define CKM_SHA512_HMAC_GENERAL              0x00000272u
+#define CKM_SHA3_224_HMAC_GENERAL            0x000002B7u
+#define CKM_SHA3_256_HMAC_GENERAL            0x000002B2u
+#define CKM_SHA3_384_HMAC_GENERAL            0x000002C2u
+#define CKM_SHA3_512_HMAC_GENERAL            0x000002D2u
 
 /* --- RSA --- */
 #define CKM_RSA_PKCS_KEY_PAIR_GEN            0x00000000u
@@ -92,13 +126,24 @@ extern "C" {
 #define CKM_SHA3_256_RSA_PKCS                0x00000060u
 #define CKM_SHA3_384_RSA_PKCS                0x00000061u
 #define CKM_SHA3_512_RSA_PKCS                0x00000062u
+#define CKM_SHA3_224_RSA_PKCS_PSS            0x00000067u
+#define CKM_SHA3_256_RSA_PKCS_PSS            0x00000063u
+#define CKM_SHA3_384_RSA_PKCS_PSS            0x00000064u
+#define CKM_SHA3_512_RSA_PKCS_PSS            0x00000065u
 
 /* --- EC --- */
+#define CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS     0x0000140Bu
 #define CKM_EC_KEY_PAIR_GEN                  0x00001040u
 #define CKM_ECDSA                            0x00001041u
 #define CKM_ECDSA_SHA256                     0x00001044u
 #define CKM_ECDSA_SHA384                     0x00001045u
 #define CKM_ECDSA_SHA512                     0x00001046u
+#define CKM_ECDSA_SHA224                     0x00001043u
+#define CKM_ECDSA_SHA3_224                   0x00001047u
+#define CKM_ECDSA_SHA3_256                   0x00001048u
+#define CKM_ECDSA_SHA3_384                   0x00001049u
+#define CKM_ECDSA_SHA3_512                   0x0000104Au
+#define CKM_ECDSA_SHA1                       0x00001042u
 #define CKM_ECDH1_DERIVE                     0x00001050u
 #define CKM_ECDH1_COFACTOR_DERIVE            0x00001051u
 
@@ -158,12 +203,54 @@ extern "C" {
 
 /* --- GENERIC --- */
 #define CKM_GENERIC_SECRET_KEY_GEN           0x00000350u
+#define CKM_SHA_1_KEY_GEN                    0x00004003u
+#define CKM_SHA224_KEY_GEN                   0x00004004u
+#define CKM_SHA256_KEY_GEN                   0x00004005u
+#define CKM_SHA384_KEY_GEN                   0x00004006u
+#define CKM_SHA512_KEY_GEN                   0x00004007u
+#define CKM_SHA512_224_KEY_GEN               0x00004008u
+#define CKM_SHA512_256_KEY_GEN               0x00004009u
+#define CKM_SHA3_224_KEY_GEN                 0x000002B8u
+#define CKM_SHA3_256_KEY_GEN                 0x000002B3u
+#define CKM_SHA3_384_KEY_GEN                 0x000002C3u
+#define CKM_SHA3_512_KEY_GEN                 0x000002D3u
 
 /* --- KDF-concat --- */
 #define CKM_CONCATENATE_BASE_AND_KEY         0x00000360u
 #define CKM_CONCATENATE_BASE_AND_DATA        0x00000362u
 #define CKM_CONCATENATE_DATA_AND_BASE        0x00000363u
 #define CKM_XOR_BASE_AND_DATA                0x00000364u
+#define CKM_EXTRACT_KEY_FROM_KEY             0x00000365u
+
+/* --- TDES --- */
+#define CKM_DES3_ECB_ENCRYPT_DATA            0x00001102u
+#define CKM_DES3_CBC_ENCRYPT_DATA            0x00001103u
+#define CKM_DES3_KEY_GEN                     0x00000131u
+#define CKM_DES3_CBC                         0x00000133u
+#define CKM_DES3_ECB                         0x00000132u
+#define CKM_DES3_CBC_PAD                     0x00000136u
+#define CKM_DES3_MAC                         0x00000134u
+#define CKM_DES3_MAC_GENERAL                 0x00000135u
+#define CKM_DES3_CMAC_GENERAL                0x00000137u
+#define CKM_DES3_CMAC                        0x00000138u
+
+/* --- KDF-pub --- */
+#define CKM_PUB_KEY_FROM_PRIV_KEY            0x0000403Au
+
+/* --- KDF-hash --- */
+#define CKM_SHA1_KEY_DERIVATION              0x00000392u
+#define CKM_SHA224_KEY_DERIVATION            0x00000396u
+#define CKM_SHA256_KEY_DERIVATION            0x00000393u
+#define CKM_SHA384_KEY_DERIVATION            0x00000394u
+#define CKM_SHA512_KEY_DERIVATION            0x00000395u
+#define CKM_SHA512_224_KEY_DERIVATION        0x0000004Bu
+#define CKM_SHA512_256_KEY_DERIVATION        0x0000004Fu
+#define CKM_SHA3_224_KEY_DERIVATION          0x00000398u
+#define CKM_SHA3_256_KEY_DERIVATION          0x00000397u
+#define CKM_SHA3_384_KEY_DERIVATION          0x00000399u
+#define CKM_SHA3_512_KEY_DERIVATION          0x0000039Au
+#define CKM_SHAKE_128_KEY_DERIVATION         0x0000039Bu
+#define CKM_SHAKE_256_KEY_DERIVATION         0x0000039Cu
 
 /* --- Composite-Sig --- */
 #define CKM_COMPOSITE_MLDSA65_ED25519        0x80004202u
@@ -177,9 +264,8 @@ extern "C" {
 /* --- DES --- */
 #define CKM_DES_KEY_GEN                      0x00000120u
 
-/* --- TDES --- */
-#define CKM_DES3_KEY_GEN                     0x00000131u
-#define CKM_DES3_CBC                         0x00000133u
+/* --- DES2 --- */
+#define CKM_DES2_KEY_GEN                     0x00000130u
 
 /* --- RC4 --- */
 #define CKM_RC4                              0x00000111u
@@ -219,10 +305,10 @@ extern fhsm_rv_t dispatch_aes_cbc_pad(unsigned long, unsigned long, const void*,
 extern fhsm_rv_t dispatch_aes_gcm(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_ccm(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_ctr(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
+extern fhsm_rv_t dispatch_aes_cmac(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_kw(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_key_wrap_pad(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_kwp(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
-extern fhsm_rv_t dispatch_aes_cmac(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_gmac(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_aes_ecb(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);
 extern fhsm_rv_t dispatch_sha256(unsigned long, unsigned long, const void*, size_t, fhsm_slice_t, uint8_t*, size_t*);

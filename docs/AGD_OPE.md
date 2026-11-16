@@ -75,7 +75,8 @@ Pick mechanisms from the **approved set** listed in `docs/MECHANISMS.md` and `do
 | Symmetric encryption at rest          | `CKM_AES_GCM` (96-bit IV, 128-bit tag) — **not** `CKM_AES_CBC_PAD`, see §3.1 |
 | Symmetric encryption in transit       | `CKM_AES_GCM` or `CKM_AES_CCM`         |
 | Symmetric authentication              | `CKM_SHA256_HMAC` or `CKM_AES_CMAC`    |
-| Streaming MAC (large messages)        | `CKM_KMAC128` / `CKM_KMAC256`          |
+| Streaming MAC (large messages)        | `CKM_SHA256_HMAC` or `CKM_AES_CMAC` in parts (`C_SignUpdate`). KMAC is not offered: PKCS#11 v3.2 defines no KMAC mechanism, and `CKM_KMAC128` / `CKM_KMAC256` were removed on 2026-09-14. |
+| Storage encryption by sector or block | `CKM_AES_XTS` with a `CKK_AES_XTS` key, the tweak naming the sector — confidentiality only, see §3.1 |
 | Asymmetric signature (classical)      | `CKM_SHA384_RSA_PKCS_PSS` or `CKM_ECDSA_SHA384` |
 | Asymmetric signature (PQ)             | `CKM_ML_DSA` (parameter set ML-DSA-65) |
 | Asymmetric signature (PQ, pre-hash)   | `CKM_HASH_ML_DSA_<hash>`, or `CKM_HASH_ML_DSA` when the caller hashes |
@@ -117,7 +118,10 @@ behaving as specified. The exposure is in the protocol.
 because there is no padding to check, but also no detection of tampering: a
 flipped ciphertext bit becomes a flipped plaintext bit under CTR, silently.
 Pair them with `CKM_SHA256_HMAC` over the ciphertext (encrypt-then-MAC,
-RFC 7366) or use `CKM_AES_GCM`, which does both in one pass.
+RFC 7366) or use `CKM_AES_GCM`, which does both in one pass. The same holds
+for `CKM_AES_OFB`, the CFB modes, `CKM_AES_CTS` and `CKM_AES_XTS`, and for
+`CKM_CHACHA20` without Poly1305: `CKM_CHACHA20_POLY1305` is the
+authenticated form.
 
 See R2 in `docs/PKCS11_CHECK_FINDINGS.md` for the measurement, and
 `tests/test_cbc_pad_oracle.c` for the regression guard.

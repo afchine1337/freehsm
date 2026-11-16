@@ -70,7 +70,8 @@ Après `C_Finalize`, le processus ne doit appeler aucun autre `C_*` avant un nou
 | Chiffrement symétrique au repos          | `CKM_AES_GCM` (IV 96 bits, tag 128 bits) — **pas** `CKM_AES_CBC_PAD`, cf. §3.1 |
 | Chiffrement symétrique en transit        | `CKM_AES_GCM` ou `CKM_AES_CCM`             |
 | Authentification symétrique              | `CKM_SHA256_HMAC` ou `CKM_AES_CMAC`        |
-| MAC streaming (gros messages)            | `CKM_KMAC128` / `CKM_KMAC256`              |
+| MAC streaming (gros messages)            | `CKM_SHA256_HMAC` ou `CKM_AES_CMAC` en plusieurs parties (`C_SignUpdate`). KMAC n'est pas offert : PKCS#11 v3.2 ne définit aucun mécanisme KMAC, et `CKM_KMAC128` / `CKM_KMAC256` ont été retirés le 2026-09-14. |
+| Chiffrement de stockage par secteur ou bloc | `CKM_AES_XTS` avec une clé `CKK_AES_XTS`, le tweak désignant le secteur — confidentialité seulement, cf. §3.1 |
 | Signature asymétrique (classique)        | `CKM_SHA384_RSA_PKCS_PSS` ou `CKM_ECDSA_SHA384` |
 | Signature asymétrique (PQ)               | `CKM_ML_DSA` (jeu paramètre ML-DSA-65)     |
 | Signature asymétrique (PQ, pré-hachage)  | `CKM_HASH_ML_DSA_<hash>`, ou `CKM_HASH_ML_DSA` quand l'appelant hache |
@@ -115,7 +116,9 @@ puisqu'il n'y a pas de padding à vérifier, mais aucune détection d'altératio
 non plus : sous CTR, un bit retourné dans le chiffré retourne le bit
 correspondant du clair, silencieusement. Associez-les à un `CKM_SHA256_HMAC` sur
 le chiffré (encrypt-then-MAC, RFC 7366), ou prenez `CKM_AES_GCM` qui fait les
-deux en une passe.
+deux en une passe. Il en va de même pour `CKM_AES_OFB`, les modes CFB,
+`CKM_AES_CTS` et `CKM_AES_XTS`, et pour `CKM_CHACHA20` sans Poly1305 :
+`CKM_CHACHA20_POLY1305` en est la forme authentifiée.
 
 Voir R2 dans `docs/PKCS11_CHECK_FINDINGS.md` pour la mesure, et
 `tests/test_cbc_pad_oracle.c` pour le garde-fou de non-régression.

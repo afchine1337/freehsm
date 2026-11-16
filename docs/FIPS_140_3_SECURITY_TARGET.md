@@ -89,13 +89,15 @@ All interfaces use the OASIS PKCS#11 v3.2 calling convention. The `CK_FUNCTION_L
 
 | Category | Function | Standard | CAVP Cert (TBD by lab) |
 |---|---|---|---|
-| **AES** | AES-128/192/256 CBC, CBC-PAD, CTR, GCM, KW (RFC 3394), KWP (RFC 5649), CMAC, GMAC | FIPS 197, SP 800-38A, SP 800-38D §6.4 (GMAC), SP 800-38F, SP 800-38B | A-AES-#### |
-| **Hash** | SHA-256, SHA-384, SHA-512 | FIPS 180-4 | A-SHS-#### |
-| **HMAC** | HMAC-SHA-256/384/512 | FIPS 198-1 | A-HMAC-#### |
+| **AES** | AES-128/192/256 ECB, CBC, CBC-PAD, CTR, OFB, CFB1/8/128, CTS (CS3), GCM, KW (RFC 3394), KWP (RFC 5649), CMAC (whole or truncated to ≥ 64 bits), GMAC | FIPS 197, SP 800-38A and its Addendum, SP 800-38D §6.4 (GMAC), SP 800-38F, SP 800-38B | A-AES-#### |
+| **XTS-AES** | XTS-AES-128, XTS-AES-256, one data unit per operation | SP 800-38E | A-AES-#### |
+| **Hash** | SHA-224, SHA-256, SHA-384, SHA-512; SHA3-224/256/384/512 | FIPS 180-4, FIPS 202 | A-SHS-#### |
+| **HMAC** | HMAC with the SHA-2 and SHA-3 digests above, whole or truncated to ≥ 32 bits | FIPS 198-1, SP 800-107 rev. 1 | A-HMAC-#### |
+| **Symmetric key generation** | AES, XTS-AES and HMAC keys from the DRBG | SP 800-133 rev. 2 | (vendor affirmed) |
 | **PBKDF2** | PBKDF2-HMAC-SHA-256 (≥ 200 000 iter, ≥ 14-byte password, ≥ 16-byte salt) | SP 800-132 | A-PBKDF-#### |
 | **DRBG** | CTR_DRBG-AES-256, no derivation function | SP 800-90A Rev. 1 | A-DRBG-#### |
-| **RSA** | RSA-2048/3072/4096 key generation, PKCS#1 v1.5 sign, PSS sign, OAEP encrypt/decrypt | FIPS 186-5 (sig), SP 800-56B (key transport) | A-RSA-#### |
-| **ECDSA** | P-256, P-384, P-521 key generation + sign/verify with SHA-256/384/512 | FIPS 186-5 | A-ECDSA-#### |
+| **RSA** | RSA-2048/3072/4096 key generation, PKCS#1 v1.5 sign, PSS sign (SHA-2 and SHA-3), OAEP encrypt/decrypt | FIPS 186-5 (sig), SP 800-56B (key transport) | A-RSA-#### |
+| **ECDSA** | P-256, P-384, P-521 key generation (including the extra random bits method, FIPS 186-5 A.2.1) + sign/verify with SHA-224/256/384/512 and SHA3-224/256/384/512 | FIPS 186-5 | A-ECDSA-#### |
 | **ECDH** | P-256, P-384, P-521 (CKM_ECDH1_DERIVE, CKM_ECDH1_COFACTOR_DERIVE ; cofactor = 1) | SP 800-56A Rev. 3 | A-KAS-#### |
 | **ML-KEM** | ML-KEM-512/768/1024 key generation, encapsulate, decapsulate | FIPS 203 (Aug 2024) | A-MLKEM-#### |
 | **ML-DSA** | ML-DSA-44/65/87 key generation, sign, verify | FIPS 204 (Aug 2024) | A-MLDSA-#### |
@@ -113,6 +115,9 @@ The module advertises these mechanisms in `C_GetMechanismList` for compatibility
 * DSA (deprecated by SP 800-131A)
 * SSL3 KDF family
 * AES-ECB on > 16 bytes (FIPS forbids)
+* CBC-MAC (`CKM_AES_MAC`, `CKM_DES3_MAC` and their `_GENERAL` forms) and 3DES-CMAC
+* Key derivation by digest (`*_KEY_DERIVATION`), by encryption (`*_ENCRYPT_DATA`) and `CKM_EXTRACT_KEY_FROM_KEY`
+* ChaCha20, Poly1305 and ChaCha20-Poly1305 (RFC 8439), which the FIPS provider does not serve: there they are not advertised at all
 
 ---
 
