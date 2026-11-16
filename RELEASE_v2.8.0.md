@@ -12,7 +12,9 @@ key usages that now follow the key type; templates that are now followed;
 and refusals that now carry the return code that names what is wrong.
 `CKA_OBJECT_ID`, `CKA_KEY_GEN_MECHANISM` and two certificate hashes are now
 stored, which takes a new token file format. Running python-pkcs11's test
-suite against FreeHSM found three more items, fixed here as well.
+suite against FreeHSM found three more items, fixed here as well. And the
+module offers PKCS#11 mechanisms it did not, for which OpenSSL does the
+computation: see *New mechanisms*.
 
 **Upgrade.** Three things to read before upgrading:
 
@@ -153,6 +155,71 @@ Montgomery one, `CKA_DECRYPT` for any private key it unwraps.
   signature buffer having been sized for RSA-4096; an imported key could
   already be that large.
 
+## New mechanisms
+
+PKCS#11 mechanisms the module did not offer, for which OpenSSL does the
+computation. Each has its own test, with the published vectors where there
+are some (RFC 3962, RFC 4493, RFC 8439, IEEE 1619, FIPS 197, SP 800-38A,
+SP 800-67) and otherwise values computed without OpenSSL.
+
+**Approved, in both builds.**
+
+- **HMAC.** The `*_HMAC_GENERAL` mechanisms, HMAC truncated to the length
+  asked, for SHA-1, SHA-2 and SHA-3; at least 4 bytes where NIST's rules
+  apply. The HMAC key generators `CKM_SHA*_KEY_GEN`, which make keys typed
+  `CKK_SHA*_HMAC`.
+- **Signatures.** `CKM_ECDSA_SHA224`, `CKM_ECDSA_SHA3_224` to
+  `CKM_ECDSA_SHA3_512`, and `CKM_SHA3_224_RSA_PKCS_PSS` to
+  `CKM_SHA3_512_RSA_PKCS_PSS`.
+- **AES.** OFB, CFB1, CFB8 and CFB128 (CFB64 is not offered: OpenSSL has
+  no such cipher). CTS, variant CS3, the one of RFC 3962. XTS, on a new key
+  type `CKK_AES_XTS` with its generator `CKM_AES_XTS_KEY_GEN`, one data unit
+  per operation. `CKM_AES_CMAC_GENERAL`, at least 8 bytes where NIST's rules
+  apply.
+- **Key utilities of PKCS#11 v3.2.** `CKM_PUB_KEY_FROM_PRIV_KEY` gives the
+  public key of a private key as a new object, for every key type but the
+  composite one; it does not ask the private key for `CKA_DERIVE`.
+  `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS` makes an EC key pair whose private key
+  comes from the extra random bits method of FIPS 186-5 A.2.1.
+
+**Not approved, in the all-mechanisms build.** As `CKM_DES3_CBC` and
+`CKM_SHA1_RSA_PKCS` already were: `CKM_ECDSA_SHA1`; 3DES in ECB and with
+PKCS#7 padding beside CBC, all three in parts as well as single-part; and
+`CKM_DES2_KEY_GEN` with the `CKK_DES2` key type, a 16-byte key that every
+DES3 mechanism takes as K1 K2 K1.
+
+**Not approved, in the all-mechanisms build in permissive mode only.**
+Refused in strict and FIPS mode as well:
+
+- **Key derivation by digest**, the `*_KEY_DERIVATION` mechanisms, SHA-1 to
+  SHAKE256 (the SHA-3 and SHAKE ones also named `*_KEY_DERIVE`).
+- **Key derivation by encryption**, `CKM_AES_ECB_ENCRYPT_DATA`,
+  `CKM_AES_CBC_ENCRYPT_DATA`, `CKM_DES3_ECB_ENCRYPT_DATA` and
+  `CKM_DES3_CBC_ENCRYPT_DATA`.
+- **`CKM_EXTRACT_KEY_FROM_KEY`**, a run of the bits of a generic secret.
+- **CBC-MAC**, `CKM_AES_MAC` and `CKM_AES_MAC_GENERAL`, and the four 3DES
+  MACs: `CKM_DES3_CMAC`, `CKM_DES3_CMAC_GENERAL`, `CKM_DES3_MAC` and
+  `CKM_DES3_MAC_GENERAL`.
+- **ChaCha20, Poly1305 and ChaCha20-Poly1305** (RFC 8439), with
+  `CKM_CHACHA20_KEY_GEN`, `CKM_POLY1305_KEY_GEN` and the `CKK_CHACHA20` and
+  `CKK_POLY1305` key types, where the loaded provider serves them. The
+  OpenSSL FIPS provider does not, and there they are neither listed nor
+  accepted.
+
+**Points to know.**
+
+- ChaCha20 takes a 32-bit counter with a 96-bit nonce, or a 64-bit counter
+  with a 64-bit nonce. Data past the counter is `CKR_DATA_LEN_RANGE`; the
+  counter is not carried into the nonce.
+- ChaCha20-Poly1305 takes a 12-byte nonce only. Poly1305's key is a
+  one-time key, and keeping it so is the caller's.
+- In parts, CTS and XTS give all their output at `C_EncryptFinal` /
+  `C_DecryptFinal`: the cipher needs the whole message. ChaCha20-Poly1305
+  checks its tag at `C_DecryptFinal`, as AES-GCM does.
+- Key generation by `CKM_DES2_KEY_GEN` and `CKM_DES3_KEY_GEN` now sets the
+  parity bits, as `C_DeriveKey` already did for these types. The cipher
+  ignores them.
+
 ## What did not work
 
 - **`C_SetPIN` changes a PIN** (#36). It failed in every session state. An
@@ -200,7 +267,8 @@ above.
 - `C_CreateObject` of a secret key of an asymmetric type, or of a private
   key of a secret type: `CKR_TEMPLATE_INCONSISTENT` (#33).
 - `C_CreateObject` of an AES key whose value is not 16, 24 or 32 bytes:
-  `CKR_ATTRIBUTE_VALUE_INVALID` (#37 K2).
+  `CKR_ATTRIBUTE_VALUE_INVALID` (#37 K2). Likewise a `CKK_DES3` key of
+  other than 24 bytes, and the new key types at their own lengths.
 
 **Templates that are now accepted.**
 
@@ -212,9 +280,11 @@ above.
 
 - AES-ECB or AES-CBC without padding, encrypting a partial block:
   `CKR_DATA_LEN_RANGE`, not `CKR_FUNCTION_FAILED` (#37 B1).
+- The same encrypted in parts, a total that is not whole blocks:
+  `CKR_DATA_LEN_RANGE` at `C_EncryptFinal`, not `CKR_FUNCTION_FAILED`.
 - AES-ECB, AES-CBC or AES-CBC-PAD, decrypting a partial block, and
   AES-CBC-PAD decrypting nothing: `CKR_ENCRYPTED_DATA_LEN_RANGE`, not
-  `CKR_ENCRYPTED_DATA_INVALID` (#37 B2).
+  `CKR_ENCRYPTED_DATA_INVALID` (#37 B2). 3DES-CBC the same.
 - `CKM_ECDH1_DERIVE` with no parameter, a KDF other than `CKD_NULL`, or a
   peer value that is not a point of the curve: `CKR_MECHANISM_PARAM_INVALID`,
   not `CKR_ARGUMENTS_BAD` or `CKR_ATTRIBUTE_VALUE_INVALID` (#37 E1, E2).
@@ -248,7 +318,17 @@ New: `tests/test_set_pin.c`, `tests/test_gcm_multipart_decrypt.c`,
 `tests/fixtures/token-v4.tok` written by v2.7.0. Also new:
 `tests/test_key_sizes.c` and `tests/test_private_not_sensitive.c`.
 Extended: `tests/test_private_attr.c`, `tests/test_template_checks.c` and
-`tests/test_finalize_release.c`. python-pkcs11's own suite passes against
+`tests/test_finalize_release.c`. For the new mechanisms:
+`tests/test_hmac_general.c`, `tests/test_hmac_keygen_derive.c`,
+`tests/test_sig_sha3_family.c`, `tests/test_aes_feedback_modes.c`,
+`tests/test_aes_mac_family.c`, `tests/test_aes_cts.c`,
+`tests/test_aes_xts.c`, `tests/test_encrypt_data_derive.c`,
+`tests/test_des3_modes.c`, `tests/test_des3_mac_family.c`,
+`tests/test_des2_keys.c`, `tests/test_chacha20_poly1305.c`,
+`tests/test_chacha20_poly1305_aead.c`, `tests/test_extract_pub_from_priv.c`
+and `tests/test_ec_extra_bits.c`. CI now runs `make tests` against
+OpenSSL's default provider in both profiles, as it did against the FIPS
+provider. python-pkcs11's own suite passes against
 this release but for one that needs what FreeHSM does not offer by design,
 `C_SeedRandom`. Its P-192 test passes in the all-mechanisms build in
 permissive mode.
@@ -258,7 +338,9 @@ listed in `tests/pkcs11_check_known_failures.txt`, 3 in `all-mechanisms`
 and 2 in `nist-approved-only`, none of them the module's to fix. 2.7.0 had
 28 more, in both profiles, all asking for a private key that is not
 sensitive (mingulov/pkcs11-check#72); they pass now that such a key is
-made, and are no longer listed.
+made, and are no longer listed. Its tests of `CKM_EXTRACT_KEY_FROM_KEY`
+derive a generic secret without `CKA_VALUE_LEN`; the module answers
+`CKR_TEMPLATE_INCOMPLETE`, which they record as an expected refusal.
 
 ## Verifying this release
 
