@@ -350,6 +350,10 @@ size_t fhsm_hash_size(fhsm_hash_t h) {
         case FHSM_HASH_SHA256: case FHSM_HASH_SHA3_256: case FHSM_HASH_SHA512_256: return 32;
         case FHSM_HASH_SHA384: case FHSM_HASH_SHA3_384: return 48;
         case FHSM_HASH_SHA512: case FHSM_HASH_SHA3_512: return 64;
+        case FHSM_HASH_BLAKE2B_160: return 20;
+        case FHSM_HASH_BLAKE2B_256: return 32;
+        case FHSM_HASH_BLAKE2B_384: return 48;
+        case FHSM_HASH_BLAKE2B_512: return 64;
         case FHSM_HASH_SHA224: case FHSM_HASH_SHA512_224: case FHSM_HASH_SHA3_224: return 28;
         case FHSM_HASH_SHA1: case FHSM_HASH_RIPEMD160: return 20;
         case FHSM_HASH_MD5:  return 16;
@@ -372,12 +376,109 @@ static const char *hash_name(fhsm_hash_t h) {
         case FHSM_HASH_SHA1:     return "SHA1";
         case FHSM_HASH_MD5:      return "MD5";
         case FHSM_HASH_RIPEMD160: return "RIPEMD160";
+        case FHSM_HASH_BLAKE2B_160: case FHSM_HASH_BLAKE2B_256:
+        case FHSM_HASH_BLAKE2B_384: case FHSM_HASH_BLAKE2B_512: return "BLAKE2B-512";
         default:                 return NULL;
     }
 }
 
 /* Public face of hash_name(). One table, several callers. */
 const char *fhsm_hash_openssl_name(fhsm_hash_t h) { return hash_name(h); }
+
+int fhsm_hash_is_blake2b(fhsm_hash_t h) {
+    return h == FHSM_HASH_BLAKE2B_160 || h == FHSM_HASH_BLAKE2B_256
+        || h == FHSM_HASH_BLAKE2B_384 || h == FHSM_HASH_BLAKE2B_512;
+}
+
+int fhsm_md_init(EVP_MD_CTX *ctx, fhsm_hash_t h) {
+    const char *name = hash_name(h);
+    if (!ctx || !name) return 0;
+    EVP_MD *md = EVP_MD_fetch(NULL, name, NULL);
+    if (!md) return 0;
+    size_t sz = fhsm_hash_size(h);
+    OSSL_PARAM p[2] = { OSSL_PARAM_construct_size_t("size", &sz), OSSL_PARAM_construct_end() };
+    int ok = EVP_DigestInit_ex2(ctx, md, fhsm_hash_is_blake2b(h) ? p : NULL) == 1;
+    EVP_MD_free(md);
+    return ok;
+}
+
+int fhsm_md_final(EVP_MD_CTX *ctx, fhsm_hash_t h, uint8_t *out, size_t *out_len) {
+    uint8_t buf[EVP_MAX_MD_SIZE];
+    unsigned int n = 0;
+    const size_t sz = fhsm_hash_size(h);
+    int ok = sz > 0 && EVP_DigestFinal_ex(ctx, buf, &n) == 1 && (size_t)n >= sz;
+    if (ok) { memcpy(out, buf, sz); *out_len = sz; }
+    OPENSSL_cleanse(buf, sizeof buf);
+    return ok;
+}
+
+int fhsm_blake2b_available(void) {
+    static const uint8_t none = 0;
+    uint8_t a[64], b[64];
+    size_t al = 0, bl = 0;
+    ERR_set_mark();
+    EVP_MD_CTX *c1 = EVP_MD_CTX_new(), *c2 = EVP_MD_CTX_new();
+    int ok = c1 && c2
+          && fhsm_md_init(c1, FHSM_HASH_BLAKE2B_160) && EVP_DigestUpdate(c1, &none, 0) == 1
+          && fhsm_md_final(c1, FHSM_HASH_BLAKE2B_160, a, &al)
+          && fhsm_md_init(c2, FHSM_HASH_BLAKE2B_512) && EVP_DigestUpdate(c2, &none, 0) == 1
+          && fhsm_md_final(c2, FHSM_HASH_BLAKE2B_512, b, &bl)
+          && al == 20 && memcmp(a, b, 20) != 0;
+    EVP_MD_CTX_free(c1);
+    EVP_MD_CTX_free(c2);
+    ERR_pop_to_mark();
+    return ok;
+}
+
+/* K0 of RFC 2104 for a BLAKE2b key: the key, or its digest when longer
+ * than the 128-byte block, padded with zeros to the block. */
+static int b2_k0(fhsm_hash_t alg, fhsm_slice_t key, uint8_t k0[128]) {
+    memset(k0, 0, 128);
+    if (key.len <= 128) {
+        if (key.len) memcpy(k0, key.data, key.len);
+        return 1;
+    }
+    EVP_MD_CTX *c = EVP_MD_CTX_new();
+    size_t l = 0;
+    int ok = c && fhsm_md_init(c, alg) && EVP_DigestUpdate(c, key.data, key.len) == 1
+          && fhsm_md_final(c, alg, k0, &l);
+    EVP_MD_CTX_free(c);
+    return ok;
+}
+
+fhsm_rv_t fhsm_hmac_b2_begin(fhsm_hash_t alg, fhsm_slice_t key, EVP_MD_CTX **inner) {
+    if (!fhsm_hash_is_blake2b(alg) || !inner) return FHSM_RV_ARGUMENTS_BAD;
+    uint8_t k0[128], pad[128];
+    if (!b2_k0(alg, key, k0)) { OPENSSL_cleanse(k0, sizeof k0); return FHSM_RV_FUNCTION_FAILED; }
+    for (size_t i = 0; i < 128; i++) pad[i] = (uint8_t)(k0[i] ^ 0x36);
+    EVP_MD_CTX *c = EVP_MD_CTX_new();
+    int ok = c && fhsm_md_init(c, alg) && EVP_DigestUpdate(c, pad, 128) == 1;
+    OPENSSL_cleanse(k0, sizeof k0);
+    OPENSSL_cleanse(pad, sizeof pad);
+    if (!ok) { EVP_MD_CTX_free(c); return FHSM_RV_FUNCTION_FAILED; }
+    *inner = c;
+    return FHSM_RV_OK;
+}
+
+fhsm_rv_t fhsm_hmac_b2_end(fhsm_hash_t alg, fhsm_slice_t key, EVP_MD_CTX *inner,
+                           uint8_t *mac, size_t *mac_len) {
+    const size_t sz = fhsm_hash_size(alg);
+    if (!fhsm_hash_is_blake2b(alg) || !inner || *mac_len < sz) return FHSM_RV_ARGUMENTS_BAD;
+    uint8_t k0[128], pad[128], ih[64];
+    size_t ihl = 0, ol = 0;
+    int ok = fhsm_md_final(inner, alg, ih, &ihl) && b2_k0(alg, key, k0);
+    if (ok) for (size_t i = 0; i < 128; i++) pad[i] = (uint8_t)(k0[i] ^ 0x5c);
+    EVP_MD_CTX *c = ok ? EVP_MD_CTX_new() : NULL;
+    ok = ok && c && fhsm_md_init(c, alg) && EVP_DigestUpdate(c, pad, 128) == 1
+            && EVP_DigestUpdate(c, ih, ihl) == 1 && fhsm_md_final(c, alg, mac, &ol);
+    EVP_MD_CTX_free(c);
+    OPENSSL_cleanse(k0, sizeof k0);
+    OPENSSL_cleanse(pad, sizeof pad);
+    OPENSSL_cleanse(ih, sizeof ih);
+    if (!ok) return FHSM_RV_FUNCTION_FAILED;
+    *mac_len = ol;
+    return FHSM_RV_OK;
+}
 
 fhsm_rv_t fhsm_aes_gcm_encrypt(fhsm_slice_t key,
                                 fhsm_slice_t iv,
@@ -486,21 +587,23 @@ fhsm_rv_t fhsm_hash_oneshot(fhsm_hash_t alg, fhsm_slice_t data,
 
     EVP_MD *md = EVP_MD_fetch(NULL, name, NULL);
     if (!md) return FHSM_RV_MECHANISM_INVALID;
+    EVP_MD_free(md);
 
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
-    if (!ctx) { EVP_MD_free(md); return FHSM_RV_HOST_MEMORY; }
+    if (!ctx) return FHSM_RV_HOST_MEMORY;
 
-    unsigned int n = 0;
-    if (EVP_DigestInit_ex2(ctx, md, NULL) == 1 &&
+    /* Through fhsm_md_init / fhsm_md_final: BLAKE2b's size parameter, and an
+     * output written through a buffer of the largest digest. */
+    size_t n = 0;
+    if (fhsm_md_init(ctx, alg) &&
         EVP_DigestUpdate(ctx, data.data, data.len) == 1 &&
-        EVP_DigestFinal_ex(ctx, out, &n) == 1) {
+        fhsm_md_final(ctx, alg, out, &n)) {
         *out_len = n;
         rv = FHSM_RV_OK;
     }
 
     EVP_MD_CTX_free(ctx);
-    EVP_MD_free(md);
     return rv;
 }
 
@@ -511,6 +614,18 @@ fhsm_rv_t fhsm_hmac(fhsm_hash_t alg, fhsm_slice_t key, fhsm_slice_t data,
     if (!name) return FHSM_RV_ARGUMENTS_BAD;
     size_t expected = fhsm_hash_size(alg);
     if (*mac_len < expected) return FHSM_RV_ARGUMENTS_BAD;
+
+    /* HMAC over BLAKE2b: RFC 2104 by hand, since OpenSSL's HMAC cannot set
+     * the digest's size parameter (2.8.0). */
+    if (fhsm_hash_is_blake2b(alg)) {
+        EVP_MD_CTX *inner = NULL;
+        fhsm_rv_t brv = fhsm_hmac_b2_begin(alg, key, &inner);
+        if (brv == FHSM_RV_OK && data.len && EVP_DigestUpdate(inner, data.data, data.len) != 1)
+            brv = FHSM_RV_FUNCTION_FAILED;
+        if (brv == FHSM_RV_OK) brv = fhsm_hmac_b2_end(alg, key, inner, mac, mac_len);
+        EVP_MD_CTX_free(inner);
+        return brv;
+    }
 
     /* Use the modern EVP_MAC interface (HMAC via EVP_MAC_fetch). The
      * legacy HMAC_* API is deprecated in OpenSSL 3.x and not part of

@@ -1590,6 +1590,13 @@ static int fhsm_provider_mech_available(CK_ULONG m) {
         case 0x00000240UL: case 0x00000241UL:   /* CKM_RIPEMD160, _HMAC */
         case 0x00000242UL: case 0x00000008UL:   /* _HMAC_GENERAL, CKM_RIPEMD160_RSA_PKCS */
             return fhsm_md_available("RIPEMD160");
+        default:
+            /* The twenty BLAKE2b mechanisms, 0x400C to 0x401F: digest, HMAC,
+             * HMAC_GENERAL, KEY_DERIVE and KEY_GEN at four sizes. */
+            if (m >= 0x0000400CUL && m <= 0x0000401FUL) return fhsm_blake2b_available();
+            break;
+    }
+    switch (m) {
         case 0x00001225UL: case 0x00001226UL:   /* CKM_CHACHA20_KEY_GEN, CKM_CHACHA20 */
             return fhsm_cipher_available("ChaCha20");
         case 0x00004021UL:                      /* CKM_CHACHA20_POLY1305 */
@@ -3277,6 +3284,15 @@ static int digest_mech_to_hash(CK_ULONG mech, fhsm_hash_t *h, int *non_approved)
         case 0x00000240UL: *h = FHSM_HASH_RIPEMD160;
                            *non_approved = FHSM_HASH_NA_DIGEST | FHSM_HASH_NA_HMAC;
                            return 1;
+        /* BLAKE2b (2.8.0): not approved, in any use. */
+        case 0x0000400CUL: *h = FHSM_HASH_BLAKE2B_160;
+                           *non_approved = FHSM_HASH_NA_DIGEST | FHSM_HASH_NA_HMAC; return 1;
+        case 0x00004011UL: *h = FHSM_HASH_BLAKE2B_256;
+                           *non_approved = FHSM_HASH_NA_DIGEST | FHSM_HASH_NA_HMAC; return 1;
+        case 0x00004016UL: *h = FHSM_HASH_BLAKE2B_384;
+                           *non_approved = FHSM_HASH_NA_DIGEST | FHSM_HASH_NA_HMAC; return 1;
+        case 0x0000401BUL: *h = FHSM_HASH_BLAKE2B_512;
+                           *non_approved = FHSM_HASH_NA_DIGEST | FHSM_HASH_NA_HMAC; return 1;
         default: return 0;
     }
 }
@@ -3302,7 +3318,8 @@ CK_RV C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism) {
       /* Refused here, as it is left out of the mechanism list, when no
        * loaded provider can compute it -- not accepted and then failed in
        * C_Digest (fhsm_md_available). */
-      if (!fhsm_md_available(fhsm_hash_openssl_name(op->hash)))
+      if (!fhsm_md_available(fhsm_hash_openssl_name(op->hash))
+          || !fhsm_provider_mech_available(pMechanism->mechanism))
           return FHSM_RV_MECHANISM_INVALID; }
     /* A digest that ended on an error after its first C_DigestUpdate kept its
      * EVP context: the error paths clear op->active and nothing else. The
@@ -3601,8 +3618,20 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             case 0x000002B3UL: key_type = 0x37; break;   /* CKM_SHA3_256_KEY_GEN   -> CKK_SHA3_256_HMAC */
             case 0x000002C3UL: key_type = 0x38; break;   /* CKM_SHA3_384_KEY_GEN   -> CKK_SHA3_384_HMAC */
             case 0x000002D3UL: key_type = 0x39; break;   /* CKM_SHA3_512_KEY_GEN   -> CKK_SHA3_512_HMAC */
+            /* BLAKE2b (2.8.0): CKK_BLAKE2B_{160,256,384,512}_HMAC. */
+            case 0x00004010UL: key_type = 0x3A; break;   /* CKM_BLAKE2B_160_KEY_GEN */
+            case 0x00004015UL: key_type = 0x3B; break;   /* CKM_BLAKE2B_256_KEY_GEN */
+            case 0x0000401AUL: key_type = 0x3C; break;   /* CKM_BLAKE2B_384_KEY_GEN */
+            case 0x0000401FUL: key_type = 0x3D; break;   /* CKM_BLAKE2B_512_KEY_GEN */
             default:                          return FHSM_RV_MECHANISM_INVALID;
         }
+        /* The BLAKE2b key generators: not approved, and only where the
+         * provider computes BLAKE2b at its sizes, as the mechanisms that
+         * use the keys. */
+        if (key_type >= 0x3A && key_type <= 0x3D
+            && (fhsm_build_fips_strict || fhsm_mode_is_fips()
+                || !fhsm_provider_mech_available(pMechanism->mechanism)))
+            return FHSM_RV_MECHANISM_INVALID;
         long j = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
         if (j < 0) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         /* Read whole, checked whole, narrowed last -- as the PBKDF2 and 3DES
@@ -3625,7 +3654,7 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         } else if (key_type == CKK_GENERIC_SECRET
                    || (key_type >= 0x28 && key_type <= 0x2E && key_type != 0x29
                        && key_type != 0x2A)
-                   || (key_type >= 0x36 && key_type <= 0x39)
+                   || (key_type >= 0x36 && key_type <= 0x3D)   /* SHA3_*, BLAKE2B_* HMAC */
                    || key_type == 0x43 || key_type == 0x44) {
             /* A generic secret, or an HMAC key typed CKK_SHA*_HMAC (0x28,
              * 0x2B to 0x2E, 0x36 to 0x39, 0x43, 0x44), has no block size
@@ -5846,7 +5875,12 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     {
         const char *dname = NULL;
         size_t dlen = 0;   /* 0: an XOF, the template gives the length */
+        fhsm_hash_t bh = (fhsm_hash_t)0;   /* a BLAKE2b size, else 0 */
         switch (pMechanism->mechanism) {
+            case 0x0000400FUL: dname = "BLAKE2B-512"; dlen = 20; bh = FHSM_HASH_BLAKE2B_160; break;
+            case 0x00004014UL: dname = "BLAKE2B-512"; dlen = 32; bh = FHSM_HASH_BLAKE2B_256; break;
+            case 0x00004019UL: dname = "BLAKE2B-512"; dlen = 48; bh = FHSM_HASH_BLAKE2B_384; break;
+            case 0x0000401EUL: dname = "BLAKE2B-512"; dlen = 64; bh = FHSM_HASH_BLAKE2B_512; break;
             case 0x00000392UL: dname = "SHA1";         dlen = 20; break;
             case 0x00000396UL: dname = "SHA2-224";     dlen = 28; break;
             case 0x00000393UL: dname = "SHA2-256";     dlen = 32; break;
@@ -5863,7 +5897,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             default: break;
         }
         if (dname) {
-            if (fhsm_build_fips_strict || fhsm_mode_is_fips())
+            if (fhsm_build_fips_strict || fhsm_mode_is_fips()
+                || !fhsm_provider_mech_available(pMechanism->mechanism))
                 return FHSM_RV_MECHANISM_INVALID;
             if (pMechanism->pParameter || pMechanism->ulParameterLen)
                 return FHSM_RV_MECHANISM_PARAM_INVALID;
@@ -5879,6 +5914,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                 case 0x2Du: case 0x2Eu:                     /* SHA512 / 224 HMAC */
                 case 0x43u: case 0x44u:                     /* SHA512_224 / 256 HMAC */
                 case 0x36u: case 0x37u: case 0x38u: case 0x39u: /* SHA3_* HMAC */
+                case 0x3Au: case 0x3Bu: case 0x3Cu: case 0x3Du: /* BLAKE2B_* HMAC */
                     break;
                 default:
                     return FHSM_RV_KEY_TYPE_INCONSISTENT;
@@ -5905,9 +5941,13 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             EVP_MD *md = EVP_MD_fetch(NULL, dname, NULL);
             const int have_md = md != NULL;
             EVP_MD_CTX *mc = md ? EVP_MD_CTX_new() : NULL;
-            if (mc && EVP_DigestInit_ex(mc, md, NULL) == 1
-                && EVP_DigestUpdate(mc, bv, bvl) == 1) {
-                if (dlen) dok = EVP_DigestFinal_ex(mc, dig, &dl) == 1 && dl == dlen;
+            /* BLAKE2b through fhsm_md_init / fhsm_md_final, for its size. */
+            const int dinit = bh ? fhsm_md_init(mc, bh)
+                                 : (mc && EVP_DigestInit_ex(mc, md, NULL) == 1);
+            if (mc && dinit && EVP_DigestUpdate(mc, bv, bvl) == 1) {
+                size_t bl = 0;
+                if (bh) dok = fhsm_md_final(mc, bh, dig, &bl) && bl == dlen;
+                else if (dlen) dok = EVP_DigestFinal_ex(mc, dig, &dl) == 1 && dl == dlen;
                 else      dok = EVP_DigestFinalXOF(mc, dig, klen) == 1;
             }
             EVP_MD_CTX_free(mc);
@@ -12830,6 +12870,8 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x0252: case 0x0262: case 0x0272:
         case 0x02B7: case 0x02B2: case 0x02C2: case 0x02D2:
         case 0x0241: case 0x0242:                           /* RIPEMD160_HMAC, _GENERAL */
+        case 0x400D: case 0x400E: case 0x4012: case 0x4013: /* BLAKE2B_{160,256}_HMAC* */
+        case 0x4017: case 0x4018: case 0x401C: case 0x401D: /* BLAKE2B_{384,512}_HMAC* */
             want = -2; break;   /* any symmetric secret ; reject asymmetric keys */
         default: want = -1; break;
     }
@@ -13993,6 +14035,11 @@ static int fhsm_hmac_hash_of(uint32_t mech, fhsm_hash_t *hash, size_t *maclen) {
         /* CKM_RIPEMD160_HMAC and _GENERAL (2.8.0, not approved). */
         case 0x00000241UL: *hash = FHSM_HASH_RIPEMD160;  *maclen = 20; return 1;
         case 0x00000242UL: *hash = FHSM_HASH_RIPEMD160;  *maclen = 20; return 1;
+        /* CKM_BLAKE2B_*_HMAC and _GENERAL (2.8.0, not approved). */
+        case 0x0000400DUL: case 0x0000400EUL: *hash = FHSM_HASH_BLAKE2B_160; *maclen = 20; return 1;
+        case 0x00004012UL: case 0x00004013UL: *hash = FHSM_HASH_BLAKE2B_256; *maclen = 32; return 1;
+        case 0x00004017UL: case 0x00004018UL: *hash = FHSM_HASH_BLAKE2B_384; *maclen = 48; return 1;
+        case 0x0000401CUL: case 0x0000401DUL: *hash = FHSM_HASH_BLAKE2B_512; *maclen = 64; return 1;
         default: return 0;
     }
 }
@@ -14004,6 +14051,8 @@ static int fhsm_hmac_is_general(uint32_t mech) {
         case 0x00000252UL: case 0x00000262UL: case 0x00000272UL:
         case 0x000002B7UL: case 0x000002B2UL: case 0x000002C2UL: case 0x000002D2UL:
         case 0x00000242UL:                                  /* CKM_RIPEMD160_HMAC_GENERAL */
+        case 0x0000400EUL: case 0x00004013UL:               /* CKM_BLAKE2B_{160,256}_HMAC_GENERAL */
+        case 0x00004018UL: case 0x0000401DUL:               /* CKM_BLAKE2B_{384,512}_HMAC_GENERAL */
             return 1;
         default:
             return 0;
@@ -14136,6 +14185,10 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x00001228UL:                      /* CKM_POLY1305 */
         case 0x00000241UL: case 0x00000242UL:   /* CKM_RIPEMD160_HMAC, _GENERAL */
         case 0x00000008UL:                      /* CKM_RIPEMD160_RSA_PKCS */
+        case 0x0000400DUL: case 0x0000400EUL:   /* CKM_BLAKE2B_160_HMAC, _GENERAL */
+        case 0x00004012UL: case 0x00004013UL:   /* CKM_BLAKE2B_256_HMAC, _GENERAL */
+        case 0x00004017UL: case 0x00004018UL:   /* CKM_BLAKE2B_384_HMAC, _GENERAL */
+        case 0x0000401CUL: case 0x0000401DUL:   /* CKM_BLAKE2B_512_HMAC, _GENERAL */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -14965,6 +15018,10 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x00001228UL:                      /* CKM_POLY1305 */
         case 0x00000241UL: case 0x00000242UL:   /* CKM_RIPEMD160_HMAC, _GENERAL */
         case 0x00000008UL:                      /* CKM_RIPEMD160_RSA_PKCS */
+        case 0x0000400DUL: case 0x0000400EUL:   /* CKM_BLAKE2B_160_HMAC, _GENERAL */
+        case 0x00004012UL: case 0x00004013UL:   /* CKM_BLAKE2B_256_HMAC, _GENERAL */
+        case 0x00004017UL: case 0x00004018UL:   /* CKM_BLAKE2B_384_HMAC, _GENERAL */
+        case 0x0000401CUL: case 0x0000401DUL:   /* CKM_BLAKE2B_512_HMAC, _GENERAL */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -15438,10 +15495,8 @@ CK_RV C_DigestUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
     if (!op->md_ctx) {
         EVP_MD_CTX *ctx = EVP_MD_CTX_new();
         if (!ctx) return digest_update_fail(op, FHSM_RV_HOST_MEMORY);
-        EVP_MD *md = EVP_MD_fetch(NULL, fhsm_hash_openssl_name(op->hash), NULL);
-        if (!md) { EVP_MD_CTX_free(ctx); return digest_update_fail(op, FHSM_RV_FUNCTION_FAILED); }
-        int ok = EVP_DigestInit_ex(ctx, md, NULL) == 1;
-        EVP_MD_free(md);
+        /* fhsm_md_init: BLAKE2b's size parameter (2.8.0). */
+        int ok = fhsm_md_init(ctx, op->hash);
         if (!ok) { EVP_MD_CTX_free(ctx); return digest_update_fail(op, FHSM_RV_FUNCTION_FAILED); }
         op->md_ctx = ctx;
     }
@@ -15511,10 +15566,8 @@ CK_RV C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey) {
         /* Same table as C_DigestUpdate, for the same reason: this path had
          * the three-entry copy too, so C_DigestKey under SHA-224 or SHA-3
          * failed where C_DigestKey under SHA-256 worked. */
-        EVP_MD *md = EVP_MD_fetch(NULL, fhsm_hash_openssl_name(op->hash), NULL);
-        if (!md) { EVP_MD_CTX_free(ctx); return digest_update_fail(op, FHSM_RV_FUNCTION_FAILED); }
-        int ok = EVP_DigestInit_ex(ctx, md, NULL) == 1;
-        EVP_MD_free(md);
+        /* fhsm_md_init: BLAKE2b's size parameter (2.8.0). */
+        int ok = fhsm_md_init(ctx, op->hash);
         if (!ok) { EVP_MD_CTX_free(ctx); return digest_update_fail(op, FHSM_RV_FUNCTION_FAILED); }
         op->md_ctx = ctx;
     }
@@ -15542,10 +15595,13 @@ CK_RV C_DigestFinal(CK_SESSION_HANDLE hSession, unsigned char *pDigest,
         op->active = 0;
         return rv;
     }
-    unsigned int out_len = (unsigned int)*pulDigestLen;
-    int ok = EVP_DigestFinal_ex(op->md_ctx, pDigest, &out_len);
+    /* Through fhsm_md_final, which writes the digest's own length: a provider
+     * that wrote BLAKE2b-512's 64 bytes for a 20-byte BLAKE2b-160 would
+     * overrun a buffer sized as the size query said. */
+    size_t out_len = 0;
+    int ok = fhsm_md_final(op->md_ctx, op->hash, pDigest, &out_len);
     EVP_MD_CTX_free(op->md_ctx); op->md_ctx = NULL;
-    *pulDigestLen = out_len;
+    *pulDigestLen = ok ? (CK_ULONG)out_len : 0;
     op->active = 0;
     return ok == 1 ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
 }
@@ -15668,6 +15724,51 @@ static fhsm_rv_t hmldsa_fail(fhsm_op_t *op, fhsm_rv_t rv) {
  * EVP_MAC streaming shape, not signatures, and sign_asymmetric() would not
  * know what to do with them. That gap is real and is named in the comment at
  * their exclusion rather than silently swept into this path. */
+/* HMAC over BLAKE2b in parts (2.8.0). EVP_MAC's HMAC cannot carry the
+ * digest's size parameter, so the inner hash streams in op->md_ctx --
+ * opened keyed with K0 ^ ipad at the first part -- and Final computes the
+ * outer one, the key read again for K0 ^ opad. One-shot goes through
+ * fhsm_hmac, which does the same in one call. */
+static int b2hmac_mech(uint32_t m) {
+    fhsm_hash_t h; size_t n;
+    return fhsm_hmac_hash_of(m, &h, &n) && fhsm_hash_is_blake2b(h);
+}
+static fhsm_rv_t b2hmac_update(fhsm_token_t *t, fhsm_op_t *op, const uint8_t *p, size_t n) {
+    fhsm_hash_t h; size_t full = 0;
+    if (!fhsm_hmac_hash_of(op->mechanism, &h, &full)) return FHSM_RV_MECHANISM_INVALID;
+    if (!op->md_ctx) {
+        const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+        fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+        if (rv != FHSM_RV_OK) return rv;
+        EVP_MD_CTX *c = NULL;
+        rv = fhsm_hmac_b2_begin(h, FHSM_SLICE(kv, kvl), &c);
+        if (rv != FHSM_RV_OK) return rv;
+        op->md_ctx = c;
+    }
+    if (n && EVP_DigestUpdate((EVP_MD_CTX *)op->md_ctx, p, n) != 1) return FHSM_RV_FUNCTION_FAILED;
+    return FHSM_RV_OK;
+}
+/* The whole MAC into mac[64]; the inner context is released. */
+static fhsm_rv_t b2hmac_final(fhsm_token_t *t, fhsm_op_t *op, uint8_t mac[64], size_t *ml) {
+    fhsm_rv_t rv = b2hmac_update(t, op, NULL, 0);   /* the empty message: open it */
+    fhsm_hash_t h; size_t full = 0;
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    if (rv == FHSM_RV_OK && !fhsm_hmac_hash_of(op->mechanism, &h, &full)) rv = FHSM_RV_MECHANISM_INVALID;
+    if (rv == FHSM_RV_OK) rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+    *ml = 64;
+    if (rv == FHSM_RV_OK)
+        rv = fhsm_hmac_b2_end(h, FHSM_SLICE(kv, kvl), (EVP_MD_CTX *)op->md_ctx, mac, ml);
+    if (op->md_ctx) { EVP_MD_CTX_free((EVP_MD_CTX *)op->md_ctx); op->md_ctx = NULL; }
+    return rv;
+}
+/* The length a BLAKE2b HMAC operation gives: the whole MAC, or the
+ * GENERAL length asked. */
+static size_t b2hmac_len(const fhsm_op_t *op) {
+    fhsm_hash_t h; size_t full = 0;
+    if (!fhsm_hmac_hash_of(op->mechanism, &h, &full)) return 0;
+    return (op->mac_out_len && op->mac_out_len <= full) ? op->mac_out_len : full;
+}
+
 static int mech_sign_is_buffered_multipart(uint32_t m) {
     fhsm_hash_t h; size_t n;
     if (m == CKM_COMPOSITE_MLDSA65_ED25519) return 0;  /* streams its own PH */
@@ -15807,6 +15908,12 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
 
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
+    /* HMAC over BLAKE2b: the inner hash, streamed. */
+    if (b2hmac_mech(op->mechanism)) {
+        fhsm_rv_t br = b2hmac_update(t, op, pPart, (size_t)ulPartLen);
+        if (br != FHSM_RV_OK) op->active = 0;
+        return br;
+    }
     /* CBC-MAC: chained here block by block, finished at C_SignFinal. */
     if (mech_is_cbcmac(op->mechanism)) {
         fhsm_rv_t cr = op->cipher_ctx ? FHSM_RV_OK : cbcmac_open(t, op);
@@ -15971,6 +16078,21 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
      * unreachable today -- but a fallback that invents a mechanism is the
      * wrong shape of guard, and the next mechanism wired into Update would
      * have inherited it silently. */
+    /* HMAC over BLAKE2b: the length checked before the MAC is finished, so a
+     * CKR_BUFFER_TOO_SMALL leaves the inner hash for the retry. */
+    if (b2hmac_mech(op->mechanism)) {
+        const size_t bl = b2hmac_len(op);
+        if (pSig == NULL) { *pulSigLen = bl; return FHSM_RV_OK; }
+        if (*pulSigLen < bl) { *pulSigLen = bl; return 0x00000150UL; }
+        fhsm_token_t *bt = fhsm_session_token(hSession);
+        uint8_t bm[64]; size_t bml = sizeof bm;
+        fhsm_rv_t br = bt ? b2hmac_final(bt, op, bm, &bml) : FHSM_RV_SESSION_HANDLE_INVALID;
+        if (br == FHSM_RV_OK) memcpy(pSig, bm, bl);
+        OPENSSL_cleanse(bm, sizeof bm);
+        *pulSigLen = br == FHSM_RV_OK ? bl : 0;
+        op->active = 0;
+        return br;
+    }
     /* CBC-MAC: the chain C_SignUpdate built, or the empty message. The
      * length is checked before the chain is finished, so a
      * CKR_BUFFER_TOO_SMALL leaves it for the retry. */
@@ -16074,6 +16196,12 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, unsigned char *pPart,
      * disagree about which mechanisms are covered. */
     if (mech_sign_is_buffered_multipart(op->mechanism))
         return op_append_multipart(op, pPart, (size_t)ulPartLen);
+    /* HMAC over BLAKE2b: as in C_SignUpdate. */
+    if (b2hmac_mech(op->mechanism)) {
+        fhsm_rv_t br = b2hmac_update(t, op, pPart, (size_t)ulPartLen);
+        if (br != FHSM_RV_OK) op->active = 0;
+        return br;
+    }
     /* CBC-MAC: as in C_SignUpdate. */
     if (mech_is_cbcmac(op->mechanism)) {
         fhsm_rv_t cr = op->cipher_ctx ? FHSM_RV_OK : cbcmac_open(t, op);
@@ -16167,6 +16295,19 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, unsigned char *pSig,
      * C_SignFinal. This path carried mac[32] and FHSM_HASH_SHA256 in the
      * empty-input branch, so a SHA-384 or SHA-512 multipart verify could not
      * be expressed at all -- the counterpart of the C_VerifyUpdate gate. */
+    /* HMAC over BLAKE2b: as in C_SignFinal, compared at the length the
+     * operation gives. */
+    if (b2hmac_mech(op->mechanism)) {
+        const size_t bl = b2hmac_len(op);
+        fhsm_token_t *bt = fhsm_session_token(hSession);
+        uint8_t bm[64]; size_t bml = sizeof bm;
+        fhsm_rv_t br = bt ? b2hmac_final(bt, op, bm, &bml) : FHSM_RV_SESSION_HANDLE_INVALID;
+        op->active = 0;
+        int bok = br == FHSM_RV_OK && ulSigLen == bl && fhsm_ct_memcmp(bm, pSig, bl) == 0;
+        OPENSSL_cleanse(bm, sizeof bm);
+        if (br != FHSM_RV_OK) return br;
+        return bok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
+    }
     /* CBC-MAC: as in C_SignFinal. */
     if (mech_is_cbcmac(op->mechanism)) {
         fhsm_rv_t cr = FHSM_RV_OK;

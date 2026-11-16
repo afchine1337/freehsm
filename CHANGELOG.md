@@ -136,6 +136,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   and in parts. Not approved: all-mechanisms in permissive mode only, and
   where the loaded provider serves RIPEMD-160 -- the FIPS provider does not.
   `tests/test_ripemd160.c`.
+* **BLAKE2b** (RFC 7693) at 160, 256, 384 and 512 bits: `CKM_BLAKE2B_*`,
+  `_HMAC`, `_HMAC_GENERAL`, `_KEY_DERIVE` and `_KEY_GEN`, twenty mechanisms,
+  with the `CKK_BLAKE2B_*_HMAC` key types. The digest size is a parameter
+  of BLAKE2b, not a truncation of the 512-bit output, and the HMAC is
+  RFC 2104 over it, computed by the module, since OpenSSL's HMAC cannot set
+  that parameter. Single-part and in parts. Not approved: all-mechanisms
+  in permissive mode only, and where the provider honours the size
+  parameter -- the FIPS provider has no BLAKE2b. `tests/test_blake2b.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first

@@ -133,10 +133,36 @@ typedef enum fhsm_hash_e {
     FHSM_HASH_SHA3_224   = 12,
     /* RIPEMD-160 (ISO/IEC 10118-3), 2.8.0: not approved, all-mechanisms
      * only, and where the loaded provider serves it. */
-    FHSM_HASH_RIPEMD160  = 13
+    FHSM_HASH_RIPEMD160  = 13,
+    /* BLAKE2b at 160, 256, 384 and 512 bits (RFC 7693), 2.8.0: not
+     * approved. The four are one OpenSSL digest, BLAKE2B-512, with its
+     * "size" parameter set -- the digest length is a parameter of BLAKE2b,
+     * not a truncation of its 512-bit output. */
+    FHSM_HASH_BLAKE2B_160 = 14,
+    FHSM_HASH_BLAKE2B_256 = 15,
+    FHSM_HASH_BLAKE2B_384 = 16,
+    FHSM_HASH_BLAKE2B_512 = 17
 } fhsm_hash_t;
 
 size_t fhsm_hash_size(fhsm_hash_t h);
+
+/* The one way to start and finish a digest of `h` on an EVP context: the
+ * BLAKE2b sizes need their parameter at init, and their output is written
+ * through a buffer of the largest digest, so a caller's buffer of the
+ * digest's own length is never overrun. 1 on success. */
+struct evp_md_ctx_st;
+int fhsm_hash_is_blake2b(fhsm_hash_t h);
+int fhsm_md_init(struct evp_md_ctx_st *ctx, fhsm_hash_t h);
+int fhsm_md_final(struct evp_md_ctx_st *ctx, fhsm_hash_t h, uint8_t *out, size_t *out_len);
+/* Does the provider honour BLAKE2b's size parameter? BLAKE2b-160 and the
+ * first 20 bytes of BLAKE2b-512 differ when it does. */
+int fhsm_blake2b_available(void);
+/* HMAC over BLAKE2b in parts (OpenSSL's HMAC cannot set the digest's size
+ * parameter): begin gives the inner context, keyed; end finishes the inner
+ * hash and computes the outer one. fhsm_hmac does both for one part. */
+fhsm_rv_t fhsm_hmac_b2_begin(fhsm_hash_t alg, fhsm_slice_t key, struct evp_md_ctx_st **inner);
+fhsm_rv_t fhsm_hmac_b2_end(fhsm_hash_t alg, fhsm_slice_t key, struct evp_md_ctx_st *inner,
+                           uint8_t *mac, size_t *mac_len);
 
 /* The OpenSSL algorithm name for a hash ("SHA2-256", "SHA3-224", ...).
  * NULL for an unknown identifier. Exposed so that callers building an
