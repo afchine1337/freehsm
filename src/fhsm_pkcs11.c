@@ -8549,6 +8549,52 @@ static int fhsm_pset_selector_of(uint32_t cko_class, uint32_t ckk_type,
 }
 
 
+/* CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS (2.8.0): the private key by FIPS 186-5
+ * A.2.1, "Key Pair Generation Using Extra Random Bits" (FIPS 186-4 B.4.1):
+ * N + 64 random bits c, where N is the bit length of the order n, and
+ * d = (c mod (n - 1)) + 1. The 64 extra bits make the bias of the reduction
+ * negligible. CKM_EC_KEY_PAIR_GEN keeps OpenSSL's own generation. The bits
+ * come from the module's DRBG, as for every other key here, and the key is
+ * built from d by fhsm_ec_priv_from_scalar, which computes Q = dG. */
+static EVP_PKEY *ec_keygen_extra_bits(const char *curve) {
+    EVP_PKEY *out = NULL;
+    EC_GROUP *group = NULL;
+    BIGNUM *c = NULL, *nm1 = NULL, *d = NULL;
+    BN_CTX *bctx = NULL;
+    uint8_t rnd[(521 + 64 + 7) / 8], dbuf[(521 + 7) / 8];
+    int nid = EC_curve_nist2nid(curve);
+    if (nid == NID_undef) nid = OBJ_sn2nid(curve);
+    if (nid == NID_undef) return NULL;
+    group = EC_GROUP_new_by_curve_name(nid);
+    if (!group) return NULL;
+    const BIGNUM *n = EC_GROUP_get0_order(group);
+    const int nbits = BN_num_bits(n);
+    const int cbits = nbits + 64;
+    const size_t clen = ((size_t)cbits + 7) / 8, dlen = ((size_t)nbits + 7) / 8;
+    if (clen > sizeof rnd || dlen > sizeof dbuf) goto done;
+    if (fhsm_rng_bytes(rnd, clen) != FHSM_RV_OK) goto done;
+    if (cbits % 8) rnd[0] &= (uint8_t)((1u << (cbits % 8)) - 1u);   /* exactly N + 64 bits */
+    bctx = BN_CTX_new();
+    c = BN_bin2bn(rnd, (int)clen, NULL);
+    nm1 = BN_dup(n);
+    d = BN_new();
+    if (!bctx || !c || !nm1 || !d
+        || BN_sub_word(nm1, 1) != 1
+        || BN_mod(d, c, nm1, bctx) != 1
+        || BN_add_word(d, 1) != 1
+        || BN_bn2binpad(d, dbuf, (int)dlen) != (int)dlen) goto done;
+    out = fhsm_ec_priv_from_scalar(curve, dbuf, dlen);
+done:
+    OPENSSL_cleanse(rnd, sizeof rnd);
+    OPENSSL_cleanse(dbuf, sizeof dbuf);
+    BN_clear_free(c);
+    BN_clear_free(d);
+    BN_free(nm1);
+    BN_CTX_free(bctx);
+    EC_GROUP_free(group);
+    return out;
+}
+
 CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                         CK_ATTRIBUTE *pPub, CK_ULONG ulPub,
                         CK_ATTRIBUTE *pPriv, CK_ULONG ulPriv,
@@ -8621,6 +8667,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         switch (pMechanism->mechanism) {
             case CKM_RSA_PKCS_KEY_PAIR_GEN:      want_kt = CKK_RSA; break;
             case CKM_EC_KEY_PAIR_GEN:            want_kt = CKK_EC; break;
+            case 0x0000140BUL:                   want_kt = CKK_EC; break;   /* _W_EXTRA_BITS */
             case CKM_EC_EDWARDS_KEY_PAIR_GEN:    want_kt = CKK_EC_EDWARDS_CREATEOBJECT; break;
             case CKM_EC_MONTGOMERY_KEY_PAIR_GEN: want_kt = CKK_EC_MONTGOMERY_KT; break;
             case CKM_ML_KEM_KEY_PAIR_GEN:        want_kt = CKK_ML_KEM; break;
@@ -8740,7 +8787,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         }
         ckk_type = CKK_RSA;
         pw_family = FHSM_PAIRWISE_RSA;
-    } else if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN) {
+    } else if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN
+               || pMechanism->mechanism == 0x0000140BUL /* CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS */) {
         const char *curve = "P-256";
         long i = find_attr(pPub, ulPub, CKA_EC_PARAMS);
         /* The curve is the public template's CKA_EC_PARAMS, for this mechanism
@@ -8753,7 +8801,10 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             if (!m) return fhsm_ec_curve_refusal(pPub[i].pValue, pPub[i].ulValueLen);
             curve = m;
         }
-        pkey = EVP_PKEY_Q_keygen(NULL, NULL, "EC", curve);
+        if (pMechanism->mechanism == 0x0000140BUL)
+            pkey = ec_keygen_extra_bits(curve);
+        else
+            pkey = EVP_PKEY_Q_keygen(NULL, NULL, "EC", curve);
         ckk_type = CKK_EC;
         pw_family = FHSM_PAIRWISE_EC;
     } else if (pMechanism->mechanism == CKM_EC_EDWARDS_KEY_PAIR_GEN) {

@@ -447,6 +447,10 @@ MECHANISMS: tuple[Mech, ...] = (
          refs=("FIPS 186-5", "FIPS 202", "RFC 8017 §8.1")),
 
     # === ECDSA / ECDH ==================================================
+    # 2.8.0: the private key by FIPS 186-5 A.2.1 (extra random bits),
+    # computed in C_GenerateKeyPair; the handler named is only a reference.
+    Mech("CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS", 0x0000140B, "EC", "keypair", "dispatch_ec_keypair",
+         fips="approved", key_type="CKK_EC", refs=("FIPS 186-5 A.2.1",)),
     Mech("CKM_EC_KEY_PAIR_GEN",    0x00001040, "EC",   "keypair", "dispatch_ec_keypair",
          fips="approved", key_type="CKK_EC",
          refs=("FIPS 186-5",),

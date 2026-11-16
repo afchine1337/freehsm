@@ -126,6 +126,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
   from the most significant bit as in PKCS#11's example. The derived key
   keeps the base key's protection. Not approved: all-mechanisms in
   permissive mode only. `tests/test_extract_pub_from_priv.c`.
+* **`CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS`**: an EC key pair whose private key
+  is made by FIPS 186-5 A.2.1, extra random bits -- N + 64 bits from the
+  module's DRBG reduced to d = (c mod (n - 1)) + 1 -- on the curves
+  `CKM_EC_KEY_PAIR_GEN` takes, with the same templates and the same
+  pair-wise check. In both builds. `tests/test_ec_extra_bits.c`.
 * **A partial block at `C_EncryptFinal` is `CKR_DATA_LEN_RANGE`.** ECB and
   CBC without padding, AES as 3DES, encrypted in parts with a total that
   is not whole blocks, answered `CKR_FUNCTION_FAILED` at Final, OpenSSL's
