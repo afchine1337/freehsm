@@ -1594,6 +1594,10 @@ static int fhsm_provider_mech_available(CK_ULONG m) {
             /* The twenty BLAKE2b mechanisms, 0x400C to 0x401F: digest, HMAC,
              * HMAC_GENERAL, KEY_DERIVE and KEY_GEN at four sizes. */
             if (m >= 0x0000400CUL && m <= 0x0000401FUL) return fhsm_blake2b_available();
+            /* Camellia 0x550..0x558 and ARIA 0x560..0x567 (2.8.0): the
+             * FIPS provider has neither. */
+            if (m >= 0x00000550UL && m <= 0x00000558UL) return fhsm_cipher_available("CAMELLIA-128-ECB");
+            if (m >= 0x00000560UL && m <= 0x00000567UL) return fhsm_cipher_available("ARIA-128-ECB");
             break;
     }
     switch (m) {
@@ -1609,6 +1613,10 @@ static int fhsm_provider_mech_available(CK_ULONG m) {
 }
 
 static int digest_mech_to_hash(CK_ULONG mech, fhsm_hash_t *h, int *non_approved);
+/* Defined beside aes_mode_cipher_name; C_DeriveKey's encryption derivations
+ * and op_init come first in the file. */
+static const char *blk_cipher_name(uint8_t blk, uint32_t mech, size_t kvl);
+static uint8_t blk_family_of(CK_ULONG m, CK_ULONG *aes_eq);
 
 /* Advertised means operational in THIS process, not merely compiled in:
  * a mechanism whose algorithm no loaded provider can serve is not offered. */
@@ -1753,7 +1761,8 @@ static void fhsm_mech_keysizes_for(const char *fam,
                                     CK_ULONG *mn, CK_ULONG *mx) {
     *mn = 0; *mx = 0;
     if (!fam) return;
-    if (!strcmp(fam, "AES"))     { *mn = 16;   *mx = 32;   return; }
+    if (!strcmp(fam, "AES") || !strcmp(fam, "CAMELLIA") || !strcmp(fam, "ARIA"))
+                                 { *mn = 16;   *mx = 32;   return; }
     /* An XTS key is two AES keys of the same length end to end (SP 800-38E):
      * 32 bytes for XTS-AES-128, 64 for XTS-AES-256. XTS-AES-192 is not
      * defined. */
@@ -2150,6 +2159,8 @@ typedef struct fhsm_op_s {
      * (UINT64_MAX: more than will ever be asked), and the bytes processed so
      * far, single-part or multipart (§6.11.3, #33 C13). */
     uint64_t    ctr_blocks_max;
+    uint8_t     blk;           /* 2.8.0: the cipher of an AES-shaped mechanism,
+                                * 0 AES, 1 Camellia, 2 ARIA (op_init) */
     uint64_t    ctr_bytes_done;
     /* CK_GCM_PARAMS members captured at EncryptInit / DecryptInit. The
      * static buffers are intentionally generous to cover Wycheproof's
@@ -3623,12 +3634,14 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             case 0x00004015UL: key_type = 0x3B; break;   /* CKM_BLAKE2B_256_KEY_GEN */
             case 0x0000401AUL: key_type = 0x3C; break;   /* CKM_BLAKE2B_384_KEY_GEN */
             case 0x0000401FUL: key_type = 0x3D; break;   /* CKM_BLAKE2B_512_KEY_GEN */
+            case 0x00000550UL: key_type = 0x25; break;   /* CKM_CAMELLIA_KEY_GEN -> CKK_CAMELLIA */
+            case 0x00000560UL: key_type = 0x26; break;   /* CKM_ARIA_KEY_GEN     -> CKK_ARIA */
             default:                          return FHSM_RV_MECHANISM_INVALID;
         }
         /* The BLAKE2b key generators: not approved, and only where the
          * provider computes BLAKE2b at its sizes, as the mechanisms that
          * use the keys. */
-        if (key_type >= 0x3A && key_type <= 0x3D
+        if (((key_type >= 0x3A && key_type <= 0x3D) || key_type == 0x25 || key_type == 0x26)
             && (fhsm_build_fips_strict || fhsm_mode_is_fips()
                 || !fhsm_provider_mech_available(pMechanism->mechanism)))
             return FHSM_RV_MECHANISM_INVALID;
@@ -4491,7 +4504,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
          * CKK_AES with CKA_VALUE_LEN 13: a key no AES mechanism could take.
          * C_GenerateKey, C_UnwrapKey and C_DeriveKey refuse such a length;
          * the import did not (#37 K2). */
-        if (a.cko == CKO_SECRET_KEY && a.ckk == CKK_AES && a.value_data
+        if (a.cko == CKO_SECRET_KEY && a.value_data
+            && (a.ckk == CKK_AES || a.ckk == 0x25 /* CKK_CAMELLIA */ || a.ckk == 0x26 /* CKK_ARIA */)
             && a.value_len != 16 && a.value_len != 24 && a.value_len != 32)
             return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         /* A DES2 key is 16 bytes and a DES3 key 24: any other length is a key
@@ -6114,12 +6128,19 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
      * the data, CK_AES_CBC_ENCRYPT_DATA_PARAMS or CK_DES_CBC_ENCRYPT_DATA_PARAMS.
      * Not an approved key derivation (SP 800-108 and SP 800-56C name none
      * of this shape), and 3DES besides: refused where NIST's rules apply. */
-    if (pMechanism->mechanism >= 0x00001102UL && pMechanism->mechanism <= 0x00001105UL) {
+    if ((pMechanism->mechanism >= 0x00001102UL && pMechanism->mechanism <= 0x00001105UL)
+        || pMechanism->mechanism == 0x00000556UL || pMechanism->mechanism == 0x00000557UL
+        || pMechanism->mechanism == 0x00000566UL || pMechanism->mechanism == 0x00000567UL) {
         const CK_ULONG em = pMechanism->mechanism;
-        if (fhsm_build_fips_strict || fhsm_mode_is_fips())
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips()
+            || !fhsm_provider_mech_available(em))
             return FHSM_RV_MECHANISM_INVALID;
         const int des3 = em == 0x00001102UL || em == 0x00001103UL;
-        const int cbc  = em == 0x00001103UL || em == 0x00001105UL;
+        const int cbc  = em == 0x00001103UL || em == 0x00001105UL
+                      || em == 0x00000557UL || em == 0x00000567UL;
+        /* Camellia and ARIA (2.8.0): the AES forms, by their cipher. */
+        const uint8_t dfam = (em == 0x00000556UL || em == 0x00000557UL) ? 1u
+                           : (em == 0x00000566UL || em == 0x00000567UL) ? 2u : 0u;
         const size_t bs = des3 ? 8u : 16u;
         const uint8_t *bv = NULL; size_t bvl = 0;
         uint32_t bcl = 0, bkt = 0;
@@ -6132,9 +6153,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         const char *cn = NULL;
         if (des3)            cn = des3_key24(bkt, bv, bvl, NULL)   /* DES2 or DES3 */
                                   ? (cbc ? "DES-EDE3-CBC" : "DES-EDE3-ECB") : NULL;
-        else if (bvl == 16)  cn = cbc ? "AES-128-CBC" : "AES-128-ECB";
-        else if (bvl == 24)  cn = cbc ? "AES-192-CBC" : "AES-192-ECB";
-        else if (bvl == 32)  cn = cbc ? "AES-256-CBC" : "AES-256-ECB";
+        else cn = blk_cipher_name(dfam, cbc ? 0x00001082UL : 0x00001081UL, bvl);
         if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
 
         /* The parameter. Every way it can be wrong -- missing, short, no
@@ -7371,7 +7390,8 @@ static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
      * the claimed CKA_KEY_TYPE, otherwise a blob wrapped as one key type is
      * being reinterpreted as an incompatible one. A CKA_VALUE_LEN in the
      * template must also match the recovered length. */
-    if (key_type == CKK_AES && pt_len != 16 && pt_len != 24 && pt_len != 32)
+    if ((key_type == CKK_AES || key_type == 0x25 || key_type == 0x26)
+        && pt_len != 16 && pt_len != 24 && pt_len != 32)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     if (key_type == 0x15 /* CKK_DES3 */ && pt_len != 24)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
@@ -7629,7 +7649,8 @@ static CK_RV kem_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     /* The lengths C_UnwrapKey holds an AES or DES3 key to. An ML-KEM secret
      * is 32 bytes, so CKK_AES alone gives AES-256, and CKK_DES3 needs
      * CKA_VALUE_LEN = 24. */
-    if (new_ckk == CKK_AES && out_len != 16 && out_len != 24 && out_len != 32)
+    if ((new_ckk == CKK_AES || new_ckk == 0x25 || new_ckk == 0x26)
+        && out_len != 16 && out_len != 24 && out_len != 32)
         return CKR_TEMPLATE_INCONSISTENT;
     if (new_ckk == 0x15 /* CKK_DES3 */ && out_len != 24)
         return CKR_TEMPLATE_INCONSISTENT;
@@ -11701,6 +11722,22 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
      * C_Sign or C_Encrypt that would fail to fetch it. */
     if (pMechanism && !fhsm_provider_mech_available(pMechanism->mechanism))
         return FHSM_RV_MECHANISM_INVALID;
+    /* Camellia and ARIA (2.8.0) run the AES path: the mechanism is read as
+     * its AES equivalent from here on, the family kept in op->blk. Not
+     * approved: refused where NIST's rules apply. */
+    op->blk = 0;
+    CK_MECHANISM blk_mech;
+    if (pMechanism) {
+        CK_ULONG aes_eq = 0;
+        const uint8_t fam = blk_family_of(pMechanism->mechanism, &aes_eq);
+        if (fam) {
+            if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return FHSM_RV_MECHANISM_INVALID;
+            blk_mech = *pMechanism;
+            blk_mech.mechanism = aes_eq;
+            pMechanism = &blk_mech;
+            op->blk = fam;
+        }
+    }
     /* The slot is being reused. Whatever AAD the previous operation left is
      * released here -- the one place that has to do it, because the slots
      * are static and no exit path destroys them. The multipart buffer has
@@ -12438,6 +12475,8 @@ static int fhsm_nonfips_enc_rejected(CK_ULONG mech) {
         case 0x00000136UL: /* CKM_DES3_CBC_PAD */
         case 0x00001226UL: /* CKM_CHACHA20 */
         case 0x00004021UL: /* CKM_CHACHA20_POLY1305 */
+        case 0x00000551UL: case 0x00000552UL: case 0x00000555UL: case 0x00000558UL: /* Camellia */
+        case 0x00000561UL: case 0x00000562UL: case 0x00000565UL:                    /* ARIA */
         case CKM_RSA_PKCS:
         case CKM_RSA_X_509:
             return 1;
@@ -12469,6 +12508,48 @@ static const char *aes_mode_cipher_name(uint32_t mech, size_t kvl) {
         case CKM_AES_CFB128:                    return cfb[k];
         default:                                return NULL;
     }
+}
+
+/* The cipher family an AES-shaped mechanism runs (2.8.0): 1 Camellia, 2
+ * ARIA, 0 any other; with the AES mechanism of the same shape in *aes_eq.
+ * op_init runs the AES path with it and remembers the family in op->blk;
+ * only the key type and the OpenSSL cipher name depend on the family. */
+static uint8_t blk_family_of(CK_ULONG m, CK_ULONG *aes_eq) {
+    switch (m) {
+        case 0x00000551UL: *aes_eq = 0x00001081UL; return 1;   /* CAMELLIA_ECB -> AES_ECB */
+        case 0x00000552UL: *aes_eq = 0x00001082UL; return 1;   /* _CBC */
+        case 0x00000553UL: *aes_eq = 0x00001083UL; return 1;   /* _MAC -> AES_MAC */
+        case 0x00000554UL: *aes_eq = 0x00001084UL; return 1;   /* _MAC_GENERAL */
+        case 0x00000555UL: *aes_eq = 0x00001085UL; return 1;   /* _CBC_PAD */
+        case 0x00000558UL: *aes_eq = 0x00001086UL; return 1;   /* _CTR */
+        case 0x00000561UL: *aes_eq = 0x00001081UL; return 2;   /* ARIA_ECB */
+        case 0x00000562UL: *aes_eq = 0x00001082UL; return 2;   /* _CBC */
+        case 0x00000563UL: *aes_eq = 0x00001083UL; return 2;   /* _MAC */
+        case 0x00000564UL: *aes_eq = 0x00001084UL; return 2;   /* _MAC_GENERAL */
+        case 0x00000565UL: *aes_eq = 0x00001085UL; return 2;   /* _CBC_PAD */
+        default: return 0;
+    }
+}
+static uint32_t blk_key_type(uint8_t blk) {
+    return blk == 1 ? 0x25u /* CKK_CAMELLIA */ : blk == 2 ? 0x26u /* CKK_ARIA */ : (uint32_t)CKK_AES;
+}
+static const char *blk_cipher_name(uint8_t blk, uint32_t mech, size_t kvl) {
+    if (blk == 0) return aes_mode_cipher_name(mech, kvl);
+    int k = (kvl == 16) ? 0 : (kvl == 24) ? 1 : (kvl == 32) ? 2 : -1;
+    if (k < 0) return NULL;
+    static const char *const cam[3][3] = {
+        { "CAMELLIA-128-ECB", "CAMELLIA-192-ECB", "CAMELLIA-256-ECB" },
+        { "CAMELLIA-128-CBC", "CAMELLIA-192-CBC", "CAMELLIA-256-CBC" },
+        { "CAMELLIA-128-CTR", "CAMELLIA-192-CTR", "CAMELLIA-256-CTR" } };
+    static const char *const aria[2][3] = {
+        { "ARIA-128-ECB", "ARIA-192-ECB", "ARIA-256-ECB" },
+        { "ARIA-128-CBC", "ARIA-192-CBC", "ARIA-256-CBC" } };
+    int row = mech == 0x00001081UL ? 0
+            : (mech == 0x00001082UL || mech == 0x00001085UL) ? 1
+            : mech == 0x00001086UL ? 2 : -1;
+    if (row < 0) return NULL;
+    if (blk == 1) return cam[row][k];
+    return row < 2 ? aria[row][k] : NULL;   /* PKCS#11 has no ARIA_CTR */
 }
 
 /* The four 3DES MACs (2.8.0): CKM_DES3_MAC, CKM_DES3_MAC_GENERAL,
@@ -12523,10 +12604,10 @@ static fhsm_rv_t cbcmac_open(fhsm_token_t *t, fhsm_op_t *op) {
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
     const int des3 = mech_is_des3_mac(op->mechanism);
-    if ((des3 ? !is_des3_key_type(kt) : kt != (uint32_t)CKK_AES))
+    if ((des3 ? !is_des3_key_type(kt) : kt != blk_key_type(op->blk)))
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     const char *cn = des3 ? (des3_key24(kt, kv, kvl, NULL) ? "DES-EDE3-ECB" : NULL)
-                          : aes_mode_cipher_name(CKM_AES_ECB, kvl);
+                          : blk_cipher_name(op->blk, CKM_AES_ECB, kvl);
     if (!cn) return FHSM_RV_KEY_SIZE_RANGE;
     EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cn, NULL);
     if (!c) return FHSM_RV_MECHANISM_INVALID;
@@ -12775,6 +12856,10 @@ static int fhsm_cipher_mech_valid(CK_ULONG mech) {
         case CKM_AES_XTS:       /* 0x1071 */
         case 0x00001226UL:      /* CKM_CHACHA20 */
         case 0x00004021UL:      /* CKM_CHACHA20_POLY1305 */
+        case 0x00000551UL: case 0x00000552UL:   /* CKM_CAMELLIA_ECB, _CBC */
+        case 0x00000555UL: case 0x00000558UL:   /* CKM_CAMELLIA_CBC_PAD, _CTR */
+        case 0x00000561UL: case 0x00000562UL:   /* CKM_ARIA_ECB, _CBC */
+        case 0x00000565UL:                      /* CKM_ARIA_CBC_PAD */
         case CKM_AES_GCM:       /* 0x1087 */
         case 0x00001088UL:      /* CKM_AES_CCM */
         case 0x00000132UL:      /* CKM_DES3_ECB */
@@ -12846,6 +12931,12 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x1104: case 0x1105:                           /* AES ECB/CBC_ENCRYPT_DATA */
             want = 0x1F; break;                             /* CKK_AES */
         case 0x1071: want = 0x35; break;                    /* AES_XTS -> CKK_AES_XTS */
+        case 0x0551: case 0x0552: case 0x0553: case 0x0554: /* Camellia ECB/CBC/MAC/MAC_GENERAL */
+        case 0x0555: case 0x0556: case 0x0557: case 0x0558: /* CBC_PAD/ECB_/CBC_ENCRYPT_DATA/CTR */
+            want = 0x25; break;                             /* CKK_CAMELLIA */
+        case 0x0561: case 0x0562: case 0x0563: case 0x0564: /* ARIA ECB/CBC/MAC/MAC_GENERAL */
+        case 0x0565: case 0x0566: case 0x0567:              /* CBC_PAD/ECB_/CBC_ENCRYPT_DATA */
+            want = 0x26; break;                             /* CKK_ARIA */
         case 0x1226: want = 0x33; break;                    /* CHACHA20 -> CKK_CHACHA20 */
         case 0x4021: want = 0x33; break;                    /* CHACHA20_POLY1305 -> CKK_CHACHA20 */
         case 0x1228: want = 0x34; break;                    /* POLY1305 -> CKK_POLY1305 */
@@ -13201,7 +13292,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         || aes_is_feedback_mode(op->mechanism)) {
         int is_ecb = (op->mechanism == CKM_AES_ECB);
         /* AES-ECB is FIPS-approved (SP 800-38A) and allowed in both profiles. */
-        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (kt != blk_key_type(op->blk)) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         if (!is_ecb && !op->have_iv) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
         /* AES-ECB and AES-CBC without padding take whole blocks (PKCS#11 v3.2
          * 6.13.4: the data length is a multiple of the block size). A partial
@@ -13211,7 +13302,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         if ((is_ecb || op->mechanism == CKM_AES_CBC) && (ulDataLen % 16) != 0) {
             op->active = 0; return FHSM_RV_DATA_LEN_RANGE;
         }
-        const char *cname = aes_mode_cipher_name(op->mechanism, kvl);
+        const char *cname = blk_cipher_name(op->blk, op->mechanism, kvl);
         if (!cname) { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
         EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cname, NULL);
         if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
@@ -13744,7 +13835,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         || aes_is_feedback_mode(op->mechanism)) {
         int is_ecb = (op->mechanism == CKM_AES_ECB);
         /* AES-ECB is FIPS-approved (SP 800-38A) and allowed in both profiles. */
-        if (kt != CKK_AES) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
+        if (kt != blk_key_type(op->blk)) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         if (!is_ecb && !op->have_iv) { op->active = 0; return FHSM_RV_ARGUMENTS_BAD; }
         /* The ciphertext of AES-ECB, AES-CBC and AES-CBC-PAD is whole blocks,
          * and that of AES-CBC-PAD at least one. Any other length cannot be a
@@ -13756,7 +13847,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
                 || (op->mechanism == CKM_AES_CBC_PAD && ulEncLen == 0))) {
             op->active = 0; return FHSM_RV_ENCRYPTED_DATA_LEN_RANGE;
         }
-        const char *cname = aes_mode_cipher_name(op->mechanism, kvl);
+        const char *cname = blk_cipher_name(op->blk, op->mechanism, kvl);
         if (!cname) { op->active = 0; return FHSM_RV_KEY_SIZE_RANGE; }
         EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cname, NULL);
         if (!c) { op->active = 0; return FHSM_RV_MECHANISM_INVALID; }
@@ -14189,6 +14280,8 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x00004012UL: case 0x00004013UL:   /* CKM_BLAKE2B_256_HMAC, _GENERAL */
         case 0x00004017UL: case 0x00004018UL:   /* CKM_BLAKE2B_384_HMAC, _GENERAL */
         case 0x0000401CUL: case 0x0000401DUL:   /* CKM_BLAKE2B_512_HMAC, _GENERAL */
+        case 0x00000553UL: case 0x00000554UL:   /* CKM_CAMELLIA_MAC, _GENERAL */
+        case 0x00000563UL: case 0x00000564UL:   /* CKM_ARIA_MAC, _GENERAL */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -15022,6 +15115,8 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x00004012UL: case 0x00004013UL:   /* CKM_BLAKE2B_256_HMAC, _GENERAL */
         case 0x00004017UL: case 0x00004018UL:   /* CKM_BLAKE2B_384_HMAC, _GENERAL */
         case 0x0000401CUL: case 0x0000401DUL:   /* CKM_BLAKE2B_512_HMAC, _GENERAL */
+        case 0x00000553UL: case 0x00000554UL:   /* CKM_CAMELLIA_MAC, _GENERAL */
+        case 0x00000563UL: case 0x00000564UL:   /* CKM_ARIA_MAC, _GENERAL */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -16397,7 +16492,7 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     const int chacha = op->mechanism == 0x00001226UL    /* CKM_CHACHA20 */
                     || op->mechanism == 0x00004021UL;   /* CKM_CHACHA20_POLY1305 */
     if (chacha ? kt != 0x33u
-               : (des3 ? !is_des3_key_type(kt) : kt != (uint32_t)CKK_AES))
+               : (des3 ? !is_des3_key_type(kt) : kt != blk_key_type(op->blk)))
         return FHSM_RV_MECHANISM_INVALID;
     int kind = op_cipher_kind(op->mechanism);
     if (kind < 0) return FHSM_RV_MECHANISM_INVALID;
@@ -16410,7 +16505,7 @@ static fhsm_rv_t ensure_cipher_ctx(fhsm_op_t *op, fhsm_token_t *t, int enc) {
     const char *cname = chacha ? (op->mechanism == 0x00004021UL ? "ChaCha20-Poly1305" : "ChaCha20")
                       : des3 ? (op->mechanism == 0x00000132UL ? "DES-EDE3-ECB" : "DES-EDE3-CBC")
                       : (kind == 0) ? gcm[ksel]
-                      : aes_mode_cipher_name(op->mechanism, kvl);
+                      : blk_cipher_name(op->blk, op->mechanism, kvl);
     if (!cname) return FHSM_RV_MECHANISM_INVALID;
     EVP_CIPHER *cipher = EVP_CIPHER_fetch(NULL, cname, NULL);
     if (!cipher) return FHSM_RV_MECHANISM_INVALID;

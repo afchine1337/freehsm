@@ -144,6 +144,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   that parameter. Single-part and in parts. Not approved: all-mechanisms
   in permissive mode only, and where the provider honours the size
   parameter -- the FIPS provider has no BLAKE2b. `tests/test_blake2b.c`.
+* **Camellia and ARIA** (RFC 3713, RFC 5794): ECB, CBC, CBC-PAD, CTR
+  (Camellia; PKCS#11 has no ARIA CTR), the CBC-MAC as `*_MAC` and
+  `*_MAC_GENERAL`, key generation and `*_ECB_ENCRYPT_DATA` /
+  `*_CBC_ENCRYPT_DATA`, seventeen mechanisms, on `CKK_CAMELLIA` and
+  `CKK_ARIA` keys of 16, 24 or 32 bytes. They run the AES path with their
+  own cipher. Single-part and in parts. Not approved: all-mechanisms in
+  permissive mode only, where the provider serves them -- the FIPS provider
+  has neither. `tests/test_camellia_aria.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first

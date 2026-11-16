@@ -1165,6 +1165,10 @@ tests/test_ripemd160: tests/test_ripemd160.c libfreehsm.so
 tests/test_blake2b: tests/test_blake2b.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Camellia and ARIA (2.8.0).
+tests/test_camellia_aria: tests/test_camellia_aria.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # A class and a key type that disagree are refused by C_GenerateKeyPair and
 # C_CreateObject; an EC private key without its curve is incomplete; a copy
 # with a new CKA_VALUE is read-only (three neighbours of #33 C3 and C7).
@@ -1459,6 +1463,7 @@ TEST_BINS = \
 	tests/test_ec_extra_bits \
 	tests/test_ripemd160 \
 	tests/test_blake2b \
+	tests/test_camellia_aria \
 	tests/test_finalize_release \
 	tests/test_apilock \
 	tests/test_concurrency \
@@ -1691,6 +1696,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_ripemd160
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_blake2b
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_camellia_aria
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_finalize_release
 # The concurrency tests (#111-prep) were run by hand under TSAN=1 and by
