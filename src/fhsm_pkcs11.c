@@ -2719,8 +2719,9 @@ static uint8_t fhsm_usage_possible(uint32_t cko_class, uint32_t kt) {
         case 0x00000000UL:   /* CKK_RSA */
             return priv ? (FHSM_USAGE_DECRYPT | FHSM_USAGE_SIGN | FHSM_USAGE_UNWRAP)
                         : (FHSM_USAGE_ENCRYPT | FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP);
-        case 0x00000003UL:   /* CKK_EC: ECDSA and ECDH */
-            return (uint8_t)((priv ? FHSM_USAGE_SIGN : FHSM_USAGE_VERIFY) | FHSM_USAGE_DERIVE);
+        case 0x00000003UL:   /* CKK_EC: ECDSA and ECDH, and CKM_ECDH_AES_KEY_WRAP (2.8.0) */
+            return (uint8_t)((priv ? FHSM_USAGE_SIGN | FHSM_USAGE_UNWRAP
+                                   : FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP) | FHSM_USAGE_DERIVE);
         case 0x00000041UL:   /* CKK_EC_MONTGOMERY: X25519, X448 */
             return FHSM_USAGE_DERIVE;
         case 0x00000040UL:   /* CKK_EC_EDWARDS */
@@ -2753,7 +2754,13 @@ static uint8_t fhsm_usage_possible(uint32_t cko_class, uint32_t kt) {
 static uint8_t fhsm_compute_usage(uint32_t cko_class, uint32_t kt,
                                   CK_ATTRIBUTE *tmpl, CK_ULONG n) {
     const uint8_t possible = fhsm_usage_possible(cko_class, kt);
-    uint8_t u = (uint8_t)(FHSM_USAGE_VALID | (possible & (uint8_t)~FHSM_USAGE_DERIVE));
+    /* CKA_WRAP and CKA_UNWRAP of an EC key (2.8.0, CKM_ECDH_AES_KEY_WRAP)
+     * are off unless asked, as CKA_DERIVE is: before that mechanism no EC
+     * key could have them, and an EC key made without asking reads them
+     * FALSE as it did. */
+    const uint8_t off_unless_asked = (uint8_t)(FHSM_USAGE_DERIVE
+        | (kt == 0x00000003UL ? (FHSM_USAGE_WRAP | FHSM_USAGE_UNWRAP) : 0));
+    uint8_t u = (uint8_t)(FHSM_USAGE_VALID | (possible & (uint8_t)~off_unless_asked));
     static const struct { CK_ATTRIBUTE_TYPE a; uint8_t bit; } map[] = {
         { CKA_ENCRYPT_ATTR, FHSM_USAGE_ENCRYPT }, { CKA_DECRYPT_ATTR, FHSM_USAGE_DECRYPT },
         { CKA_SIGN_ATTR, FHSM_USAGE_SIGN }, { CKA_VERIFY_ATTR, FHSM_USAGE_VERIFY },
@@ -6914,6 +6921,137 @@ static int pkey_is_ckk(EVP_PKEY *pk, CK_ULONG ckk) {
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * CKM_RSA_AES_KEY_WRAP and CKM_ECDH_AES_KEY_WRAP (2.8.0), PKCS#11 v2.40
+ * 2.1.21 and 2.3.12, which v3.x keeps: a temporary AES key wraps the target
+ * key with AES-KWP (RFC 5649), and the temporary key travels in front of it
+ * -- RSA-OAEP-encrypted under the RSA wrapping key, or agreed by ECDH
+ * between an ephemeral EC key, whose public point travels instead, and the
+ * EC wrapping key. The format cloud providers take for importing a key.
+ *
+ * Two points the text leaves to the token, and how this one reads them:
+ *   - ECDH: the "public key material" in front is the ephemeral key's
+ *     uncompressed point, 04 || X || Y. The unwrap text splits the blob at
+ *     "the public key material length" of the unwrapping key's domain, which
+ *     only a fixed encoding allows, and the bare point is the form
+ *     CKM_ECDH1_DERIVE must accept (2.3.8).
+ *   - ECDH: the AES key is "the first ulAESKeyBits bits" of the derivation,
+ *     so the leading bytes -- under CKD_NULL, of Z itself.
+ * ----------------------------------------------------------------------- */
+#define FHSM_CKM_RSA_AES_KEY_WRAP   0x00001054UL
+#define FHSM_CKM_ECDH_AES_KEY_WRAP  0x00001053UL
+
+typedef struct { CK_ULONG ulAESKeyBits; void *pOAEPParams; } fhsm_rsa_aes_params_t;
+typedef struct { CK_ULONG ulAESKeyBits; CK_ULONG kdf; CK_ULONG ulSharedDataLen;
+                 unsigned char *pSharedData; } fhsm_ecdh_aes_params_t;
+
+/* CK_RSA_AES_KEY_WRAP_PARAMS: the temporary key's bits, and the OAEP
+ * parameters as a CKM_RSA_PKCS_OAEP mechanism for the OAEP helpers. */
+static CK_RV rsa_aes_params(CK_MECHANISM *m, size_t *aes_len, CK_MECHANISM *oaep) {
+    if (!m->pParameter || m->ulParameterLen < sizeof(fhsm_rsa_aes_params_t))
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    fhsm_rsa_aes_params_t p;
+    memcpy(&p, m->pParameter, sizeof p);
+    if ((p.ulAESKeyBits != 128 && p.ulAESKeyBits != 192 && p.ulAESKeyBits != 256)
+        || !p.pOAEPParams)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    *aes_len = (size_t)p.ulAESKeyBits / 8;
+    /* CK_RSA_PKCS_OAEP_PARAMS: five CK_ULONG-sized fields. */
+    oaep->mechanism = CKM_RSA_PKCS_OAEP;
+    oaep->pParameter = p.pOAEPParams;
+    oaep->ulParameterLen = 5 * sizeof(CK_ULONG);
+    return FHSM_RV_OK;
+}
+
+static CK_RV ecdh_aes_params(CK_MECHANISM *m, fhsm_ecdh_aes_params_t *p) {
+    if (!m->pParameter || m->ulParameterLen < sizeof(*p)) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    memcpy(p, m->pParameter, sizeof *p);
+    if (p->ulAESKeyBits != 128 && p->ulAESKeyBits != 192 && p->ulAESKeyBits != 256)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if ((p->ulSharedDataLen && !p->pSharedData) || p->ulSharedDataLen > 0x10000UL)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    switch (p->kdf) {
+        case 1:                                   /* CKD_NULL: no shared data */
+            return p->ulSharedDataLen ? FHSM_RV_MECHANISM_PARAM_INVALID : FHSM_RV_OK;
+        case 2: case 5: case 6: case 7: case 8:   /* CKD_SHA1/224/256/384/512_KDF */
+            return FHSM_RV_OK;
+        default:
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+    }
+}
+
+/* The AES key from Z: its leading bytes under CKD_NULL, or the ANSI X9.63
+ * KDF with the shared data (the CKD_SHA*_KDF of PKCS#11). */
+static fhsm_rv_t ecdh_aes_kek(const fhsm_ecdh_aes_params_t *p, const uint8_t *z, size_t zl,
+                              uint8_t *k, size_t kl) {
+    if (p->kdf == 1) {
+        if (zl < kl) return FHSM_RV_MECHANISM_PARAM_INVALID;   /* a curve too small for the key */
+        memcpy(k, z, kl);
+        return FHSM_RV_OK;
+    }
+    const char *dn = p->kdf == 2 ? "SHA1" : p->kdf == 5 ? "SHA224" : p->kdf == 6 ? "SHA256"
+                   : p->kdf == 7 ? "SHA384" : "SHA512";
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "X963KDF", NULL);
+    EVP_KDF_CTX *kc = kdf ? EVP_KDF_CTX_new(kdf) : NULL;
+    EVP_KDF_free(kdf);
+    if (!kc) return FHSM_RV_FUNCTION_FAILED;
+    OSSL_PARAM kp[4];
+    int np = 0;
+    kp[np++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, (char *)dn, 0);
+    kp[np++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, (void *)z, zl);
+    if (p->ulSharedDataLen)
+        kp[np++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO, p->pSharedData,
+                                                     (size_t)p->ulSharedDataLen);
+    kp[np] = OSSL_PARAM_construct_end();
+    int ok = EVP_KDF_derive(kc, k, kl, kp) == 1;
+    EVP_KDF_CTX_free(kc);
+    return ok ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+}
+
+/* Z between priv and peer, the peer's point checked on the curve first, as
+ * CKM_ECDH1_DERIVE checks it (the invalid-curve attack). */
+static fhsm_rv_t ecdh_z(EVP_PKEY *priv, EVP_PKEY *peer, uint8_t *z, size_t *zl) {
+    EVP_PKEY_CTX *chk = EVP_PKEY_CTX_new_from_pkey(NULL, peer, NULL);
+    int on_curve = chk && EVP_PKEY_public_check(chk) == 1;
+    EVP_PKEY_CTX_free(chk);
+    if (!on_curve) return 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
+    EVP_PKEY_CTX *d = EVP_PKEY_CTX_new_from_pkey(NULL, priv, NULL);
+    size_t n = 0;
+    int ok = d && EVP_PKEY_derive_init(d) == 1 && EVP_PKEY_derive_set_peer(d, peer) == 1
+          && EVP_PKEY_derive(d, NULL, &n) == 1 && n > 0 && n <= FHSM_ECDH_Z_MAX
+          && EVP_PKEY_derive(d, z, &n) == 1;
+    EVP_PKEY_CTX_free(d);
+    if (!ok) return FHSM_RV_FUNCTION_FAILED;
+    *zl = n;
+    return FHSM_RV_OK;
+}
+
+/* The length of the uncompressed point of an EC key's curve. */
+static size_t ec_point_len(EVP_PKEY *k) {
+    int bits = EVP_PKEY_get_bits(k);
+    return bits > 0 ? 1 + 2 * (((size_t)bits + 7) / 8) : 0;
+}
+
+/* AES-KWP (RFC 5649) under kek, in one call. */
+static fhsm_rv_t kwp_run(int enc, const uint8_t *kek, size_t kekl,
+                         const uint8_t *in, size_t inl, uint8_t *out, size_t *outl) {
+    const char *cn = kekl == 16 ? "AES-128-WRAP-PAD" : kekl == 24 ? "AES-192-WRAP-PAD"
+                   : kekl == 32 ? "AES-256-WRAP-PAD" : NULL;
+    if (!cn || inl > 0x7FFFFFF0u) return FHSM_RV_ARGUMENTS_BAD;
+    EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, cn, NULL);
+    EVP_CIPHER_CTX *ctx = c ? EVP_CIPHER_CTX_new() : NULL;
+    int ol = 0, fl = 0;
+    if (ctx) EVP_CIPHER_CTX_set_flags(ctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
+    int ok = ctx && EVP_CipherInit_ex2(ctx, c, kek, NULL, enc, NULL) == 1
+          && EVP_CipherUpdate(ctx, out, &ol, in, (int)inl) == 1
+          && EVP_CipherFinal_ex(ctx, out + ol, &fl) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    EVP_CIPHER_free(c);
+    if (!ok) return enc ? FHSM_RV_FUNCTION_FAILED : 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
+    *outl = (size_t)ol + (size_t)fl;
+    return FHSM_RV_OK;
+}
+
 static CK_RV wrap_key_value(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                             CK_OBJECT_HANDLE hWrappingKey, CK_OBJECT_HANDLE hKey,
                             unsigned char *pWrappedKey, CK_ULONG *pulWrappedKeyLen,
@@ -7148,6 +7286,84 @@ static CK_RV wrap_key_value(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism
         return FHSM_RV_OK;
     }
 
+    /* --- CKM_RSA_AES_KEY_WRAP: OAEP(K) || KWP_K(key), K fresh --- */
+    if (pMechanism->mechanism == FHSM_CKM_RSA_AES_KEY_WRAP) {
+        size_t al = 0;
+        CK_MECHANISM om;
+        { CK_RV pr = rsa_aes_params(pMechanism, &al, &om); if (pr != FHSM_RV_OK) return pr; }
+        if (wcl != CKO_PUBLIC_KEY || wkt != CKK_RSA)
+            return 0x00000115UL;   /* CKR_WRAPPING_KEY_TYPE_INCONSISTENT */
+        if (kvl == 0) return 0x00000062UL;   /* CKR_KEY_SIZE_RANGE */
+        size_t rl = 0;
+        fhsm_rv_t orv = fhsm_rsa_oaep_wrap(wkv, wkl, &om, NULL, 0, NULL, &rl);
+        if (orv != FHSM_RV_OK) return orv;
+        const size_t need = rl + ((kvl + 7) & ~(size_t)7) + 8;
+        if (pWrappedKey == NULL) { *pulWrappedKeyLen = (CK_ULONG)need; return FHSM_RV_OK; }
+        if (*pulWrappedKeyLen < need) { *pulWrappedKeyLen = (CK_ULONG)need; return 0x00000150UL; }
+        uint8_t k[32];
+        size_t got = rl, wl = 0;
+        orv = fhsm_rng_bytes(k, al);
+        if (orv == FHSM_RV_OK) orv = fhsm_rsa_oaep_wrap(wkv, wkl, &om, k, al, pWrappedKey, &got);
+        if (orv == FHSM_RV_OK && got != rl) orv = FHSM_RV_FUNCTION_FAILED;
+        if (orv == FHSM_RV_OK) orv = kwp_run(1, k, al, kv, kvl, pWrappedKey + rl, &wl);
+        OPENSSL_cleanse(k, sizeof k);
+        if (orv != FHSM_RV_OK) return orv;
+        *pulWrappedKeyLen = (CK_ULONG)(rl + wl);
+        (void)fhsm_audit_event(FHSM_EV_WRAP, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
+        return FHSM_RV_OK;
+    }
+
+    /* --- CKM_ECDH_AES_KEY_WRAP: point || KWP_K(key), K from an ephemeral
+     * ECDH. Not approved: under CKD_NULL Z itself is the key, which SP
+     * 800-56C does not allow; refused where NIST's rules apply. --- */
+    if (pMechanism->mechanism == FHSM_CKM_ECDH_AES_KEY_WRAP) {
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return FHSM_RV_MECHANISM_INVALID;
+        fhsm_ecdh_aes_params_t ep;
+        { CK_RV pr = ecdh_aes_params(pMechanism, &ep); if (pr != FHSM_RV_OK) return pr; }
+        if (wcl != CKO_PUBLIC_KEY || wkt != CKK_EC)
+            return 0x00000115UL;   /* CKR_WRAPPING_KEY_TYPE_INCONSISTENT */
+        if (kvl == 0) return 0x00000062UL;   /* CKR_KEY_SIZE_RANGE */
+        const unsigned char *wp = wkv;
+        EVP_PKEY *pub = d2i_PUBKEY(NULL, &wp, (long)wkl);
+        if (!pub) return 0x00000113UL;   /* CKR_WRAPPING_KEY_HANDLE_INVALID */
+        const size_t pl = ec_point_len(pub);
+        const size_t need = pl + ((kvl + 7) & ~(size_t)7) + 8;
+        if (pl == 0) { EVP_PKEY_free(pub); return FHSM_RV_FUNCTION_FAILED; }
+        if (pWrappedKey == NULL || *pulWrappedKeyLen < need) {
+            EVP_PKEY_free(pub);
+            *pulWrappedKeyLen = (CK_ULONG)need;
+            return pWrappedKey == NULL ? FHSM_RV_OK : 0x00000150UL;
+        }
+        EVP_PKEY *eph = NULL;
+        EVP_PKEY_CTX *g = EVP_PKEY_CTX_new_from_pkey(NULL, pub, NULL);
+        fhsm_rv_t erv = (g && EVP_PKEY_keygen_init(g) == 1 && EVP_PKEY_keygen(g, &eph) == 1)
+                        ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+        EVP_PKEY_CTX_free(g);
+        size_t got = 0, zl = 0, wl = 0;
+        uint8_t z[FHSM_ECDH_Z_MAX], k[32];
+        const size_t al = (size_t)ep.ulAESKeyBits / 8;
+        if (erv == FHSM_RV_OK
+            && (EVP_PKEY_set_utf8_string_param(eph, OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT,
+                                               "uncompressed") != 1
+                || EVP_PKEY_get_octet_string_param(eph, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY,
+                                                   pWrappedKey, pl, &got) != 1
+                || got != pl))
+            erv = FHSM_RV_FUNCTION_FAILED;
+        if (erv == FHSM_RV_OK) erv = ecdh_z(eph, pub, z, &zl);
+        if (erv == FHSM_RV_OK) erv = ecdh_aes_kek(&ep, z, zl, k, al);
+        if (erv == FHSM_RV_OK) erv = kwp_run(1, k, al, kv, kvl, pWrappedKey + pl, &wl);
+        OPENSSL_cleanse(z, sizeof z);
+        OPENSSL_cleanse(k, sizeof k);
+        EVP_PKEY_free(eph);
+        EVP_PKEY_free(pub);
+        if (erv != FHSM_RV_OK) return erv;
+        *pulWrappedKeyLen = (CK_ULONG)(pl + wl);
+        (void)fhsm_audit_event(FHSM_EV_WRAP, -1, (int)hSession,
+                                fhsm_session_role(hSession), FHSM_RV_OK, FHSM_AUDIT_END);
+        return FHSM_RV_OK;
+    }
+
     /* --- AES-CBC / AES-CBC-PAD, all-mechanisms and permissive only --- */
     if (mech_is_aes_cbc_wrap(pMechanism->mechanism)) {
         if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return FHSM_RV_MECHANISM_INVALID;
@@ -7239,6 +7455,24 @@ static CK_RV unwrap_plain_cap(CK_MECHANISM *m, uint32_t ucl, uint32_t ukt,
          * is therefore enough, without parsing the key twice. */
         if (wlen == 0) return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
         *cap = (size_t)wlen;
+    } else if (mech == FHSM_CKM_RSA_AES_KEY_WRAP || mech == FHSM_CKM_ECDH_AES_KEY_WRAP) {
+        /* The blob is the OAEP block or the point, then KWP; the plaintext is
+         * shorter than the blob. Split and checked in unwrap_decrypt, which
+         * reads the key the split depends on. */
+        if (mech == FHSM_CKM_ECDH_AES_KEY_WRAP) {
+            if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return FHSM_RV_MECHANISM_INVALID;
+            fhsm_ecdh_aes_params_t ep;
+            { CK_RV pr = ecdh_aes_params(m, &ep); if (pr != FHSM_RV_OK) return pr; }
+            if (ucl != CKO_PRIVATE_KEY || ukt != CKK_EC)
+                return 0x000000F2UL;   /* CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT */
+        } else {
+            size_t al = 0; CK_MECHANISM om;
+            { CK_RV pr = rsa_aes_params(m, &al, &om); if (pr != FHSM_RV_OK) return pr; }
+            if (ucl != CKO_PRIVATE_KEY || ukt != CKK_RSA)
+                return 0x000000F2UL;   /* CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT */
+        }
+        if (wlen == 0) return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
+        *cap = (size_t)wlen;
     } else if (mech_is_aes_cbc_wrap(mech)) {
         /* AES-CBC / AES-CBC-PAD, all-mechanisms and permissive only; see
          * aes_cbc_wrap_run, whose output holds at least in_len + 16. */
@@ -7311,6 +7545,64 @@ static CK_RV unwrap_decrypt(CK_MECHANISM *m, const uint8_t *ukv, size_t ukl,
         *pt_len = cap;
         return fhsm_rsa_v15_unwrap(ukv, ukl, mech == CKM_RSA_X_509,
                                    in, in_len, pt, pt_len);
+    }
+    if (mech == FHSM_CKM_RSA_AES_KEY_WRAP) {
+        size_t al = 0; CK_MECHANISM om;
+        { CK_RV pr = rsa_aes_params(m, &al, &om); if (pr != FHSM_RV_OK) return pr; }
+        const unsigned char *pp = ukv;
+        EVP_PKEY *pk = d2i_AutoPrivateKey(NULL, &pp, (long)ukl);
+        int ms = pk ? EVP_PKEY_get_size(pk) : 0;
+        EVP_PKEY_free(pk);
+        if (ms <= 0) return 0x000000F0UL;   /* CKR_UNWRAPPING_KEY_HANDLE_INVALID */
+        const size_t rl = (size_t)ms;
+        if (in_len < rl + 16 || ((size_t)in_len - rl) % 8 != 0)
+            return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
+        if (cap < (size_t)in_len - rl - 8) return FHSM_RV_FUNCTION_FAILED;
+        uint8_t k[512];
+        size_t kl = sizeof k;
+        CK_RV rv = fhsm_rsa_oaep_unwrap(ukv, ukl, &om, in, rl, k, &kl);
+        if (rv == FHSM_RV_OK && kl != al) rv = 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
+        if (rv == FHSM_RV_OK) rv = kwp_run(0, k, al, in + rl, (size_t)in_len - rl, pt, pt_len);
+        OPENSSL_cleanse(k, sizeof k);
+        return rv;
+    }
+    if (mech == FHSM_CKM_ECDH_AES_KEY_WRAP) {
+        fhsm_ecdh_aes_params_t ep;
+        { CK_RV pr = ecdh_aes_params(m, &ep); if (pr != FHSM_RV_OK) return pr; }
+        const unsigned char *pp = ukv;
+        EVP_PKEY *priv = d2i_AutoPrivateKey(NULL, &pp, (long)ukl);
+        if (!priv) return 0x000000F0UL;   /* CKR_UNWRAPPING_KEY_HANDLE_INVALID */
+        const size_t pl = ec_point_len(priv);
+        if (pl == 0 || in_len < pl + 16 || ((size_t)in_len - pl) % 8 != 0
+            || in[0] != 0x04) {
+            EVP_PKEY_free(priv);
+            return 0x00000112UL;   /* CKR_WRAPPED_KEY_LEN_RANGE */
+        }
+        if (cap < (size_t)in_len - pl - 8) { EVP_PKEY_free(priv); return FHSM_RV_FUNCTION_FAILED; }
+        char curve[32] = "";
+        size_t cl = 0;
+        EVP_PKEY_get_utf8_string_param(priv, OSSL_PKEY_PARAM_GROUP_NAME, curve, sizeof curve, &cl);
+        OSSL_PARAM pp2[3] = {
+            OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, curve, 0),
+            OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_PUB_KEY, (void *)in, pl),
+            OSSL_PARAM_construct_end() };
+        EVP_PKEY *peer = NULL;
+        EVP_PKEY_CTX *fc = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+        CK_RV rv = (fc && EVP_PKEY_fromdata_init(fc) == 1
+                    && EVP_PKEY_fromdata(fc, &peer, EVP_PKEY_PUBLIC_KEY, pp2) == 1)
+                   ? FHSM_RV_OK : 0x00000110UL;   /* CKR_WRAPPED_KEY_INVALID */
+        EVP_PKEY_CTX_free(fc);
+        uint8_t z[FHSM_ECDH_Z_MAX], k[32];
+        size_t zl = 0;
+        const size_t al = (size_t)ep.ulAESKeyBits / 8;
+        if (rv == FHSM_RV_OK) rv = ecdh_z(priv, peer, z, &zl);
+        if (rv == FHSM_RV_OK) rv = ecdh_aes_kek(&ep, z, zl, k, al);
+        if (rv == FHSM_RV_OK) rv = kwp_run(0, k, al, in + pl, (size_t)in_len - pl, pt, pt_len);
+        OPENSSL_cleanse(z, sizeof z);
+        OPENSSL_cleanse(k, sizeof k);
+        EVP_PKEY_free(peer);
+        EVP_PKEY_free(priv);
+        return rv;
     }
     if (mech_is_aes_cbc_wrap(mech)) {
         if (cap < (size_t)in_len + 16) return FHSM_RV_FUNCTION_FAILED;

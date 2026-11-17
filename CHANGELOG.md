@@ -152,6 +152,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   own cipher. Single-part and in parts. Not approved: all-mechanisms in
   permissive mode only, where the provider serves them -- the FIPS provider
   has neither. `tests/test_camellia_aria.c`.
+* **`CKM_RSA_AES_KEY_WRAP` and `CKM_ECDH_AES_KEY_WRAP`**, key wrapping in
+  two layers (PKCS#11 v2.40 2.1.21 and 2.3.12): a fresh AES key wraps the
+  key with AES-KWP (RFC 5649), and travels in front of it RSA-OAEP-encrypted
+  under the RSA wrapping key, or as the uncompressed point of an ephemeral
+  EC key whose ECDH with the wrapping key gives it -- `CKD_NULL`, or the
+  ANSI X9.63 KDF with SHA-1 to SHA-512 and shared data. The format cloud
+  providers take for key import. `C_WrapKey` and `C_UnwrapKey`. RSA-AES is
+  approved (KTS-OAEP and KWP), in both builds; ECDH-AES is not, and runs
+  in the all-mechanisms build in permissive mode only. An EC key may now
+  have `CKA_WRAP` (public) and `CKA_UNWRAP` (private), off unless the
+  template asks, as `CKA_DERIVE` is. `tests/test_rsa_ecdh_aes_wrap.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first

@@ -215,6 +215,16 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_ARIA_CBC_ENCRYPT_DATA", 0x00000567, "ARIA", "derive", "dispatch_xor_base_and_data",
          fips="non-approved", key_type="CKK_ARIA", min_key_bits=128, max_key_bits=256,
          refs=("RFC 5794",)),
+    # Key wrapping in two layers (2.8.0, PKCS#11 v2.40 2.1.21 and 2.3.12): a
+    # temporary AES key wraps the key with AES-KWP and travels RSA-OAEP-
+    # encrypted, or agreed by an ephemeral ECDH. Computed in C_WrapKey and
+    # C_UnwrapKey; the handlers named are references. RSA-AES is KTS-OAEP and
+    # KWP, both approved; ECDH-AES may use Z itself as the key (CKD_NULL),
+    # which is not.
+    Mech("CKM_RSA_AES_KEY_WRAP",   0x00001054, "RSA", "wrap", "dispatch_aes_kw",
+         fips="approved", key_type="CKK_RSA", refs=("SP 800-56B rev. 2", "SP 800-38F", "RFC 5649")),
+    Mech("CKM_ECDH_AES_KEY_WRAP",  0x00001053, "EC",  "wrap", "dispatch_aes_kw",
+         fips="non-approved", key_type="CKK_EC", refs=("SP 800-56A rev. 3", "ANSI X9.63", "RFC 5649")),
     # XTS-AES (2.8.0): a CKK_AES_XTS key, two AES keys end to end, 32 or 64
     # bytes; the 16-byte tweak as the parameter; one data unit per operation.
     Mech("CKM_AES_XTS",            0x00001071, "AES-XTS", "encrypt", "dispatch_aes_cbc",
