@@ -787,6 +787,24 @@ MECHANISMS: tuple[Mech, ...] = (
          "dispatch_xor_base_and_data", fips="non-approved",
          refs=("RFC 5705", "PKCS#11 v3.2 6.40.9")),
 
+    # === IKE key derivation (2.8.0) ===================================
+    # PKCS#11 v3.2 6.64, the prf an HMAC; C_DeriveKey computes them and the
+    # handler named is only a reference. SP 800-135 rev. 1 4.1 covers the
+    # first three; the IKEv1 expansion of RFC 2409 appendix B is not
+    # approved: all-mechanisms in permissive mode only.
+    Mech("CKM_IKE_PRF_DERIVE",       0x0000402F, "IKE", "derive",
+         "dispatch_xor_base_and_data", fips="approved",
+         refs=("RFC 2409", "RFC 7296", "SP 800-135 rev. 1", "PKCS#11 v3.2 6.64.3")),
+    Mech("CKM_IKE1_PRF_DERIVE",      0x00004030, "IKE", "derive",
+         "dispatch_xor_base_and_data", fips="approved",
+         refs=("RFC 2409", "SP 800-135 rev. 1", "PKCS#11 v3.2 6.64.4")),
+    Mech("CKM_IKE2_PRF_PLUS_DERIVE", 0x0000402E, "IKE", "derive",
+         "dispatch_xor_base_and_data", fips="approved",
+         refs=("RFC 7296", "SP 800-135 rev. 1", "PKCS#11 v3.2 6.64.5")),
+    Mech("CKM_IKE1_EXTENDED_DERIVE", 0x00004031, "IKE", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved",
+         refs=("RFC 2409 appendix B", "PKCS#11 v3.2 6.64.6")),
+
     # === CKM_NIST_PRF_KDF: removed, 2026-09-14 ========================
     #
     # 0x384 is unassigned. PKCS#11 v3.2 has no CKM_NIST_PRF_KDF; the

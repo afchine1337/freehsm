@@ -6003,6 +6003,304 @@ static CK_RV tls12_key_mat_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     return FHSM_RV_OK;
 }
 
+/* ---------------------------------------------------------------------------
+ * IKE key derivation (PKCS#11 v3.2 6.64, 2.8.0)
+ *
+ *   CKM_IKE_PRF_DERIVE        0x402F  SKEYID / SKEYSEED (RFC 2409, RFC 7296)
+ *   CKM_IKE1_PRF_DERIVE       0x4030  SKEYID_d, _a, _e (RFC 2409 5)
+ *   CKM_IKE1_EXTENDED_DERIVE  0x4031  RFC 2409 appendix B and 5.5
+ *   CKM_IKE2_PRF_PLUS_DERIVE  0x402E  prf+ (RFC 7296 2.13)
+ *
+ * The prf is the HMAC prfMechanism names (CKM_SHA256_HMAC and the like, not
+ * a *_HMAC_GENERAL), computed by fhsm_hmac as C_Sign computes it. A key "of
+ * the prf's type" is a generic secret or an HMAC key type. Where NIST's
+ * rules apply the HMAC must be approved: SHA-1, SHA-2 or SHA-3. The three
+ * of SP 800-135 rev. 1 4.1 are approved; the extended derivation of
+ * appendix B is not, and runs in the all-mechanisms build in permissive mode
+ * only.
+ *
+ * 6.64.5 writes T3 = prf(K, T3 | S | 0x03) and Tn = prf(K, T(n-1) | n);
+ * RFC 7296 has T(n) = prf(K, T(n-1) | S | n), which is what this computes.
+ * ------------------------------------------------------------------------ */
+#define FHSM_CKM_IKE2_PRF_PLUS_DERIVE  0x0000402EUL
+#define FHSM_CKM_IKE_PRF_DERIVE        0x0000402FUL
+#define FHSM_CKM_IKE1_PRF_DERIVE       0x00004030UL
+#define FHSM_CKM_IKE1_EXTENDED_DERIVE  0x00004031UL
+
+static int ike_mech(CK_ULONG m) {
+    return m == FHSM_CKM_IKE2_PRF_PLUS_DERIVE || m == FHSM_CKM_IKE_PRF_DERIVE
+        || m == FHSM_CKM_IKE1_PRF_DERIVE || m == FHSM_CKM_IKE1_EXTENDED_DERIVE;
+}
+
+/* The HMAC key type of a hash: the type CKM_IKE_PRF_DERIVE gives its key
+ * when the template names none ("the underlying key type of the prf"). */
+static CK_ULONG ike_hmac_key_type(fhsm_hash_t h) {
+    switch (h) {
+        case FHSM_HASH_SHA1:        return 0x28;
+        case FHSM_HASH_SHA256:      return 0x2B;
+        case FHSM_HASH_SHA384:      return 0x2C;
+        case FHSM_HASH_SHA512:      return 0x2D;
+        case FHSM_HASH_SHA224:      return 0x2E;
+        case FHSM_HASH_SHA512_224:  return 0x43;
+        case FHSM_HASH_SHA512_256:  return 0x44;
+        case FHSM_HASH_SHA3_224:    return 0x36;
+        case FHSM_HASH_SHA3_256:    return 0x37;
+        case FHSM_HASH_SHA3_384:    return 0x38;
+        case FHSM_HASH_SHA3_512:    return 0x39;
+        case FHSM_HASH_RIPEMD160:   return 0x2A;
+        case FHSM_HASH_BLAKE2B_160: return 0x3A;
+        case FHSM_HASH_BLAKE2B_256: return 0x3B;
+        case FHSM_HASH_BLAKE2B_384: return 0x3C;
+        case FHSM_HASH_BLAKE2B_512: return 0x3D;
+        default:                    return CKK_GENERIC_SECRET;
+    }
+}
+
+static int ike_prf_key_type_ok(uint32_t kt) {
+    switch (kt) {
+        case 0x10: case 0x28: case 0x2A: case 0x2B: case 0x2C: case 0x2D: case 0x2E:
+        case 0x36: case 0x37: case 0x38: case 0x39:
+        case 0x3A: case 0x3B: case 0x3C: case 0x3D: case 0x43: case 0x44:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* A key the parameter names: visible, a secret key -- a generic secret
+ * where `generic` -- that permits derivation, as HKDF's salt key must. */
+static CK_RV ike_aux_key(fhsm_token_t *t, CK_OBJECT_HANDLE h, int generic,
+                         const uint8_t **v, size_t *vl) {
+    { CK_RV vr = fhsm_key_handle_visible(t, h, FHSM_RV_KEY_HANDLE_INVALID);
+      if (vr != FHSM_RV_OK) return vr; }
+    uint32_t cl = 0, kt = 0;
+    fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)h, v, vl, &cl, &kt);
+    if (r != FHSM_RV_OK) return r;
+    if (cl != CKO_SECRET_KEY || (generic && kt != CKK_GENERIC_SECRET))
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    return fhsm_check_usage(t, h, FHSM_USAGE_DERIVE);
+}
+
+/* Bytes appended to a buffer the caller sized. */
+#define IKE_PUT(buf, off, p, n) do { if (n) memcpy((buf) + (off), (p), (n)); (off) += (n); } while (0)
+
+static CK_RV ike_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                        const CK_MECHANISM *pMechanism,
+                        CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
+                        CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
+    const CK_ULONG m = pMechanism->mechanism;
+    const int strict = fhsm_build_fips_strict || fhsm_mode_is_fips();
+    if (m == FHSM_CKM_IKE1_EXTENDED_DERIVE && strict) return FHSM_RV_MECHANISM_INVALID;
+    if (!pMechanism->pParameter) return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+    typedef struct { CK_ULONG prfMechanism; unsigned char bDataAsKey, bRekey;
+                     unsigned char *pNi; CK_ULONG ulNiLen; unsigned char *pNr; CK_ULONG ulNrLen;
+                     CK_OBJECT_HANDLE hNewKey; } ike_prf_params_t;
+    typedef struct { CK_ULONG prfMechanism; unsigned char bHasPrevKey;
+                     CK_OBJECT_HANDLE hKeygxy, hPrevKey;
+                     unsigned char *pCKYi; CK_ULONG ulCKYiLen; unsigned char *pCKYr; CK_ULONG ulCKYrLen;
+                     unsigned char keyNumber; } ike1_prf_params_t;
+    typedef struct { CK_ULONG prfMechanism; unsigned char bHasKeygxy; CK_OBJECT_HANDLE hKeygxy;
+                     unsigned char *pExtraData; CK_ULONG ulExtraDataLen; } ike1_ext_params_t;
+    typedef struct { CK_ULONG prfMechanism; unsigned char bHasSeedKey; CK_OBJECT_HANDLE hSeedKey;
+                     unsigned char *pSeedData; CK_ULONG ulSeedDataLen; } ike2_plus_params_t;
+    union { ike_prf_params_t a; ike1_prf_params_t b; ike1_ext_params_t c; ike2_plus_params_t d; } p;
+    /* The extended and prf+ parameters have one layout, so one size. */
+    size_t want = m == FHSM_CKM_IKE_PRF_DERIVE ? sizeof p.a
+                : m == FHSM_CKM_IKE1_PRF_DERIVE ? sizeof p.b : sizeof p.c;
+    if (pMechanism->ulParameterLen != want) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    memcpy(&p, pMechanism->pParameter, want);
+
+    /* The prf: one of the HMACs, the whole MAC. All four structures start
+     * with prfMechanism. */
+    const CK_ULONG prf = p.a.prfMechanism;
+    fhsm_hash_t h; size_t hl = 0;
+    if (prf > 0xFFFFFFFFUL || !fhsm_hmac_hash_of((uint32_t)prf, &h, &hl)
+        || fhsm_hmac_is_general((uint32_t)prf) || hl == 0 || hl > 64)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (strict && (h == FHSM_HASH_RIPEMD160 || h == FHSM_HASH_MD5
+                   || (h >= FHSM_HASH_BLAKE2B_160 && h <= FHSM_HASH_BLAKE2B_512)))
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+    /* The base key. */
+    const uint8_t *bv = NULL; size_t bvl = 0;
+    uint32_t bcl = 0, bkt = 0;
+    { fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hBaseKey, &bv, &bvl, &bcl, &bkt);
+      if (r != FHSM_RV_OK) return r; }
+    const int data_as_key = m == FHSM_CKM_IKE_PRF_DERIVE && p.a.bDataAsKey;
+    if (bcl != CKO_SECRET_KEY || bvl == 0
+        || (data_as_key ? bkt != CKK_GENERIC_SECRET : !ike_prf_key_type_ok(bkt)))
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+
+    /* The template's type and length, per mechanism (6.64.3 to 6.64.6). */
+    long ki = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+    long vi = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+    CK_ULONG asked = 0;
+    if (vi >= 0) {
+        if (!pTemplate[vi].pValue || pTemplate[vi].ulValueLen != sizeof asked)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        memcpy(&asked, pTemplate[vi].pValue, sizeof asked);
+    }
+    size_t out_len;
+    if (m == FHSM_CKM_IKE_PRF_DERIVE) {
+        if (vi >= 0 && asked != hl) return FHSM_RV_KEY_SIZE_RANGE;
+        out_len = hl;
+    } else if (m == FHSM_CKM_IKE1_PRF_DERIVE) {
+        if (ki < 0) return CKR_TEMPLATE_INCOMPLETE;
+        if (vi >= 0 && (asked == 0 || asked > hl)) return FHSM_RV_KEY_SIZE_RANGE;
+        out_len = vi >= 0 ? (size_t)asked : hl;
+    } else {
+        if (vi < 0) return CKR_TEMPLATE_INCOMPLETE;
+        if (asked == 0 || asked > 255u * hl) return FHSM_RV_KEY_SIZE_RANGE;
+        out_len = (size_t)asked;
+    }
+    /* A key type with a length of its own must agree with it. */
+    { size_t l = 0;
+      CK_RV lr = ecdh_key_len(pTemplate, ulCount, out_len, &l);
+      if (lr != FHSM_RV_OK) return lr;
+      if (l != out_len) return CKR_TEMPLATE_INCONSISTENT; }
+
+    /* The prf's input: key and data, and the keys the parameter names. */
+    const uint8_t *k = bv; size_t kl = bvl;
+    uint8_t *kbuf = NULL, *data = NULL, *okm = NULL;
+    size_t dl = 0;
+    CK_OBJECT_HANDLE h2 = 0;
+    int truncate_base = 0;
+    CK_RV rv = FHSM_RV_OK;
+    if (m == FHSM_CKM_IKE_PRF_DERIVE) {
+        if (p.a.bDataAsKey && p.a.bRekey) return FHSM_RV_ARGUMENTS_BAD;
+        if (!p.a.pNi || !p.a.pNr || p.a.ulNiLen == 0 || p.a.ulNrLen == 0
+            || p.a.ulNiLen > 256 || p.a.ulNrLen > 256)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        const uint8_t *nv = NULL; size_t nvl = 0;
+        if (p.a.bRekey) {
+            rv = ike_aux_key(t, p.a.hNewKey, 1, &nv, &nvl);
+            if (rv != FHSM_RV_OK) return rv;
+            h2 = p.a.hNewKey;
+        }
+        const size_t nn = (size_t)p.a.ulNiLen + (size_t)p.a.ulNrLen;
+        if (p.a.bDataAsKey) {
+            kbuf = OPENSSL_malloc(nn); data = OPENSSL_malloc(bvl);
+            if (!kbuf || !data) { rv = FHSM_RV_HOST_MEMORY; goto done; }
+            size_t o = 0;
+            IKE_PUT(kbuf, o, p.a.pNi, p.a.ulNiLen); IKE_PUT(kbuf, o, p.a.pNr, p.a.ulNrLen);
+            k = kbuf; kl = nn;
+            memcpy(data, bv, bvl); dl = bvl;
+        } else {
+            data = OPENSSL_malloc(nvl + nn);
+            if (!data) { rv = FHSM_RV_HOST_MEMORY; goto done; }
+            IKE_PUT(data, dl, nv, nvl);
+            IKE_PUT(data, dl, p.a.pNi, p.a.ulNiLen); IKE_PUT(data, dl, p.a.pNr, p.a.ulNrLen);
+        }
+    } else if (m == FHSM_CKM_IKE1_PRF_DERIVE) {
+        if (!p.b.pCKYi || !p.b.pCKYr || p.b.ulCKYiLen == 0 || p.b.ulCKYrLen == 0
+            || p.b.ulCKYiLen > 64 || p.b.ulCKYrLen > 64)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        const uint8_t *gv = NULL, *pv = NULL; size_t gvl = 0, pvl = 0;
+        rv = ike_aux_key(t, p.b.hKeygxy, 1, &gv, &gvl);
+        if (rv != FHSM_RV_OK) return rv;
+        if (p.b.bHasPrevKey) {
+            rv = ike_aux_key(t, p.b.hPrevKey, 0, &pv, &pvl);
+            if (rv != FHSM_RV_OK) return rv;
+        }
+        h2 = p.b.hKeygxy;
+        data = OPENSSL_malloc(pvl + gvl + (size_t)p.b.ulCKYiLen + (size_t)p.b.ulCKYrLen + 1);
+        if (!data) { rv = FHSM_RV_HOST_MEMORY; goto done; }
+        IKE_PUT(data, dl, pv, pvl); IKE_PUT(data, dl, gv, gvl);
+        IKE_PUT(data, dl, p.b.pCKYi, p.b.ulCKYiLen); IKE_PUT(data, dl, p.b.pCKYr, p.b.ulCKYrLen);
+        data[dl++] = p.b.keyNumber;
+    } else {
+        /* The seed, S: a key's value then data (prf+), or g^xy then extra
+         * data (the IKEv1 expansion). */
+        const int ext = m == FHSM_CKM_IKE1_EXTENDED_DERIVE;
+        const unsigned char has = ext ? p.c.bHasKeygxy : p.d.bHasSeedKey;
+        const CK_OBJECT_HANDLE sk = ext ? p.c.hKeygxy : p.d.hSeedKey;
+        const unsigned char *sd = ext ? p.c.pExtraData : p.d.pSeedData;
+        const CK_ULONG sdl = ext ? p.c.ulExtraDataLen : p.d.ulSeedDataLen;
+        if ((!sd && sdl) || sdl > 4096) return FHSM_RV_MECHANISM_PARAM_INVALID;
+        const uint8_t *sv = NULL; size_t svl = 0;
+        if (has) {
+            rv = ike_aux_key(t, sk, ext, &sv, &svl);
+            if (rv != FHSM_RV_OK) return rv;
+            h2 = sk;
+        }
+        if (ext && !has && out_len <= hl) {
+            /* RFC 2409 appendix B: a key no longer than SKEYID_e is SKEYID_e,
+             * cut -- the base key's own bytes. */
+            truncate_base = 1;
+        } else {
+            data = OPENSSL_malloc(svl + (size_t)sdl + 1);
+            if (!data) { rv = FHSM_RV_HOST_MEMORY; goto done; }
+            IKE_PUT(data, dl, sv, svl); IKE_PUT(data, dl, sd, (size_t)sdl);
+        }
+    }
+
+    okm = OPENSSL_malloc(out_len > hl ? out_len : hl);
+    if (!okm) { rv = FHSM_RV_HOST_MEMORY; goto done; }
+    if (truncate_base) {
+        if (bvl < out_len) { rv = FHSM_RV_KEY_SIZE_RANGE; goto done; }
+        memcpy(okm, bv, out_len);
+    } else if (m == FHSM_CKM_IKE_PRF_DERIVE || m == FHSM_CKM_IKE1_PRF_DERIVE) {
+        uint8_t mac[64]; size_t ml = sizeof mac;
+        rv = fhsm_hmac(h, FHSM_SLICE(k, kl), FHSM_SLICE(data, dl), mac, &ml);
+        if (rv == FHSM_RV_OK && ml != hl) rv = FHSM_RV_FUNCTION_FAILED;
+        if (rv == FHSM_RV_OK) memcpy(okm, mac, out_len);
+        OPENSSL_cleanse(mac, sizeof mac);
+    } else {
+        /* prf+: T(i) = prf(K, T(i-1) | S | i). The IKEv1 expansion:
+         * K(i) = prf(K, K(i-1) | S), K(1) = prf(K, S) -- or prf(K, 0x00)
+         * where S is empty, and then K(2) = prf(K, K(1)): the 0x00 is K(1)'s
+         * alone (RFC 2409 appendix B). */
+        const int plus = m == FHSM_CKM_IKE2_PRF_PLUS_DERIVE;
+        uint8_t *in = OPENSSL_malloc(hl + dl + 1);
+        uint8_t prev[64];
+        size_t done_len = 0, prev_len = 0;
+        if (!in) { rv = FHSM_RV_HOST_MEMORY; goto done; }
+        for (unsigned i = 1; rv == FHSM_RV_OK && done_len < out_len; ++i) {
+            size_t il = 0;
+            IKE_PUT(in, il, prev, prev_len);
+            IKE_PUT(in, il, data, dl);
+            if (plus) in[il++] = (uint8_t)i;
+            else if (i == 1 && dl == 0) in[il++] = 0x00;
+            size_t ml = sizeof prev;
+            rv = fhsm_hmac(h, FHSM_SLICE(k, kl), FHSM_SLICE(in, il), prev, &ml);
+            if (rv == FHSM_RV_OK && ml != hl) rv = FHSM_RV_FUNCTION_FAILED;
+            if (rv != FHSM_RV_OK) break;
+            prev_len = ml;
+            const size_t n = out_len - done_len < ml ? out_len - done_len : ml;
+            memcpy(okm + done_len, prev, n);
+            done_len += n;
+        }
+        OPENSSL_cleanse(prev, sizeof prev);
+        OPENSSL_clear_free(in, hl + dl + 1);
+    }
+
+    if (rv == FHSM_RV_OK) {
+        /* CKM_IKE_PRF_DERIVE gives the prf's HMAC key type where the
+         * template names none; the others a generic secret. */
+        CK_ATTRIBUTE *tt = pTemplate;
+        CK_ULONG tn = ulCount;
+        CK_ULONG dkt = ike_hmac_key_type(h);
+        if (m == FHSM_CKM_IKE_PRF_DERIVE && ki < 0) {
+            tt = OPENSSL_malloc((ulCount + 1) * sizeof *tt);
+            if (!tt) { rv = FHSM_RV_HOST_MEMORY; goto done; }
+            for (CK_ULONG i = 0; i < ulCount; ++i) tt[i] = pTemplate[i];
+            tt[ulCount] = (CK_ATTRIBUTE){ CKA_KEY_TYPE, &dkt, sizeof dkt };
+            tn = ulCount + 1;
+        }
+        rv = derive_store_secret(t, hSession, tt, tn, okm, out_len, CKO_SECRET_KEY,
+                                 hBaseKey, h2, truncate_base, phKey);
+        if (tt != pTemplate) OPENSSL_free(tt);
+    }
+
+done:
+    if (okm) OPENSSL_clear_free(okm, out_len > hl ? out_len : hl);
+    if (kbuf) OPENSSL_clear_free(kbuf, (size_t)p.a.ulNiLen + (size_t)p.a.ulNrLen);
+    if (data) OPENSSL_clear_free(data, dl);
+    return rv;
+}
+#undef IKE_PUT
+
 /* CKM_TLS_KDF and its alias CKM_TLS12_KDF (6.40.8, 6.40.9): the exporter of
  * RFC 5705, PRF(secret, label, client_random || server_random [|| length
  * || context]), the context and its two-byte length only where pContextData
@@ -6196,6 +6494,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     }
     if (pMechanism->mechanism == FHSM_CKM_TLS_KDF || pMechanism->mechanism == FHSM_CKM_TLS12_KDF)
         return tls_kdf_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
+    if (ike_mech(pMechanism->mechanism))
+        return ike_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
     /* HKDF (RFC 5869, PKCS#11 v3.2 §6.32). Advertised with a handler in
      * src/dispatch/fhsm_dispatch_kdf.c that nothing called; 660 vectors in
      * the conformance report read "HKDF derive failed for valid vector ...

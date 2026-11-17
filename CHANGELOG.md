@@ -181,6 +181,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   PRF, or with `CKM_TLS_PRF` the TLS 1.0 and 1.1 one, in permissive mode
   only. The MAC is approved; the exporter is not, and runs in the
   all-mechanisms build in permissive mode only. `tests/test_tls12_kdf.c`.
+* **The IKE key derivations** (PKCS#11 v3.2 6.64), the prf an HMAC:
+  `CKM_IKE_PRF_DERIVE` (SKEYID and SKEYSEED, from a pre-shared key, from
+  g^ir with the nonces as key, and the IKEv2 rekey), `CKM_IKE1_PRF_DERIVE`
+  (SKEYID_d, _a, _e), `CKM_IKE2_PRF_PLUS_DERIVE` (prf+, up to 255 blocks)
+  and `CKM_IKE1_EXTENDED_DERIVE` (RFC 2409 appendix B). The first three are
+  approved (SP 800-135 rev. 1 4.1) with an HMAC on SHA-1, SHA-2 or SHA-3;
+  the fourth runs in the all-mechanisms build in permissive mode only.
+  `tests/test_ike_prf.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first
