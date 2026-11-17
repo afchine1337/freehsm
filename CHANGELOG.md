@@ -173,6 +173,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   accepted. The master secret without the session hash is not approved
   (SP 800-135 rev. 1, IG D.Q) and runs in the all-mechanisms build in
   permissive mode only; the others in both builds. `tests/test_tls12_kdf.c`.
+* **`CKM_TLS_MAC` and `CKM_TLS_KDF`**, with their deprecated aliases
+  `CKM_TLS12_MAC` and `CKM_TLS12_KDF` (PKCS#11 v3.2 6.40.3, 6.40.8): the
+  Finished message's verify_data in `C_Sign` and `C_Verify`, one-shot and
+  in parts, 12 to 64 bytes, client or server label; and the RFC 5705
+  exporter in `C_DeriveKey`, with or without context. Both take the TLS 1.2
+  PRF, or with `CKM_TLS_PRF` the TLS 1.0 and 1.1 one, in permissive mode
+  only. The MAC is approved; the exporter is not, and runs in the
+  all-mechanisms build in permissive mode only. `tests/test_tls12_kdf.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first

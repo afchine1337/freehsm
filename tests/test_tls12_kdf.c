@@ -2,10 +2,11 @@
  * Copyright 2026 Afchine Madjlessi <afchine.mad@gmail.com>
  * SPDX-License-Identifier: Apache-2.0
  * ===========================================================================
- * test_tls12_kdf.c --- the TLS 1.2 key derivations (2.8.0):
+ * test_tls12_kdf.c --- the TLS 1.2 mechanisms (2.8.0):
  * CKM_TLS12_MASTER_KEY_DERIVE, CKM_TLS12_MASTER_KEY_DERIVE_DH, their
  * RFC 7627 forms CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE(_DH),
- * CKM_TLS12_KEY_AND_MAC_DERIVE and CKM_TLS12_KEY_SAFE_DERIVE.
+ * CKM_TLS12_KEY_AND_MAC_DERIVE, CKM_TLS12_KEY_SAFE_DERIVE, CKM_TLS_MAC,
+ * CKM_TLS_KDF and the aliases CKM_TLS12_MAC and CKM_TLS12_KDF.
  *
  * Every output is checked against the TLS 1.2 PRF of RFC 5246 5 computed
  * here, P_hash from C_Sign with CKM_SHA256_HMAC or CKM_SHA384_HMAC under a
@@ -23,6 +24,11 @@
  *       base key's, a master secret of 32 bytes, a 47-byte pre-master,
  *       SHA-1 as the PRF hash, and a master secret used by a mechanism
  *       outside its CKA_ALLOWED_MECHANISMS.
+ *   (T) the Finished MAC under the (X) master secret, one-shot and in
+ *       parts, signed and verified, the alias with the server's label and
+ *       32 bytes; a changed tag, a short one, a bad side or length.
+ *   (E) the exporter, with and without context, and its alias; a template
+ *       without a length. Refused where NIST's rules apply.
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -47,11 +53,18 @@ typedef struct { CK_ULONG ulMacSizeInBits, ulKeySizeInBits, ulIVSizeInBits; CK_B
                  CK_SSL3_RANDOM_DATA RandomInfo; CK_SSL3_KEY_MAT_OUT *pReturnedKeyMaterial;
                  CK_ULONG prfHashMechanism; } CK_TLS12_KEY_MAT_PARAMS;
 typedef struct { void *pData; CK_ULONG ulLen; } CK_KEY_DERIVATION_STRING_DATA;
+typedef struct { CK_ULONG prfHashMechanism, ulMacLength, ulServerOrClient; } CK_TLS_MAC_PARAMS;
+typedef struct { CK_ULONG prfMechanism; CK_BYTE *pLabel; CK_ULONG ulLabelLength;
+                 CK_SSL3_RANDOM_DATA RandomInfo; CK_BYTE *pContextData;
+                 CK_ULONG ulContextDataLength; } CK_TLS_KDF_PARAMS;
 
 #define CKR_OK                         0x000UL
 #define CKR_KEY_SIZE_RANGE             0x062UL
 #define CKR_MECHANISM_INVALID          0x070UL
 #define CKR_MECHANISM_PARAM_INVALID    0x071UL
+#define CKR_SIGNATURE_INVALID          0x0C0UL
+#define CKR_SIGNATURE_LEN_RANGE        0x0C1UL
+#define CKR_TEMPLATE_INCOMPLETE        0x0D0UL
 #define CKR_TEMPLATE_INCONSISTENT      0x0D1UL
 #define CKF_RW                         6UL
 #define CKO_SECRET_KEY                 4UL
@@ -64,6 +77,7 @@ typedef struct { void *pData; CK_ULONG ulLen; } CK_KEY_DERIVATION_STRING_DATA;
 #define CKA_SENSITIVE                  0x103UL
 #define CKA_ENCRYPT                    0x104UL
 #define CKA_SIGN                       0x108UL
+#define CKA_VERIFY                     0x10AUL
 #define CKA_DERIVE                     0x10CUL
 #define CKA_VALUE_LEN                  0x161UL
 #define CKA_EXTRACTABLE                0x162UL
@@ -81,6 +95,11 @@ typedef struct { void *pData; CK_ULONG ulLen; } CK_KEY_DERIVATION_STRING_DATA;
 #define CKM_TLS12_KEY_AND_MAC          0x03E1UL
 #define CKM_TLS12_MASTER_DH            0x03E2UL
 #define CKM_TLS12_KEY_SAFE             0x03E3UL
+#define CKM_TLS_MAC                    0x03E4UL
+#define CKM_TLS_KDF                    0x03E5UL
+#define CKM_TLS12_MAC                  0x03D8UL
+#define CKM_TLS12_KDF                  0x03D9UL
+#define CKM_TLS_PRF                    0x0378UL
 
 #define SO_PIN   "sopin1234"
 #define USER_PIN "userpin1234"
@@ -98,6 +117,10 @@ static CK_RV (*C_DeriveKey)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE, 
                             CK_ULONG, CK_OBJECT_HANDLE*);
 static CK_RV (*C_SignInit)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE);
 static CK_RV (*C_Sign)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG, CK_BYTE*, CK_ULONG*);
+static CK_RV (*C_SignUpdate)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG);
+static CK_RV (*C_SignFinal)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG*);
+static CK_RV (*C_VerifyInit)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE);
+static CK_RV (*C_Verify)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG, CK_BYTE*, CK_ULONG);
 
 static int fails;
 static void ok(int cond, const char *what) {
@@ -178,8 +201,9 @@ int main(void) {
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
     SYM(C_Login); SYM(C_Logout); SYM(C_InitPIN); SYM(C_GetMechanismList);
     SYM(C_CreateObject); SYM(C_GetAttributeValue); SYM(C_DeriveKey);
-    SYM(C_SignInit); SYM(C_Sign);
-    if (!C_DeriveKey || !C_Sign) { fprintf(stderr, "missing symbols\n"); return 2; }
+    SYM(C_SignInit); SYM(C_Sign); SYM(C_SignUpdate); SYM(C_SignFinal);
+    SYM(C_VerifyInit); SYM(C_Verify);
+    if (!C_DeriveKey || !C_Sign || !C_SignFinal || !C_Verify) { fprintf(stderr, "missing symbols\n"); return 2; }
 
     printf("TLS 1.2 key derivation\n\n");
     CK_BYTE label[32]; memset(label, ' ', 32); memcpy(label, "tls12", 5);
@@ -210,7 +234,7 @@ int main(void) {
     CK_ULONG cls = CKO_SECRET_KEY;
     CK_ATTRIBUTE mt[] = { { CKA_CLASS, &cls, sizeof cls }, { CKA_TOKEN, &no, 1 },
                           { CKA_SENSITIVE, &no, 1 }, { CKA_EXTRACTABLE, &yes, 1 },
-                          { CKA_DERIVE, &yes, 1 } };
+                          { CKA_DERIVE, &yes, 1 }, { CKA_SIGN, &yes, 1 }, { CKA_VERIFY, &yes, 1 } };
     CK_SSL3_RANDOM_DATA rnd = { cr, 32, sr, 32 };
     CK_BYTE got[64], want[160];
     char what[160];
@@ -221,7 +245,7 @@ int main(void) {
         CK_TLS12_MASTER_KEY_DERIVE_PARAMS mp = { rnd, &v, CKM_SHA256 };
         CK_MECHANISM m = { CKM_TLS12_MASTER, &mp, sizeof mp };
         CK_OBJECT_HANDLE ms = 0;
-        CK_RV rv = C_DeriveKey(s, &m, kp, mt, 5, &ms);
+        CK_RV rv = C_DeriveKey(s, &m, kp, mt, 7, &ms);
         if (nist) {
             snprintf(what, sizeof what, "(M) CKM_TLS12_MASTER_KEY_DERIVE refused: 0x%lx", rv);
             ok(rv == CKR_MECHANISM_INVALID, what);
@@ -244,9 +268,9 @@ int main(void) {
 
             CK_TLS12_MASTER_KEY_DERIVE_PARAMS dp = { rnd, &v, CKM_SHA256 };
             CK_MECHANISM dm = { CKM_TLS12_MASTER_DH, &dp, sizeof dp };
-            CK_RV r1 = C_DeriveKey(s, &dm, kd, mt, 5, &ms);
+            CK_RV r1 = C_DeriveKey(s, &dm, kd, mt, 7, &ms);
             dp.pVersion = NULL;
-            CK_RV r2 = C_DeriveKey(s, &dm, kd, mt, 5, &ms);
+            CK_RV r2 = C_DeriveKey(s, &dm, kd, mt, 7, &ms);
             snprintf(what, sizeof what, "(M) _DH: pVersion set refused, NULL accepted (0x%lx 0x%lx)", r1, r2);
             ok(r1 == CKR_MECHANISM_PARAM_INVALID && r2 == CKR_OK, what);
             ok(r2 == CKR_OK && value_of(ms, got, sizeof got) == 48
@@ -262,7 +286,7 @@ int main(void) {
         CK_VERSION v = { 0, 0 };
         CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS xp = { CKM_SHA384, sh, 48, &v };
         CK_MECHANISM m = { CKM_TLS12_EXT_MASTER, &xp, sizeof xp };
-        CK_RV rv = C_DeriveKey(s, &m, kp, mt, 5, &xms);
+        CK_RV rv = C_DeriveKey(s, &m, kp, mt, 7, &xms);
         snprintf(what, sizeof what, "(X) CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE, SHA-384: 0x%lx", rv);
         ok(rv == CKR_OK && listed(CKM_TLS12_EXT_MASTER), what);
         ok(value_of(xms, xv, sizeof xv) == 48
@@ -275,7 +299,7 @@ int main(void) {
         CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS dp = { CKM_SHA384, sh, 48, NULL };
         CK_MECHANISM dm = { CKM_TLS12_EXT_MASTER_DH, &dp, sizeof dp };
         CK_OBJECT_HANDLE h = 0;
-        rv = C_DeriveKey(s, &dm, kd, mt, 5, &h);
+        rv = C_DeriveKey(s, &dm, kd, mt, 7, &h);
         snprintf(what, sizeof what, "(X) _DH from a 32-byte pre-master secret: 0x%lx", rv);
         ok(rv == CKR_OK && value_of(h, got, sizeof got) == 48
            && p_hash(CKM_SHA384_HMAC, hd, "extended master secret", sh, 48, NULL, 0, want, 48)
@@ -343,7 +367,7 @@ int main(void) {
         CK_KEY_DERIVATION_STRING_DATA sd = { data, 4 };
         CK_MECHANISM cm = { CKM_CONCATENATE_BASE_AND_DATA, &sd, sizeof sd };
         CK_OBJECT_HANDLE h = 0;
-        CK_RV r4 = C_DeriveKey(s, &cm, xms, mt, 5, &h);
+        CK_RV r4 = C_DeriveKey(s, &cm, xms, mt, 7, &h);
         snprintf(what, sizeof what,
                  "(F) export, other protection, 32-byte master, not allowed (0x%lx 0x%lx 0x%lx 0x%lx)",
                  r1, r2, r3, r4);
@@ -356,9 +380,9 @@ int main(void) {
         CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS xp = { CKM_SHA384, sh, 48, NULL };
         CK_MECHANISM m = { CKM_TLS12_EXT_MASTER, &xp, sizeof xp };
         CK_OBJECT_HANDLE h = 0;
-        CK_RV r1 = C_DeriveKey(s, &m, k47, mt, 5, &h);
+        CK_RV r1 = C_DeriveKey(s, &m, k47, mt, 7, &h);
         xp.prfHashMechanism = CKM_SHA_1;
-        CK_RV r2 = C_DeriveKey(s, &m, kp, mt, 5, &h);
+        CK_RV r2 = C_DeriveKey(s, &m, kp, mt, 7, &h);
         xp.prfHashMechanism = CKM_SHA384;
         CK_ULONG l32 = 32;
         CK_ATTRIBUTE lt[] = { { CKA_VALUE_LEN, &l32, sizeof l32 } };
@@ -367,6 +391,93 @@ int main(void) {
                  r1, r2, r3);
         ok(r1 == CKR_KEY_SIZE_RANGE && r2 == CKR_MECHANISM_PARAM_INVALID
            && r3 == CKR_TEMPLATE_INCONSISTENT, what);
+    }
+
+    /* --- (T) the Finished MAC --------------------------------------------- */
+    CK_OBJECT_HANDLE hx = xms ? secret(xv, 48, CKA_SIGN) : 0;
+    if (xms && hx) {
+        CK_TLS_MAC_PARAMS tp = { CKM_SHA384, 12, 2 };
+        CK_MECHANISM m = { CKM_TLS_MAC, &tp, sizeof tp };
+        CK_BYTE tag[64], tag2[64];
+        CK_ULONG tl = sizeof tag, tl2 = sizeof tag2;
+        CK_RV r1 = C_SignInit(s, &m, xms);
+        if (r1 == CKR_OK) r1 = C_Sign(s, sh, 48, tag, &tl);
+        snprintf(what, sizeof what, "(T) CKM_TLS_MAC, client, 12 bytes: 0x%lx", r1);
+        ok(r1 == CKR_OK && tl == 12 && listed(CKM_TLS_MAC), what);
+        ok(p_hash(CKM_SHA384_HMAC, hx, "client finished", sh, 48, NULL, 0, want, 12)
+           && !memcmp(tag, want, 12), "(T) PRF(master, \"client finished\", hash)");
+        CK_RV r2 = C_SignInit(s, &m, xms);
+        if (r2 == CKR_OK) r2 = C_SignUpdate(s, sh, 20);
+        if (r2 == CKR_OK) r2 = C_SignUpdate(s, sh + 20, 28);
+        if (r2 == CKR_OK) r2 = C_SignFinal(s, tag2, &tl2);
+        snprintf(what, sizeof what, "(T) in parts, the same tag: 0x%lx", r2);
+        ok(r2 == CKR_OK && tl2 == 12 && !memcmp(tag, tag2, 12), what);
+        CK_RV v1 = C_VerifyInit(s, &m, xms);
+        if (v1 == CKR_OK) v1 = C_Verify(s, sh, 48, tag, 12);
+        tag[0] ^= 1;
+        CK_RV v2 = C_VerifyInit(s, &m, xms);
+        if (v2 == CKR_OK) v2 = C_Verify(s, sh, 48, tag, 12);
+        CK_RV v3 = C_VerifyInit(s, &m, xms);
+        if (v3 == CKR_OK) v3 = C_Verify(s, sh, 48, tag, 11);
+        snprintf(what, sizeof what, "(T) verified; changed, short refused (0x%lx 0x%lx 0x%lx)", v1, v2, v3);
+        ok(v1 == CKR_OK && v2 == CKR_SIGNATURE_INVALID && v3 == CKR_SIGNATURE_LEN_RANGE, what);
+
+        CK_TLS_MAC_PARAMS sp = { CKM_SHA384, 32, 1 };
+        CK_MECHANISM am = { CKM_TLS12_MAC, &sp, sizeof sp };
+        tl = sizeof tag;
+        CK_RV r3 = C_SignInit(s, &am, xms);
+        if (r3 == CKR_OK) r3 = C_Sign(s, sh, 48, tag, &tl);
+        snprintf(what, sizeof what, "(T) CKM_TLS12_MAC, server, 32 bytes: 0x%lx", r3);
+        ok(r3 == CKR_OK && tl == 32
+           && p_hash(CKM_SHA384_HMAC, hx, "server finished", sh, 48, NULL, 0, want, 32)
+           && !memcmp(tag, want, 32), what);
+
+        CK_TLS_MAC_PARAMS b1 = { CKM_SHA384, 12, 3 }, b2 = { CKM_SHA384, 11, 2 },
+                          b3 = { CKM_TLS_PRF, 16, 2 };
+        CK_MECHANISM bm = { CKM_TLS_MAC, &b1, sizeof b1 };
+        CK_RV f1 = C_SignInit(s, &bm, xms);
+        bm.pParameter = &b2;
+        CK_RV f2 = C_SignInit(s, &bm, xms);
+        bm.pParameter = &b3;
+        CK_RV f3 = C_SignInit(s, &bm, xms);
+        snprintf(what, sizeof what, "(T) side 3, 11 bytes, TLS 1.0 PRF of 16 refused (0x%lx 0x%lx 0x%lx)",
+                 f1, f2, f3);
+        ok(f1 == CKR_MECHANISM_PARAM_INVALID && f2 == CKR_MECHANISM_PARAM_INVALID
+           && f3 == CKR_MECHANISM_PARAM_INVALID, what);
+    } else ok(0, "(T) no master secret to MAC with");
+
+    /* --- (E) the exporter ---------------------------------------------------- */
+    if (xms && hx) {
+        CK_BYTE el[] = "EXPORTER-test", ctx[3] = { 'c', 't', 'x' }, sfx[64 + 5];
+        CK_ULONG l40 = 40;
+        CK_ATTRIBUTE et[] = { { CKA_CLASS, &cls, sizeof cls }, { CKA_TOKEN, &no, 1 },
+                              { CKA_VALUE_LEN, &l40, sizeof l40 } };
+        CK_TLS_KDF_PARAMS ep = { CKM_SHA384, el, 13, rnd, ctx, 3 };
+        CK_MECHANISM m = { CKM_TLS_KDF, &ep, sizeof ep };
+        CK_OBJECT_HANDLE h = 0;
+        CK_RV rv = C_DeriveKey(s, &m, xms, et, 3, &h);
+        if (nist) {
+            snprintf(what, sizeof what, "(E) CKM_TLS_KDF refused: 0x%lx", rv);
+            ok(rv == CKR_MECHANISM_INVALID, what);
+        } else {
+            memcpy(sfx, sr, 32); sfx[32] = 0; sfx[33] = 3; memcpy(sfx + 34, ctx, 3);
+            snprintf(what, sizeof what, "(E) CKM_TLS_KDF with context, 40 bytes: 0x%lx", rv);
+            ok(rv == CKR_OK && value_of(h, got, sizeof got) == 40
+               && p_hash(CKM_SHA384_HMAC, hx, "EXPORTER-test", cr, 32, sfx, 37, want, 40)
+               && !memcmp(got, want, 40), what);
+            ok(bool_attr(h, CKA_EXTRACTABLE) == 1 && bool_attr(h, CKA_SENSITIVE) == 0,
+               "(E) the base key's protection where the template says nothing");
+            ep.pContextData = NULL; ep.ulContextDataLength = 0;
+            m.mechanism = CKM_TLS12_KDF;
+            rv = C_DeriveKey(s, &m, xms, et, 3, &h);
+            snprintf(what, sizeof what, "(E) CKM_TLS12_KDF without context: 0x%lx", rv);
+            ok(rv == CKR_OK && value_of(h, got, sizeof got) == 40
+               && p_hash(CKM_SHA384_HMAC, hx, "EXPORTER-test", cr, 32, sr, 32, want, 40)
+               && !memcmp(got, want, 40), what);
+            rv = C_DeriveKey(s, &m, xms, et, 2, &h);
+            snprintf(what, sizeof what, "(E) no CKA_VALUE_LEN: 0x%lx", rv);
+            ok(rv == CKR_TEMPLATE_INCOMPLETE, what);
+        }
     }
 
     C_Finalize(NULL);

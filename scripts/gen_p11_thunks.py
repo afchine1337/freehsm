@@ -769,6 +769,23 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_TLS12_KEY_SAFE_DERIVE",          0x000003E3, "TLS12", "derive",
          "dispatch_xor_base_and_data", fips="approved",
          refs=("RFC 5246", "SP 800-135 rev. 1", "PKCS#11 v3.2 6.40.7")),
+    # The Finished message's verify_data, in C_Sign and C_Verify under the
+    # master secret, through the PRF of the derivations above. CKM_TLS12_MAC
+    # is its deprecated alias (6.40.9).
+    Mech("CKM_TLS_MAC",                        0x000003E4, "TLS12", "sign",
+         "dispatch_aes_cmac", fips="approved", key_type="CKK_GENERIC_SECRET",
+         refs=("RFC 5246 7.4.9", "PKCS#11 v3.2 6.40.3")),
+    Mech("CKM_TLS12_MAC",                      0x000003D8, "TLS12", "sign",
+         "dispatch_aes_cmac", fips="approved", key_type="CKK_GENERIC_SECRET",
+         refs=("RFC 5246 7.4.9", "PKCS#11 v3.2 6.40.9")),
+    # The exporter of RFC 5705, and its deprecated alias. Not approved:
+    # SP 800-135 covers the master secret and the key block, not exporters.
+    Mech("CKM_TLS_KDF",                        0x000003E5, "TLS12", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved",
+         refs=("RFC 5705", "PKCS#11 v3.2 6.40.8")),
+    Mech("CKM_TLS12_KDF",                      0x000003D9, "TLS12", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved",
+         refs=("RFC 5705", "PKCS#11 v3.2 6.40.9")),
 
     # === CKM_NIST_PRF_KDF: removed, 2026-09-14 ========================
     #

@@ -2277,6 +2277,11 @@ typedef struct fhsm_op_s {
      * when the slot is initialised. The single-part call may not finish an
      * operation that has taken a part: see op_single_part_refused. */
     int         multi;
+    /* CKM_TLS_MAC (2.8.0): the PRF's hash mechanism, or CKM_TLS_PRF, and
+     * the label, 1 "server finished" or 2 "client finished". The length is
+     * mac_out_len. */
+    uint32_t    tls_prf;
+    uint8_t     tls_side;
 } fhsm_op_t;
 
 /* C_Digest, C_Sign, C_Verify, C_Encrypt and C_Decrypt "cannot be used to
@@ -5726,6 +5731,30 @@ static CK_RV tls12_prf(const char *md, const uint8_t *sec, size_t sec_len,
     return FHSM_RV_OK;
 }
 
+/* CKM_TLS_MAC and its alias CKM_TLS12_MAC (6.40.3, 6.40.9): the Finished
+ * message's verify_data, PRF(master secret, "server finished" or "client
+ * finished", the handshake hash the caller passes as data), of the length
+ * CK_TLS_MAC_PARAMS asks (op_init). Through sign_asymmetric and
+ * verify_asymmetric, so the one-shot and multipart paths -- the latter
+ * buffered, the data being a hash -- give one answer. */
+static int tls_mac_mech(uint32_t m) {
+    return m == (uint32_t)FHSM_CKM_TLS_MAC || m == (uint32_t)FHSM_CKM_TLS12_MAC;
+}
+
+static fhsm_rv_t tls_mac_compute(fhsm_token_t *t, const fhsm_op_t *op,
+                                 const uint8_t *data, size_t data_len, uint8_t *out) {
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
+    if (rv != FHSM_RV_OK) return rv;
+    if (cl != CKO_SECRET_KEY || kt != CKK_GENERIC_SECRET || kvl == 0)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    const char *md = op->tls_prf == 0x00000378UL ? "MD5-SHA1" : tls12_prf_md(op->tls_prf);
+    if (!md || op->mac_out_len < 12 || op->mac_out_len > 64) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    return (fhsm_rv_t)tls12_prf(md, kv, kvl,
+                                op->tls_side == 1 ? "server finished" : "client finished",
+                                data, data_len, NULL, 0, out, op->mac_out_len, 0);
+}
+
 /* What a master secret may be used for (6.40.4): the mechanism contributes
  * CKA_ALLOWED_MECHANISMS, and 6.40.9 lets a token that has them add the two
  * deprecated aliases. */
@@ -5974,6 +6003,113 @@ static CK_RV tls12_key_mat_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     return FHSM_RV_OK;
 }
 
+/* CKM_TLS_KDF and its alias CKM_TLS12_KDF (6.40.8, 6.40.9): the exporter of
+ * RFC 5705, PRF(secret, label, client_random || server_random [|| length
+ * || context]), the context and its two-byte length only where pContextData
+ * is not NULL -- RFC 5705 tells an empty context from none. The PRF is the
+ * TLS 1.2 one with the hash prfMechanism names, or the TLS 1.0 and 1.1 one
+ * for CKM_TLS_PRF.
+ *
+ * The new key's length is the template's: CKA_VALUE_LEN, or a DES type's
+ * own; up to 512 bytes. Its protection: a sensitive base gives a sensitive
+ * key and an unextractable base an unextractable one, and a template asking
+ * otherwise is refused (derive_store_secret, combines = 1); a template that
+ * says nothing gets the base key's values, as 6.40.8 has it. Not approved
+ * -- SP 800-135 covers the master secret and the key block, not exporters
+ * -- so the all-mechanisms build in permissive mode only. */
+static CK_RV tls_kdf_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                            const CK_MECHANISM *pMechanism,
+                            CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
+                            CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
+    typedef struct {
+        CK_ULONG prfMechanism;
+        unsigned char *pLabel; CK_ULONG ulLabelLength;
+        fhsm_ssl3_random_t RandomInfo;
+        unsigned char *pContextData; CK_ULONG ulContextDataLength;
+    } tls_kdf_params_t;
+    if (fhsm_build_fips_strict || fhsm_mode_is_fips()) return FHSM_RV_MECHANISM_INVALID;
+    tls_kdf_params_t p;
+    if (!pMechanism->pParameter || pMechanism->ulParameterLen != sizeof p)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    memcpy(&p, pMechanism->pParameter, sizeof p);
+    const char *md = p.prfMechanism == 0x00000378UL /* CKM_TLS_PRF */
+                   ? (fhsm_md_available("MD5-SHA1") ? "MD5-SHA1" : NULL)
+                   : tls12_prf_md(p.prfMechanism);
+    if (!md || !p.pLabel || p.ulLabelLength == 0 || p.ulLabelLength > 255
+        || !tls12_random_ok(&p.RandomInfo)
+        || (!p.pContextData && p.ulContextDataLength != 0)
+        || p.ulContextDataLength > 0xFFFFUL)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+    /* The length: the template must give one, unless the type has its own. */
+    {
+        CK_ULONG kt = CKK_GENERIC_SECRET;
+        long ki = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+        if (ki >= 0 && pTemplate[ki].pValue && pTemplate[ki].ulValueLen == sizeof(CK_ULONG))
+            memcpy(&kt, pTemplate[ki].pValue, sizeof kt);
+        int fixed = kt == 0x13UL || kt == 0x14UL || kt == 0x15UL || kt == 0x1EUL;
+        if (!fixed && find_attr(pTemplate, ulCount, CKA_VALUE_LEN) < 0)
+            return CKR_TEMPLATE_INCOMPLETE;
+    }
+    size_t klen = 0;
+    { CK_RV lr = ecdh_key_len(pTemplate, ulCount, 512, &klen); if (lr != FHSM_RV_OK) return lr; }
+
+    const uint8_t *bv = NULL; size_t bvl = 0;
+    uint32_t bcl = 0, bkt = 0;
+    { fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hBaseKey, &bv, &bvl, &bcl, &bkt);
+      if (r != FHSM_RV_OK) return r; }
+    if (bcl != CKO_SECRET_KEY || bkt != CKK_GENERIC_SECRET || bvl == 0)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+
+    /* The template, with the base key's protection where it says nothing. */
+    uint8_t bf = 0;
+    { fhsm_rv_t r = fhsm_token_object_get_flags(t, (uint32_t)hBaseKey, &bf);
+      if (r != FHSM_RV_OK) return r; }
+    unsigned char sens = (bf & FHSM_OBJF_SENSITIVE) ? 1 : 0;
+    unsigned char extr = (bf & FHSM_OBJF_EXTRACTABLE) ? 1 : 0;
+    CK_ATTRIBUTE *tt = OPENSSL_malloc((ulCount + 2) * sizeof *tt);
+    if (!tt) return FHSM_RV_HOST_MEMORY;
+    CK_ULONG tn = 0;
+    for (CK_ULONG i = 0; i < ulCount; ++i) tt[tn++] = pTemplate[i];
+    if (find_attr(pTemplate, ulCount, CKA_SENSITIVE) < 0)
+        tt[tn++] = (CK_ATTRIBUTE){ CKA_SENSITIVE, &sens, 1 };
+    if (find_attr(pTemplate, ulCount, CKA_EXTRACTABLE) < 0)
+        tt[tn++] = (CK_ATTRIBUTE){ CKA_EXTRACTABLE, &extr, 1 };
+
+    /* The seed after the label: the randoms, then the context. */
+    const size_t rl = (size_t)p.RandomInfo.ulClientRandomLen + (size_t)p.RandomInfo.ulServerRandomLen;
+    const size_t cl = p.pContextData ? 2 + (size_t)p.ulContextDataLength : 0;
+    uint8_t *seed = OPENSSL_malloc(rl + cl);
+    char label[256];
+    uint8_t *okm = OPENSSL_malloc(klen);
+    CK_RV rv = FHSM_RV_HOST_MEMORY;
+    if (seed && okm) {
+        size_t o = 0;
+        memcpy(seed + o, p.RandomInfo.pClientRandom, p.RandomInfo.ulClientRandomLen);
+        o += p.RandomInfo.ulClientRandomLen;
+        memcpy(seed + o, p.RandomInfo.pServerRandom, p.RandomInfo.ulServerRandomLen);
+        o += p.RandomInfo.ulServerRandomLen;
+        if (p.pContextData) {
+            seed[o++] = (uint8_t)(p.ulContextDataLength >> 8);
+            seed[o++] = (uint8_t)p.ulContextDataLength;
+            if (p.ulContextDataLength) memcpy(seed + o, p.pContextData, p.ulContextDataLength);
+        }
+        memcpy(label, p.pLabel, p.ulLabelLength);
+        label[p.ulLabelLength] = '\0';
+        /* A label with a NUL inside would be cut by tls12_prf's strlen. */
+        rv = strlen(label) != (size_t)p.ulLabelLength ? FHSM_RV_MECHANISM_PARAM_INVALID
+           : tls12_prf(md, bv, bvl, label, seed, rl + cl, NULL, 0, okm, klen, 0);
+        if (rv == FHSM_RV_OK)
+            rv = derive_store_secret(t, hSession, tt, tn, okm, klen, CKO_SECRET_KEY,
+                                     hBaseKey, 0, 1, phKey);
+        OPENSSL_cleanse(okm, klen);
+    }
+    OPENSSL_free(okm);
+    OPENSSL_free(seed);
+    OPENSSL_free(tt);
+    return rv;
+}
+
 CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                    CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
                    CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
@@ -6058,6 +6194,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return tls12_master_derive(t, hSession, pMechanism, hBaseKey,
                                    pTemplate, ulCount, phKey);
     }
+    if (pMechanism->mechanism == FHSM_CKM_TLS_KDF || pMechanism->mechanism == FHSM_CKM_TLS12_KDF)
+        return tls_kdf_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
     /* HKDF (RFC 5869, PKCS#11 v3.2 §6.32). Advertised with a handler in
      * src/dispatch/fhsm_dispatch_kdf.c that nothing called; 660 vectors in
      * the conformance report read "HKDF derive failed for valid vector ...
@@ -12465,6 +12603,32 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         if (want < least || want > gfull) return FHSM_RV_MECHANISM_PARAM_INVALID;
         op->mac_out_len = (size_t)want;
     }
+    /* CKM_TLS_MAC and its alias CKM_TLS12_MAC (2.8.0): CK_TLS_MAC_PARAMS,
+     * the PRF's hash -- or CKM_TLS_PRF for the TLS 1.0 and 1.1 PRF, not
+     * approved and 12 bytes only -- the verify_data length, at least 12, and
+     * which side's label. */
+    op->tls_prf = 0;
+    op->tls_side = 0;
+    if (pMechanism->mechanism == 0x000003E4UL || pMechanism->mechanism == 0x000003D8UL) {
+        typedef struct { CK_ULONG prfHashMechanism, ulMacLength, ulServerOrClient; } tls_mac_params_t;
+        tls_mac_params_t tp;
+        if (!pMechanism->pParameter || pMechanism->ulParameterLen != sizeof tp)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        memcpy(&tp, pMechanism->pParameter, sizeof tp);
+        if ((tp.ulServerOrClient != 1 && tp.ulServerOrClient != 2)
+            || tp.ulMacLength < 12 || tp.ulMacLength > 64)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        if (tp.prfHashMechanism == 0x00000378UL /* CKM_TLS_PRF */) {
+            if (fhsm_build_fips_strict || fhsm_mode_is_fips() || tp.ulMacLength != 12
+                || !fhsm_md_available("MD5-SHA1"))
+                return FHSM_RV_MECHANISM_PARAM_INVALID;
+        } else if (!tls12_prf_md(tp.prfHashMechanism)) {
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        }
+        op->tls_prf = (uint32_t)tp.prfHashMechanism;
+        op->tls_side = (uint8_t)tp.ulServerOrClient;
+        op->mac_out_len = (size_t)tp.ulMacLength;
+    }
     /* The AES MACs with a length. CKM_AES_MAC_GENERAL and
      * CKM_AES_CMAC_GENERAL take CK_MAC_GENERAL_PARAMS, 1 to 16 bytes; for
      * CMAC where NIST's rules apply at least 8, the 64 bits SP 800-38B
@@ -13612,6 +13776,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
             want = 0x15; break;                             /* CKK_DES3 */
         case 0x0360: case 0x0362: case 0x0363: case 0x0364: /* v3.2 §6.20 combiners */
         case 0x0365:                                        /* EXTRACT_KEY_FROM_KEY */
+        case 0x03E4: case 0x03D8:                           /* TLS_MAC, TLS12_MAC (2.8.0) */
             /* The base key of a combiner is a CKK_GENERIC_SECRET. This is the
              * mirror of the AES rule below -- if a generic secret is not a
              * substitute for a typed key, a typed key is not a substitute for
@@ -14929,6 +15094,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x36UL: case 0x37UL: case 0x38UL: case 0x39UL: /* CKM_HASH_SLH_DSA_SHA{224..512} */
         case 0x3AUL: case 0x3BUL: case 0x3CUL: case 0x3DUL: /* CKM_HASH_SLH_DSA_SHA3_* */
         case 0x3EUL: case 0x3FUL:                           /* CKM_HASH_SLH_DSA_SHAKE* */
+        case 0x3E4UL: case 0x3D8UL:                         /* CKM_TLS_MAC, CKM_TLS12_MAC */
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
         case CKM_SHA1_RSA_PKCS_PSS: /* non-FIPS : all-mechanisms only */
@@ -15248,6 +15414,7 @@ static fhsm_rv_t pss_apply_hash(EVP_PKEY_CTX *ctx, uint32_t hash)
  * its conservative bound -- reporting a too-small length would be worse than
  * reporting a too-large one. */
 static size_t fhsm_exact_sig_len(fhsm_token_t *t, fhsm_op_t *op) {
+    if (tls_mac_mech(op->mechanism)) return op->mac_out_len;
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
     if (fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt) != FHSM_RV_OK)
         return 0;
@@ -15296,6 +15463,12 @@ static size_t sig_family_bound(uint32_t mech) {
 static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
                                   const uint8_t *data, size_t data_len,
                                   uint8_t *sig, size_t *sig_len) {
+    if (tls_mac_mech(op->mechanism)) {
+        if (*sig_len < op->mac_out_len) return FHSM_RV_FUNCTION_FAILED;
+        fhsm_rv_t mr = tls_mac_compute(t, op, data, data_len, sig);
+        if (mr == FHSM_RV_OK) *sig_len = op->mac_out_len;
+        return mr;
+    }
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) return rv;
@@ -15764,6 +15937,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x36UL: case 0x37UL: case 0x38UL: case 0x39UL: /* CKM_HASH_SLH_DSA_SHA{224..512} */
         case 0x3AUL: case 0x3BUL: case 0x3CUL: case 0x3DUL: /* CKM_HASH_SLH_DSA_SHA3_* */
         case 0x3EUL: case 0x3FUL:                           /* CKM_HASH_SLH_DSA_SHAKE* */
+        case 0x3E4UL: case 0x3D8UL:                         /* CKM_TLS_MAC, CKM_TLS12_MAC */
             break;
         case CKM_SHA1_RSA_PKCS: /* non-FIPS : all-mechanisms only */
         case CKM_SHA1_RSA_PKCS_PSS: /* non-FIPS : all-mechanisms only */
@@ -15944,6 +16118,20 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
                                     fhsm_op_t *op,
                                     unsigned char *pData, CK_ULONG ulDataLen,
                                     unsigned char *pSig, CK_ULONG ulSigLen) {
+    /* CKM_TLS_MAC: recompute and compare in constant time. A tag of
+     * another length than the one asked is CKR_SIGNATURE_LEN_RANGE. */
+    if (tls_mac_mech(op->mechanism)) {
+        uint8_t mac[64];
+        fhsm_rv_t mr = ulSigLen != op->mac_out_len ? 0x000000C1u /* CKR_SIGNATURE_LEN_RANGE */
+                     : tls_mac_compute(t, op, pData, (size_t)ulDataLen, mac);
+        if (mr == FHSM_RV_OK && (!pSig || CRYPTO_memcmp(mac, pSig, op->mac_out_len) != 0))
+            mr = FHSM_RV_SIGNATURE_INVALID;
+        OPENSSL_cleanse(mac, sizeof mac);
+        op->active = 0;
+        (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
+                                fhsm_session_role(hSession), mr, FHSM_AUDIT_END);
+        return mr;
+    }
     const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
     fhsm_rv_t rv = fhsm_token_object_get(t, op->key_handle, &kv, &kvl, &cl, &kt);
     if (rv != FHSM_RV_OK) { op->active = 0; return rv; }
