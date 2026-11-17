@@ -746,6 +746,30 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_SP800_108_DOUBLE_PIPELINE_KDF", 0x000003AE, "SP800-108", "derive",
          "dispatch_sp800_108", fips="approved", refs=("SP 800-108r1",)),
 
+    # === TLS 1.2 key derivation (2.8.0) ===============================
+    # PKCS#11 v3.2 6.40, through the TLS 1.2 PRF; C_DeriveKey computes them
+    # and the handler named is only a reference. The master secret without
+    # the session hash of RFC 7627 is not approved (SP 800-135 rev. 1, FIPS
+    # 140-3 IG D.Q): all-mechanisms in permissive mode only.
+    Mech("CKM_TLS12_MASTER_KEY_DERIVE",        0x000003E0, "TLS12-MASTER", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved",
+         refs=("RFC 5246", "PKCS#11 v3.2 6.40.4")),
+    Mech("CKM_TLS12_MASTER_KEY_DERIVE_DH",     0x000003E2, "TLS12-MASTER", "derive",
+         "dispatch_xor_base_and_data", fips="non-approved",
+         refs=("RFC 5246", "PKCS#11 v3.2 6.40.5")),
+    Mech("CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE",    0x00000056, "TLS12-MASTER", "derive",
+         "dispatch_xor_base_and_data", fips="approved",
+         refs=("RFC 7627", "SP 800-135 rev. 1", "PKCS#11 v3.2 6.40.4")),
+    Mech("CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE_DH", 0x00000057, "TLS12-MASTER", "derive",
+         "dispatch_xor_base_and_data", fips="approved",
+         refs=("RFC 7627", "SP 800-135 rev. 1", "PKCS#11 v3.2 6.40.5")),
+    Mech("CKM_TLS12_KEY_AND_MAC_DERIVE",       0x000003E1, "TLS12", "derive",
+         "dispatch_xor_base_and_data", fips="approved",
+         refs=("RFC 5246", "SP 800-135 rev. 1", "PKCS#11 v3.2 6.40.6")),
+    Mech("CKM_TLS12_KEY_SAFE_DERIVE",          0x000003E3, "TLS12", "derive",
+         "dispatch_xor_base_and_data", fips="approved",
+         refs=("RFC 5246", "SP 800-135 rev. 1", "PKCS#11 v3.2 6.40.7")),
+
     # === CKM_NIST_PRF_KDF: removed, 2026-09-14 ========================
     #
     # 0x384 is unassigned. PKCS#11 v3.2 has no CKM_NIST_PRF_KDF; the

@@ -1776,6 +1776,8 @@ static void fhsm_mech_keysizes_for(const char *fam,
     if (!strcmp(fam, "TDES"))    { *mn = 24;   *mx = 24;   return; }
     if (!strcmp(fam, "DES"))     { *mn = 8;    *mx = 8;    return; }
     if (!strcmp(fam, "DES2"))    { *mn = 16;   *mx = 16;   return; }
+    /* A TLS master secret is 48 bytes, base and result (6.40.4). */
+    if (!strcmp(fam, "TLS12-MASTER")) { *mn = 48; *mx = 48; return; }
     /* ChaCha20 and Poly1305 keys are 256 bits and only 256 (RFC 8439). */
     if (!strcmp(fam, "CHACHA20") || !strcmp(fam, "POLY1305"))
                                  { *mn = 32;   *mx = 32;   return; }
@@ -5613,12 +5615,376 @@ static CK_RV kbkdf_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     return FHSM_RV_OK;
 }
 
+/* ---------------------------------------------------------------------------
+ * TLS 1.2 key derivation (PKCS#11 v3.2 6.40, 2.8.0)
+ *
+ *   CKM_TLS12_MASTER_KEY_DERIVE            0x3E0  master secret, RSA suites
+ *   CKM_TLS12_MASTER_KEY_DERIVE_DH         0x3E2  master secret, (EC)DH suites
+ *   CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE   0x056  the same by RFC 7627
+ *   CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE_DH 0x057
+ *   CKM_TLS12_KEY_AND_MAC_DERIVE           0x3E1  the key block, four keys, IVs
+ *   CKM_TLS12_KEY_SAFE_DERIVE              0x3E3  the same, no IVs
+ *
+ * All through the TLS 1.2 PRF (RFC 5246 5), OpenSSL's TLS1-PRF, with the
+ * hash prfHashMechanism names: SHA-256, SHA-384 or SHA-512.
+ *
+ * The master secret derivations without the session hash are not approved
+ * (SP 800-135 rev. 1 and FIPS 140-3 IG D.Q ask for RFC 7627): the
+ * all-mechanisms build in permissive mode only. The extended ones and the
+ * key block are approved.
+ * ------------------------------------------------------------------------ */
+#define FHSM_CKM_TLS12_MASTER_KEY_DERIVE        0x000003E0UL
+#define FHSM_CKM_TLS12_KEY_AND_MAC_DERIVE       0x000003E1UL
+#define FHSM_CKM_TLS12_MASTER_KEY_DERIVE_DH     0x000003E2UL
+#define FHSM_CKM_TLS12_KEY_SAFE_DERIVE          0x000003E3UL
+#define FHSM_CKM_TLS_MAC                        0x000003E4UL
+#define FHSM_CKM_TLS_KDF                        0x000003E5UL
+#define FHSM_CKM_TLS12_MAC                      0x000003D8UL
+#define FHSM_CKM_TLS12_KDF                      0x000003D9UL
+#define FHSM_CKM_TLS12_EXT_MASTER_KEY_DERIVE    0x00000056UL
+#define FHSM_CKM_TLS12_EXT_MASTER_KEY_DERIVE_DH 0x00000057UL
+
+typedef struct { unsigned char major, minor; } fhsm_ck_version_t;
+typedef struct {
+    unsigned char *pClientRandom; CK_ULONG ulClientRandomLen;
+    unsigned char *pServerRandom; CK_ULONG ulServerRandomLen;
+} fhsm_ssl3_random_t;
+typedef struct {
+    CK_OBJECT_HANDLE hClientMacSecret, hServerMacSecret, hClientKey, hServerKey;
+    unsigned char *pIVClient, *pIVServer;
+} fhsm_ssl3_key_mat_out_t;
+typedef struct {
+    fhsm_ssl3_random_t RandomInfo;
+    fhsm_ck_version_t *pVersion;
+    CK_ULONG prfHashMechanism;
+} fhsm_tls12_master_params_t;
+typedef struct {
+    CK_ULONG prfHashMechanism;
+    unsigned char *pSessionHash; CK_ULONG ulSessionHashLen;
+    fhsm_ck_version_t *pVersion;
+} fhsm_tls12_ems_params_t;
+typedef struct {
+    CK_ULONG ulMacSizeInBits, ulKeySizeInBits, ulIVSizeInBits;
+    unsigned char bIsExport;
+    fhsm_ssl3_random_t RandomInfo;
+    fhsm_ssl3_key_mat_out_t *pReturnedKeyMaterial;
+    CK_ULONG prfHashMechanism;
+} fhsm_tls12_key_mat_params_t;
+
+static int tls12_mech(CK_ULONG m) {
+    return m == FHSM_CKM_TLS12_MASTER_KEY_DERIVE || m == FHSM_CKM_TLS12_MASTER_KEY_DERIVE_DH
+        || m == FHSM_CKM_TLS12_EXT_MASTER_KEY_DERIVE || m == FHSM_CKM_TLS12_EXT_MASTER_KEY_DERIVE_DH
+        || m == FHSM_CKM_TLS12_KEY_AND_MAC_DERIVE || m == FHSM_CKM_TLS12_KEY_SAFE_DERIVE;
+}
+
+/* The PRF's hash. SHA-1 and SHA-224 are not TLS 1.2 PRF hashes. */
+static const char *tls12_prf_md(CK_ULONG m) {
+    switch (m) {
+        case 0x00000250UL: return "SHA2-256";   /* CKM_SHA256 */
+        case 0x00000260UL: return "SHA2-384";   /* CKM_SHA384 */
+        case 0x00000270UL: return "SHA2-512";   /* CKM_SHA512 */
+        default: return NULL;
+    }
+}
+
+/* Client and server random: present, and of a length a seed can take. */
+static int tls12_random_ok(const fhsm_ssl3_random_t *r) {
+    return r->pClientRandom && r->pServerRandom
+        && r->ulClientRandomLen > 0 && r->ulClientRandomLen <= 256
+        && r->ulServerRandomLen > 0 && r->ulServerRandomLen <= 256;
+}
+
+/* PRF(secret, label, a || b) of out_len bytes. `ems_exempt`: the label is
+ * "master secret", which a FIPS provider built with its EMS check refuses;
+ * ems_check=0 lets it run where this module already allows the mechanism
+ * (permissive mode), and a provider without the parameter ignores it. */
+static CK_RV tls12_prf(const char *md, const uint8_t *sec, size_t sec_len,
+                       const char *label, const uint8_t *a, size_t al,
+                       const uint8_t *b, size_t bl,
+                       uint8_t *out, size_t out_len, int ems_exempt) {
+    const size_t ll = strlen(label);
+    uint8_t *seed = OPENSSL_malloc(ll + al + bl);
+    if (!seed) return FHSM_RV_HOST_MEMORY;
+    memcpy(seed, label, ll);
+    if (al) memcpy(seed + ll, a, al);
+    if (bl) memcpy(seed + ll + al, b, bl);
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "TLS1-PRF", NULL);
+    EVP_KDF_CTX *kc = kdf ? EVP_KDF_CTX_new(kdf) : NULL;
+    EVP_KDF_free(kdf);
+    int zero = 0;
+    OSSL_PARAM p[5];
+    int np = 0;
+    p[np++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, (char*)md, 0);
+    p[np++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SECRET, (void*)sec, sec_len);
+    p[np++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SEED, seed, ll + al + bl);
+    if (ems_exempt) p[np++] = OSSL_PARAM_construct_int("ems_check", &zero);
+    p[np] = OSSL_PARAM_construct_end();
+    int r = kc && EVP_KDF_derive(kc, out, out_len, p) == 1;
+    EVP_KDF_CTX_free(kc);
+    OPENSSL_free(seed);
+    if (!r) { OPENSSL_cleanse(out, out_len); return FHSM_RV_FUNCTION_FAILED; }
+    return FHSM_RV_OK;
+}
+
+/* What a master secret may be used for (6.40.4): the mechanism contributes
+ * CKA_ALLOWED_MECHANISMS, and 6.40.9 lets a token that has them add the two
+ * deprecated aliases. */
+static const uint32_t tls12_master_allowed[] = {
+    FHSM_CKM_TLS12_KEY_AND_MAC_DERIVE, FHSM_CKM_TLS12_KEY_SAFE_DERIVE,
+    FHSM_CKM_TLS_KDF, FHSM_CKM_TLS_MAC, FHSM_CKM_TLS12_KDF, FHSM_CKM_TLS12_MAC };
+
+/* The four master secret derivations.
+ *
+ * The base key is the pre-master secret, a generic secret: 48 bytes with
+ * the client's version in its first two for the RSA forms, any length for
+ * the DH ones, whose pVersion must be NULL. The new key is a 48-byte generic
+ * secret; a template stating another type or length is inconsistent with
+ * the mechanism. Its template sets CKA_SENSITIVE and CKA_EXTRACTABLE freely
+ * and the base key's history carries (derive_store_secret, combines = 0), as
+ * 6.40.4 says. A CKA_ALLOWED_MECHANISMS in the template may narrow the
+ * contributed list, not widen it. */
+static CK_RV tls12_master_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                                 const CK_MECHANISM *pMechanism,
+                                 CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
+                                 CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
+    const CK_ULONG m = pMechanism->mechanism;
+    const int ems = m == FHSM_CKM_TLS12_EXT_MASTER_KEY_DERIVE
+                 || m == FHSM_CKM_TLS12_EXT_MASTER_KEY_DERIVE_DH;
+    const int dh = m == FHSM_CKM_TLS12_MASTER_KEY_DERIVE_DH
+                || m == FHSM_CKM_TLS12_EXT_MASTER_KEY_DERIVE_DH;
+    if (!ems && (fhsm_build_fips_strict || fhsm_mode_is_fips()))
+        return FHSM_RV_MECHANISM_INVALID;
+    if (!pMechanism->pParameter) return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+    CK_ULONG prf;
+    fhsm_ck_version_t *ver;
+    const uint8_t *sa, *sb; size_t sal, sbl;
+    if (ems) {
+        fhsm_tls12_ems_params_t p;
+        if (pMechanism->ulParameterLen != sizeof p) return FHSM_RV_MECHANISM_PARAM_INVALID;
+        memcpy(&p, pMechanism->pParameter, sizeof p);
+        if (!p.pSessionHash || p.ulSessionHashLen == 0 || p.ulSessionHashLen > 64)
+            return FHSM_RV_MECHANISM_PARAM_INVALID;
+        prf = p.prfHashMechanism; ver = p.pVersion;
+        sa = p.pSessionHash; sal = (size_t)p.ulSessionHashLen; sb = NULL; sbl = 0;
+    } else {
+        fhsm_tls12_master_params_t p;
+        if (pMechanism->ulParameterLen != sizeof p) return FHSM_RV_MECHANISM_PARAM_INVALID;
+        memcpy(&p, pMechanism->pParameter, sizeof p);
+        if (!tls12_random_ok(&p.RandomInfo)) return FHSM_RV_MECHANISM_PARAM_INVALID;
+        prf = p.prfHashMechanism; ver = p.pVersion;
+        sa = p.RandomInfo.pClientRandom; sal = (size_t)p.RandomInfo.ulClientRandomLen;
+        sb = p.RandomInfo.pServerRandom; sbl = (size_t)p.RandomInfo.ulServerRandomLen;
+    }
+    const char *md = tls12_prf_md(prf);
+    if (!md) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (dh && ver) return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+    { long ki = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+      if (ki >= 0) {
+          CK_ULONG kt = 0;
+          if (!pTemplate[ki].pValue || pTemplate[ki].ulValueLen != sizeof kt)
+              return CKR_TEMPLATE_INCONSISTENT;
+          memcpy(&kt, pTemplate[ki].pValue, sizeof kt);
+          if (kt != CKK_GENERIC_SECRET) return CKR_TEMPLATE_INCONSISTENT;
+      } }
+    { long vi = find_attr(pTemplate, ulCount, CKA_VALUE_LEN);
+      if (vi >= 0) {
+          CK_ULONG vl = 0;
+          if (!pTemplate[vi].pValue || pTemplate[vi].ulValueLen != sizeof vl)
+              return CKR_TEMPLATE_INCONSISTENT;
+          memcpy(&vl, pTemplate[vi].pValue, sizeof vl);
+          if (vl != 48) return CKR_TEMPLATE_INCONSISTENT;
+      } }
+    { long ai = find_attr(pTemplate, ulCount, CKA_ALLOWED_MECHANISMS_ATTR);
+      if (ai >= 0) {
+          if (pTemplate[ai].ulValueLen % sizeof(CK_ULONG)) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+          const CK_ULONG cnt = pTemplate[ai].ulValueLen / sizeof(CK_ULONG);
+          for (CK_ULONG k = 0; k < cnt; ++k) {
+              CK_ULONG v = 0;
+              memcpy(&v, (const uint8_t *)pTemplate[ai].pValue + k * sizeof v, sizeof v);
+              int in = 0;
+              for (size_t j = 0; j < sizeof tls12_master_allowed / sizeof tls12_master_allowed[0]; ++j)
+                  if (v == tls12_master_allowed[j]) in = 1;
+              if (!in) return CKR_TEMPLATE_INCONSISTENT;
+          }
+      } }
+
+    const uint8_t *pms = NULL; size_t pms_len = 0;
+    uint32_t bcl = 0, bkt = 0;
+    { fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hBaseKey, &pms, &pms_len, &bcl, &bkt);
+      if (r != FHSM_RV_OK) return r; }
+    if (bcl != CKO_SECRET_KEY || bkt != CKK_GENERIC_SECRET) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (dh ? pms_len == 0 : pms_len != 48) return FHSM_RV_KEY_SIZE_RANGE;
+
+    uint8_t ms[48];
+    CK_RV rv = tls12_prf(md, pms, pms_len, ems ? "extended master secret" : "master secret",
+                         sa, sal, sb, sbl, ms, sizeof ms, !ems);
+    if (rv != FHSM_RV_OK) return rv;
+    rv = derive_store_secret(t, hSession, pTemplate, ulCount, ms, sizeof ms,
+                             CKO_SECRET_KEY, hBaseKey, 0, 0, phKey);
+    OPENSSL_cleanse(ms, sizeof ms);
+    if (rv != FHSM_RV_OK) return rv;
+    if (find_attr(pTemplate, ulCount, CKA_ALLOWED_MECHANISMS_ATTR) < 0) {
+        fhsm_rv_t ar = fhsm_token_object_set_allowed_mechs(t, (uint32_t)*phKey,
+                           tls12_master_allowed,
+                           (uint8_t)(sizeof tls12_master_allowed / sizeof tls12_master_allowed[0]));
+        if (ar != FHSM_RV_OK) {
+            (void)fhsm_token_object_destroy(t, (uint32_t)*phKey);
+            *phKey = 0;
+            return ar;
+        }
+    }
+    if (ver && !dh) { ver->major = pms[0]; ver->minor = pms[1]; }
+    return FHSM_RV_OK;
+}
+
+/* The key block (RFC 5246 6.3): PRF(master, "key expansion", server_random
+ * || client_random), cut into client MAC key, server MAC key, client key,
+ * server key, client IV, server IV.
+ *
+ * The MAC keys are generic secrets that sign and verify. The two cipher keys
+ * take their type from the template (ecdh_key_len checks it against
+ * ulKeySizeInBits) and encrypt, decrypt and derive unless it says otherwise.
+ * All four have the base key's CKA_SENSITIVE and CKA_EXTRACTABLE, and its
+ * history; a template stating another value is inconsistent (6.40.6). The
+ * template's other attributes -- label, ID, CKA_TOKEN -- go to all four.
+ *
+ * phKey is not used and may be NULL: the handles go to pReturnedKeyMaterial,
+ * and the IVs to the caller's buffers, under CKM_TLS12_KEY_AND_MAC_DERIVE
+ * only. All the keys are made or none is. bIsExport must be FALSE. */
+static CK_RV tls12_key_mat_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                                  const CK_MECHANISM *pMechanism,
+                                  CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
+                                  CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
+    const int safe = pMechanism->mechanism == FHSM_CKM_TLS12_KEY_SAFE_DERIVE;
+    fhsm_tls12_key_mat_params_t p;
+    if (!pMechanism->pParameter || pMechanism->ulParameterLen != sizeof p)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    memcpy(&p, pMechanism->pParameter, sizeof p);
+    const char *md = tls12_prf_md(p.prfHashMechanism);
+    if (!md || p.bIsExport || !p.pReturnedKeyMaterial || !tls12_random_ok(&p.RandomInfo))
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (safe) p.ulIVSizeInBits = 0;
+    if (p.ulMacSizeInBits % 8 || p.ulKeySizeInBits % 8 || p.ulIVSizeInBits % 8
+        || p.ulMacSizeInBits > 512 || p.ulKeySizeInBits > 512 || p.ulIVSizeInBits > 256
+        || p.ulMacSizeInBits + p.ulKeySizeInBits == 0)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    const size_t macl = p.ulMacSizeInBits / 8, keyl = p.ulKeySizeInBits / 8,
+                 ivl = p.ulIVSizeInBits / 8;
+    fhsm_ssl3_key_mat_out_t *out = p.pReturnedKeyMaterial;
+    if (ivl && (!out->pIVClient || !out->pIVServer)) return FHSM_RV_MECHANISM_PARAM_INVALID;
+
+    const uint8_t *mk = NULL; size_t mk_len = 0;
+    uint32_t bcl = 0, bkt = 0;
+    { fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hBaseKey, &mk, &mk_len, &bcl, &bkt);
+      if (r != FHSM_RV_OK) return r; }
+    if (bcl != CKO_SECRET_KEY || bkt != CKK_GENERIC_SECRET) return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    if (mk_len != 48) return FHSM_RV_KEY_SIZE_RANGE;
+
+    /* The base key's protection, which the template may restate, not change. */
+    uint8_t bf = 0;
+    { fhsm_rv_t r = fhsm_token_object_get_flags(t, (uint32_t)hBaseKey, &bf);
+      if (r != FHSM_RV_OK) return r; }
+    unsigned char sens = (bf & FHSM_OBJF_SENSITIVE) ? 1 : 0;
+    unsigned char extr = (bf & FHSM_OBJF_EXTRACTABLE) ? 1 : 0;
+    { long i = find_attr(pTemplate, ulCount, CKA_SENSITIVE);
+      if (i >= 0 && (!pTemplate[i].pValue || pTemplate[i].ulValueLen != 1
+                     || (((unsigned char *)pTemplate[i].pValue)[0] != 0) != sens))
+          return CKR_TEMPLATE_INCONSISTENT; }
+    { long i = find_attr(pTemplate, ulCount, CKA_EXTRACTABLE);
+      if (i >= 0 && (!pTemplate[i].pValue || pTemplate[i].ulValueLen != 1
+                     || (((unsigned char *)pTemplate[i].pValue)[0] != 0) != extr))
+          return CKR_TEMPLATE_INCONSISTENT; }
+    if (keyl) {
+        size_t l = 0;
+        CK_RV lr = ecdh_key_len(pTemplate, ulCount, keyl, &l);
+        if (lr != FHSM_RV_OK) return lr;
+        if (l != keyl) return CKR_TEMPLATE_INCONSISTENT;
+    }
+
+    /* Two templates: the MAC keys' and the cipher keys'. */
+    CK_ATTRIBUTE *mt = OPENSSL_malloc((ulCount + 8) * sizeof *mt);
+    CK_ATTRIBUTE *ct = OPENSSL_malloc((ulCount + 8) * sizeof *ct);
+    if (!mt || !ct) { OPENSSL_free(mt); OPENSSL_free(ct); return FHSM_RV_HOST_MEMORY; }
+    CK_ULONG mn = 0, cn = 0;
+    CK_ULONG gen = CKK_GENERIC_SECRET;
+    unsigned char one = 1;
+    for (CK_ULONG i = 0; i < ulCount; ++i) {
+        const CK_ULONG ty = pTemplate[i].type;
+        if (ty == CKA_SENSITIVE || ty == CKA_EXTRACTABLE) continue;
+        ct[cn++] = pTemplate[i];
+        switch (ty) {
+            case CKA_KEY_TYPE: case CKA_VALUE_LEN: case CKA_ALLOWED_MECHANISMS_ATTR:
+            case 0x104: case 0x105: case 0x106: case 0x107:   /* ENCRYPT .. UNWRAP */
+            case 0x108: case 0x109: case 0x10A: case 0x10B:   /* SIGN .. VERIFY_RECOVER */
+            case 0x10C:                                       /* DERIVE */
+                break;
+            default:
+                mt[mn++] = pTemplate[i];
+        }
+    }
+    mt[mn++] = (CK_ATTRIBUTE){ CKA_KEY_TYPE, &gen, sizeof gen };
+    mt[mn++] = (CK_ATTRIBUTE){ 0x108 /* CKA_SIGN */, &one, 1 };
+    mt[mn++] = (CK_ATTRIBUTE){ 0x10A /* CKA_VERIFY */, &one, 1 };
+    mt[mn++] = (CK_ATTRIBUTE){ CKA_SENSITIVE, &sens, 1 };
+    mt[mn++] = (CK_ATTRIBUTE){ CKA_EXTRACTABLE, &extr, 1 };
+    ct[cn++] = (CK_ATTRIBUTE){ CKA_SENSITIVE, &sens, 1 };
+    ct[cn++] = (CK_ATTRIBUTE){ CKA_EXTRACTABLE, &extr, 1 };
+    if (find_attr(pTemplate, ulCount, 0x104) < 0)
+        ct[cn++] = (CK_ATTRIBUTE){ 0x104 /* CKA_ENCRYPT */, &one, 1 };
+    if (find_attr(pTemplate, ulCount, 0x105) < 0)
+        ct[cn++] = (CK_ATTRIBUTE){ 0x105 /* CKA_DECRYPT */, &one, 1 };
+    if (find_attr(pTemplate, ulCount, 0x10C) < 0)
+        ct[cn++] = (CK_ATTRIBUTE){ 0x10C /* CKA_DERIVE */, &one, 1 };
+
+    const size_t blk_len = 2 * (macl + keyl + ivl);
+    uint8_t blk[2 * (64 + 64 + 32)];
+    CK_RV rv = tls12_prf(md, mk, mk_len, "key expansion",
+                         p.RandomInfo.pServerRandom, (size_t)p.RandomInfo.ulServerRandomLen,
+                         p.RandomInfo.pClientRandom, (size_t)p.RandomInfo.ulClientRandomLen,
+                         blk, blk_len, 0);
+    CK_OBJECT_HANDLE h[4] = { 0, 0, 0, 0 };
+    int made = 0;
+    for (int k = 0; rv == FHSM_RV_OK && k < 4; ++k) {
+        const int is_mac = k < 2;
+        const size_t len = is_mac ? macl : keyl;
+        if (!len) continue;
+        const size_t off = is_mac ? (size_t)k * macl : 2 * macl + (size_t)(k - 2) * keyl;
+        rv = derive_store_secret(t, hSession, is_mac ? mt : ct, is_mac ? mn : cn,
+                                 blk + off, len, CKO_SECRET_KEY, hBaseKey, 0, 1, &h[k]);
+        if (rv == FHSM_RV_OK) made |= 1 << k;
+    }
+    OPENSSL_free(mt);
+    OPENSSL_free(ct);
+    if (rv != FHSM_RV_OK) {
+        for (int k = 0; k < 4; ++k)
+            if (made & (1 << k)) (void)fhsm_token_object_destroy(t, (uint32_t)h[k]);
+        OPENSSL_cleanse(blk, sizeof blk);
+        return rv;
+    }
+    out->hClientMacSecret = h[0]; out->hServerMacSecret = h[1];
+    out->hClientKey = h[2];       out->hServerKey = h[3];
+    if (ivl) {
+        memcpy(out->pIVClient, blk + 2 * (macl + keyl), ivl);
+        memcpy(out->pIVServer, blk + 2 * (macl + keyl) + ivl, ivl);
+    }
+    OPENSSL_cleanse(blk, sizeof blk);
+    if (phKey) *phKey = 0;   /* CK_INVALID_HANDLE */
+    return FHSM_RV_OK;
+}
+
 CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                    CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
                    CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
     FHSM_API_SHARED(); FHSM_REQUIRE_INITIALIZED();
     if (fhsm_state_get() == FHSM_STATE_ERROR) return FHSM_RV_FUNCTION_FAILED;
-    if (!pMechanism || !phKey) return FHSM_RV_ARGUMENTS_BAD;
+    /* phKey may be NULL for the TLS 1.2 key block, which returns its handles
+     * in its parameter (6.40.6: "should be a NULL_PTR"). */
+    if (!pMechanism
+        || (!phKey && pMechanism->mechanism != FHSM_CKM_TLS12_KEY_AND_MAC_DERIVE
+                   && pMechanism->mechanism != FHSM_CKM_TLS12_KEY_SAFE_DERIVE))
+        return FHSM_RV_ARGUMENTS_BAD;
     /* Bounds first, then contents.
      *
      * The two length checks below iterate the template: fhsm_check_bool_attr_
@@ -5684,6 +6050,14 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         || pMechanism->mechanism == CKM_SP800_108_FEEDBACK_KDF_OP
         || pMechanism->mechanism == CKM_SP800_108_DOUBLE_PIPELINE_KDF_OP)
         return kbkdf_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
+    if (tls12_mech(pMechanism->mechanism)) {
+        if (pMechanism->mechanism == FHSM_CKM_TLS12_KEY_AND_MAC_DERIVE
+            || pMechanism->mechanism == FHSM_CKM_TLS12_KEY_SAFE_DERIVE)
+            return tls12_key_mat_derive(t, hSession, pMechanism, hBaseKey,
+                                        pTemplate, ulCount, phKey);
+        return tls12_master_derive(t, hSession, pMechanism, hBaseKey,
+                                   pTemplate, ulCount, phKey);
+    }
     /* HKDF (RFC 5869, PKCS#11 v3.2 §6.32). Advertised with a handler in
      * src/dispatch/fhsm_dispatch_kdf.c that nothing called; 660 vectors in
      * the conformance report read "HKDF derive failed for valid vector ...

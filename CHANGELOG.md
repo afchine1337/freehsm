@@ -163,6 +163,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
   in the all-mechanisms build in permissive mode only. An EC key may now
   have `CKA_WRAP` (public) and `CKA_UNWRAP` (private), off unless the
   template asks, as `CKA_DERIVE` is. `tests/test_rsa_ecdh_aes_wrap.c`.
+* **The TLS 1.2 key derivations** (PKCS#11 v3.2 6.40), through the TLS 1.2
+  PRF with SHA-256, SHA-384 or SHA-512: the master secret,
+  `CKM_TLS12_MASTER_KEY_DERIVE` and `_DH`, and its RFC 7627 form,
+  `CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE` and `_DH`, which return the
+  client's version and give the new key the `CKA_ALLOWED_MECHANISMS` 6.40.4
+  contributes; and the key block, `CKM_TLS12_KEY_AND_MAC_DERIVE` and
+  `CKM_TLS12_KEY_SAFE_DERIVE`, four keys at once and the IVs, `phKey` NULL
+  accepted. The master secret without the session hash is not approved
+  (SP 800-135 rev. 1, IG D.Q) and runs in the all-mechanisms build in
+  permissive mode only; the others in both builds. `tests/test_tls12_kdf.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first
