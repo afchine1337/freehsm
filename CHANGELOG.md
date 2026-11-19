@@ -198,6 +198,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
   for a key that may be read, x. Not approved (FIPS 186-5): the
   all-mechanisms build in permissive mode only, where a provider other than
   the FIPS one serves DSA. `tests/test_dsa.c`.
+* **PKCS #3 Diffie-Hellman.** `CKM_DH_PKCS_KEY_PAIR_GEN` makes a key pair on
+  the public template's `CKA_PRIME` and `CKA_BASE`, the private value bounded
+  by `CKA_VALUE_BITS` when asked; it was listed and refused until now.
+  `CKM_DH_PKCS_DERIVE` agrees with the other party's public value, checked
+  against the group, Z padded to p's length and cut to the template's
+  length. `CKA_PRIME`, `CKA_BASE`, `CKA_VALUE` (y, or x for a key that may
+  be read) and `CKA_VALUE_BITS` read back. Approved on the safe-prime groups
+  of SP 800-56A rev. 3 (ffdhe and MODP, 2048 to 8192 bits), the only ones
+  allowed where NIST's rules apply; other prime groups of 1024 bits and up
+  elsewhere. `tests/test_dh_pkcs.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first

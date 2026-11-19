@@ -91,6 +91,7 @@
 #include <openssl/err.h>      /* ERR_peek_last_error (ML-KEM debug only) */
 #include <openssl/ecdsa.h>    /* ECDSA_SIG_new / d2i / i2d  for raw r||s conversion */
 #include <openssl/provider.h> /* OSSL_PROVIDER_get0_name: fhsm_dsa_available */
+#include <openssl/dh.h>       /* EVP_PKEY_CTX_set_dh_pad: CKM_DH_PKCS_DERIVE */
 
 /* PKCS#11 v3.2 §6.13 ECDSA r||s wire format <-> DER ECDSA_SIG. Extracted
  * into its own translation unit in v1.1.14 as a prerequisite for the
@@ -1603,6 +1604,43 @@ static int fhsm_dsa_available(void) {
     return ok;
 }
 
+/* Finite-field DH (2.8.0) on any group, not only the named ones: a provider
+ * other than the FIPS one serves DH. The FIPS provider takes the safe-prime
+ * groups of SP 800-56A rev. 3 alone. */
+static int fhsm_dh_any_group_available(void) {
+    ERR_set_mark();
+    EVP_KEYMGMT *km = EVP_KEYMGMT_fetch(NULL, "DH", NULL);
+    int ok = 0;
+    if (km) {
+        const OSSL_PROVIDER *pv = EVP_KEYMGMT_get0_provider(km);
+        const char *pn = pv ? OSSL_PROVIDER_get0_name(pv) : NULL;
+        ok = pn && strcmp(pn, "fips") != 0;
+    }
+    EVP_KEYMGMT_free(km);
+    ERR_pop_to_mark();
+    return ok;
+}
+
+/* Whether a DH key or parameter set is one of the safe-prime groups SP
+ * 800-56A rev. 3 5.5.1.1 approves: ffdhe2048 to ffdhe8192 (RFC 7919) and
+ * MODP 2048 to 8192 (RFC 3526). OpenSSL names the group when p and g are a
+ * known one. */
+static int dh_safe_prime_group(EVP_PKEY *k) {
+    static const char *const ok_groups[] = {
+        "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192",
+        "modp_2048", "modp_3072", "modp_4096", "modp_6144", "modp_8192" };
+    char name[32] = "";
+    size_t nl = 0;
+    ERR_set_mark();
+    int got = k && EVP_PKEY_get_utf8_string_param(k, OSSL_PKEY_PARAM_GROUP_NAME,
+                                                  name, sizeof name, &nl) == 1;
+    ERR_pop_to_mark();
+    if (!got) return 0;
+    for (size_t i = 0; i < sizeof ok_groups / sizeof ok_groups[0]; ++i)
+        if (strcmp(name, ok_groups[i]) == 0) return 1;
+    return 0;
+}
+
 /* 1 when the providers serve what the mechanism needs; 1 for any mechanism
  * that needs nothing beyond what every provider has. Grown family by family
  * since 2.8.0: each algorithm the FIPS provider lacks is listed here when it
@@ -1805,6 +1843,10 @@ static void fhsm_mech_keysizes_for(const char *fam,
     if (!strcmp(fam, "TLS12-MASTER")) { *mn = 48; *mx = 48; return; }
     /* DSA: the prime p, in bits (FIPS 186-4 4.2: 1024 to 3072). */
     if (!strcmp(fam, "DSA"))     { *mn = 1024; *mx = 3072; return; }
+    /* DH: the prime p, in bits; 2048 where NIST's rules apply, the smallest
+     * safe-prime group of SP 800-56A rev. 3. */
+    if (!strcmp(fam, "DH"))      { *mn = (fhsm_build_fips_strict || fhsm_mode_is_fips()) ? 2048 : 1024;
+                                   *mx = 8192; return; }
     /* ChaCha20 and Poly1305 keys are 256 bits and only 256 (RFC 8439). */
     if (!strcmp(fam, "CHACHA20") || !strcmp(fam, "POLY1305"))
                                  { *mn = 32;   *mx = 32;   return; }
@@ -2757,6 +2799,7 @@ static uint8_t fhsm_usage_possible(uint32_t cko_class, uint32_t kt) {
             return (uint8_t)((priv ? FHSM_USAGE_SIGN | FHSM_USAGE_UNWRAP
                                    : FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP) | FHSM_USAGE_DERIVE);
         case 0x00000041UL:   /* CKK_EC_MONTGOMERY: X25519, X448 */
+        case 0x00000002UL:   /* CKK_DH (2.8.0): key agreement only */
             return FHSM_USAGE_DERIVE;
         case 0x00000001UL:   /* CKK_DSA (2.8.0) */
         case 0x00000040UL:   /* CKK_EC_EDWARDS */
@@ -6436,6 +6479,95 @@ static CK_RV tls_kdf_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     return rv;
 }
 
+/* CKM_DH_PKCS_DERIVE (PKCS#11 v3.2 6.4.10, 2.8.0): PKCS #3 phase II. The
+ * parameter is the other party's public value y, big-endian; the base key a
+ * CKK_DH private key. The peer's y is checked against the base key's group
+ * before use -- 1 < y < p - 1, and y^q = 1 where the group has a q -- as
+ * CKM_ECDH1_DERIVE checks a point against the curve. The secret is Z padded
+ * to p's length (SP 800-56A rev. 3 5.7.1.1), cut from the leading end to
+ * the template's type and length as 6.4.10 says, as for ECDH. Approved on
+ * the safe-prime groups, the only ones a key has where NIST's rules apply. */
+static CK_RV dh_pkcs_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                            const CK_MECHANISM *pMechanism,
+                            CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
+                            CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
+    if (!pMechanism->pParameter || pMechanism->ulParameterLen == 0
+        || pMechanism->ulParameterLen > 1024)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    const uint8_t *bv = NULL; size_t bvl = 0;
+    uint32_t bcl = 0, bkt = 0;
+    { fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hBaseKey, &bv, &bvl, &bcl, &bkt);
+      if (r != FHSM_RV_OK) return r; }
+    if (bcl != CKO_PRIVATE_KEY || bkt != 0x00000002UL /* CKK_DH */)
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
+    const unsigned char *pp = bv;
+    EVP_PKEY *priv = d2i_AutoPrivateKey(NULL, &pp, (long)bvl);
+    if (!priv) return FHSM_RV_FUNCTION_FAILED;
+    if ((fhsm_build_fips_strict || fhsm_mode_is_fips()) && !dh_safe_prime_group(priv)) {
+        EVP_PKEY_free(priv);
+        return 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
+    }
+
+    /* The peer: the base key's group and the caller's y. */
+    CK_RV rv = FHSM_RV_OK;
+    EVP_PKEY *peer = NULL;
+    BIGNUM *p = NULL, *g = NULL, *q = NULL;
+    BIGNUM *y = BN_bin2bn(pMechanism->pParameter, (int)pMechanism->ulParameterLen, NULL);
+    if (!y || EVP_PKEY_get_bn_param(priv, OSSL_PKEY_PARAM_FFC_P, &p) != 1
+        || EVP_PKEY_get_bn_param(priv, OSSL_PKEY_PARAM_FFC_G, &g) != 1)
+        rv = FHSM_RV_FUNCTION_FAILED;
+    ERR_set_mark();
+    (void)EVP_PKEY_get_bn_param(priv, OSSL_PKEY_PARAM_FFC_Q, &q);   /* none for PKCS #3 */
+    ERR_pop_to_mark();
+    if (rv == FHSM_RV_OK) {
+        OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+        OSSL_PARAM *prm = NULL;
+        if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, p) == 1
+            && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, g) == 1
+            && (!q || OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, q) == 1)
+            && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PUB_KEY, y) == 1)
+            prm = OSSL_PARAM_BLD_to_param(bld);
+        OSSL_PARAM_BLD_free(bld);
+        EVP_PKEY_CTX *fc = prm ? EVP_PKEY_CTX_new_from_name(NULL, "DH", NULL) : NULL;
+        if (!fc || EVP_PKEY_fromdata_init(fc) != 1
+            || EVP_PKEY_fromdata(fc, &peer, EVP_PKEY_PUBLIC_KEY, prm) != 1)
+            rv = FHSM_RV_MECHANISM_PARAM_INVALID;
+        EVP_PKEY_CTX_free(fc);
+        OSSL_PARAM_free(prm);
+    }
+    BN_free(p); BN_free(g); BN_free(q); BN_free(y);
+    if (rv == FHSM_RV_OK) {
+        EVP_PKEY_CTX *chk = EVP_PKEY_CTX_new_from_pkey(NULL, peer, NULL);
+        if (!chk || EVP_PKEY_public_check(chk) != 1) rv = FHSM_RV_MECHANISM_PARAM_INVALID;
+        EVP_PKEY_CTX_free(chk);
+    }
+
+    uint8_t *z = NULL;
+    size_t zl = 0;
+    if (rv == FHSM_RV_OK) {
+        EVP_PKEY_CTX *d = EVP_PKEY_CTX_new_from_pkey(NULL, priv, NULL);
+        int ok = d && EVP_PKEY_derive_init(d) == 1 && EVP_PKEY_CTX_set_dh_pad(d, 1) == 1
+              && EVP_PKEY_derive_set_peer(d, peer) == 1
+              && EVP_PKEY_derive(d, NULL, &zl) == 1 && zl > 0 && zl <= 1024
+              && (z = OPENSSL_malloc(zl)) != NULL
+              && EVP_PKEY_derive(d, z, &zl) == 1;
+        EVP_PKEY_CTX_free(d);
+        if (!ok) rv = FHSM_RV_FUNCTION_FAILED;
+    }
+    EVP_PKEY_free(peer);
+    EVP_PKEY_free(priv);
+    ERR_clear_error();
+    if (rv == FHSM_RV_OK) {
+        size_t klen = 0;
+        rv = ecdh_key_len(pTemplate, ulCount, zl, &klen);
+        if (rv == FHSM_RV_OK)
+            rv = derive_store_secret(t, hSession, pTemplate, ulCount, z + (zl - klen), klen,
+                                     CKO_SECRET_KEY, hBaseKey, 0, 0, phKey);
+    }
+    if (z) OPENSSL_clear_free(z, zl);
+    return rv;
+}
+
 CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                    CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
                    CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
@@ -6524,6 +6656,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return tls_kdf_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
     if (ike_mech(pMechanism->mechanism))
         return ike_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
+    if (pMechanism->mechanism == 0x00000021UL /* CKM_DH_PKCS_DERIVE */)
+        return dh_pkcs_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
     /* HKDF (RFC 5869, PKCS#11 v3.2 §6.32). Advertised with a handler in
      * src/dispatch/fhsm_dispatch_kdf.c that nothing called; 660 vectors in
      * the conformance report read "HKDF derive failed for valid vector ...
@@ -9877,6 +10011,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             case CKM_SLH_DSA_KEY_PAIR_GEN:       want_kt = CKK_SLH_DSA; break;
             case CKM_COMPOSITE_MLDSA65_ED25519:  want_kt = CKK_COMPOSITE_MLDSA65_ED25519; break;
             case 0x00000010UL:                   want_kt = 0x00000001UL; break; /* DSA */
+            case 0x00000020UL:                   want_kt = 0x00000002UL; break; /* DH */
             default: kt_known = 0; break;   /* refused below, as before */
         }
         CK_ATTRIBUTE *tp[2] = { pPub, pPriv }; CK_ULONG tn[2] = { ulPub, ulPriv };
@@ -10089,7 +10224,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         pw_family = FHSM_PAIRWISE_SLH_DSA;
     } else if (pMechanism->mechanism == 0x00000010UL /* CKM_DSA_KEY_PAIR_GEN */) {
         /* 2.8.0. The domain parameters are the public template's CKA_PRIME,
-         * CKA_SUBPRIME and CKA_BASE (PKCS#11 v3.2 6.4.11), all three
+         * CKA_SUBPRIME and CKA_BASE (PKCS#11 v3.2 6.2.6), all three
          * required; their sizes one of FIPS 186-4's (L, N) pairs, (1024,
          * 160), (2048, 224), (2048, 256) or (3072, 256), and the three checked
          * by OpenSSL's parameter validation -- p and q prime, q dividing
@@ -10151,6 +10286,84 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (drv != FHSM_RV_OK) return drv;
         ckk_type = 0x00000001UL;   /* CKK_DSA */
         pw_family = FHSM_PAIRWISE_DSA;
+    } else if (pMechanism->mechanism == 0x00000020UL /* CKM_DH_PKCS_KEY_PAIR_GEN */) {
+        /* 2.8.0. PKCS#11 v3.2 6.4.8: the prime and base are the public
+         * template's CKA_PRIME and CKA_BASE, both required; the private
+         * template's CKA_VALUE_BITS, when given, bounds the private value.
+         * p odd, prime, of 1024 to 8192 bits, and 1 < g < p - 1, or
+         * CKR_DOMAIN_PARAMS_INVALID. Where NIST's rules apply only the
+         * safe-prime groups of SP 800-56A rev. 3 5.5.1.1 -- ffdhe2048 to
+         * ffdhe8192 (RFC 7919) and MODP 2048 to 8192 (RFC 3526) -- which
+         * OpenSSL recognises from p and g (dh_safe_prime_group). */
+        const long ip = find_attr(pPub, ulPub, 0x130UL /* CKA_PRIME */);
+        const long ig = find_attr(pPub, ulPub, 0x132UL /* CKA_BASE */);
+        if (ip < 0 || ig < 0) return CKR_TEMPLATE_INCOMPLETE;
+        if (!pPub[ip].pValue || pPub[ip].ulValueLen == 0 || pPub[ip].ulValueLen > 1024
+            || !pPub[ig].pValue || pPub[ig].ulValueLen == 0 || pPub[ig].ulValueLen > 1024)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        CK_ULONG vbits = 0;
+        { long vb = find_attr(pPriv, ulPriv, 0x160UL /* CKA_VALUE_BITS */);
+          if (vb >= 0) {
+              if (!pPriv[vb].pValue || pPriv[vb].ulValueLen != sizeof vbits)
+                  return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+              memcpy(&vbits, pPriv[vb].pValue, sizeof vbits);
+              if (vbits < 160) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+          } }
+        const int strict = fhsm_build_fips_strict || fhsm_mode_is_fips();
+        BIGNUM *bp = BN_bin2bn(pPub[ip].pValue, (int)pPub[ip].ulValueLen, NULL);
+        BIGNUM *bg = BN_bin2bn(pPub[ig].pValue, (int)pPub[ig].ulValueLen, NULL);
+        BIGNUM *pm1 = BN_new();
+        CK_RV drv = FHSM_RV_OK;
+        if (!bp || !bg || !pm1 || !BN_sub(pm1, bp, BN_value_one())) drv = FHSM_RV_HOST_MEMORY;
+        if (drv == FHSM_RV_OK) {
+            const int L = BN_num_bits(bp);
+            if (L < (strict ? 2048 : 1024) || L > 8192 || !BN_is_odd(bp)
+                || BN_cmp(bg, BN_value_one()) <= 0 || BN_cmp(bg, pm1) >= 0
+                || (vbits && vbits >= (CK_ULONG)L))
+                drv = 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
+        }
+        EVP_PKEY *dom = NULL;
+        if (drv == FHSM_RV_OK) {
+            OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+            OSSL_PARAM *dp = NULL;
+            if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
+                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1)
+                dp = OSSL_PARAM_BLD_to_param(bld);
+            OSSL_PARAM_BLD_free(bld);
+            EVP_PKEY_CTX *fc = dp ? EVP_PKEY_CTX_new_from_name(NULL, "DH", NULL) : NULL;
+            if (!fc || EVP_PKEY_fromdata_init(fc) != 1
+                || EVP_PKEY_fromdata(fc, &dom, EVP_PKEY_KEY_PARAMETERS, dp) != 1)
+                drv = 0x00000130UL;
+            EVP_PKEY_CTX_free(fc);
+            OSSL_PARAM_free(dp);
+        }
+        if (drv == FHSM_RV_OK && !dh_safe_prime_group(dom)) {
+            /* Not a named group: refused where NIST's rules apply and where
+             * only the FIPS provider serves DH, which takes the named groups
+             * alone; elsewhere p must at least be prime. */
+            if (strict || !fhsm_dh_any_group_available()) drv = 0x00000130UL;
+            else {
+                BN_CTX *bc = BN_CTX_new();
+                if (!bc || BN_check_prime(bp, bc, NULL) != 1) drv = 0x00000130UL;
+                BN_CTX_free(bc);
+            }
+        }
+        if (drv == FHSM_RV_OK) {
+            EVP_PKEY_CTX *kc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
+            int plen = (int)vbits;
+            OSSL_PARAM kp[2] = { OSSL_PARAM_construct_int(OSSL_PKEY_PARAM_DH_PRIV_LEN, &plen),
+                                 OSSL_PARAM_construct_end() };
+            if (!kc || EVP_PKEY_keygen_init(kc) != 1
+                || (vbits && EVP_PKEY_CTX_set_params(kc, kp) != 1)
+                || EVP_PKEY_generate(kc, &pkey) != 1)
+                pkey = NULL;   /* reported below, with OpenSSL's reason */
+            EVP_PKEY_CTX_free(kc);
+        }
+        EVP_PKEY_free(dom);
+        BN_free(bp); BN_free(bg); BN_free(pm1);
+        if (drv != FHSM_RV_OK) { ERR_clear_error(); return drv; }
+        ckk_type = 0x00000002UL;   /* CKK_DH */
+        pw_family = FHSM_PAIRWISE_DH;
     } else {
         return FHSM_RV_MECHANISM_INVALID;
     }
@@ -10403,10 +10616,22 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
     if (!pkey) return -1;
     int rc = -1;
 
-    if (kt == 0x00000001UL /* CKK_DSA */
-        && (type == 0x130UL || type == 0x131UL || type == 0x132UL)) {
+    if (kt == 0x00000002UL /* CKK_DH */ && cl == CKO_PRIVATE_KEY && type == 0x160UL) {
+        /* CKA_VALUE_BITS of a DH private key (PKCS#11 v3.2 6.4.4), the
+         * length of x in bits, which CKM_DH_PKCS_KEY_PAIR_GEN contributes
+         * when the template did not give it. A length, not the value. */
+        BIGNUM *x = NULL;
+        if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, &x) == 1 && x) {
+            CK_ULONG bits = (CK_ULONG)BN_num_bits(x);
+            if (*out_len < sizeof bits) { *out_len = sizeof bits; rc = -2; }
+            else { memcpy(out, &bits, sizeof bits); *out_len = sizeof bits; rc = 0; }
+        }
+        BN_clear_free(x);
+    } else if ((kt == 0x00000001UL /* CKK_DSA */ && (type == 0x130UL || type == 0x131UL || type == 0x132UL))
+               || (kt == 0x00000002UL /* CKK_DH */ && (type == 0x130UL || type == 0x132UL))) {
         /* CKA_PRIME, CKA_SUBPRIME, CKA_BASE (2.8.0): the domain parameters,
-         * on both halves of the pair, as RSA's modulus is. */
+         * on both halves of the pair, as RSA's modulus is. A PKCS #3 DH key
+         * has no CKA_SUBPRIME. */
         const char *name = type == 0x130UL ? OSSL_PKEY_PARAM_FFC_P
                          : type == 0x131UL ? OSSL_PKEY_PARAM_FFC_Q : OSSL_PKEY_PARAM_FFC_G;
         BIGNUM *bn = NULL;
@@ -10636,7 +10861,8 @@ static int private_value_of(const uint8_t *der, size_t der_len, CK_ULONG ckk,
         return -1;
     } else if (ckk == 0x00000003UL /* CKK_EC */) {
         bn_name = OSSL_PKEY_PARAM_PRIV_KEY; ec_scalar = 1;
-    } else if (ckk == 0x00000001UL /* CKK_DSA: x, big-endian */) {
+    } else if (ckk == 0x00000001UL /* CKK_DSA: x, big-endian */
+               || ckk == 0x00000002UL /* CKK_DH: x, big-endian */) {
         bn_name = OSSL_PKEY_PARAM_PRIV_KEY;
     } else if (ckk == 0x00000040UL /* CKK_EC_EDWARDS */
                || ckk == 0x00000041UL /* CKK_EC_MONTGOMERY */
@@ -10817,9 +11043,11 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     src = pqc_raw; src_len = rl;
                     break;
                 }
-                /* A DSA public key's CKA_VALUE is y, big-endian (PKCS#11
-                 * v3.2 6.4.3), not the stored SubjectPublicKeyInfo. 2.8.0. */
-                if (cko_class == CKO_PUBLIC_KEY && ckk_type == 0x00000001UL /* CKK_DSA */) {
+                /* A DSA or DH public key's CKA_VALUE is y, big-endian
+                 * (PKCS#11 v3.2 6.2.2, 6.4.2), not the stored
+                 * SubjectPublicKeyInfo. 2.8.0. */
+                if (cko_class == CKO_PUBLIC_KEY
+                    && (ckk_type == 0x00000001UL /* CKK_DSA */ || ckk_type == 0x00000002UL /* CKK_DH */)) {
                     const unsigned char *pp = value;
                     EVP_PKEY *pk = d2i_PUBKEY(NULL, &pp, (long)value_len);
                     BIGNUM *y = NULL;
@@ -11043,7 +11271,8 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             case CKA_PUBLIC_EXPONENT:
             case CKA_EC_POINT:
             case CKA_EC_PARAMS_QUERY:
-            case 0x130UL: case 0x131UL: case 0x132UL: {   /* CKA_PRIME, _SUBPRIME, _BASE */
+            case 0x130UL: case 0x131UL: case 0x132UL:     /* CKA_PRIME, _SUBPRIME, _BASE */
+            case 0x160UL: {                               /* CKA_VALUE_BITS (DH) */
                 /* Two-pass : (a) query the size with NULL pValue, (b) fill. */
                 if (pTemplate[i].pValue == NULL) {
                     size_t need = 0;
@@ -15757,7 +15986,7 @@ static const char *mech_hash_name(uint32_t m) {
 
 /* The DSA signature mechanisms (2.8.0). Their signatures are r || s, each
  * the length of q, as ECDSA's are each the length of n (PKCS#11 v3.2
- * 6.4.13), and OpenSSL gives both as the same DER SEQUENCE of two INTEGERs;
+ * 6.2.11), and OpenSSL gives both as the same DER SEQUENCE of two INTEGERs;
  * so they share ECDSA's conversion, with the half length taken from q. */
 static int mech_is_dsa(uint32_t m) {
     return (m >= 0x11u && m <= 0x16u) || (m >= 0x18u && m <= 0x1Bu);

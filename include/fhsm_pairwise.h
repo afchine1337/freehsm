@@ -74,6 +74,9 @@ typedef enum {
     /* DSA (2.8.0): sign-then-verify a digest, the EC check, which is written
      * against EVP_PKEY_sign and holds nothing EC-specific. */
     FHSM_PAIRWISE_DSA      = 8,
+    /* Finite-field DH (2.8.0): y recomputed from x and compared, the
+     * key-agreement check, as for X25519 and X448. */
+    FHSM_PAIRWISE_DH       = 9,
 } fhsm_pairwise_family_t;
 
 /* Run the pair-wise consistency check on `pkey` (which must contain

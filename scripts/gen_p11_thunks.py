@@ -1130,9 +1130,19 @@ MECHANISMS: tuple[Mech, ...] = (
          fips="non-approved", refs=("SP 800-38B", "SP 800-67 rev. 2")),
     Mech("CKM_RC4",                0x00000111, "RC4",  "encrypt", "dispatch_reject_fips",
          fips="non-approved"),
-    Mech("CKM_DH_PKCS_KEY_PAIR_GEN", 0x00000020, "DH",  "keypair", "dispatch_reject_fips",
-         fips="non-approved",
-         notes="Finite-field DH < 2048 bits forbidden; modern code should use ECDH / X25519."),
+    # PKCS #3 Diffie-Hellman (2.8.0): key pairs on the caller's prime and
+    # base, and phase II. Approved on the safe-prime groups of SP 800-56A
+    # rev. 3 5.5.1.1 (ffdhe and MODP, 2048 to 8192), the only ones allowed
+    # where NIST's rules apply; other groups of 1024 bits and up elsewhere.
+    # C_GenerateKeyPair and C_DeriveKey compute them; the handlers named are
+    # only references.
+    Mech("CKM_DH_PKCS_KEY_PAIR_GEN", 0x00000020, "DH",  "keypair", "dispatch_ec_keypair",
+         fips="approved", key_type="CKK_DH",
+         refs=("PKCS #3", "SP 800-56A rev. 3", "PKCS#11 v3.2 6.4.8"),
+         notes="Safe-prime groups only where NIST's rules apply."),
+    Mech("CKM_DH_PKCS_DERIVE",       0x00000021, "DH",  "derive",  "dispatch_xor_base_and_data",
+         fips="approved", key_type="CKK_DH",
+         refs=("PKCS #3", "SP 800-56A rev. 3", "PKCS#11 v3.2 6.4.10")),
     # DSA (2.8.0): key pairs on the caller's domain parameters, and the
     # signatures, raw r || s. Not approved -- FIPS 186-5 withdrew DSA
     # signature generation -- so all-mechanisms in permissive mode only, and
@@ -1141,7 +1151,7 @@ MECHANISMS: tuple[Mech, ...] = (
     # are only references.
     Mech("CKM_DSA_KEY_PAIR_GEN",   0x00000010, "DSA",  "keypair", "dispatch_ec_keypair",
          fips="non-approved", key_type="CKK_DSA",
-         refs=("FIPS 186-4", "PKCS#11 v3.2 6.4.11"),
+         refs=("FIPS 186-4", "PKCS#11 v3.2 6.2.6"),
          notes="DSA was withdrawn by FIPS 186-5."),
     Mech("CKM_DSA",                0x00000011, "DSA",  "sign",    "dispatch_ecdsa",
          fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4",)),

@@ -31,6 +31,8 @@
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/rsa.h>      /* RSA_PKCS1_PADDING + EVP_PKEY_CTX_set_rsa_padding */
+#include <openssl/bn.h>       /* BN_mod_exp: the DH recomputation */
+#include <openssl/core_names.h>
 
 /* Fixed plaintexts / messages used by the pair-wise checks. Their
  * content is not security-sensitive --- any 32-byte value would do.
@@ -237,6 +239,29 @@ done:
 }
 
 /* ---------------------------------------------------------------------------
+ * Finite-field DH (2.8.0): y recomputed as g^x mod p and compared with the
+ * generated y -- the check SP 800-56A rev. 3 5.6.2.1.4 describes for a
+ * key-agreement pair, as pairwise_ecm does for X25519 and X448.
+ * ----------------------------------------------------------------------- */
+static fhsm_rv_t pairwise_dh(EVP_PKEY *pkey) {
+    fhsm_rv_t rv = FHSM_RV_FUNCTION_FAILED;
+    BIGNUM *p = NULL, *g = NULL, *x = NULL, *y = NULL, *y2 = BN_new();
+    BN_CTX *ctx = BN_CTX_new();
+    if (!y2 || !ctx) goto done;
+    if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_FFC_P, &p) != 1
+        || EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_FFC_G, &g) != 1
+        || EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, &x) != 1
+        || EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, &y) != 1)
+        goto done;
+    if (BN_mod_exp(y2, g, x, p, ctx) != 1) goto done;
+    if (BN_cmp(y, y2) == 0) rv = FHSM_RV_OK;
+done:
+    BN_free(p); BN_free(g); BN_clear_free(x); BN_free(y); BN_free(y2);
+    BN_CTX_free(ctx);
+    return rv;
+}
+
+/* ---------------------------------------------------------------------------
  * Public entry point.
  * ----------------------------------------------------------------------- */
 fhsm_rv_t fhsm_pairwise_check(EVP_PKEY *pkey, fhsm_pairwise_family_t family) {
@@ -250,6 +275,7 @@ fhsm_rv_t fhsm_pairwise_check(EVP_PKEY *pkey, fhsm_pairwise_family_t family) {
     case FHSM_PAIRWISE_EDDSA:   return pairwise_pq_sign(pkey);
     case FHSM_PAIRWISE_ECM:     return pairwise_ecm(pkey);
     case FHSM_PAIRWISE_DSA:     return pairwise_ec(pkey);
+    case FHSM_PAIRWISE_DH:      return pairwise_dh(pkey);
     default:                    return FHSM_RV_ARGUMENTS_BAD;
     }
 }
