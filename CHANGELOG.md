@@ -208,6 +208,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   of SP 800-56A rev. 3 (ffdhe and MODP, 2048 to 8192 bits), the only ones
   allowed where NIST's rules apply; other prime groups of 1024 bits and up
   elsewhere. `tests/test_dh_pkcs.c`.
+* **X9.42 Diffie-Hellman.** `CKM_X9_42_DH_KEY_PAIR_GEN` makes a key pair on
+  the public template's `CKA_PRIME`, `CKA_SUBPRIME` and `CKA_BASE`,
+  validated, or `CKR_DOMAIN_PARAMS_INVALID`. `CKM_X9_42_DH_DERIVE` agrees
+  with the other party's public value, with `CKD_NULL` or the SHA-1
+  concatenation KDF (`CKD_SHA1_KDF_CONCATENATE`) over the other info;
+  `CKD_SHA1_KDF_ASN1` and the hybrid and MQV forms are not offered. The same
+  groups as PKCS #3: approved on the safe-prime groups, the only ones where
+  NIST's rules apply. `tests/test_dh_x942.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first

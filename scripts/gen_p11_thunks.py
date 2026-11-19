@@ -1143,6 +1143,16 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_DH_PKCS_DERIVE",       0x00000021, "DH",  "derive",  "dispatch_xor_base_and_data",
          fips="approved", key_type="CKK_DH",
          refs=("PKCS #3", "SP 800-56A rev. 3", "PKCS#11 v3.2 6.4.10")),
+    # X9.42 Diffie-Hellman (2.8.0): key pairs on p, q and g, and the
+    # agreement with one key pair each, CKD_NULL or the SHA-1 concatenation
+    # KDF. The same groups as PKCS #3 where NIST's rules apply. The hybrid
+    # and MQV forms are not offered.
+    Mech("CKM_X9_42_DH_KEY_PAIR_GEN", 0x00000030, "DH", "keypair", "dispatch_ec_keypair",
+         fips="approved", key_type="CKK_X9_42_DH",
+         refs=("ANSI X9.42", "SP 800-56A rev. 3", "PKCS#11 v3.2 6.4.12")),
+    Mech("CKM_X9_42_DH_DERIVE",      0x00000031, "DH",  "derive",  "dispatch_xor_base_and_data",
+         fips="approved", key_type="CKK_X9_42_DH",
+         refs=("ANSI X9.42", "SP 800-56A rev. 3", "PKCS#11 v3.2 6.4.14")),
     # DSA (2.8.0): key pairs on the caller's domain parameters, and the
     # signatures, raw r || s. Not approved -- FIPS 186-5 withdrew DSA
     # signature generation -- so all-mechanisms in permissive mode only, and

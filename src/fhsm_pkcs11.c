@@ -2800,6 +2800,7 @@ static uint8_t fhsm_usage_possible(uint32_t cko_class, uint32_t kt) {
                                    : FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP) | FHSM_USAGE_DERIVE);
         case 0x00000041UL:   /* CKK_EC_MONTGOMERY: X25519, X448 */
         case 0x00000002UL:   /* CKK_DH (2.8.0): key agreement only */
+        case 0x00000004UL:   /* CKK_X9_42_DH (2.8.0): likewise */
             return FHSM_USAGE_DERIVE;
         case 0x00000001UL:   /* CKK_DSA (2.8.0) */
         case 0x00000040UL:   /* CKK_EC_EDWARDS */
@@ -6487,18 +6488,18 @@ static CK_RV tls_kdf_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
  * to p's length (SP 800-56A rev. 3 5.7.1.1), cut from the leading end to
  * the template's type and length as 6.4.10 says, as for ECDH. Approved on
  * the safe-prime groups, the only ones a key has where NIST's rules apply. */
-static CK_RV dh_pkcs_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
-                            const CK_MECHANISM *pMechanism,
-                            CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
-                            CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
-    if (!pMechanism->pParameter || pMechanism->ulParameterLen == 0
-        || pMechanism->ulParameterLen > 1024)
-        return FHSM_RV_MECHANISM_PARAM_INVALID;
+/* Z for the finite-field agreements, PKCS #3 (kt CKK_DH, OpenSSL "DH") and
+ * X9.42 (CKK_X9_42_DH, "DHX"): the base key's private value with the peer's
+ * y, checked against the base key's group, padded to p's length. *z is
+ * OPENSSL_malloc'd and the caller frees it with OPENSSL_clear_free. */
+static CK_RV ffdh_z(fhsm_token_t *t, CK_OBJECT_HANDLE hBaseKey, uint32_t want_kt,
+                    const uint8_t *py, size_t pyl, uint8_t **zout, size_t *zlout) {
+    if (!py || pyl == 0 || pyl > 1024) return FHSM_RV_MECHANISM_PARAM_INVALID;
     const uint8_t *bv = NULL; size_t bvl = 0;
     uint32_t bcl = 0, bkt = 0;
     { fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hBaseKey, &bv, &bvl, &bcl, &bkt);
       if (r != FHSM_RV_OK) return r; }
-    if (bcl != CKO_PRIVATE_KEY || bkt != 0x00000002UL /* CKK_DH */)
+    if (bcl != CKO_PRIVATE_KEY || bkt != want_kt)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     const unsigned char *pp = bv;
     EVP_PKEY *priv = d2i_AutoPrivateKey(NULL, &pp, (long)bvl);
@@ -6512,7 +6513,7 @@ static CK_RV dh_pkcs_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     CK_RV rv = FHSM_RV_OK;
     EVP_PKEY *peer = NULL;
     BIGNUM *p = NULL, *g = NULL, *q = NULL;
-    BIGNUM *y = BN_bin2bn(pMechanism->pParameter, (int)pMechanism->ulParameterLen, NULL);
+    BIGNUM *y = BN_bin2bn(py, (int)pyl, NULL);
     if (!y || EVP_PKEY_get_bn_param(priv, OSSL_PKEY_PARAM_FFC_P, &p) != 1
         || EVP_PKEY_get_bn_param(priv, OSSL_PKEY_PARAM_FFC_G, &g) != 1)
         rv = FHSM_RV_FUNCTION_FAILED;
@@ -6528,7 +6529,8 @@ static CK_RV dh_pkcs_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
             && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PUB_KEY, y) == 1)
             prm = OSSL_PARAM_BLD_to_param(bld);
         OSSL_PARAM_BLD_free(bld);
-        EVP_PKEY_CTX *fc = prm ? EVP_PKEY_CTX_new_from_name(NULL, "DH", NULL) : NULL;
+        EVP_PKEY_CTX *fc = prm ? EVP_PKEY_CTX_new_from_name(NULL,
+                                     want_kt == 0x00000004UL ? "DHX" : "DH", NULL) : NULL;
         if (!fc || EVP_PKEY_fromdata_init(fc) != 1
             || EVP_PKEY_fromdata(fc, &peer, EVP_PKEY_PUBLIC_KEY, prm) != 1)
             rv = FHSM_RV_MECHANISM_PARAM_INVALID;
@@ -6557,14 +6559,106 @@ static CK_RV dh_pkcs_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     EVP_PKEY_free(peer);
     EVP_PKEY_free(priv);
     ERR_clear_error();
-    if (rv == FHSM_RV_OK) {
-        size_t klen = 0;
+    if (rv != FHSM_RV_OK) { if (z) OPENSSL_clear_free(z, zl); return rv; }
+    *zout = z; *zlout = zl;
+    return FHSM_RV_OK;
+}
+
+static CK_RV dh_pkcs_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                            const CK_MECHANISM *pMechanism,
+                            CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
+                            CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
+    uint8_t *z = NULL;
+    size_t zl = 0;
+    CK_RV rv = ffdh_z(t, hBaseKey, 0x00000002UL /* CKK_DH */, pMechanism->pParameter,
+                      (size_t)pMechanism->ulParameterLen, &z, &zl);
+    if (rv != FHSM_RV_OK) return rv;
+    size_t klen = 0;
+    rv = ecdh_key_len(pTemplate, ulCount, zl, &klen);
+    if (rv == FHSM_RV_OK)
+        rv = derive_store_secret(t, hSession, pTemplate, ulCount, z + (zl - klen), klen,
+                                 CKO_SECRET_KEY, hBaseKey, 0, 0, phKey);
+    OPENSSL_clear_free(z, zl);
+    return rv;
+}
+
+/* CKM_X9_42_DH_DERIVE (PKCS#11 v3.2 6.4.14, 2.8.0): X9.42 agreement, each
+ * party one key pair, CK_X9_42_DH1_DERIVE_PARAMS. Z as for PKCS #3, the
+ * peer checked against p, q and g. The key derivation functions of Table 94:
+ *   - CKD_NULL: Z itself, cut from the leading end to the template's type
+ *     and length; no other info.
+ *   - CKD_SHA1_KDF_CONCATENATE: X9.42's concatenation KDF, SHA-1(Z ||
+ *     counter || OtherInfo) for counter = 1, 2, ..., which is the ANSI X9.63
+ *     KDF's construction: OpenSSL's X963KDF with SHA-1 and the other info.
+ *     The template gives the length, as for the SHAKE digest derivations.
+ *   - CKD_SHA1_KDF_ASN1 is refused: its counter lives inside the DER
+ *     OtherInfo the caller supplies whole, and 6.4.11 does not say where.
+ * Approved, on the safe-prime groups where NIST's rules apply. */
+static CK_RV x942_dh_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                            const CK_MECHANISM *pMechanism,
+                            CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
+                            CK_ULONG ulCount, CK_OBJECT_HANDLE *phKey) {
+    typedef struct {
+        CK_ULONG kdf;
+        CK_ULONG ulOtherInfoLen; unsigned char *pOtherInfo;
+        CK_ULONG ulPublicDataLen; unsigned char *pPublicData;
+    } x942_dh1_params_t;
+    x942_dh1_params_t p;
+    if (!pMechanism->pParameter || pMechanism->ulParameterLen != sizeof p)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    memcpy(&p, pMechanism->pParameter, sizeof p);
+    if ((p.pOtherInfo == NULL) != (p.ulOtherInfoLen == 0) || p.ulOtherInfoLen > 4096)
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    if (p.kdf == 0x00000001UL /* CKD_NULL */) {
+        if (p.ulOtherInfoLen) return FHSM_RV_MECHANISM_PARAM_INVALID;
+    } else if (p.kdf != 0x00000004UL /* CKD_SHA1_KDF_CONCATENATE */) {
+        return FHSM_RV_MECHANISM_PARAM_INVALID;
+    }
+    /* The length, before the agreement: a KDF output has none of its own. */
+    size_t klen = 0;
+    if (p.kdf != 0x00000001UL) {
+        CK_ULONG kt = CKK_GENERIC_SECRET;
+        long ki = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+        if (ki >= 0 && pTemplate[ki].pValue && pTemplate[ki].ulValueLen == sizeof(CK_ULONG))
+            memcpy(&kt, pTemplate[ki].pValue, sizeof kt);
+        int fixed = kt == 0x13UL || kt == 0x14UL || kt == 0x15UL || kt == 0x1EUL;
+        if (!fixed && find_attr(pTemplate, ulCount, CKA_VALUE_LEN) < 0)
+            return CKR_TEMPLATE_INCOMPLETE;
+        CK_RV lr = ecdh_key_len(pTemplate, ulCount, 1024, &klen);
+        if (lr != FHSM_RV_OK) return lr;
+    }
+    uint8_t *z = NULL;
+    size_t zl = 0;
+    CK_RV rv = ffdh_z(t, hBaseKey, 0x00000004UL /* CKK_X9_42_DH */, p.pPublicData,
+                      (size_t)p.ulPublicDataLen, &z, &zl);
+    if (rv != FHSM_RV_OK) return rv;
+    if (p.kdf == 0x00000001UL) {
         rv = ecdh_key_len(pTemplate, ulCount, zl, &klen);
         if (rv == FHSM_RV_OK)
             rv = derive_store_secret(t, hSession, pTemplate, ulCount, z + (zl - klen), klen,
                                      CKO_SECRET_KEY, hBaseKey, 0, 0, phKey);
+        OPENSSL_clear_free(z, zl);
+        return rv;
     }
-    if (z) OPENSSL_clear_free(z, zl);
+    uint8_t *okm = OPENSSL_malloc(klen);
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "X963KDF", NULL);
+    EVP_KDF_CTX *kc = kdf ? EVP_KDF_CTX_new(kdf) : NULL;
+    EVP_KDF_free(kdf);
+    OSSL_PARAM kp[4];
+    int np = 0;
+    kp[np++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, (char *)"SHA1", 0);
+    kp[np++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, z, zl);
+    if (p.ulOtherInfoLen)
+        kp[np++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO, p.pOtherInfo,
+                                                     (size_t)p.ulOtherInfoLen);
+    kp[np] = OSSL_PARAM_construct_end();
+    rv = (okm && kc && EVP_KDF_derive(kc, okm, klen, kp) == 1) ? FHSM_RV_OK : FHSM_RV_FUNCTION_FAILED;
+    EVP_KDF_CTX_free(kc);
+    OPENSSL_clear_free(z, zl);
+    if (rv == FHSM_RV_OK)
+        rv = derive_store_secret(t, hSession, pTemplate, ulCount, okm, klen,
+                                 CKO_SECRET_KEY, hBaseKey, 0, 0, phKey);
+    if (okm) OPENSSL_clear_free(okm, klen);
     return rv;
 }
 
@@ -6658,6 +6752,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return ike_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
     if (pMechanism->mechanism == 0x00000021UL /* CKM_DH_PKCS_DERIVE */)
         return dh_pkcs_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
+    if (pMechanism->mechanism == 0x00000031UL /* CKM_X9_42_DH_DERIVE */)
+        return x942_dh_derive(t, hSession, pMechanism, hBaseKey, pTemplate, ulCount, phKey);
     /* HKDF (RFC 5869, PKCS#11 v3.2 §6.32). Advertised with a handler in
      * src/dispatch/fhsm_dispatch_kdf.c that nothing called; 660 vectors in
      * the conformance report read "HKDF derive failed for valid vector ...
@@ -10012,6 +10108,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             case CKM_COMPOSITE_MLDSA65_ED25519:  want_kt = CKK_COMPOSITE_MLDSA65_ED25519; break;
             case 0x00000010UL:                   want_kt = 0x00000001UL; break; /* DSA */
             case 0x00000020UL:                   want_kt = 0x00000002UL; break; /* DH */
+            case 0x00000030UL:                   want_kt = 0x00000004UL; break; /* X9.42 DH */
             default: kt_known = 0; break;   /* refused below, as before */
         }
         CK_ATTRIBUTE *tp[2] = { pPub, pPriv }; CK_ULONG tn[2] = { ulPub, ulPriv };
@@ -10364,6 +10461,69 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         if (drv != FHSM_RV_OK) { ERR_clear_error(); return drv; }
         ckk_type = 0x00000002UL;   /* CKK_DH */
         pw_family = FHSM_PAIRWISE_DH;
+    } else if (pMechanism->mechanism == 0x00000030UL /* CKM_X9_42_DH_KEY_PAIR_GEN */) {
+        /* 2.8.0. PKCS#11 v3.2 6.4.12: the public template's CKA_PRIME,
+         * CKA_SUBPRIME and CKA_BASE, all three required. p of 1024 to 8192
+         * bits in steps of 256 and q of 160 bits or more (6.4.3), and the
+         * three passing OpenSSL's validation -- p and q prime, q dividing
+         * p - 1, g of order q -- or CKR_DOMAIN_PARAMS_INVALID. Where NIST's
+         * rules apply only the safe-prime groups, as for PKCS #3, given with
+         * q = (p - 1) / 2. */
+        const long ip = find_attr(pPub, ulPub, 0x130UL /* CKA_PRIME */);
+        const long iq = find_attr(pPub, ulPub, 0x131UL /* CKA_SUBPRIME */);
+        const long ig = find_attr(pPub, ulPub, 0x132UL /* CKA_BASE */);
+        if (ip < 0 || iq < 0 || ig < 0) return CKR_TEMPLATE_INCOMPLETE;
+        const long idx[3] = { ip, iq, ig };
+        for (int k = 0; k < 3; ++k)
+            if (!pPub[idx[k]].pValue || pPub[idx[k]].ulValueLen == 0
+                || pPub[idx[k]].ulValueLen > 1024)
+                return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        const int strict = fhsm_build_fips_strict || fhsm_mode_is_fips();
+        BIGNUM *bp = BN_bin2bn(pPub[ip].pValue, (int)pPub[ip].ulValueLen, NULL);
+        BIGNUM *bq = BN_bin2bn(pPub[iq].pValue, (int)pPub[iq].ulValueLen, NULL);
+        BIGNUM *bg = BN_bin2bn(pPub[ig].pValue, (int)pPub[ig].ulValueLen, NULL);
+        CK_RV drv = FHSM_RV_OK;
+        if (!bp || !bq || !bg) drv = FHSM_RV_HOST_MEMORY;
+        if (drv == FHSM_RV_OK) {
+            const int L = BN_num_bits(bp), N = BN_num_bits(bq);
+            if (L < (strict ? 2048 : 1024) || L > 8192 || L % 256 != 0 || N < 160 || N >= L)
+                drv = 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
+        }
+        EVP_PKEY *dom = NULL;
+        if (drv == FHSM_RV_OK) {
+            OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+            OSSL_PARAM *dp = NULL;
+            if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
+                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, bq) == 1
+                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1)
+                dp = OSSL_PARAM_BLD_to_param(bld);
+            OSSL_PARAM_BLD_free(bld);
+            EVP_PKEY_CTX *fc = dp ? EVP_PKEY_CTX_new_from_name(NULL, "DHX", NULL) : NULL;
+            if (!fc || EVP_PKEY_fromdata_init(fc) != 1
+                || EVP_PKEY_fromdata(fc, &dom, EVP_PKEY_KEY_PARAMETERS, dp) != 1)
+                drv = 0x00000130UL;
+            EVP_PKEY_CTX_free(fc);
+            OSSL_PARAM_free(dp);
+        }
+        if (drv == FHSM_RV_OK && !dh_safe_prime_group(dom)
+            && (strict || !fhsm_dh_any_group_available()))
+            drv = 0x00000130UL;
+        if (drv == FHSM_RV_OK) {
+            EVP_PKEY_CTX *vc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
+            if (!vc || EVP_PKEY_param_check(vc) != 1) drv = 0x00000130UL;
+            EVP_PKEY_CTX_free(vc);
+        }
+        if (drv == FHSM_RV_OK) {
+            EVP_PKEY_CTX *kc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
+            if (!kc || EVP_PKEY_keygen_init(kc) != 1 || EVP_PKEY_generate(kc, &pkey) != 1)
+                pkey = NULL;   /* reported below, with OpenSSL's reason */
+            EVP_PKEY_CTX_free(kc);
+        }
+        EVP_PKEY_free(dom);
+        BN_free(bp); BN_free(bq); BN_free(bg);
+        if (drv != FHSM_RV_OK) { ERR_clear_error(); return drv; }
+        ckk_type = 0x00000004UL;   /* CKK_X9_42_DH */
+        pw_family = FHSM_PAIRWISE_DH;
     } else {
         return FHSM_RV_MECHANISM_INVALID;
     }
@@ -10627,7 +10787,8 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
             else { memcpy(out, &bits, sizeof bits); *out_len = sizeof bits; rc = 0; }
         }
         BN_clear_free(x);
-    } else if ((kt == 0x00000001UL /* CKK_DSA */ && (type == 0x130UL || type == 0x131UL || type == 0x132UL))
+    } else if (((kt == 0x00000001UL /* CKK_DSA */ || kt == 0x00000004UL /* CKK_X9_42_DH */)
+                && (type == 0x130UL || type == 0x131UL || type == 0x132UL))
                || (kt == 0x00000002UL /* CKK_DH */ && (type == 0x130UL || type == 0x132UL))) {
         /* CKA_PRIME, CKA_SUBPRIME, CKA_BASE (2.8.0): the domain parameters,
          * on both halves of the pair, as RSA's modulus is. A PKCS #3 DH key
@@ -10862,7 +11023,8 @@ static int private_value_of(const uint8_t *der, size_t der_len, CK_ULONG ckk,
     } else if (ckk == 0x00000003UL /* CKK_EC */) {
         bn_name = OSSL_PKEY_PARAM_PRIV_KEY; ec_scalar = 1;
     } else if (ckk == 0x00000001UL /* CKK_DSA: x, big-endian */
-               || ckk == 0x00000002UL /* CKK_DH: x, big-endian */) {
+               || ckk == 0x00000002UL /* CKK_DH: x, big-endian */
+               || ckk == 0x00000004UL /* CKK_X9_42_DH: x, big-endian */) {
         bn_name = OSSL_PKEY_PARAM_PRIV_KEY;
     } else if (ckk == 0x00000040UL /* CKK_EC_EDWARDS */
                || ckk == 0x00000041UL /* CKK_EC_MONTGOMERY */
@@ -11047,7 +11209,8 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                  * (PKCS#11 v3.2 6.2.2, 6.4.2), not the stored
                  * SubjectPublicKeyInfo. 2.8.0. */
                 if (cko_class == CKO_PUBLIC_KEY
-                    && (ckk_type == 0x00000001UL /* CKK_DSA */ || ckk_type == 0x00000002UL /* CKK_DH */)) {
+                    && (ckk_type == 0x00000001UL /* CKK_DSA */ || ckk_type == 0x00000002UL /* CKK_DH */
+                        || ckk_type == 0x00000004UL /* CKK_X9_42_DH */)) {
                     const unsigned char *pp = value;
                     EVP_PKEY *pk = d2i_PUBKEY(NULL, &pp, (long)value_len);
                     BIGNUM *y = NULL;
