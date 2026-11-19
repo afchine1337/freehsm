@@ -189,6 +189,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
   approved (SP 800-135 rev. 1 4.1) with an HMAC on SHA-1, SHA-2 or SHA-3;
   the fourth runs in the all-mechanisms build in permissive mode only.
   `tests/test_ike_prf.c`.
+* **DSA.** `CKM_DSA_KEY_PAIR_GEN` makes a key pair on the domain parameters
+  of the public template (`CKA_PRIME`, `CKA_SUBPRIME`, `CKA_BASE`), one of
+  FIPS 186-4's sizes and validated, or `CKR_DOMAIN_PARAMS_INVALID`; it was
+  listed and refused until now. `CKM_DSA` and `CKM_DSA_SHA1` to
+  `CKM_DSA_SHA3_512` sign and verify, r || s, single-part and in parts. The
+  three parameters read back from both halves, and `CKA_VALUE` gives y and,
+  for a key that may be read, x. Not approved (FIPS 186-5): the
+  all-mechanisms build in permissive mode only, where a provider other than
+  the FIPS one serves DSA. `tests/test_dsa.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first

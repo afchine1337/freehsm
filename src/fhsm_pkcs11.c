@@ -90,6 +90,7 @@
 #include <openssl/param_build.h> /* OSSL_PARAM_BLD */
 #include <openssl/err.h>      /* ERR_peek_last_error (ML-KEM debug only) */
 #include <openssl/ecdsa.h>    /* ECDSA_SIG_new / d2i / i2d  for raw r||s conversion */
+#include <openssl/provider.h> /* OSSL_PROVIDER_get0_name: fhsm_dsa_available */
 
 /* PKCS#11 v3.2 §6.13 ECDSA r||s wire format <-> DER ECDSA_SIG. Extracted
  * into its own translation unit in v1.1.14 as a prerequisite for the
@@ -1581,6 +1582,27 @@ static int fhsm_mac_available(const char *name) {
     ERR_pop_to_mark();
     return ok;
 }
+/* DSA (2.8.0): key generation and signing by a provider other than the FIPS
+ * one. FIPS 186-5 withdrew DSA signature generation, and the FIPS provider
+ * keeps DSA for verification only -- signing is refused there, or flagged
+ * unapproved, depending on its configuration -- so a module whose DSA would
+ * come from it does not offer the family at all rather than half of it. */
+static int fhsm_dsa_available(void) {
+    ERR_set_mark();
+    EVP_KEYMGMT *km = EVP_KEYMGMT_fetch(NULL, "DSA", NULL);
+    EVP_SIGNATURE *sg = EVP_SIGNATURE_fetch(NULL, "DSA", NULL);
+    int ok = km != NULL && sg != NULL;
+    if (ok) {
+        const OSSL_PROVIDER *pv = EVP_SIGNATURE_get0_provider(sg);
+        const char *pn = pv ? OSSL_PROVIDER_get0_name(pv) : NULL;
+        if (!pn || strcmp(pn, "fips") == 0) ok = 0;
+    }
+    EVP_SIGNATURE_free(sg);
+    EVP_KEYMGMT_free(km);
+    ERR_pop_to_mark();
+    return ok;
+}
+
 /* 1 when the providers serve what the mechanism needs; 1 for any mechanism
  * that needs nothing beyond what every provider has. Grown family by family
  * since 2.8.0: each algorithm the FIPS provider lacks is listed here when it
@@ -1598,6 +1620,9 @@ static int fhsm_provider_mech_available(CK_ULONG m) {
              * FIPS provider has neither. */
             if (m >= 0x00000550UL && m <= 0x00000558UL) return fhsm_cipher_available("CAMELLIA-128-ECB");
             if (m >= 0x00000560UL && m <= 0x00000567UL) return fhsm_cipher_available("ARIA-128-ECB");
+            /* DSA 0x10..0x1B (2.8.0): key pair generation and signatures. */
+            if (m >= 0x00000010UL && m <= 0x0000001BUL && m != 0x00000017UL)
+                return fhsm_dsa_available();
             break;
     }
     switch (m) {
@@ -1778,6 +1803,8 @@ static void fhsm_mech_keysizes_for(const char *fam,
     if (!strcmp(fam, "DES2"))    { *mn = 16;   *mx = 16;   return; }
     /* A TLS master secret is 48 bytes, base and result (6.40.4). */
     if (!strcmp(fam, "TLS12-MASTER")) { *mn = 48; *mx = 48; return; }
+    /* DSA: the prime p, in bits (FIPS 186-4 4.2: 1024 to 3072). */
+    if (!strcmp(fam, "DSA"))     { *mn = 1024; *mx = 3072; return; }
     /* ChaCha20 and Poly1305 keys are 256 bits and only 256 (RFC 8439). */
     if (!strcmp(fam, "CHACHA20") || !strcmp(fam, "POLY1305"))
                                  { *mn = 32;   *mx = 32;   return; }
@@ -2731,6 +2758,7 @@ static uint8_t fhsm_usage_possible(uint32_t cko_class, uint32_t kt) {
                                    : FHSM_USAGE_VERIFY | FHSM_USAGE_WRAP) | FHSM_USAGE_DERIVE);
         case 0x00000041UL:   /* CKK_EC_MONTGOMERY: X25519, X448 */
             return FHSM_USAGE_DERIVE;
+        case 0x00000001UL:   /* CKK_DSA (2.8.0) */
         case 0x00000040UL:   /* CKK_EC_EDWARDS */
         case 0x0000004AUL:   /* CKK_ML_DSA */
         case 0x0000004BUL:   /* CKK_SLH_DSA */
@@ -9848,6 +9876,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             case CKM_ML_DSA_KEY_PAIR_GEN:        want_kt = CKK_ML_DSA; break;
             case CKM_SLH_DSA_KEY_PAIR_GEN:       want_kt = CKK_SLH_DSA; break;
             case CKM_COMPOSITE_MLDSA65_ED25519:  want_kt = CKK_COMPOSITE_MLDSA65_ED25519; break;
+            case 0x00000010UL:                   want_kt = 0x00000001UL; break; /* DSA */
             default: kt_known = 0; break;   /* refused below, as before */
         }
         CK_ATTRIBUTE *tp[2] = { pPub, pPriv }; CK_ULONG tn[2] = { ulPub, ulPriv };
@@ -10058,6 +10087,70 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         pkey = EVP_PKEY_Q_keygen(NULL, NULL, pset);
         ckk_type = CKK_SLH_DSA;
         pw_family = FHSM_PAIRWISE_SLH_DSA;
+    } else if (pMechanism->mechanism == 0x00000010UL /* CKM_DSA_KEY_PAIR_GEN */) {
+        /* 2.8.0. The domain parameters are the public template's CKA_PRIME,
+         * CKA_SUBPRIME and CKA_BASE (PKCS#11 v3.2 6.4.11), all three
+         * required; their sizes one of FIPS 186-4's (L, N) pairs, (1024,
+         * 160), (2048, 224), (2048, 256) or (3072, 256), and the three checked
+         * by OpenSSL's parameter validation -- p and q prime, q dividing
+         * p - 1, g of order q -- or CKR_DOMAIN_PARAMS_INVALID. Not approved
+         * (FIPS 186-5): refused where NIST's rules apply, and where only the
+         * FIPS provider serves DSA (fhsm_dsa_available). */
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips() || !fhsm_dsa_available())
+            return FHSM_RV_MECHANISM_INVALID;
+        const long ip = find_attr(pPub, ulPub, 0x130UL /* CKA_PRIME */);
+        const long iq = find_attr(pPub, ulPub, 0x131UL /* CKA_SUBPRIME */);
+        const long ig = find_attr(pPub, ulPub, 0x132UL /* CKA_BASE */);
+        if (ip < 0 || iq < 0 || ig < 0) return CKR_TEMPLATE_INCOMPLETE;
+        const long idx[3] = { ip, iq, ig };
+        for (int k = 0; k < 3; ++k)
+            if (!pPub[idx[k]].pValue || pPub[idx[k]].ulValueLen == 0
+                || pPub[idx[k]].ulValueLen > 384)
+                return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        BIGNUM *bp = BN_bin2bn(pPub[ip].pValue, (int)pPub[ip].ulValueLen, NULL);
+        BIGNUM *bq = BN_bin2bn(pPub[iq].pValue, (int)pPub[iq].ulValueLen, NULL);
+        BIGNUM *bg = BN_bin2bn(pPub[ig].pValue, (int)pPub[ig].ulValueLen, NULL);
+        CK_RV drv = FHSM_RV_OK;
+        if (!bp || !bq || !bg) drv = FHSM_RV_HOST_MEMORY;
+        if (drv == FHSM_RV_OK) {
+            const int L = BN_num_bits(bp), N = BN_num_bits(bq);
+            if (!((L == 1024 && N == 160) || (L == 2048 && N == 224)
+                  || (L == 2048 && N == 256) || (L == 3072 && N == 256)))
+                drv = 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
+        }
+        EVP_PKEY *dom = NULL;
+        if (drv == FHSM_RV_OK) {
+            OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+            OSSL_PARAM *dp = NULL;
+            if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
+                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, bq) == 1
+                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1)
+                dp = OSSL_PARAM_BLD_to_param(bld);
+            OSSL_PARAM_BLD_free(bld);
+            EVP_PKEY_CTX *fc = dp ? EVP_PKEY_CTX_new_from_name(NULL, "DSA", NULL) : NULL;
+            if (!fc || EVP_PKEY_fromdata_init(fc) != 1
+                || EVP_PKEY_fromdata(fc, &dom, EVP_PKEY_KEY_PARAMETERS, dp) != 1)
+                drv = 0x00000130UL;
+            EVP_PKEY_CTX_free(fc);
+            OSSL_PARAM_free(dp);
+        }
+        if (drv == FHSM_RV_OK) {
+            EVP_PKEY_CTX *vc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
+            if (!vc || EVP_PKEY_param_check(vc) != 1) drv = 0x00000130UL;
+            EVP_PKEY_CTX_free(vc);
+            ERR_clear_error();
+        }
+        if (drv == FHSM_RV_OK) {
+            EVP_PKEY_CTX *kc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
+            if (!kc || EVP_PKEY_keygen_init(kc) != 1 || EVP_PKEY_generate(kc, &pkey) != 1)
+                pkey = NULL;   /* reported below, with OpenSSL's reason */
+            EVP_PKEY_CTX_free(kc);
+        }
+        EVP_PKEY_free(dom);
+        BN_free(bp); BN_free(bq); BN_free(bg);
+        if (drv != FHSM_RV_OK) return drv;
+        ckk_type = 0x00000001UL;   /* CKK_DSA */
+        pw_family = FHSM_PAIRWISE_DSA;
     } else {
         return FHSM_RV_MECHANISM_INVALID;
     }
@@ -10310,7 +10403,20 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
     if (!pkey) return -1;
     int rc = -1;
 
-    if (kt == CKK_RSA && type == CKA_MODULUS_BITS) {
+    if (kt == 0x00000001UL /* CKK_DSA */
+        && (type == 0x130UL || type == 0x131UL || type == 0x132UL)) {
+        /* CKA_PRIME, CKA_SUBPRIME, CKA_BASE (2.8.0): the domain parameters,
+         * on both halves of the pair, as RSA's modulus is. */
+        const char *name = type == 0x130UL ? OSSL_PKEY_PARAM_FFC_P
+                         : type == 0x131UL ? OSSL_PKEY_PARAM_FFC_Q : OSSL_PKEY_PARAM_FFC_G;
+        BIGNUM *bn = NULL;
+        if (EVP_PKEY_get_bn_param(pkey, name, &bn) == 1 && bn) {
+            int sz = BN_num_bytes(bn);
+            if (*out_len < (size_t)sz) { *out_len = (size_t)sz; rc = -2; }
+            else { BN_bn2bin(bn, out); *out_len = (size_t)sz; rc = 0; }
+        }
+        BN_free(bn);
+    } else if (kt == CKK_RSA && type == CKA_MODULUS_BITS) {
         CK_ULONG bits = (CK_ULONG)EVP_PKEY_get_bits(pkey);
         if (*out_len < sizeof(CK_ULONG)) { *out_len = sizeof(CK_ULONG); rc = -2; }
         else { memcpy(out, &bits, sizeof(bits)); *out_len = sizeof(bits); rc = 0; }
@@ -10530,6 +10636,8 @@ static int private_value_of(const uint8_t *der, size_t der_len, CK_ULONG ckk,
         return -1;
     } else if (ckk == 0x00000003UL /* CKK_EC */) {
         bn_name = OSSL_PKEY_PARAM_PRIV_KEY; ec_scalar = 1;
+    } else if (ckk == 0x00000001UL /* CKK_DSA: x, big-endian */) {
+        bn_name = OSSL_PKEY_PARAM_PRIV_KEY;
     } else if (ckk == 0x00000040UL /* CKK_EC_EDWARDS */
                || ckk == 0x00000041UL /* CKK_EC_MONTGOMERY */
                || ckk == 0x00000049UL /* CKK_ML_KEM */
@@ -10707,6 +10815,22 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     if (pk) EVP_PKEY_free(pk);
                     if (!raw_ok) { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue; }
                     src = pqc_raw; src_len = rl;
+                    break;
+                }
+                /* A DSA public key's CKA_VALUE is y, big-endian (PKCS#11
+                 * v3.2 6.4.3), not the stored SubjectPublicKeyInfo. 2.8.0. */
+                if (cko_class == CKO_PUBLIC_KEY && ckk_type == 0x00000001UL /* CKK_DSA */) {
+                    const unsigned char *pp = value;
+                    EVP_PKEY *pk = d2i_PUBKEY(NULL, &pp, (long)value_len);
+                    BIGNUM *y = NULL;
+                    int yl = -1;
+                    if (pk && EVP_PKEY_get_bn_param(pk, OSSL_PKEY_PARAM_PUB_KEY, &y) == 1 && y
+                        && BN_num_bytes(y) <= (int)sizeof pqc_raw)
+                        yl = BN_bn2bin(y, pqc_raw);
+                    BN_free(y);
+                    EVP_PKEY_free(pk);
+                    if (yl <= 0) { pTemplate[i].ulValueLen = (CK_ULONG)-1; fhsm_type_invalid = 1; continue; }
+                    src = pqc_raw; src_len = (size_t)yl;
                     break;
                 }
                 /* RSA, EC, Edwards and Montgomery public keys have no
@@ -10918,7 +11042,8 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             case CKA_MODULUS:
             case CKA_PUBLIC_EXPONENT:
             case CKA_EC_POINT:
-            case CKA_EC_PARAMS_QUERY: {
+            case CKA_EC_PARAMS_QUERY:
+            case 0x130UL: case 0x131UL: case 0x132UL: {   /* CKA_PRIME, _SUBPRIME, _BASE */
                 /* Two-pass : (a) query the size with NULL pValue, (b) fill. */
                 if (pTemplate[i].pValue == NULL) {
                     size_t need = 0;
@@ -14042,6 +14167,10 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x1047: case 0x1048: case 0x1049: case 0x104A: /* ECDSA_SHA3_* */
             want = 0x03; break;                             /* CKK_EC */
         case 0x1057: want = 0x40; break;                    /* EDDSA -> CKK_EC_EDWARDS */
+        case 0x0011: case 0x0012: case 0x0013: case 0x0014: /* DSA, DSA_SHA1/224/256 (2.8.0) */
+        case 0x0015: case 0x0016:                           /* DSA_SHA384/512 */
+        case 0x0018: case 0x0019: case 0x001A: case 0x001B: /* DSA_SHA3_* */
+            want = 0x01; break;                             /* CKK_DSA */
         case 0x001D: case 0x001F:                           /* ML_DSA, HASH_ML_DSA */
         case 0x0023: case 0x0024: case 0x0025: case 0x0026: /* HASH_ML_DSA_SHA{224..512} */
         case 0x0027: case 0x0028: case 0x0029: case 0x002A: /* HASH_ML_DSA_SHA3_* */
@@ -15414,6 +15543,11 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x0000401CUL: case 0x0000401DUL:   /* CKM_BLAKE2B_512_HMAC, _GENERAL */
         case 0x00000553UL: case 0x00000554UL:   /* CKM_CAMELLIA_MAC, _GENERAL */
         case 0x00000563UL: case 0x00000564UL:   /* CKM_ARIA_MAC, _GENERAL */
+        case 0x00000011UL: case 0x00000012UL:   /* CKM_DSA, CKM_DSA_SHA1 */
+        case 0x00000013UL: case 0x00000014UL:   /* CKM_DSA_SHA224, _SHA256 */
+        case 0x00000015UL: case 0x00000016UL:   /* CKM_DSA_SHA384, _SHA512 */
+        case 0x00000018UL: case 0x00000019UL:   /* CKM_DSA_SHA3_224, _256 */
+        case 0x0000001AUL: case 0x0000001BUL:   /* CKM_DSA_SHA3_384, _512 */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -15607,8 +15741,42 @@ static const char *mech_hash_name(uint32_t m) {
         case CKM_ECDSA_SHA3_384:                                 return "SHA3-384";
         case CKM_SHA3_512_RSA_PKCS: case CKM_SHA3_512_RSA_PKCS_PSS:
         case CKM_ECDSA_SHA3_512:                                 return "SHA3-512";
+        /* DSA (2.8.0); bare CKM_DSA, 0x11, signs the caller's digest. */
+        case 0x00000012UL:                                       return "SHA1";
+        case 0x00000013UL:                                       return "SHA224";
+        case 0x00000014UL:                                       return "SHA256";
+        case 0x00000015UL:                                       return "SHA384";
+        case 0x00000016UL:                                       return "SHA512";
+        case 0x00000018UL:                                       return "SHA3-224";
+        case 0x00000019UL:                                       return "SHA3-256";
+        case 0x0000001AUL:                                       return "SHA3-384";
+        case 0x0000001BUL:                                       return "SHA3-512";
         default:                                                   return NULL;
     }
+}
+
+/* The DSA signature mechanisms (2.8.0). Their signatures are r || s, each
+ * the length of q, as ECDSA's are each the length of n (PKCS#11 v3.2
+ * 6.4.13), and OpenSSL gives both as the same DER SEQUENCE of two INTEGERs;
+ * so they share ECDSA's conversion, with the half length taken from q. */
+static int mech_is_dsa(uint32_t m) {
+    return (m >= 0x11u && m <= 0x16u) || (m >= 0x18u && m <= 0x1Bu);
+}
+
+static int mech_is_rs(uint32_t m) {
+    return fhsm_mech_is_ecdsa(m) || mech_is_dsa(m);
+}
+
+/* The length of r and of s: the order n's for ECDSA, q's for DSA. 0 when the
+ * key does not give it. */
+static size_t rs_half_len(EVP_PKEY *pkey, uint32_t m) {
+    if (!mech_is_dsa(m)) return (size_t)((EVP_PKEY_get_bits(pkey) + 7) / 8);
+    BIGNUM *q = NULL;
+    size_t n = 0;
+    if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_FFC_Q, &q) == 1 && q)
+        n = (size_t)BN_num_bytes(q);
+    BN_free(q);
+    return n;
 }
 
 /* CKM_RSA_X_509 is textbook RSA: the caller's bytes go through the modular
@@ -15723,10 +15891,9 @@ static size_t fhsm_exact_sig_len(fhsm_token_t *t, fhsm_op_t *op) {
     EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
     if (!pkey) return 0;
     size_t out = 0;
-    if (fhsm_mech_is_ecdsa(op->mechanism)) {
-        /* Raw r||s : two field elements, each ceil(order_bits / 8). */
-        int bits = EVP_PKEY_get_bits(pkey);
-        if (bits > 0) out = 2u * (size_t)((bits + 7) / 8);
+    if (mech_is_rs(op->mechanism)) {
+        /* Raw r||s : two integers, each the length of n (ECDSA) or q (DSA). */
+        out = 2u * rs_half_len(pkey, op->mechanism);
     } else {
         int sz = EVP_PKEY_get_size(pkey);
         if (sz > 0) out = (size_t)sz;
@@ -15942,8 +16109,8 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
     /* PKCS#11 v3.2 conformity : for the CKM_ECDSA family OpenSSL
      * produced a DER ECDSA-Sig-Value, but the spec mandates raw
      * r||s. Convert in place. */
-    if (fhsm_mech_is_ecdsa(op->mechanism)) {
-        size_t nlen = (size_t)((EVP_PKEY_get_bits(pkey) + 7) / 8);
+    if (mech_is_rs(op->mechanism)) {
+        size_t nlen = rs_half_len(pkey, op->mechanism);
         if (nlen == 0 || *sig_len < 2 * nlen) goto cleanup;
         uint8_t raw[2 * 66];   /* enough for P-521 (66*2 = 132) */
         size_t raw_len = fhsm_ecdsa_der_to_raw(sig, out_len, nlen,
@@ -16257,6 +16424,11 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x0000401CUL: case 0x0000401DUL:   /* CKM_BLAKE2B_512_HMAC, _GENERAL */
         case 0x00000553UL: case 0x00000554UL:   /* CKM_CAMELLIA_MAC, _GENERAL */
         case 0x00000563UL: case 0x00000564UL:   /* CKM_ARIA_MAC, _GENERAL */
+        case 0x00000011UL: case 0x00000012UL:   /* CKM_DSA, CKM_DSA_SHA1 */
+        case 0x00000013UL: case 0x00000014UL:   /* CKM_DSA_SHA224, _SHA256 */
+        case 0x00000015UL: case 0x00000016UL:   /* CKM_DSA_SHA384, _SHA512 */
+        case 0x00000018UL: case 0x00000019UL:   /* CKM_DSA_SHA3_224, _256 */
+        case 0x0000001AUL: case 0x0000001BUL:   /* CKM_DSA_SHA3_384, _512 */
             if (fhsm_build_fips_strict || fhsm_mode_is_fips())
                 return FHSM_RV_MECHANISM_INVALID;
             break;
@@ -16578,8 +16750,8 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
     const unsigned char *sig_to_verify = pSig;
     CK_ULONG sig_to_verify_len = ulSigLen;
     uint8_t *der_buf = NULL;
-    if (fhsm_mech_is_ecdsa(op->mechanism)) {
-        size_t nlen = (size_t)((EVP_PKEY_get_bits(pkey) + 7) / 8);
+    if (mech_is_rs(op->mechanism)) {
+        size_t nlen = rs_half_len(pkey, op->mechanism);
         if (nlen == 0 || ulSigLen != 2 * nlen) {
             EVP_PKEY_free(pkey);
             op->active = 0;
@@ -16620,7 +16792,7 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
         int vrv = EVP_PKEY_verify(pkctx_raw, sig_to_verify, sig_to_verify_len,
                                     pData, ulDataLen);
         verify_ok = (vrv == 1);
-        if (vrv < 0 && fhsm_mech_is_ecdsa(op->mechanism)) {
+        if (vrv < 0 && mech_is_rs(op->mechanism)) {
             /* See the hashed path below: an ECDSA arithmetic error here is
              * the signature failing, not the module. */
             ERR_clear_error();
@@ -16665,7 +16837,7 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
              * pkcs11-check scored 80 such vectors per profile as a non-clean
              * rejection (PKCS11_CHECK_FINDINGS, 2026-10-21). RSA keeps the old
              * answer: there a negative return has other causes. */
-            if (vrv < 0 && fhsm_mech_is_ecdsa(op->mechanism)) {
+            if (vrv < 0 && mech_is_rs(op->mechanism)) {
                 ERR_clear_error();
             } else if (vrv < 0) {
                 if (der_buf) OPENSSL_free(der_buf);

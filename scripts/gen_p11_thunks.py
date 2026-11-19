@@ -1133,9 +1133,36 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_DH_PKCS_KEY_PAIR_GEN", 0x00000020, "DH",  "keypair", "dispatch_reject_fips",
          fips="non-approved",
          notes="Finite-field DH < 2048 bits forbidden; modern code should use ECDH / X25519."),
-    Mech("CKM_DSA_KEY_PAIR_GEN",   0x00000010, "DSA",  "keypair", "dispatch_reject_fips",
-         fips="non-approved",
+    # DSA (2.8.0): key pairs on the caller's domain parameters, and the
+    # signatures, raw r || s. Not approved -- FIPS 186-5 withdrew DSA
+    # signature generation -- so all-mechanisms in permissive mode only, and
+    # only where a provider other than the FIPS one serves DSA.
+    # C_GenerateKeyPair, C_Sign and C_Verify compute them; the handlers named
+    # are only references.
+    Mech("CKM_DSA_KEY_PAIR_GEN",   0x00000010, "DSA",  "keypair", "dispatch_ec_keypair",
+         fips="non-approved", key_type="CKK_DSA",
+         refs=("FIPS 186-4", "PKCS#11 v3.2 6.4.11"),
          notes="DSA was withdrawn by FIPS 186-5."),
+    Mech("CKM_DSA",                0x00000011, "DSA",  "sign",    "dispatch_ecdsa",
+         fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4",)),
+    Mech("CKM_DSA_SHA1",           0x00000012, "DSA",  "sign",    "dispatch_ecdsa",
+         fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4",)),
+    Mech("CKM_DSA_SHA224",         0x00000013, "DSA",  "sign",    "dispatch_ecdsa",
+         fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4",)),
+    Mech("CKM_DSA_SHA256",         0x00000014, "DSA",  "sign",    "dispatch_ecdsa",
+         fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4",)),
+    Mech("CKM_DSA_SHA384",         0x00000015, "DSA",  "sign",    "dispatch_ecdsa",
+         fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4",)),
+    Mech("CKM_DSA_SHA512",         0x00000016, "DSA",  "sign",    "dispatch_ecdsa",
+         fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4",)),
+    Mech("CKM_DSA_SHA3_224",       0x00000018, "DSA",  "sign",    "dispatch_ecdsa",
+         fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4", "FIPS 202")),
+    Mech("CKM_DSA_SHA3_256",       0x00000019, "DSA",  "sign",    "dispatch_ecdsa",
+         fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4", "FIPS 202")),
+    Mech("CKM_DSA_SHA3_384",       0x0000001A, "DSA",  "sign",    "dispatch_ecdsa",
+         fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4", "FIPS 202")),
+    Mech("CKM_DSA_SHA3_512",       0x0000001B, "DSA",  "sign",    "dispatch_ecdsa",
+         fips="non-approved", key_type="CKK_DSA", refs=("FIPS 186-4", "FIPS 202")),
 )
 
 
