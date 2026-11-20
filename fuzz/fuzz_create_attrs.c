@@ -70,6 +70,10 @@
  *        final write before an FHSM_PARSE_OK return. Any early error path
  *        must leave path at 0 = INVALID. Violation = the parser leaks a
  *        success-looking enum on a failed dispatch.
+ *   E2.  The one exception to E1: FHSM_PARSE_CURVE_NOT_IN_TABLE from the EC
+ *        public-key path, which hands C_CreateObject a parsed point for a
+ *        curve outside the parser's three (#39). Then path == EC_PUB,
+ *        cko == PUBLIC_KEY, ec_group == NULL and ec_point != NULL.
  *
  * Truncation probe
  *   For each accepted input, the last record's ulValueLen is shrunk by
@@ -274,8 +278,16 @@ static void check_ok(const fhsm_create_attrs_t *a) {
     }
 }
 
-static void check_err(const fhsm_create_attrs_t *a) {
-    /* E1 : on any non-OK return, path stays at 0 = INVALID because
+static void check_err(fhsm_parse_rv_t rv, const fhsm_create_attrs_t *a) {
+    /* E2 : a curve outside the table, with the point parsed (#39). */
+    if (rv == FHSM_PARSE_CURVE_NOT_IN_TABLE
+        && a->path == FHSM_CREATE_PATH_EC_PUB) {
+        if (a->cko != HARNESS_CKO_PUBLIC_KEY) __builtin_trap();
+        if (a->ec_group != NULL)              __builtin_trap();
+        if (a->ec_point == NULL)              __builtin_trap();
+        return;
+    }
+    /* E1 : on any other non-OK return, path stays at 0 = INVALID because
      * the parser memset()s attrs before any early-return decision. */
     if (a->path != FHSM_CREATE_PATH_INVALID) {
         __builtin_trap();
@@ -294,7 +306,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         fhsm_create_attrs_t out;
         fhsm_parse_rv_t rv = fhsm_parse_create_attrs(tmpl, n, &out);
         if (rv == FHSM_PARSE_OK) check_ok(&out);
-        else                     check_err(&out);
+        else                     check_err(rv, &out);
     }
 
     /* Pass 2 : truncation probe. Shrink the last record's ulValueLen by
@@ -305,7 +317,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         fhsm_create_attrs_t out2;
         fhsm_parse_rv_t rv2 = fhsm_parse_create_attrs(tmpl, n, &out2);
         if (rv2 == FHSM_PARSE_OK) check_ok(&out2);
-        else                      check_err(&out2);
+        else                      check_err(rv2, &out2);
     }
 
     return 0;
