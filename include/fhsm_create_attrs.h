@@ -157,9 +157,12 @@ typedef enum {
      * (e.g. unknown curve OID, missing OCTET STRING wrapper, etc.). */
     FHSM_PARSE_ATTRIBUTE_VALUE_INVALID,
     /* CKA_EC_PARAMS is not one of the curves this parser knows. Whether it
-     * names a curve at all (CKR_CURVE_NOT_SUPPORTED) or is malformed
+     * names a curve the module takes (resolved with match_curve and imported,
+     * #39), one it does not (CKR_CURVE_NOT_SUPPORTED) or none at all
      * (CKR_ATTRIBUTE_VALUE_INVALID) takes OpenSSL's OID registry, which this
-     * file does not use; C_CreateObject decides. */
+     * file does not use; C_CreateObject decides. The EC point is parsed
+     * first: when it is well formed, ec_point and path are set and ec_group
+     * is NULL. */
     FHSM_PARSE_CURVE_NOT_IN_TABLE,
 } fhsm_parse_rv_t;
 

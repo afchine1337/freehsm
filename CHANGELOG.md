@@ -358,6 +358,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Reported by Alexandre Laroche. `tests/test_usage_defaults.c`.
 
 ### Fixed
+* **An EC public key imports on every curve the module generates on**
+  (#39). `C_CreateObject` resolved a public key's curve with a table of the
+  three NIST curves, where key generation and private-key import take
+  secp256k1 and brainpool in the all-mechanisms build: a secp256k1 or
+  brainpool public key, a peer's or the pair's own `CKA_EC_POINT`, was
+  `CKR_CURVE_NOT_SUPPORTED`. It is now resolved as they resolve it, and the
+  point is still checked on that curve. Reported by AlexLaroche.
+  `tests/test_ec_pub_import_curves.c`.
 * **Outside `C_Initialize` and `C_Finalize`, the module says it is not
   initialized.** It never answered `CKR_CRYPTOKI_NOT_INITIALIZED`: the code
   was defined and returned nowhere. After `C_Finalize`, `C_GetSlotList`,

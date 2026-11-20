@@ -4548,12 +4548,24 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     fhsm_parse_rv_t prv = fhsm_parse_create_attrs(
         (const fhsm_attr_t *)pTemplate, ulCount, &a);
     if (prv == FHSM_PARSE_CURVE_NOT_IN_TABLE) {
-        /* An EC public key on a curve outside the parser's table: a curve
-         * the module does not take for import, or no curve at all. */
+        /* An EC public key on a curve outside the parser's three. It was
+         * refused here whatever the curve, so a secp256k1 or brainpool key
+         * the module generates, and whose private half C_CreateObject takes,
+         * could not be imported as a public key (#39). The OID is resolved
+         * as generation and private-key import resolve it, with match_curve;
+         * the point is then checked on that curve where the EC path builds
+         * the key. A curve match_curve does not take, or no curve at all,
+         * is refused as before. */
         long pi = find_attr(pTemplate, ulCount, CKA_EC_PARAMS);
-        return pi < 0 ? CKR_TEMPLATE_INCOMPLETE
-                      : fhsm_ec_curve_refusal(pTemplate[pi].pValue,
-                                              pTemplate[pi].ulValueLen);
+        if (pi < 0) return CKR_TEMPLATE_INCOMPLETE;
+        const char *grp = pTemplate[pi].pValue
+            ? match_curve(pTemplate[pi].pValue, pTemplate[pi].ulValueLen) : NULL;
+        if (!grp)
+            return fhsm_ec_curve_refusal(pTemplate[pi].pValue, pTemplate[pi].ulValueLen);
+        if (a.path != FHSM_CREATE_PATH_EC_PUB || !a.ec_point)
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;   /* a point that will not parse */
+        a.ec_group = grp;
+        prv = FHSM_PARSE_OK;
     }
     CK_RV rv_parse = map_parse_rv(prv);
     if (rv_parse != FHSM_RV_OK) return rv_parse;

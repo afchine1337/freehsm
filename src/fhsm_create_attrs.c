@@ -189,8 +189,6 @@ static fhsm_parse_rv_t parse_ec_pub(
 
     const char *group = ec_oid_to_group(
         (const uint8_t *)t[ip].pValue, (size_t)t[ip].ulValueLen);
-    if (!group) return FHSM_PARSE_CURVE_NOT_IN_TABLE;
-    attrs->ec_group = group;
 
     /* CKA_EC_POINT is a DER OCTET STRING wrapper around 0x04 || X || Y. */
     const uint8_t *point = NULL;
@@ -198,12 +196,17 @@ static fhsm_parse_rv_t parse_ec_pub(
     if (!fhsm_strip_octet_string_inline(
             (const uint8_t *)t[ipt].pValue, (size_t)t[ipt].ulValueLen,
             &point, &point_len))
-        return FHSM_PARSE_ATTRIBUTE_VALUE_INVALID;
+        return group ? FHSM_PARSE_ATTRIBUTE_VALUE_INVALID : FHSM_PARSE_CURVE_NOT_IN_TABLE;
     attrs->ec_point     = point;
     attrs->ec_point_len = point_len;
+    attrs->path         = FHSM_CREATE_PATH_EC_PUB;
 
-    attrs->path = FHSM_CREATE_PATH_EC_PUB;
-    return FHSM_PARSE_OK;
+    /* A curve outside the three of the table is not refused here: the
+     * parser knows no OpenSSL, and C_CreateObject resolves the OID with
+     * match_curve -- what key generation and private-key import use -- with
+     * the point already parsed, ec_group left NULL (#39). */
+    attrs->ec_group = group;
+    return group ? FHSM_PARSE_OK : FHSM_PARSE_CURVE_NOT_IN_TABLE;
 }
 
 static fhsm_parse_rv_t parse_ed_pub(
