@@ -213,9 +213,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
   validated, or `CKR_DOMAIN_PARAMS_INVALID`. `CKM_X9_42_DH_DERIVE` agrees
   with the other party's public value, with `CKD_NULL` or the SHA-1
   concatenation KDF (`CKD_SHA1_KDF_CONCATENATE`) over the other info;
-  `CKD_SHA1_KDF_ASN1` and the hybrid and MQV forms are not offered. The same
-  groups as PKCS #3: approved on the safe-prime groups, the only ones where
-  NIST's rules apply. `tests/test_dh_x942.c`.
+  `CKD_SHA1_KDF_ASN1` and the hybrid and MQV forms are not offered. Approved
+  on the safe-prime groups and on the FIPS 186-type parameter sets SP 800-56A
+  rev. 3 keeps for compatibility, (2048, 224) and (2048, 256) -- RFC 5114's
+  2048-bit groups -- the only ones where NIST's rules apply.
+  `tests/test_dh_x942.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first

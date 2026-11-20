@@ -1641,6 +1641,25 @@ static int dh_safe_prime_group(EVP_PKEY *k) {
     return 0;
 }
 
+/* Whether an X9.42 key or parameter set has the sizes of SP 800-56A rev. 3
+ * 5.5.1.1's FIPS 186-type parameter sets kept for backward compatibility:
+ * "FB", p of 2048 bits and q of 224, and "FC", p of 2048 and q of 256 --
+ * RFC 5114's 2048-bit groups among them. OpenSSL's FIPS provider takes them
+ * for KAS-FFC. The parameters themselves are validated where they come in. */
+static int ffc_fb_fc_group(EVP_PKEY *k) {
+    BIGNUM *p = NULL, *q = NULL;
+    int ok = 0;
+    ERR_set_mark();
+    if (k && EVP_PKEY_get_bn_param(k, OSSL_PKEY_PARAM_FFC_P, &p) == 1
+        && EVP_PKEY_get_bn_param(k, OSSL_PKEY_PARAM_FFC_Q, &q) == 1 && p && q) {
+        const int L = BN_num_bits(p), N = BN_num_bits(q);
+        ok = L == 2048 && (N == 224 || N == 256);
+    }
+    ERR_pop_to_mark();
+    BN_free(p); BN_free(q);
+    return ok;
+}
+
 /* 1 when the providers serve what the mechanism needs; 1 for any mechanism
  * that needs nothing beyond what every provider has. Grown family by family
  * since 2.8.0: each algorithm the FIPS provider lacks is listed here when it
@@ -6504,7 +6523,8 @@ static CK_RV ffdh_z(fhsm_token_t *t, CK_OBJECT_HANDLE hBaseKey, uint32_t want_kt
     const unsigned char *pp = bv;
     EVP_PKEY *priv = d2i_AutoPrivateKey(NULL, &pp, (long)bvl);
     if (!priv) return FHSM_RV_FUNCTION_FAILED;
-    if ((fhsm_build_fips_strict || fhsm_mode_is_fips()) && !dh_safe_prime_group(priv)) {
+    if ((fhsm_build_fips_strict || fhsm_mode_is_fips()) && !dh_safe_prime_group(priv)
+        && !(want_kt == 0x00000004UL && ffc_fb_fc_group(priv))) {
         EVP_PKEY_free(priv);
         return 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
     }
@@ -6593,7 +6613,8 @@ static CK_RV dh_pkcs_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
  *     The template gives the length, as for the SHAKE digest derivations.
  *   - CKD_SHA1_KDF_ASN1 is refused: its counter lives inside the DER
  *     OtherInfo the caller supplies whole, and 6.4.11 does not say where.
- * Approved, on the safe-prime groups where NIST's rules apply. */
+ * Approved where NIST's rules apply on the safe-prime groups and the FB and
+ * FC parameter sets, the groups a key may be made on there. */
 static CK_RV x942_dh_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                             const CK_MECHANISM *pMechanism,
                             CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE *pTemplate,
@@ -10467,8 +10488,9 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
          * bits in steps of 256 and q of 160 bits or more (6.4.3), and the
          * three passing OpenSSL's validation -- p and q prime, q dividing
          * p - 1, g of order q -- or CKR_DOMAIN_PARAMS_INVALID. Where NIST's
-         * rules apply only the safe-prime groups, as for PKCS #3, given with
-         * q = (p - 1) / 2. */
+         * rules apply, the safe-prime groups given with q = (p - 1) / 2, as
+         * for PKCS #3, and the FB and FC parameter sets of SP 800-56A rev. 3
+         * 5.5.1.1 (ffc_fb_fc_group), which RFC 5114's 2048-bit groups are. */
         const long ip = find_attr(pPub, ulPub, 0x130UL /* CKA_PRIME */);
         const long iq = find_attr(pPub, ulPub, 0x131UL /* CKA_SUBPRIME */);
         const long ig = find_attr(pPub, ulPub, 0x132UL /* CKA_BASE */);
@@ -10505,7 +10527,11 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             EVP_PKEY_CTX_free(fc);
             OSSL_PARAM_free(dp);
         }
-        if (drv == FHSM_RV_OK && !dh_safe_prime_group(dom)
+        /* Where NIST's rules apply, or only the FIPS provider serves DH: a
+         * safe-prime group, or an FB or FC parameter set (SP 800-56A rev. 3
+         * 5.5.1.1), which the FIPS provider also takes. Elsewhere any group
+         * that validates. */
+        if (drv == FHSM_RV_OK && !dh_safe_prime_group(dom) && !ffc_fb_fc_group(dom)
             && (strict || !fhsm_dh_any_group_available()))
             drv = 0x00000130UL;
         if (drv == FHSM_RV_OK) {
