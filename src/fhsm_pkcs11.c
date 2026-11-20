@@ -1660,6 +1660,26 @@ static int ffc_fb_fc_group(EVP_PKEY *k) {
     return ok;
 }
 
+/* The explicit checks of an FFC parameter set given without the seed it was
+ * generated from: p and q prime, q dividing p - 1, 1 < g < p - 1, and g of
+ * order q (g^q = 1 mod p, which with q prime and g != 1 makes the order
+ * exactly q). Used for FB and FC sets where the FIPS provider alone serves
+ * DH, as it cannot validate them without the seed. */
+static int ffc_explicit_params_ok(const BIGNUM *p, const BIGNUM *q, const BIGNUM *g) {
+    BN_CTX *ctx = BN_CTX_new();
+    BIGNUM *pm1 = BN_new(), *r = BN_new();
+    int ok = ctx && pm1 && r
+        && BN_check_prime(p, ctx, NULL) == 1
+        && BN_check_prime(q, ctx, NULL) == 1
+        && BN_sub(pm1, p, BN_value_one())
+        && BN_mod(r, pm1, q, ctx) && BN_is_zero(r)
+        && BN_cmp(g, BN_value_one()) > 0 && BN_cmp(g, pm1) < 0
+        && BN_mod_exp(r, g, q, p, ctx) && BN_is_one(r);
+    BN_free(pm1); BN_free(r); BN_CTX_free(ctx);
+    ERR_clear_error();
+    return ok;
+}
+
 /* 1 when the providers serve what the mechanism needs; 1 for any mechanism
  * that needs nothing beyond what every provider has. Grown family by family
  * since 2.8.0: each algorithm the FIPS provider lacks is listed here when it
@@ -10547,9 +10567,20 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             && (strict || !fhsm_dh_any_group_available()))
             drv = 0x00000130UL;
         if (drv == FHSM_RV_OK) {
-            EVP_PKEY_CTX *vc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
-            if (!vc || EVP_PKEY_param_check(vc) != 1) drv = 0x00000130UL;
-            EVP_PKEY_CTX_free(vc);
+            /* The FIPS provider validates a group it does not know by name the
+             * FIPS 186-4 way, regenerating p and q from the seed, which a
+             * PKCS #11 template does not carry: RFC 5114's groups are named
+             * only outside it, so every FB or FC set failed there. Where it
+             * alone serves DH, those sets get the explicit checks of
+             * ffc_explicit_params_ok instead; every other group, and every
+             * group elsewhere, goes to OpenSSL's validation as before. */
+            if (!fhsm_dh_any_group_available() && ffc_fb_fc_group(dom)) {
+                if (!ffc_explicit_params_ok(bp, bq, bg)) drv = 0x00000130UL;
+            } else {
+                EVP_PKEY_CTX *vc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
+                if (!vc || EVP_PKEY_param_check(vc) != 1) drv = 0x00000130UL;
+                EVP_PKEY_CTX_free(vc);
+            }
         }
         if (drv == FHSM_RV_OK) {
             EVP_PKEY_CTX *kc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);

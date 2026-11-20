@@ -254,6 +254,10 @@ for t in tests/test_*; do
     else
         printf '  \033[31mNON\033[0m   %-28s rc=%d\n' "$name" "$rc"
         printf '%s\n' "$out" | sed -n '1,6p' | sed 's/^/            /'
+        # The first lines name the test; the failing checks are usually
+        # further down, and the summary is all CI keeps of them.
+        printf '%s\n' "$out" | sed -n '7,$p' | grep -E 'FAIL|FATAL|error' \
+            | head -20 | sed 's/^/          > /'
         fail=$((fail+1))
     fi
 done

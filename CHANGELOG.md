@@ -216,8 +216,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `CKD_SHA1_KDF_ASN1` and the hybrid and MQV forms are not offered. Approved
   on the safe-prime groups and on the FIPS 186-type parameter sets SP 800-56A
   rev. 3 keeps for compatibility, (2048, 224) and (2048, 256) -- RFC 5114's
-  2048-bit groups -- the only ones where NIST's rules apply.
-  `tests/test_dh_x942.c`.
+  2048-bit groups -- the only ones where NIST's rules apply. The FIPS
+  provider cannot validate those two sets without the seed they were
+  generated from, which a template does not carry; where it alone serves DH,
+  the module checks them itself: p and q prime, q dividing p - 1, g of order
+  q. `tests/test_dh_x942.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first
