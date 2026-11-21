@@ -1604,6 +1604,40 @@ static int fhsm_dsa_available(void) {
     return ok;
 }
 
+/* RSA signatures with X9.31 padding (2.8.0): a provider other than the FIPS
+ * one serves RSA signatures, as the FIPS provider refuses X9.31 padding for
+ * signing (FIPS 186-5 withdrew it). */
+static int fhsm_rsa_x931_available(void) {
+    ERR_set_mark();
+    EVP_SIGNATURE *sg = EVP_SIGNATURE_fetch(NULL, "RSA", NULL);
+    int ok = 0;
+    if (sg) {
+        const OSSL_PROVIDER *pv = EVP_SIGNATURE_get0_provider(sg);
+        const char *pn = pv ? OSSL_PROVIDER_get0_name(pv) : NULL;
+        ok = pn && strcmp(pn, "fips") != 0;
+    }
+    EVP_SIGNATURE_free(sg);
+    ERR_pop_to_mark();
+    return ok;
+}
+
+/* X9.31 signatures need k, the modulus length in bytes, of at least 128 and
+ * a multiple of 32 (PKCS#11 v3.2 6.1.13, 6.1.16): a modulus of 1024 + 256s
+ * bits. CKR_KEY_SIZE_RANGE otherwise; a key that cannot be read is left to
+ * the checks after this one. */
+static CK_RV x931_key_size_check(fhsm_token_t *t, CK_OBJECT_HANDLE h) {
+    const uint8_t *kv = NULL; size_t kvl = 0; uint32_t cl = 0, kt = 0;
+    if (!t || fhsm_token_object_get(t, (uint32_t)h, &kv, &kvl, &cl, &kt) != FHSM_RV_OK)
+        return FHSM_RV_OK;
+    const uint8_t *p = kv;
+    EVP_PKEY *pk = cl == 3u /* CKO_PRIVATE_KEY */ ? d2i_AutoPrivateKey(NULL, &p, (long)kvl)
+                 : cl == 2u /* CKO_PUBLIC_KEY */  ? d2i_PUBKEY(NULL, &p, (long)kvl) : NULL;
+    if (!pk) { ERR_clear_error(); return FHSM_RV_OK; }
+    const int bits = EVP_PKEY_get_bits(pk);
+    EVP_PKEY_free(pk);
+    return bits >= 1024 && bits % 256 == 0 ? FHSM_RV_OK : FHSM_RV_KEY_SIZE_RANGE;
+}
+
 /* Finite-field DH (2.8.0) on any group, not only the named ones: a provider
  * other than the FIPS one serves DH. The FIPS provider takes the safe-prime
  * groups of SP 800-56A rev. 3 alone. */
@@ -1689,6 +1723,8 @@ static int fhsm_provider_mech_available(CK_ULONG m) {
         case 0x00000240UL: case 0x00000241UL:   /* CKM_RIPEMD160, _HMAC */
         case 0x00000242UL: case 0x00000008UL:   /* _HMAC_GENERAL, CKM_RIPEMD160_RSA_PKCS */
             return fhsm_md_available("RIPEMD160");
+        case 0x0000000BUL: case 0x0000000CUL:   /* CKM_RSA_X9_31, CKM_SHA1_RSA_X9_31 */
+            return fhsm_rsa_x931_available();
         default:
             /* The twenty BLAKE2b mechanisms, 0x400C to 0x401F: digest, HMAC,
              * HMAC_GENERAL, KEY_DERIVE and KEY_GEN at four sizes. */
@@ -1890,6 +1926,11 @@ static void fhsm_mech_keysizes_for(const char *fam,
     if (!strcmp(fam, "CHACHA20") || !strcmp(fam, "POLY1305"))
                                  { *mn = 32;   *mx = 32;   return; }
     if (!strcmp(fam, "RSA"))     { *mn = rsa_min_bits(); *mx = FHSM_RSA_MAX_BITS; return; }
+    /* X9.31 (2.8.0): signatures on a modulus of 1024 + 256s bits; key pairs
+     * from 2048 bits, where the generation makes strong primes (see
+     * C_GenerateKeyPair). */
+    if (!strcmp(fam, "RSA-X931"))     { *mn = 1024; *mx = FHSM_RSA_MAX_BITS; return; }
+    if (!strcmp(fam, "RSA-X931-GEN")) { *mn = 2048; *mx = FHSM_RSA_MAX_BITS; return; }
     if (!strcmp(fam, "EC"))      { *mn = ec_min_bits(); *mx = FHSM_EC_MAX_BITS; return; }
     if (!strcmp(fam, "EdDSA") || !strcmp(fam, "ECM"))
                                  { *mn = 256u; *mx = FHSM_EC_MAX_BITS; return; }
@@ -10166,6 +10207,7 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         CK_ULONG want_kt = 0; int kt_known = 1;
         switch (pMechanism->mechanism) {
             case CKM_RSA_PKCS_KEY_PAIR_GEN:      want_kt = CKK_RSA; break;
+            case 0x0000000AUL:                   want_kt = CKK_RSA; break; /* X9.31 */
             case CKM_EC_KEY_PAIR_GEN:            want_kt = CKK_EC; break;
             case 0x0000140BUL:                   want_kt = CKK_EC; break;   /* _W_EXTRA_BITS */
             case CKM_EC_EDWARDS_KEY_PAIR_GEN:    want_kt = CKK_EC_EDWARDS_CREATEOBJECT; break;
@@ -10240,7 +10282,20 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         fhsm_zeroize(pv, sizeof pv);
         ckk_type  = CKK_COMPOSITE_MLDSA65_ED25519;
         composite = 1;
-    } else if (pMechanism->mechanism == CKM_RSA_PKCS_KEY_PAIR_GEN) {
+    } else if (pMechanism->mechanism == CKM_RSA_PKCS_KEY_PAIR_GEN
+               || pMechanism->mechanism == 0x0000000AUL /* CKM_RSA_X9_31_KEY_PAIR_GEN */) {
+        /* CKM_RSA_X9_31_KEY_PAIR_GEN (2.8.0, PKCS#11 v3.2 6.1.5) asks for p
+         * and q that are strong primes in X9.31's sense. OpenSSL makes every
+         * two-prime key of 2048 bits and more, with e > 2^16 -- the only
+         * keys made here -- by FIPS 186-4 B.3.6, primes with conditions
+         * based on auxiliary primes: p - 1 and p + 1 each have a large prime
+         * factor, as X9.31 requires (rsa_keygen in crypto/rsa/rsa_gen.c,
+         * ossl_rsa_fips186_4_gen_prob_primes). So the same generation serves
+         * both mechanisms; X9.31 adds that the modulus is 1024 + 256s bits.
+         * FIPS 186-5 withdrew X9.31, so not where NIST's rules apply. */
+        const int x931 = pMechanism->mechanism == 0x0000000AUL;
+        if (x931 && (fhsm_build_fips_strict || fhsm_mode_is_fips()))
+            return FHSM_RV_MECHANISM_INVALID;
         /* CKA_MODULUS_BITS is required in the public key template (§6.1.2):
          * without it the template is CKR_TEMPLATE_INCOMPLETE (§4.1.1). A
          * missing one made a 2048-bit key and answered CKR_OK, so the caller
@@ -10251,7 +10306,8 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         long bits = (long)(*(CK_ULONG*)pPub[i].pValue);
         if (bits < (long)rsa_min_bits() || bits > (long)FHSM_RSA_MAX_BITS
-            || bits % (long)FHSM_RSA_STEP_BITS != 0)
+            || bits % (long)FHSM_RSA_STEP_BITS != 0
+            || (x931 && (bits < 2048 || bits % 256 != 0)))
             return FHSM_RV_KEY_SIZE_RANGE;
         /* CKA_PUBLIC_EXPONENT, when supplied, is the key's exponent (§6.1.4).
          * It was checked and then replaced by F4: a template asking 65539
@@ -14635,6 +14691,7 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x000E: case 0x0047:                           /* SHA{1,224}_RSA_PKCS_PSS */
         case 0x0046:                                        /* SHA224_RSA_PKCS */
         case 0x0008:                                        /* RIPEMD160_RSA_PKCS */
+        case 0x000B: case 0x000C:                           /* RSA_X9_31, SHA1_RSA_X9_31 */
         case 0x0060: case 0x0061: case 0x0062: case 0x0066: /* SHA3_*_RSA_PKCS */
         case 0x0063: case 0x0064: case 0x0065: case 0x0067: /* SHA3_*_RSA_PKCS_PSS */
             want = 0x00; break;                             /* CKK_RSA */
@@ -16020,6 +16077,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x00001228UL:                      /* CKM_POLY1305 */
         case 0x00000241UL: case 0x00000242UL:   /* CKM_RIPEMD160_HMAC, _GENERAL */
         case 0x00000008UL:                      /* CKM_RIPEMD160_RSA_PKCS */
+        case 0x0000000BUL: case 0x0000000CUL:   /* CKM_RSA_X9_31, CKM_SHA1_RSA_X9_31 */
         case 0x0000400DUL: case 0x0000400EUL:   /* CKM_BLAKE2B_160_HMAC, _GENERAL */
         case 0x00004012UL: case 0x00004013UL:   /* CKM_BLAKE2B_256_HMAC, _GENERAL */
         case 0x00004017UL: case 0x00004018UL:   /* CKM_BLAKE2B_384_HMAC, _GENERAL */
@@ -16045,6 +16103,10 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV tc = fhsm_check_key_mech_type(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (tc != FHSM_RV_OK) return tc; }
     { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_SIGN); if (uc != FHSM_RV_OK) return uc; }
+    if (pMechanism->mechanism == 0x0BUL || pMechanism->mechanism == 0x0CUL) {   /* X9.31 */
+        CK_RV xc = x931_key_size_check(fhsm_session_token(hSession), hKey);
+        if (xc != FHSM_RV_OK) return xc;
+    }
     fhsm_op_t *op = op_slot(g_op_sig, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     fhsm_rv_t ir = op_init(op, hSession, pMechanism, hKey);
@@ -16207,6 +16269,7 @@ static const char *mech_hash_name(uint32_t m) {
     switch (m) {
         case CKM_SHA1_RSA_PKCS: case CKM_SHA1_RSA_PKCS_PSS:     return "SHA1";
         case 0x00000008UL: /* CKM_RIPEMD160_RSA_PKCS */          return "RIPEMD160";
+        case 0x0000000CUL: /* CKM_SHA1_RSA_X9_31 */              return "SHA1";
         case CKM_SHA224_RSA_PKCS: case CKM_SHA224_RSA_PKCS_PSS:  return "SHA224";
         case CKM_ECDSA_SHA256: case CKM_SHA256_RSA_PKCS:
         case CKM_SHA256_RSA_PKCS_PSS:                            return "SHA256";
@@ -16273,6 +16336,118 @@ static size_t rs_half_len(EVP_PKEY *pkey, uint32_t m) {
  * v1.2.2 in a different costume. */
 static int mech_is_raw_rsa(uint32_t m) {
     return m == CKM_RSA_X_509;
+}
+
+/* The X9.31 signature mechanisms (2.8.0). The block is the header (0x6B, or
+ * 0x6A when there is no room for padding), the 0xBB...0xBA padding, the
+ * input and the final 0xCC; the signature is min(s, n - s), as X9.31 has it.
+ * CKM_RSA_X9_31 takes the caller's hash || trailer ID as input, the part of
+ * the trailer PKCS#11 6.1.13 leaves to the application, so at most k - 2
+ * bytes; CKM_SHA1_RSA_X9_31 hashes with SHA-1 and adds the ID, 0x33.
+ *
+ * Built here and signed as raw RSA rather than through OpenSSL's X9.31
+ * padding: through EVP_PKEY_sign with no digest that padding failed on
+ * this OpenSSL (CKR_FUNCTION_FAILED in tests/test_rsa_x931.c), and its
+ * check refuses the valid block 0x6B 0xBA, which its own padding writes
+ * for k - 3 bytes of input. */
+static int mech_is_x931(uint32_t m) {
+    return m == 0x0000000BUL || m == 0x0000000CUL;
+}
+
+/* The X9.31 block of k bytes around `in` (hash || trailer ID): 0x6A when
+ * in fills all but two bytes, else 0x6B, 0xBB..., 0xBA; then in, then 0xCC.
+ * 0 when in is longer than k - 2. */
+static int x931_block(uint8_t *blk, size_t k, const uint8_t *in, size_t inl) {
+    if (inl + 2 > k) return 0;
+    const size_t j = k - inl - 2;
+    if (j == 0) {
+        blk[0] = 0x6A;
+    } else {
+        blk[0] = 0x6B;
+        memset(blk + 1, 0xBB, j - 1);
+        blk[j] = 0xBA;
+    }
+    memcpy(blk + j + 1, in, inl);
+    blk[k - 1] = 0xCC;
+    return 1;
+}
+
+/* The input of the X9.31 block: the caller's bytes for CKM_RSA_X9_31,
+ * SHA-1 of them and the ID 0x33 for CKM_SHA1_RSA_X9_31. */
+static fhsm_rv_t x931_input(uint32_t m, const uint8_t *data, size_t dl,
+                            uint8_t *buf, const uint8_t **in, size_t *inl) {
+    if (m == 0x0000000BUL) { *in = data; *inl = dl; return FHSM_RV_OK; }
+    unsigned int hl = 0;
+    if (EVP_Digest(data, dl, buf, &hl, EVP_sha1(), NULL) != 1 || hl != 20)
+        return FHSM_RV_FUNCTION_FAILED;
+    buf[20] = 0x33;
+    *in = buf; *inl = 21;
+    return FHSM_RV_OK;
+}
+
+/* X9.31 signing, by hand rather than through OpenSSL's X9.31 padding: the
+ * block, raw RSA, and min(s, n - s). */
+static fhsm_rv_t x931_sign(EVP_PKEY *pkey, uint32_t m, const uint8_t *data, size_t dl,
+                           uint8_t *sig, size_t *sig_len) {
+    const int ks = EVP_PKEY_get_size(pkey);
+    if (ks <= 0 || ks > 1024 || *sig_len < (size_t)ks) return FHSM_RV_FUNCTION_FAILED;
+    const size_t k = (size_t)ks;
+    uint8_t hb[21], blk[1024], raw[1024];
+    const uint8_t *in = NULL; size_t inl = 0;
+    fhsm_rv_t rv = x931_input(m, data, dl, hb, &in, &inl);
+    if (rv != FHSM_RV_OK) return rv;
+    if (!x931_block(blk, k, in, inl)) return FHSM_RV_DATA_LEN_RANGE;
+    rv = FHSM_RV_FUNCTION_FAILED;
+    EVP_PKEY_CTX *c = EVP_PKEY_CTX_new(pkey, NULL);
+    BIGNUM *n = NULL, *s = BN_new(), *t = BN_new();
+    size_t rl = sizeof raw;
+    if (c && s && t && EVP_PKEY_sign_init(c) > 0
+        && EVP_PKEY_CTX_set_rsa_padding(c, RSA_NO_PADDING) > 0
+        && EVP_PKEY_sign(c, raw, &rl, blk, k) > 0 && rl == k
+        && EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_N, &n) == 1
+        && BN_bin2bn(raw, (int)k, s) && BN_sub(t, n, s)
+        && BN_bn2binpad(BN_cmp(t, s) < 0 ? t : s, sig, (int)k) == (int)k) {
+        *sig_len = k;
+        rv = FHSM_RV_OK;
+    }
+    OPENSSL_cleanse(blk, sizeof blk);
+    OPENSSL_cleanse(raw, sizeof raw);
+    BN_free(n); BN_clear_free(s); BN_clear_free(t);
+    EVP_PKEY_CTX_free(c);
+    return rv;
+}
+
+/* X9.31 verification: s^e mod n, or n minus it when its last nibble is not
+ * 0xC (the signer gave n - s), against the block the input makes. */
+static fhsm_rv_t x931_verify(EVP_PKEY *pkey, uint32_t m, const uint8_t *data, size_t dl,
+                             const uint8_t *sig, size_t sl) {
+    const int ks = EVP_PKEY_get_size(pkey);
+    if (ks <= 0 || ks > 1024) return FHSM_RV_FUNCTION_FAILED;
+    const size_t k = (size_t)ks;
+    if (!sig || sl != k) return FHSM_RV_SIGNATURE_INVALID;
+    uint8_t hb[21], want[1024], got[1024];
+    const uint8_t *in = NULL; size_t inl = 0;
+    fhsm_rv_t rv = x931_input(m, data, dl, hb, &in, &inl);
+    if (rv != FHSM_RV_OK) return rv;
+    if (!x931_block(want, k, in, inl)) return FHSM_RV_SIGNATURE_INVALID;
+    rv = FHSM_RV_SIGNATURE_INVALID;
+    EVP_PKEY_CTX *c = EVP_PKEY_CTX_new(pkey, NULL);
+    BIGNUM *n = NULL, *v = BN_new();
+    size_t gl = sizeof got;
+    if (c && v && EVP_PKEY_verify_recover_init(c) > 0
+        && EVP_PKEY_CTX_set_rsa_padding(c, RSA_NO_PADDING) > 0
+        && EVP_PKEY_verify_recover(c, got, &gl, sig, sl) > 0 && gl == k
+        && EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_N, &n) == 1
+        && BN_bin2bn(got, (int)k, v)) {
+        if ((got[k - 1] & 0x0F) != 0x0C) {
+            if (!BN_sub(v, n, v) || BN_bn2binpad(v, got, (int)k) != (int)k) gl = 0;
+        }
+        if (gl == k && CRYPTO_memcmp(got, want, k) == 0) rv = FHSM_RV_OK;
+    }
+    ERR_clear_error();
+    BN_free(n); BN_free(v);
+    EVP_PKEY_CTX_free(c);
+    return rv;
 }
 
 static int mech_is_pss(uint32_t m) {
@@ -16526,6 +16701,14 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
         *sig_len = out_len;
         EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
         return FHSM_RV_OK;
+    }
+
+    /* X9.31 (2.8.0): the block by hand, see x931_sign. Table 46: at most
+     * k - 2 bytes of input, else CKR_DATA_LEN_RANGE. */
+    if (mech_is_x931(op->mechanism)) {
+        rv = x931_sign(pkey, op->mechanism, data, data_len, sig, sig_len);
+        EVP_PKEY_free(pkey);
+        return rv;
     }
 
     int ok = 0;
@@ -16901,6 +17084,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         case 0x00001228UL:                      /* CKM_POLY1305 */
         case 0x00000241UL: case 0x00000242UL:   /* CKM_RIPEMD160_HMAC, _GENERAL */
         case 0x00000008UL:                      /* CKM_RIPEMD160_RSA_PKCS */
+        case 0x0000000BUL: case 0x0000000CUL:   /* CKM_RSA_X9_31, CKM_SHA1_RSA_X9_31 */
         case 0x0000400DUL: case 0x0000400EUL:   /* CKM_BLAKE2B_160_HMAC, _GENERAL */
         case 0x00004012UL: case 0x00004013UL:   /* CKM_BLAKE2B_256_HMAC, _GENERAL */
         case 0x00004017UL: case 0x00004018UL:   /* CKM_BLAKE2B_384_HMAC, _GENERAL */
@@ -16925,6 +17109,10 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV tc = fhsm_check_key_mech_type(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (tc != FHSM_RV_OK) return tc; }
     { CK_RV ac = fhsm_check_allowed_mech(fhsm_session_token(hSession), hKey, pMechanism->mechanism); if (ac != FHSM_RV_OK) return ac; }
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hKey, FHSM_USAGE_VERIFY); if (uc != FHSM_RV_OK) return uc; }
+    if (pMechanism->mechanism == 0x0BUL || pMechanism->mechanism == 0x0CUL) {   /* X9.31 */
+        CK_RV xc = x931_key_size_check(fhsm_session_token(hSession), hKey);
+        if (xc != FHSM_RV_OK) return xc;
+    }
     fhsm_op_t *op = op_slot(g_op_ver, hSession);
     if (!op) return FHSM_RV_SESSION_HANDLE_INVALID;
     return op_init(op, hSession, pMechanism, hKey);
@@ -17218,6 +17406,16 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
         EVP_MD_CTX_free(mdctx); EVP_PKEY_free(pkey);
         op->active = 0;
         rv = vok ? FHSM_RV_OK : FHSM_RV_SIGNATURE_INVALID;
+        (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
+                                fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
+        return rv;
+    }
+
+    /* X9.31 (2.8.0): see x931_verify. */
+    if (mech_is_x931(op->mechanism)) {
+        rv = x931_verify(pkey, op->mechanism, pData, (size_t)ulDataLen, pSig, (size_t)ulSigLen);
+        EVP_PKEY_free(pkey);
+        op->active = 0;
         (void)fhsm_audit_event(FHSM_EV_VERIFY, -1, (int)hSession,
                                 fhsm_session_role(hSession), rv, FHSM_AUDIT_END);
         return rv;

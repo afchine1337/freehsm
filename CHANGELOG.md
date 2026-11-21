@@ -221,6 +221,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
   generated from, which a template does not carry; where it alone serves DH,
   the module checks them itself: p and q prime, q dividing p - 1, g of order
   q. `tests/test_dh_x942.c`.
+* **RSA X9.31.** `CKM_RSA_X9_31_KEY_PAIR_GEN` makes RSA key pairs of 2048
+  bits and more, in steps of 512, whose primes are strong in X9.31's sense:
+  OpenSSL makes them by FIPS 186-4 B.3.6, from auxiliary primes.
+  `CKM_RSA_X9_31` signs the caller's hash and trailer ID, at most k - 2
+  bytes, with the X9.31 header, padding and final 0xCC around them, and
+  gives min(s, n - s); `CKM_SHA1_RSA_X9_31` hashes with SHA-1 and adds the
+  ID 0x33, in parts as well. The signatures
+  take a modulus of 1024 + 256s bits, `CKR_KEY_SIZE_RANGE` otherwise. Not
+  approved -- FIPS 186-5 withdrew X9.31 -- so all-mechanisms in permissive
+  mode only, and the signatures only where a provider other than the FIPS
+  one serves RSA: the FIPS provider refuses X9.31 padding for signing.
+  `tests/test_rsa_x931.c`.
 * **A mechanism no loaded provider serves is refused at its Init.** Every
   `C_*Init` that takes a key now asks, as `C_GetMechanismList` does, and
   answers `CKR_MECHANISM_INVALID` rather than failing at the first

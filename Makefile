@@ -1185,6 +1185,10 @@ tests/test_ike_prf: tests/test_ike_prf.c libfreehsm.so
 tests/test_dsa: tests/test_dsa.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# RSA X9.31 key pairs and signatures (2.8.0).
+tests/test_rsa_x931: tests/test_rsa_x931.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # PKCS #3 Diffie-Hellman (2.8.0).
 tests/test_dh_pkcs: tests/test_dh_pkcs.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
@@ -1496,6 +1500,7 @@ TEST_BINS = \
 	tests/test_tls12_kdf \
 	tests/test_ike_prf \
 	tests/test_dsa \
+	tests/test_rsa_x931 \
 	tests/test_dh_pkcs \
 	tests/test_dh_x942 \
 	tests/test_ec_pub_import_curves \
@@ -1741,6 +1746,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_ike_prf
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_dsa
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_rsa_x931
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_dh_pkcs
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

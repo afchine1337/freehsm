@@ -1153,6 +1153,23 @@ MECHANISMS: tuple[Mech, ...] = (
     Mech("CKM_X9_42_DH_DERIVE",      0x00000031, "DH",  "derive",  "dispatch_xor_base_and_data",
          fips="approved", key_type="CKK_X9_42_DH",
          refs=("ANSI X9.42", "SP 800-56A rev. 3", "PKCS#11 v3.2 6.4.14")),
+    # RSA X9.31 (2.8.0): key pairs with strong primes, and signatures with
+    # the X9.31 block -- CKM_RSA_X9_31 on the caller's hash || trailer ID,
+    # CKM_SHA1_RSA_X9_31 hashing with SHA-1. Not approved: FIPS 186-5 withdrew
+    # X9.31, and the FIPS provider refuses its padding for signing. So
+    # all-mechanisms in permissive mode only, and the signatures only where a
+    # provider other than the FIPS one serves RSA. C_GenerateKeyPair, C_Sign
+    # and C_Verify compute them; the handlers named are only references.
+    Mech("CKM_RSA_X9_31_KEY_PAIR_GEN", 0x0000000A, "RSA-X931-GEN", "keypair", "dispatch_rsa_keypair",
+         fips="non-approved", key_type="CKK_RSA",
+         refs=("ANSI X9.31", "FIPS 186-4 B.3.6", "PKCS#11 v3.2 6.1.5"),
+         notes="X9.31 was withdrawn by FIPS 186-5."),
+    Mech("CKM_RSA_X9_31",          0x0000000B, "RSA-X931", "sign",    "dispatch_sha1_rsa",
+         fips="non-approved", key_type="CKK_RSA",
+         refs=("ANSI X9.31", "PKCS#11 v3.2 6.1.13")),
+    Mech("CKM_SHA1_RSA_X9_31",     0x0000000C, "RSA-X931", "sign",    "dispatch_sha1_rsa",
+         fips="non-approved", key_type="CKK_RSA",
+         refs=("ANSI X9.31", "PKCS#11 v3.2 6.1.16")),
     # DSA (2.8.0): key pairs on the caller's domain parameters, and the
     # signatures, raw r || s. Not approved -- FIPS 186-5 withdrew DSA
     # signature generation -- so all-mechanisms in permissive mode only, and
