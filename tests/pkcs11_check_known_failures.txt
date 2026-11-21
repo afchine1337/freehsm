@@ -54,3 +54,11 @@ all-mechanisms  pkcs11_check/testcases/security/test_padding_oracle.py::TestRSAP
 # the FIPS one serves it, so this fails in the unsigned job, not the gated one.
 all-mechanisms  pkcs11_check/testcases/test_camellia.py::TestCamelliaCTR::test_camellia_ctr_different_nonces
 
+# 0.3.0, signed jobs only: imports an X25519 private key without asking
+# whether the module serves Montgomery curves. The FIPS provider has no
+# X25519, so the module lists no Montgomery mechanism and answers
+# CKR_CURVE_NOT_SUPPORTED, which the test does not count as a refusal. The
+# unsigned runs, where the default provider serves X25519, pass it.
+# Upstream: mingulov/pkcs11-check, issue to be filed.
+*  pkcs11_check/testcases/test_object.py::TestAttributeValueEncodings::test_private_ec_family_value_raw_known_material[montgomery]
+
