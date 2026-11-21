@@ -14,9 +14,12 @@
  *       SHAKE256 take the length from the template and refuse to go without
  *       one (CKR_TEMPLATE_INCOMPLETE); a length past the digest is
  *       CKR_ATTRIBUTE_VALUE_INVALID; a parameter is
- *       CKR_MECHANISM_PARAM_INVALID; an AES key from SHA-256 is the digest.
+ *       CKR_MECHANISM_PARAM_INVALID; an AES key from SHA-256 needs a length
+ *       (CKR_TEMPLATE_INCOMPLETE without one) and is then the digest.
  *       The base key may be a generic secret or an HMAC-typed key; an AES
  *       base key is CKR_KEY_TYPE_INCONSISTENT.
+ *   (H) an AES key is not an HMAC key: CKR_KEY_TYPE_INCONSISTENT at
+ *       C_SignInit with CKM_SHA256_HMAC.
  *       The expected values were computed with Python's hashlib, not with
  *       OpenSSL. Where NIST's rules apply (the nist-approved-only build,
  *       strict mode) the derivations are CKR_MECHANISM_INVALID.
@@ -250,8 +253,13 @@ int main(void) {
     if (!nist) {
         CK_BYTE want[32], got[128]; CK_ULONG gl = 0;
         unhex(D[2].hex, want);
+        /* AES has no length of its own (PKCS#11 v3.2 6.20.5: a key type
+         * given without a length must have a well-defined one). */
         rv = derive(0x393, base, CKK_AES, 0, NULL, 0, got, &gl);
-        snprintf(what, sizeof what, "(D) SHA-256 to an AES key: AES-256, the digest (0x%lx)", rv);
+        snprintf(what, sizeof what, "(D) SHA-256 to an AES key, no length: TEMPLATE_INCOMPLETE (0x%lx)", rv);
+        ok(rv == CKR_TEMPLATE_INCOMPLETE, what);
+        rv = derive(0x393, base, CKK_AES, 32, NULL, 0, got, &gl);
+        snprintf(what, sizeof what, "(D) SHA-256 to an AES key of 32 bytes: the digest (0x%lx)", rv);
         ok(rv == CKR_OK && gl == 32 && memcmp(got, want, 32) == 0, what);
 
         /* The same bytes as a CKK_SHA256_HMAC key derive the same; as an
@@ -269,6 +277,14 @@ int main(void) {
         if (rv == CKR_OK) rv = derive(0x393, abase, 0, 0, NULL, 0, got, &gl);
         snprintf(what, sizeof what, "(D) SHA-256 from an AES base: KEY_TYPE_INCONSISTENT (0x%lx)", rv);
         ok(rv == CKR_KEY_TYPE_INCONSISTENT, what);
+
+        /* HMAC takes a generic secret or an HMAC key type, not an AES key. */
+        if (abase) {
+            CK_MECHANISM hm = { 0x251UL /* CKM_SHA256_HMAC */, NULL, 0 };
+            rv = C_SignInit(s, &hm, abase);
+            snprintf(what, sizeof what, "(H) SHA256_HMAC with an AES key: KEY_TYPE_INCONSISTENT (0x%lx)", rv);
+            ok(rv == CKR_KEY_TYPE_INCONSISTENT, what);
+        }
     }
 
     C_Finalize(NULL);

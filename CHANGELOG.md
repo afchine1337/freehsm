@@ -361,6 +361,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Reported by Alexandre Laroche. `tests/test_usage_defaults.c`.
 
 ### Fixed
+* **HMAC takes a generic secret or an HMAC key, not an AES key.** The HMAC
+  mechanisms refused only RSA, EC and EdDSA keys, so an AES or DES3 key
+  signed and verified with them. They now take `CKK_GENERIC_SECRET` and the
+  HMAC key types (`CKK_SHA*_HMAC`, `CKK_SHA3_*_HMAC`, `CKK_BLAKE2B_*_HMAC`,
+  ...), and any other key is `CKR_KEY_TYPE_INCONSISTENT` at `C_SignInit` and
+  `C_VerifyInit`. Found by pkcs11-check 0.3.0 on BLAKE2b and RIPEMD-160
+  HMAC. `tests/test_hmac_keygen_derive.c`.
+* **A key derivation by digest refuses a key type without a length of its
+  own when the template gives none.** `CKM_SHA*_KEY_DERIVATION`,
+  `CKM_SHA3_*_KEY_DERIVATION` and `CKM_BLAKE2B_*_KEY_DERIVE` made an AES key
+  of the digest's length when the template gave `CKK_AES` and no
+  `CKA_VALUE_LEN`; PKCS #11 v3.2 6.20.5 requires the key type to have a
+  well-defined length then, and AES has three. That is now
+  `CKR_TEMPLATE_INCOMPLETE`; with `CKA_VALUE_LEN` the key is made as before.
+  Found by pkcs11-check 0.3.0. `tests/test_hmac_keygen_derive.c`.
 * **An EC public key imports on every curve the module generates on**
   (#39). `C_CreateObject` resolved a public key's curve with a table of the
   three NIST curves, where key generation and private-key import take

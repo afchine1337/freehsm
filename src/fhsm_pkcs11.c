@@ -7065,6 +7065,21 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             }
             size_t klen = 0;
             if (dlen) {
+                /* No CKA_VALUE_LEN: no key type gives a generic secret of the
+                 * digest's length, and a key type must have a length of its
+                 * own -- DES, DES2, DES3, CDMF. AES has three, so it is
+                 * CKR_TEMPLATE_INCOMPLETE rather than the digest's length
+                 * taken as the key's (pkcs11-check 0.3.0
+                 * test_blake2b_key_derive_rejects_aes_without_value_len). */
+                long ki = find_attr(pTemplate, ulCount, CKA_KEY_TYPE);
+                if (ki >= 0 && find_attr(pTemplate, ulCount, CKA_VALUE_LEN) < 0
+                    && pTemplate[ki].pValue && pTemplate[ki].ulValueLen == sizeof(CK_ULONG)) {
+                    CK_ULONG kt = 0;
+                    memcpy(&kt, pTemplate[ki].pValue, sizeof kt);
+                    if (kt != CKK_GENERIC_SECRET && kt != 0x13UL && kt != 0x14UL
+                        && kt != 0x15UL && kt != 0x1EUL)
+                        return CKR_TEMPLATE_INCOMPLETE;
+                }
                 CK_RV lr = ecdh_key_len(pTemplate, ulCount, dlen, &klen);
                 if (lr != FHSM_RV_OK) return lr;
             } else {
@@ -14684,16 +14699,23 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
         case 0x0241: case 0x0242:                           /* RIPEMD160_HMAC, _GENERAL */
         case 0x400D: case 0x400E: case 0x4012: case 0x4013: /* BLAKE2B_{160,256}_HMAC* */
         case 0x4017: case 0x4018: case 0x401C: case 0x401D: /* BLAKE2B_{384,512}_HMAC* */
-            want = -2; break;   /* any symmetric secret ; reject asymmetric keys */
+            want = -2; break;   /* a generic secret or an HMAC key type */
         default: want = -1; break;
     }
     if (want == -2) {
-        /* HMAC requires a symmetric secret key. An asymmetric key
-         * (CKK_RSA / CKK_EC / CKK_EC_EDWARDS) is CKR_KEY_TYPE_INCONSISTENT
-         * (#125 TestWrongKeyType hmac_sha256_with_rsa_key). */
-        if (kt == 0x00 || kt == 0x03 || kt == 0x40)
-            return FHSM_RV_KEY_TYPE_INCONSISTENT;
-        return FHSM_RV_OK;
+        /* HMAC takes a CKK_GENERIC_SECRET or one of the HMAC key types --
+         * MD5, SHA-1, RIPEMD, SHA-2 and SHA-512/t (0x27..0x2E, 0x43..0x45),
+         * SHA-3 and BLAKE2b (0x36..0x3D) -- and nothing else. This accepted
+         * every key that was not RSA, EC or EdDSA, so an AES or DES3 key
+         * signed with HMAC; pkcs11-check 0.3.0 imports a CKK_AES key as the
+         * wrong key for BLAKE2b and RIPEMD-160 HMAC and expects
+         * CKR_KEY_TYPE_INCONSISTENT (TestWrongKeyType
+         * test_registry_sign_wrong_key_type). Asymmetric keys stay refused
+         * as before (#125 hmac_sha256_with_rsa_key). */
+        if (kt == 0x10 || (kt >= 0x27 && kt <= 0x2E)
+            || (kt >= 0x36 && kt <= 0x3D) || (kt >= 0x43 && kt <= 0x45))
+            return FHSM_RV_OK;
+        return FHSM_RV_KEY_TYPE_INCONSISTENT;
     }
     /* Every mechanism that takes CKK_DES3 takes CKK_DES2 too (2.8.0). */
     if (want == 0x15 && kt == 0x14) return FHSM_RV_OK;
