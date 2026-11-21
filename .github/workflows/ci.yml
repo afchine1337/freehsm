@@ -113,7 +113,12 @@ jobs:
           #   --spec <0.2.1 types_std.py>   322 conform, 30 not in ref, 0 divergent
           #
           # Identical, so a bump and not a change of reference.
-          /tmp/p11spec/bin/pip install --quiet 'pkcs11-check==0.2.3'
+          #
+          # 0.2.3 -> 0.3.0 on 2026-11-21, with the corpus workflow. Against the
+          # tree of that day: 457 conform, 30 not in ref, 0 divergent. The
+          # conform count grew with the mechanisms of 2.8.0, not with the
+          # reference.
+          /tmp/p11spec/bin/pip install --quiet 'pkcs11-check==0.3.0'
           # Locate types_std.py without importing it: the module uses
           # `from typing import Self` (3.11+) and importing it would tie this
           # step to the runner's Python version. We only need to read the file.

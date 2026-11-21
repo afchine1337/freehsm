@@ -17,6 +17,10 @@
 #
 # Measured on 2026-10-06 in both profiles, pkcs11-check 0.2.3, full corpus,
 # signed module (reports/pkcs11-check-nist-0.2.3, reports/pkcs11-check-all-0.2.3).
+# Moved to 0.3.0 on 2026-11-21, after runs by hand with an unsigned module
+# (reports/pkcs11-check-nist-0.3.0b, reports/pkcs11-check-all-0.3.0). Neither
+# run failed the three 0.2.3 entries below; they stay until a signed 0.3.0
+# run in CI confirms it, and the gate reports them when they pass.
 # ===========================================================================
 
 # RSA PKCS#1 v1.5 decryption of a malformed ciphertext returns CKR_OK and
@@ -36,4 +40,17 @@ all-mechanisms  pkcs11_check/testcases/security/test_padding_oracle.py::TestRSAP
 # 0.2.1 reported as a skip. Open upstream: mingulov/pkcs11-check#49.
 *  pkcs11_check/testcases/ckr/test_ckr_v32_raw.py::TestAsyncErrors::test_async_get_id_no_operation
 *  pkcs11_check/testcases/ckr/test_ckr_v32_raw.py::TestAsyncErrors::test_async_get_id_empty_selector
+
+# 0.3.0: the CKM_AES_CTS variant detection imports its probe key with
+# C_CreateObject in a session that is not logged in. The module answers
+# CKR_USER_NOT_LOGGED_IN, the detection fails, and the 7,499 CTS vectors are
+# skipped. The harness's to change: mingulov/pkcs11-check#89.
+*  pkcs11_check/testcases/acvp/aes/test_cts.py::test_cts_variant_detected
+
+# 0.3.0: encrypts twice with the same all-zero counter block, only
+# ulCounterBits differing (32, then 64), and expects two ciphertexts. Over
+# two blocks the counter never wraps, so any correct CTR gives one.
+# mingulov/pkcs11-check#92. Camellia runs only where a provider other than
+# the FIPS one serves it, so this fails in the unsigned job, not the gated one.
+all-mechanisms  pkcs11_check/testcases/test_camellia.py::TestCamelliaCTR::test_camellia_ctr_different_nonces
 

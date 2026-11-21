@@ -166,7 +166,18 @@ jobs:
           # both profiles from the next run on -- the harness, not the module.
           # pkcs11-check asks only pytest>=8.0. Lift the bound when a
           # pytest-benchmark release reads `nodeid`.
-          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.3' 'pytest<9.2'
+          #
+          # 0.2.3 -> 0.3.0 on 2026-11-21. Run by hand first, unsigned module,
+          # default provider:
+          #
+          #   nist  passed 60484 · fail 1     all  passed 81252 · fail 23
+          #
+          # 21 of the all-mechanisms failures were the module's and are fixed
+          # (HMAC on a non-HMAC key, digest derivation to AES without a
+          # length). The two left are listed in
+          # tests/pkcs11_check_known_failures.txt: the CTS variant detection
+          # (mingulov/pkcs11-check#89) and Camellia-CTR nonces (#92).
+          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.3.0' 'pytest<9.2'
           ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
           ln -sf /opt/p11check/bin/pkcs11-check-report /usr/local/bin/pkcs11-check-report
           pkcs11-check version
@@ -184,7 +195,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /root/.local/share/pkcs11-check/data
-          key: p11check-data-0.2.3
+          key: p11check-data-0.3.0
 
       - name: Fetch third-party vectors
         if: env.FULL_CORPUS == '1'
@@ -321,7 +332,7 @@ jobs:
           apt-get install -y -qq opensc python3-pip python3-venv
           python3 -m venv /opt/p11check
           # Same pins as the job above; see the note there before changing them.
-          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.2.3' 'pytest<9.2'
+          /opt/p11check/bin/pip install --quiet 'pkcs11-check==0.3.0' 'pytest<9.2'
           ln -sf /opt/p11check/bin/pkcs11-check /usr/local/bin/pkcs11-check
           ln -sf /opt/p11check/bin/pkcs11-check-report /usr/local/bin/pkcs11-check-report
           pkcs11-check version
@@ -331,7 +342,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /root/.local/share/pkcs11-check/data
-          key: p11check-data-0.2.3
+          key: p11check-data-0.3.0
 
       - name: Fetch third-party vectors
         if: env.FULL_CORPUS == '1'
