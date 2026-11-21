@@ -14,7 +14,11 @@ and refusals that now carry the return code that names what is wrong.
 stored, which takes a new token file format. Running python-pkcs11's test
 suite against FreeHSM found three more items, fixed here as well. And the
 module offers PKCS#11 mechanisms it did not, for which OpenSSL does the
-computation: see *New mechanisms*.
+computation: see *New mechanisms*. Among them, DSA and finite-field
+Diffie-Hellman, whose key pair generators were listed and refused until
+now; the TLS 1.2 and IKE key derivations; key wrapping in two layers;
+RIPEMD-160, BLAKE2b, Camellia, ARIA and RSA X9.31. pkcs11-check 0.3.0 and
+Alexandre Laroche's #39 found four more defects on the way, fixed here.
 
 **Upgrade.** Three things to read before upgrading:
 
@@ -29,6 +33,8 @@ computation: see *New mechanisms*.
   pkcs11-tool asks for exactly that unless `--private` is given.
 - **An EC or Montgomery key made without `CKA_DERIVE=TRUE` no longer
   derives.**
+- **HMAC takes a generic secret or an HMAC key, and nothing else.** An AES
+  or DES3 key used for HMAC is now `CKR_KEY_TYPE_INCONSISTENT`.
 
 The sections below give the details. Several calls also answer with
 different return codes: see *Answers that change*.
@@ -181,6 +187,27 @@ SP 800-67) and otherwise values computed without OpenSSL.
   composite one; it does not ask the private key for `CKA_DERIVE`.
   `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS` makes an EC key pair whose private key
   comes from the extra random bits method of FIPS 186-5 A.2.1.
+- **`CKM_RSA_AES_KEY_WRAP`.** A fresh AES key wraps the key with AES-KWP
+  (RFC 5649) and travels in front of it, RSA-OAEP-encrypted under the
+  wrapping key: the format cloud providers take for key import.
+- **TLS 1.2** (PKCS#11 v3.2 6.40), through its PRF with SHA-256, SHA-384 or
+  SHA-512. The extended master secret of RFC 7627,
+  `CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE` and `_DH`; the key block,
+  `CKM_TLS12_KEY_AND_MAC_DERIVE` and `CKM_TLS12_KEY_SAFE_DERIVE`; and the
+  Finished message's verify_data, `CKM_TLS_MAC` (alias `CKM_TLS12_MAC`), in
+  `C_Sign` and `C_Verify`.
+- **IKE** (PKCS#11 v3.2 6.64), the prf an HMAC on SHA-1, SHA-2 or SHA-3:
+  `CKM_IKE_PRF_DERIVE` (SKEYID, SKEYSEED and the IKEv2 rekey),
+  `CKM_IKE1_PRF_DERIVE` (SKEYID_d, _a, _e) and `CKM_IKE2_PRF_PLUS_DERIVE`
+  (prf+).
+- **Finite-field Diffie-Hellman.** PKCS #3 (`CKM_DH_PKCS_KEY_PAIR_GEN`,
+  `CKM_DH_PKCS_DERIVE`) on the safe-prime groups of SP 800-56A rev. 3,
+  ffdhe and MODP from 2048 to 8192 bits; X9.42 (`CKM_X9_42_DH_KEY_PAIR_GEN`,
+  `CKM_X9_42_DH_DERIVE`, with `CKD_NULL` or the SHA-1 concatenation KDF) on
+  those groups and on the FB and FC parameter sets, (2048, 224) and (2048,
+  256), RFC 5114's 2048-bit groups among them. Both key pair generators
+  were listed and refused until now. Where NIST's rules apply, these groups
+  alone.
 
 **Not approved, in the all-mechanisms build.** As `CKM_DES3_CBC` and
 `CKM_SHA1_RSA_PKCS` already were: `CKM_ECDSA_SHA1`; 3DES in ECB and with
@@ -205,6 +232,39 @@ Refused in strict and FIPS mode as well:
   `CKK_POLY1305` key types, where the loaded provider serves them. The
   OpenSSL FIPS provider does not, and there they are neither listed nor
   accepted.
+- **RIPEMD-160**: the digest, `_HMAC`, `_HMAC_GENERAL` and
+  `CKM_RIPEMD160_RSA_PKCS`.
+- **BLAKE2b** at 160, 256, 384 and 512 bits: digest, HMAC, HMAC_GENERAL,
+  key derivation and HMAC key generation, twenty mechanisms, with the
+  `CKK_BLAKE2B_*_HMAC` key types. The size is BLAKE2b's own parameter, not a
+  truncation of the 512-bit output.
+- **Camellia and ARIA**: ECB, CBC, CBC-PAD, CTR (Camellia only: PKCS#11 has
+  no ARIA CTR), the CBC-MAC, key generation and the derivations by
+  encryption, on `CKK_CAMELLIA` and `CKK_ARIA` keys of 16, 24 or 32 bytes.
+- **`CKM_ECDH_AES_KEY_WRAP`**, the two-layer wrapping above with an
+  ephemeral EC key in front: the AES key comes from the ECDH with the
+  wrapping key, through `CKD_NULL` or the ANSI X9.63 KDF. An EC key may now
+  have `CKA_WRAP` and `CKA_UNWRAP`, off unless the template asks.
+- **TLS.** The master secret without the session hash
+  (`CKM_TLS12_MASTER_KEY_DERIVE` and `_DH`), the RFC 5705 exporter
+  (`CKM_TLS_KDF`, alias `CKM_TLS12_KDF`), and `CKM_TLS_MAC` and
+  `CKM_TLS_KDF` over the TLS 1.0 and 1.1 PRF (`CKM_TLS_PRF`).
+- **IKE.** `CKM_IKE1_EXTENDED_DERIVE`, RFC 2409 appendix B.
+- **DSA.** `CKM_DSA_KEY_PAIR_GEN` on the caller's domain parameters, one of
+  FIPS 186-4's sizes and validated, and the signatures `CKM_DSA` and
+  `CKM_DSA_SHA1` to `CKM_DSA_SHA3_512`, r || s. FIPS 186-5 withdrew DSA.
+- **Diffie-Hellman on other groups**: any prime group of 1024 bits and up
+  that validates, for PKCS #3 and X9.42.
+- **RSA X9.31.** `CKM_RSA_X9_31_KEY_PAIR_GEN`, key pairs of 2048 bits and
+  more whose primes are strong in X9.31's sense, and the signatures
+  `CKM_RSA_X9_31` and `CKM_SHA1_RSA_X9_31`. FIPS 186-5 withdrew X9.31.
+
+RIPEMD-160, BLAKE2b, Camellia, ARIA, DSA, Diffie-Hellman on other groups
+and the X9.31 signatures run only where a provider other than the OpenSSL
+FIPS one serves them: the FIPS provider has none of the first four, refuses
+DSA and X9.31 signing, and validates only the safe-prime groups by itself.
+Under it they are neither listed nor accepted. The X9.31 key pair
+generator stays, its keys being RSA keys.
 
 **Points to know.**
 
@@ -219,6 +279,26 @@ Refused in strict and FIPS mode as well:
 - Key generation by `CKM_DES2_KEY_GEN` and `CKM_DES3_KEY_GEN` now sets the
   parity bits, as `C_DeriveKey` already did for these types. The cipher
   ignores them.
+- The TLS master secret is 48 bytes and gets a `CKA_ALLOWED_MECHANISMS`
+  naming the TLS 1.2 mechanisms that take it, which the template may narrow.
+  `CKM_TLS12_KEY_AND_MAC_DERIVE` accepts `phKey` NULL.
+- DSA and ECDSA signatures are r || s, each half the length of q or of the
+  curve's order. A DH agreement gives Z padded to p's length, cut to the
+  template's `CKA_VALUE_LEN`.
+- X9.42 takes neither `CKD_SHA1_KDF_ASN1` nor the hybrid and MQV forms.
+  The FIPS provider cannot validate an FB or FC set without the seed it was
+  generated from, which a template does not carry; where it alone serves
+  DH, the module checks the set itself: p and q prime, q dividing p - 1, g
+  of order q.
+- `CKM_RSA_X9_31` signs the caller's hash followed by its trailer ID (0x33
+  for SHA-1, 0x34 for SHA-256, ...), at most k - 2 bytes; the module adds
+  the header, the padding and the final 0xCC, and gives min(s, n - s). The
+  module builds the block itself: OpenSSL's X9.31 padding failed through
+  its raw signing call, and its check refuses the block written for k - 3
+  bytes of input. A modulus that is not 1024 + 256s bits is
+  `CKR_KEY_SIZE_RANGE` for both X9.31 signatures.
+- **Not offered**: HOTP and the other OTP mechanisms, which need fields the
+  token file does not have yet.
 
 ## What did not work
 
@@ -230,6 +310,13 @@ Refused in strict and FIPS mode as well:
   ciphertext, because the tag was never set. As with any decryption in
   parts, the earlier parts are given out before the tag is verified; a
   caller that must not act on unauthenticated data uses `C_Decrypt`.
+- **An EC public key imports on every curve the module generates on**
+  (#39). `C_CreateObject` resolved a public key's curve with a table of the
+  three NIST curves, where key generation and private-key import take
+  secp256k1 and brainpool in the all-mechanisms build: a peer's secp256k1
+  or brainpool public key, or the pair's own `CKA_EC_POINT`, was
+  `CKR_CURVE_NOT_SUPPORTED`. All three paths now resolve the curve the same
+  way, and the point is still checked on it. Reported by Alexandre Laroche.
 - **A single-part call no longer ends a multi-part operation** (#37 M1).
   `C_Digest` after `C_DigestUpdate` gave the digest of its own data alone.
   `C_Digest`, `C_Sign`, `C_Verify`, `C_Encrypt` and `C_Decrypt` now answer
@@ -294,6 +381,16 @@ above.
   `CKR_TEMPLATE_INCONSISTENT` (#33).
 - `CKA_OBJECT_ID` on a data object is accepted and kept; 2.7.0 refused it
   with `CKR_ATTRIBUTE_TYPE_INVALID`.
+- An HMAC mechanism with a secret key that is neither a generic secret nor
+  of an HMAC key type (AES, DES3, ChaCha20, ...): `CKR_KEY_TYPE_INCONSISTENT`
+  at `C_SignInit` and `C_VerifyInit`. Only RSA, EC and EdDSA keys were
+  refused; found by pkcs11-check 0.3.0 on BLAKE2b and RIPEMD-160 HMAC.
+- A key derivation by digest to a key type without a length of its own,
+  AES among them, with no `CKA_VALUE_LEN`: `CKR_TEMPLATE_INCOMPLETE`
+  (PKCS#11 v3.2 6.20.5). The key was made at the digest's length.
+- A mechanism no loaded provider serves: `CKR_MECHANISM_INVALID` at its
+  Init, as `C_GetMechanismList` already left it out, rather than a failure
+  at the first operation.
 
 ## Corrections to the 2.7.0 notes
 
@@ -326,7 +423,12 @@ Extended: `tests/test_private_attr.c`, `tests/test_template_checks.c` and
 `tests/test_des3_modes.c`, `tests/test_des3_mac_family.c`,
 `tests/test_des2_keys.c`, `tests/test_chacha20_poly1305.c`,
 `tests/test_chacha20_poly1305_aead.c`, `tests/test_extract_pub_from_priv.c`
-and `tests/test_ec_extra_bits.c`. CI now runs `make tests` against
+and `tests/test_ec_extra_bits.c`; then `tests/test_ripemd160.c`,
+`tests/test_blake2b.c`, `tests/test_camellia_aria.c`,
+`tests/test_rsa_ecdh_aes_wrap.c`, `tests/test_tls12_kdf.c`,
+`tests/test_ike_prf.c`, `tests/test_dsa.c`, `tests/test_dh_pkcs.c`,
+`tests/test_dh_x942.c` and `tests/test_rsa_x931.c`, and for #39
+`tests/test_ec_pub_import_curves.c`. CI now runs `make tests` against
 OpenSSL's default provider in both profiles, as it did against the FIPS
 provider. python-pkcs11's own suite passes against
 this release but for one that needs what FreeHSM does not offer by design,
@@ -341,6 +443,18 @@ sensitive (mingulov/pkcs11-check#72); they pass now that such a key is
 made, and are no longer listed. Its tests of `CKM_EXTRACT_KEY_FROM_KEY`
 derive a generic secret without `CKA_VALUE_LEN`; the module answers
 `CKR_TEMPLATE_INCOMPLETE`, which they record as an expected refusal.
+
+pkcs11-check 0.3.0, run by hand on the module of 2026-11-19 to 21:
+- nist-approved-only: 60,484 passed and 1 failed;
+- all-mechanisms: 81,252 passed and 23 failed.
+
+Of the 23, 21 were the module's -- the HMAC key types and the digest
+derivation above -- and are fixed. The two left are the harness's:
+- its CTS variant detection runs in a session that is not logged in, so
+  7,499 `CKM_AES_CTS` vectors are skipped (mingulov/pkcs11-check#89, the
+  one nist-approved-only failure as well);
+- `test_camellia_ctr_different_nonces` encrypts twice with the same counter
+  block and expects two ciphertexts (mingulov/pkcs11-check#92).
 
 ## Verifying this release
 

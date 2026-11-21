@@ -537,6 +537,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
     ML-KEM key pair helpers and in its RSA-OAEP cross-verification. Those 28
     tests fail at `C_GenerateKeyPair`; they are listed, with that reason, in
     `tests/pkcs11_check_known_failures.txt`.
+* **The mechanisms of 2.8.0 in the FIPS documents.** `docs/FIPS_140_3.md`
+  and its French version list the approved additions -- KAS-FFC on the
+  safe-prime groups and the FB and FC sets, the RSA-AES key wrap, the TLS
+  1.2 and IKE key derivations -- in the services map and the table of
+  approved algorithms, and the ones that are not approved in one row of the
+  services map. The RSA-PSS row gives the sizes now taken, 2048 to 8192
+  bits. `RELEASE_v2.8.0.md` covers the second series of mechanisms, the
+  fixes found by pkcs11-check 0.3.0 and #39, and the runs of pkcs11-check
+  0.3.0.
 
 ## [2.7.0] --- 2026-11-11
 
