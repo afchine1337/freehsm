@@ -79,7 +79,12 @@ private, and read back TRUE (#37 K1). It is now a public object, as
 PKCS#11 v3.2 §4.4 has it: a session that is not logged in finds it and can
 use it. Data objects have worked this way since 2.7.0.
 
-- Creating one still needs the user's login.
+- Creating one still needs the user's login. So does creating any object:
+  PKCS#11 gives a session that is not logged in read/write access to
+  public objects, and this module creates none before a login, of any
+  class -- the token's store takes no object without the key the login
+  unlocks. `C_EncapsulateKey`, which needs only a public key, is therefore
+  `CKR_USER_NOT_LOGGED_IN` without a login. Planned for 2.9.0.
 - One that is not sensitive is written in the token file's public section,
   which is in clear, so that it can be found before a login. One that is
   sensitive is not written there, and is seen after a login.
@@ -92,8 +97,10 @@ use it. Data objects have worked this way since 2.7.0.
 generates, imports, derives with HKDF, encapsulates and decapsulates,
 unless `--private` is given. Its plain commands now make public secret
 keys. Give `--private` for a key that must need a login, and `--sensitive`
-for one that must not be written in clear. OpenSC/OpenSC#3950 proposes that
-pkcs11-tool stop sending `CKA_PRIVATE=FALSE` for secret keys.
+for one that must not be written in clear. OpenSC/OpenSC#3964 makes
+pkcs11-tool leave `CKA_PRIVATE` of a secret key to the token unless
+`--private` is given, except for the secret of `--encapsulate`, which it
+keeps public (OpenSC/OpenSC#3950).
 
 ## Private keys that are not sensitive
 
