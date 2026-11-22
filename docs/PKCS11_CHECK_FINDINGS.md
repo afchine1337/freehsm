@@ -2911,7 +2911,7 @@ the gate for them is not news.
 | (absent) → skipped | 44 | registry and flag probes that do not apply to them |
 | skipped → passed | 5 | `TestRSAX931KeyPairGen` (3), the tamper and wrong-digest tests |
 | skipped → failed | 2 | the X9.31 oracle above |
-| passed → xfailed | 1 | `TestKeyFunctionNotPermitted::test_sign_not_permitted`: its probe makes an **AES** key with `CKA_SIGN=FALSE` and calls `C_SignInit(CKM_SHA256_HMAC)`. Since 4331f753c the module refuses the key type first, `CKR_KEY_TYPE_INCONSISTENT`, which 0.3.0's own HMAC tests demand; the test wanted `CKR_KEY_FUNCTION_NOT_PERMITTED` and records the other as LOW. Two refusals of one call, in an order the standard does not fix. The probe never reaches `CKA_SIGN` |
+| passed → xfailed | 1 | `TestKeyFunctionNotPermitted::test_sign_not_permitted`: its probe makes an **AES** key with `CKA_SIGN=FALSE` and calls `C_SignInit(CKM_SHA256_HMAC)`. Since 4331f753c the module refuses the key type first, `CKR_KEY_TYPE_INCONSISTENT`, which 0.3.0's `TestWrongKeyType::test_registry_sign_wrong_key_type` demands for an AES key on an HMAC mechanism; the test wanted `CKR_KEY_FUNCTION_NOT_PERMITTED` and records the other as LOW. Two refusals of one call, in an order the standard does not fix. The probe never reaches `CKA_SIGN`: mingulov/pkcs11-check#96 |
 | xfailed → passed | 1 | `TestMalformedObjectUnwrap::test_unwrap_malformed_template[rsa-swap_asym_class_secret_type]`, whose premise was refused with `CKR_KEY_SIZE_RANGE` on 2026-11-20. Not attributed: two commits lie between the runs, 4331f753c and the X9.31 one |
 
 **brainpool and secp256k1, after #39.** In the run of 2026-11-07,
