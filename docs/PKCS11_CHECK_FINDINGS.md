@@ -2898,8 +2898,8 @@ module-independent repro, a 2048-bit key and the oracle's own
 `verify_x931_signature`: the block signed as s passes, the same block
 signed as n - s fails with "header 0x4a". The module verifies both, and so
 does `tests/test_rsa_x931.c`; `TestMechSignRoundtrip` and the tamper and
-wrong-digest tests pass. Listed in `tests/pkcs11_check_known_failures.txt`.
-Each of the two fails or passes by chance, so a "did not fail" notice from
+wrong-digest tests pass. Listed in `tests/pkcs11_check_known_failures.txt`;
+upstream, mingulov/pkcs11-check#94. Each of the two fails or passes by chance, so a "did not fail" notice from
 the gate for them is not news.
 
 **The moves since 2026-11-20** (96, by node-id):
@@ -2933,3 +2933,14 @@ probes are skipped on `CKR_FUNCTION_NOT_SUPPORTED`, here and in the
 nist-approved-only run of 2026-11-19. None of the three is in the embedded
 corpus CI runs on push, so CI could never have confirmed it, as the list
 waited for. Removed from the list.
+
+**A failure by chance, not listed.** The signed all-mechanisms job of
+2026-11-22 (0a9154780, a documentation commit) failed
+`TestProtectedComponentMatrix::test_unsealed_components_readable[rsa-import-unsealed]`
+with "impossible reported length for CKA_EXPONENT_1". The test imports a fresh RSA key on every run, encodes
+`d` at 256 bytes and `dmp1`, `dmq1`, `iqmp` at 128, and compares lengths
+byte for byte. The module returns each component as the Big integer
+PKCS#11 defines, without leading zeros (`BN_num_bytes`), so a component
+whose top byte is zero -- about once in 256 keys, four components -- reads
+one byte short: roughly 1.5 % of runs. Not listed, as a list entry would
+mostly report "did not fail"; rerun the job. mingulov/pkcs11-check#95.

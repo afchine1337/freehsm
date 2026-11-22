@@ -56,7 +56,7 @@ all-mechanisms  pkcs11_check/testcases/test_camellia.py::TestCamelliaCTR::test_c
 # oracle does not, so it refuses every signature where s > n/2, about half
 # of them. The module's own verification and tests/test_rsa_x931.c accept
 # both. Each test fails or passes by chance, so the gate's "did not fail"
-# notice for these two means nothing. Upstream: issue to be filed. X9.31 is
+# notice for these two means nothing. mingulov/pkcs11-check#94. X9.31 is
 # offered only where a provider other than the FIPS one serves RSA, so in
 # the unsigned job.
 all-mechanisms  pkcs11_check/testcases/test_rsa_extended.py::TestRSAX931::test_sign_verify_sha1

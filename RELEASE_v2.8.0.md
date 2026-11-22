@@ -457,7 +457,8 @@ listed in `tests/pkcs11_check_known_failures.txt`:
 - `test_camellia_ctr_different_nonces` encrypts twice with the same counter
   block and expects two ciphertexts (mingulov/pkcs11-check#92);
 - two X9.31 tests whose oracle reads only s^e mod n, where X9.31 signs
-  min(s, n - s): about half of correct signatures fail it.
+  min(s, n - s): about half of correct signatures fail it
+  (mingulov/pkcs11-check#94).
 
 In the signed CI jobs, the one failure is an X25519 import the FIPS
 provider cannot serve (mingulov/pkcs11-check#93).
