@@ -48,11 +48,93 @@ warn() { printf '  \033[33m?\033[0m     %s\n' "$1"; }
 
 echo "== Pre-flight $TAG =="
 
+# --- 0. generated sources against what HEAD carries ----------------------
+# The tag must carry the generated files of the profile it ships. On
+# 2026-11-22 the committed set still listed 185 mechanisms, from before the
+# Level 1 and Level 2 work, while the generator produced 258: every build
+# regenerates them from the untracked .profile.stamp, so CI, the baseline and
+# the release workflow were all right, and only the copy a reader of the tag
+# sees was stale. It surfaced here as "working tree dirty", after the release
+# commit and the reference commit, and cost a third commit before the tag.
+#
+# So this script regenerates them itself and names the case. It writes the
+# three files, which is what `make generate` was asked to do before it anyway;
+# it still writes nothing to git.
+GEN_FILES="docs/MECHANISMS.md include/fhsm_pkcs11_mechanisms.h $GEN"
+if rm -f src/gen/.profile.stamp \
+   && make PROFILE=nist-approved-only generate >/tmp/rel_generate.log 2>&1; then
+    # shellcheck disable=SC2086  # GEN_FILES is a list of paths
+    gen_dirty=$(git status --porcelain -- $GEN_FILES)
+    if [ -z "$gen_dirty" ]; then
+        ok "generated sources match HEAD for nist-approved-only"
+    else
+        bad "the committed generated sources are not what nist-approved-only
+        generates now:
+$(printf '%s\n' "$gen_dirty" | sed 's/^/            /')
+        Commit them as they are (git add $GEN_FILES), push, wait for CI.
+        libfreehsm.so is built from regenerated sources either way, so a
+        reproducibility reference already recorded stays valid."
+    fi
+else
+    bad "make PROFILE=nist-approved-only generate failed -- /tmp/rel_generate.log"
+fi
+
 # --- 1. tree state -------------------------------------------------------
-if [ -z "$(git status --porcelain)" ]; then
+# The generated sources are judged above; counting them here as well would
+# report one cause twice under a message that names the wrong remedy.
+# shellcheck disable=SC2046  # one pathspec exclusion per generated file
+other_dirty=$(git status --porcelain -- . $(printf ":(exclude)%s " $GEN_FILES))
+if [ -z "$other_dirty" ]; then
     ok "working tree clean"
 else
-    bad "working tree dirty -- commit or stash first"
+    bad "working tree dirty -- commit or stash first:
+$(printf '%s\n' "$other_dirty" | sed 's/^/            /')"
+fi
+
+# --- 1b. CI on the commit being tagged -----------------------------------
+# This script never asked whether CI had passed. On 2026-11-11 the v2.7.0
+# release commit went in while the static-analysis job had been red since
+# f900d10, and it was found at release time, not before. The tag goes on HEAD, so
+# HEAD must be the commit on origin/main and every workflow run for it must
+# have finished green. The pkcs11-check workflow only runs when its paths
+# change; a commit it did not run on is judged by the runs it has.
+HEAD_SHA=$(git rev-parse HEAD 2>/dev/null)
+ORIGIN_SHA=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
+if [ -z "$ORIGIN_SHA" ]; then
+    warn "could not read origin/main -- CI not checked"
+elif [ "$HEAD_SHA" != "$ORIGIN_SHA" ]; then
+    bad "HEAD ${HEAD_SHA:0:9} is not origin/main ${ORIGIN_SHA:0:9} -- push it, wait for CI, rerun"
+elif ! command -v gh >/dev/null 2>&1; then
+    warn "gh not found -- CI on ${HEAD_SHA:0:9} not checked, look before tagging"
+elif ! ci_runs=$(gh run list --commit "$HEAD_SHA" --limit 50 \
+        --json workflowName,status,conclusion \
+        --jq '.[] | "\(.workflowName)\t\(.status)\t\(.conclusion)"' 2>/dev/null); then
+    warn "gh could not list the runs (not logged in?) -- CI on ${HEAD_SHA:0:9} not checked"
+else
+    ci_seen=0; ci_pending=""; ci_failed=""
+    while IFS="$(printf '\t')" read -r wf st co; do
+        [ -n "$wf" ] || continue
+        [ "$wf" = "CI" ] && ci_seen=1
+        if [ "$st" != "completed" ]; then
+            ci_pending="$ci_pending $wf;"
+        else
+            case "$co" in
+                success|skipped|neutral) ;;
+                *) ci_failed="$ci_failed $wf ($co);" ;;
+            esac
+        fi
+    done <<EOF_RUNS
+$ci_runs
+EOF_RUNS
+    if [ -n "$ci_failed" ]; then
+        bad "a workflow failed on ${HEAD_SHA:0:9}:$ci_failed"
+    elif [ -n "$ci_pending" ]; then
+        bad "still running on ${HEAD_SHA:0:9}:$ci_pending wait, then rerun"
+    elif [ "$ci_seen" -eq 0 ]; then
+        bad "no CI run found for ${HEAD_SHA:0:9} -- was it pushed?"
+    else
+        ok "CI green on ${HEAD_SHA:0:9}, every workflow run finished"
+    fi
 fi
 
 # --- 2. build profile ----------------------------------------------------
@@ -354,7 +436,7 @@ afterwards with note commits rather than rewritten history):
 
 On a clean tree, skip straight to:
 
-    git tag -s $TAG -m "FreeHSM $TAG --- PKCS#11 v3.2 software HSM, Simorgh Labs"
+    git tag -s $TAG -m "FreeHSM $TAG --- PKCS#11 v3.2 software HSM"
     git tag -v $TAG
     git push origin main --follow-tags
     git ls-remote --tags origin | grep $TAG   # confirm it actually went
