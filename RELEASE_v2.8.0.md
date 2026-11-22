@@ -435,26 +435,36 @@ this release but for one that needs what FreeHSM does not offer by design,
 `C_SeedRandom`. Its P-192 test passes in the all-mechanisms build in
 permissive mode.
 
-`make tests` in both profiles, green. pkcs11-check 0.2.3: every failure is
-listed in `tests/pkcs11_check_known_failures.txt`, 3 in `all-mechanisms`
-and 2 in `nist-approved-only`, none of them the module's to fix. 2.7.0 had
-28 more, in both profiles, all asking for a private key that is not
-sensitive (mingulov/pkcs11-check#72); they pass now that such a key is
-made, and are no longer listed. Its tests of `CKM_EXTRACT_KEY_FROM_KEY`
-derive a generic secret without `CKA_VALUE_LEN`; the module answers
+`make tests` in both profiles, green. Under pkcs11-check 0.2.3, the 28
+failures of 2.7.0 that asked for a private key that is not sensitive
+(mingulov/pkcs11-check#72) pass now that such a key is made, and are no
+longer listed. Its tests of `CKM_EXTRACT_KEY_FROM_KEY` derive a generic
+secret without `CKA_VALUE_LEN`; the module answers
 `CKR_TEMPLATE_INCOMPLETE`, which they record as an expected refusal.
 
-pkcs11-check 0.3.0, run by hand on the module of 2026-11-19 to 21:
-- nist-approved-only: 60,484 passed and 1 failed;
-- all-mechanisms: 81,252 passed and 23 failed.
+CI now runs pkcs11-check 0.3.0. By hand, full corpus, unsigned module:
+- nist-approved-only (2026-11-19): 60,484 passed and 1 failed;
+- all-mechanisms (2026-11-20): 81,252 passed and 23 failed;
+- all-mechanisms again (2026-11-21, this release's mechanisms included):
+  81,300 passed and 4 failed.
 
 Of the 23, 21 were the module's -- the HMAC key types and the digest
-derivation above -- and are fixed. The two left are the harness's:
+derivation above -- and are fixed. The four left are the harness's, and
+listed in `tests/pkcs11_check_known_failures.txt`:
 - its CTS variant detection runs in a session that is not logged in, so
   7,499 `CKM_AES_CTS` vectors are skipped (mingulov/pkcs11-check#89, the
   one nist-approved-only failure as well);
 - `test_camellia_ctr_different_nonces` encrypts twice with the same counter
-  block and expects two ciphertexts (mingulov/pkcs11-check#92).
+  block and expects two ciphertexts (mingulov/pkcs11-check#92);
+- two X9.31 tests whose oracle reads only s^e mod n, where X9.31 signs
+  min(s, n - s): about half of correct signatures fail it.
+
+In the signed CI jobs, the one failure is an X25519 import the FIPS
+provider cannot serve (mingulov/pkcs11-check#93).
+
+Since #39, 8,433 Wycheproof ECDSA vectors on brainpool and secp256k1 run
+and pass in the all-mechanisms build under the default provider; before,
+their public key was refused and they were skipped.
 
 ## Verifying this release
 

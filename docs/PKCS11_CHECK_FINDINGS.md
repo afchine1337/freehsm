@@ -2811,6 +2811,11 @@ this run and reports/ is not under version control; the 2.4.0 reports of
 2026-10-14/15 are the baseline above, so the moves include those of
 2026-10-16/17 already recorded in the sections before this one.
 
+The third row holds for a signed module, which has no brainpool or
+secp256k1. Where the default provider serves them, the public key of
+those vectors was refused as well, until #39; since then they run and
+pass: see 2026-11-21 below.
+
 An all-mechanisms run first measured a nist-approved-only module: the
 signing step was given without `PROFILE=` and rebuilt the default profile,
 the trap the Makefile describes. Its results matched the nist run exactly
@@ -2868,3 +2873,63 @@ The same 321 moves in each profile, none backwards:
 
 The test count grows by 283 because pkcs11-check parametrizes per
 advertised mechanism. These are the figures in RELEASE_v2.5.0.md.
+
+## 2026-11-21 — pkcs11-check 0.3.0, all-mechanisms, the 2.8.0 tree
+
+    pkcs11-check 0.3.0 · unsigned module, default provider, full corpus ·
+    reports/pkcs11-check-all-0.3.0b · diffed by node-id against
+    reports/pkcs11-check-all-0.3.0 (2026-11-20) and, for the curves,
+    reports/pkcs11-check-all-0.3.0-pre (2026-11-07, before #39)
+
+| profile | passed | failed | xfailed | skipped |
+|---|---|---|---|---|
+| all-mechanisms | 81 300 / 117 003 | 4, all listed | 1 050 | 34 649 |
+
+**The four failures.** Two are those of 2026-11-20, the harness's:
+`test_cts_variant_detected` (mingulov/pkcs11-check#89) and
+`test_camellia_ctr_different_nonces` (#92). The other two are new, and the
+harness's too. They are `TestRSAX931::test_sign_verify_sha1` and
+`test_sign_verify_sha256`, whose oracle computes s^e mod n and checks the
+X9.31 block it expects. X9.31 signs min(s, n - s) -- OpenSSL's
+`RSA_X931_PADDING` does the same -- and the verifier takes n minus the
+result when its last nibble is not 0xC. The oracle skips that step, so it
+refuses every signature with s > n/2, about half of them. A
+module-independent repro, a 2048-bit key and the oracle's own
+`verify_x931_signature`: the block signed as s passes, the same block
+signed as n - s fails with "header 0x4a". The module verifies both, and so
+does `tests/test_rsa_x931.c`; `TestMechSignRoundtrip` and the tamper and
+wrong-digest tests pass. Listed in `tests/pkcs11_check_known_failures.txt`.
+Each of the two fails or passes by chance, so a "did not fail" notice from
+the gate for them is not news.
+
+**The moves since 2026-11-20** (96, by node-id):
+
+| move | count | why |
+|---|---:|---|
+| failed → passed | 21 | HMAC on a non-HMAC secret key and the digest derivation to AES without a length, fixed in 4331f753c |
+| (absent) → passed | 22 | per-mechanism tests generated for the three X9.31 mechanisms: flags, key generation, round trip, multipart |
+| (absent) → skipped | 44 | registry and flag probes that do not apply to them |
+| skipped → passed | 5 | `TestRSAX931KeyPairGen` (3), the tamper and wrong-digest tests |
+| skipped → failed | 2 | the X9.31 oracle above |
+| passed → xfailed | 1 | `TestKeyFunctionNotPermitted::test_sign_not_permitted`: its probe makes an **AES** key with `CKA_SIGN=FALSE` and calls `C_SignInit(CKM_SHA256_HMAC)`. Since 4331f753c the module refuses the key type first, `CKR_KEY_TYPE_INCONSISTENT`, which 0.3.0's own HMAC tests demand; the test wanted `CKR_KEY_FUNCTION_NOT_PERMITTED` and records the other as LOW. Two refusals of one call, in an order the standard does not fix. The probe never reaches `CKA_SIGN` |
+| xfailed → passed | 1 | `TestMalformedObjectUnwrap::test_unwrap_malformed_template[rsa-swap_asym_class_secret_type]`, whose premise was refused with `CKR_KEY_SIZE_RANGE` on 2026-11-20. Not attributed: two commits lie between the runs, 4331f753c and the X9.31 one |
+
+**brainpool and secp256k1, after #39.** In the run of 2026-11-07,
+8 427 Wycheproof ECDSA vectors on brainpool P224 to P512 and secp256k1
+were skipped as "Curve ... not supported": `C_CreateObject` refused their
+public key with `CKR_CURVE_NOT_SUPPORTED` although the module generates
+keys on those curves (#39). Since the fix, all 8 433 run and pass, and
+the 2 618 others are the harness's duplicate inputs. Wycheproof ECDH on
+the same curves: 3 456 pass, 785 more than on 2026-11-07 (555 skipped and
+230 xfailed then). In the 2026-10-06 run (reports/pkcs11-check-all-023)
+the same ECDSA vectors were 4 483 xfails, the key refused with
+`CKR_ATTRIBUTE_VALUE_INVALID`, and 3 950 passes, every one an invalid
+vector "rejected" on a key that never reached a signature -- the third row
+of 2026-10-22. They now pass for a signature that is actually checked.
+
+**The 0.2.3 entries left.** The PKCS#1 v1.5 structured-oracle test is an
+xfail in 0.3.0, implicit rejection recognised; the two `C_AsyncGetID`
+probes are skipped on `CKR_FUNCTION_NOT_SUPPORTED`, here and in the
+nist-approved-only run of 2026-11-19. None of the three is in the embedded
+corpus CI runs on push, so CI could never have confirmed it, as the list
+waited for. Removed from the list.

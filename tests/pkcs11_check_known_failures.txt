@@ -18,28 +18,16 @@
 # Measured on 2026-10-06 in both profiles, pkcs11-check 0.2.3, full corpus,
 # signed module (reports/pkcs11-check-nist-0.2.3, reports/pkcs11-check-all-0.2.3).
 # Moved to 0.3.0 on 2026-11-21, after runs by hand with an unsigned module
-# (reports/pkcs11-check-nist-0.3.0b, reports/pkcs11-check-all-0.3.0). Neither
-# run failed the three 0.2.3 entries below; they stay until a signed 0.3.0
-# run in CI confirms it, and the gate reports them when they pass.
+# (reports/pkcs11-check-nist-0.3.0b, reports/pkcs11-check-all-0.3.0).
+#
+# The three 0.2.3 entries -- the PKCS#1 v1.5 structured oracle and the two
+# C_AsyncGetID probes -- were removed on 2026-11-22. In the full-corpus runs
+# of 0.3.0 the oracle test is an xfail (implicit rejection recognised) and
+# the async probes are skipped on CKR_FUNCTION_NOT_SUPPORTED, in both
+# profiles (reports/pkcs11-check-nist-0.3.0b, reports/pkcs11-check-all-0.3.0b).
+# CI could not have confirmed it: none of the three is in the embedded
+# corpus it runs on push.
 # ===========================================================================
-
-# RSA PKCS#1 v1.5 decryption of a malformed ciphertext returns CKR_OK and
-# pseudo-random bytes. That is OpenSSL's implicit rejection, the Marvin-attack
-# countermeasure, and it is deliberate: an error return here is the oracle.
-# 0.2.3 recognises it in TestInvalidOperations::test_decrypt_garbage, now an
-# xfail; this structured-oracle test still records CKR_OK on its v1.5 samples
-# as accepted_invalid. See docs/PKCS11_CHECK_FINDINGS.md. Upstream:
-# mingulov/pkcs11-check#37, follow-up in #49.
-# CKM_RSA_PKCS decryption exists only in all-mechanisms builds.
-all-mechanisms  pkcs11_check/testcases/security/test_padding_oracle.py::TestRSAPaddingOracle::test_pkcs1v15_bleichenbacher_structured_oracle
-
-# C_AsyncGetID probes that never call the module. The child passes a c_char
-# buffer where the harness declares the selector as CK_UTF8CHAR_PTR, ctypes
-# raises ArgumentError before the call, and the child exits without a RESULT
-# line ("missing_result"). The module answers CKR_FUNCTION_NOT_SUPPORTED, which
-# 0.2.1 reported as a skip. Open upstream: mingulov/pkcs11-check#49.
-*  pkcs11_check/testcases/ckr/test_ckr_v32_raw.py::TestAsyncErrors::test_async_get_id_no_operation
-*  pkcs11_check/testcases/ckr/test_ckr_v32_raw.py::TestAsyncErrors::test_async_get_id_empty_selector
 
 # 0.3.0: the CKM_AES_CTS variant detection imports its probe key with
 # C_CreateObject in a session that is not logged in. The module answers
@@ -59,6 +47,18 @@ all-mechanisms  pkcs11_check/testcases/test_camellia.py::TestCamelliaCTR::test_c
 # X25519, so the module lists no Montgomery mechanism and answers
 # CKR_CURVE_NOT_SUPPORTED, which the test does not count as a refusal. The
 # unsigned runs, where the default provider serves X25519, pass it.
-# Upstream: mingulov/pkcs11-check, issue to be filed.
+# Upstream: mingulov/pkcs11-check#93.
 *  pkcs11_check/testcases/test_object.py::TestAttributeValueEncodings::test_private_ec_family_value_raw_known_material[montgomery]
+
+# 0.3.0: the X9.31 oracle opens the signature as s^e mod n and checks the
+# block. X9.31 signs min(s, n - s), as OpenSSL's RSA_X931_PADDING does, and a
+# verifier takes n minus the result when its last nibble is not 0xC; the
+# oracle does not, so it refuses every signature where s > n/2, about half
+# of them. The module's own verification and tests/test_rsa_x931.c accept
+# both. Each test fails or passes by chance, so the gate's "did not fail"
+# notice for these two means nothing. Upstream: issue to be filed. X9.31 is
+# offered only where a provider other than the FIPS one serves RSA, so in
+# the unsigned job.
+all-mechanisms  pkcs11_check/testcases/test_rsa_extended.py::TestRSAX931::test_sign_verify_sha1
+all-mechanisms  pkcs11_check/testcases/test_rsa_extended.py::TestRSAX931::test_sign_verify_sha256
 
