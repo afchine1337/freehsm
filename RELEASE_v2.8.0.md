@@ -20,7 +20,7 @@ now; the TLS 1.2 and IKE key derivations; key wrapping in two layers;
 RIPEMD-160, BLAKE2b, Camellia, ARIA and RSA X9.31. pkcs11-check 0.3.0 and
 Alexandre Laroche's #39 found four more defects on the way, fixed here.
 
-**Upgrade.** Three things to read before upgrading:
+**Upgrade.** Four things to read before upgrading:
 
 - **The token file format is now v5, and the change is one way.** Tokens
   written by earlier versions are read as they are and rewritten as v5 at

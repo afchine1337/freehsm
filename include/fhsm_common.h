@@ -138,9 +138,16 @@ extern "C" {
  * answered CKR_OK for a template they did not follow -- RSA without
  * CKA_MODULUS_BITS, EC without CKA_EC_PARAMS, a private key asked not
  * sensitive -- or with the wrong error; searches match every attribute. A
- * caller that relied on those answers meets new ones, hence the minor. */
+ * caller that relied on those answers meets new ones, hence the minor.
+ *
+ * 2.8.0, MINOR: no security fix. The token file moves to v5, one way: a
+ * token 2.8.0 has written cannot be used by 2.7.0. A secret key asked
+ * CKA_PRIVATE=FALSE is now public, key usages follow the key type, HMAC
+ * takes only generic and HMAC keys, and many refusals carry another return
+ * code. New mechanisms, among them DSA, finite-field DH, the TLS 1.2 and
+ * IKE derivations, RIPEMD-160, BLAKE2b, Camellia, ARIA and RSA X9.31. */
 #define FHSM_VERSION_MAJOR   2
-#define FHSM_VERSION_MINOR   7
+#define FHSM_VERSION_MINOR   8
 #define FHSM_VERSION_PATCH   0
 /* No -FIPS suffix. It rode into LIB_VER (libfreehsm.so.2.0.0-FIPS), the
  * source tarball prefix and the build seed, asserting in three more places
@@ -148,7 +155,7 @@ extern "C" {
  * binary was built with is readable from CK_TOKEN_INFO and from
  * `fhsm-service --profile`; a version string is the wrong place for it,
  * and it was saying something worse than the profile anyway. */
-#define FHSM_VERSION_STRING  "2.7.0"
+#define FHSM_VERSION_STRING  "2.8.0"
 
 /* SHA-256 of the entire signed binary --- declaration moved to
  * include/fhsm_integrity.h (the canonical location). Including

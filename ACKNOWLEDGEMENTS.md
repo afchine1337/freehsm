@@ -72,6 +72,10 @@ the outputs of the byte-level derivations and of HKDF. The same run found a
 classical public key's `CKA_VALUE`, the unwrap default of `CKA_EXTRACTABLE`,
 the parity of derived DES keys, and private objects outliving a `C_Logout`.
 
+In v2.8.0, the released 0.3.0 found that the HMAC mechanisms took any
+secret key, AES and DES3 among them, and that a digest derivation made an
+AES key of the digest's length when the template gave no `CKA_VALUE_LEN`.
+
 ## Simon Josefsson (`jas4711`)
 
 Preparing Debian packages, and reporting what that exposed:
@@ -219,6 +223,15 @@ eighteen return codes and template checks. Among them an AES-CTR counter
 that carried into the nonce, a hashing RSA-PSS mechanism that ignored a
 different `hashAlg`, and `C_FindObjects` ignoring every attribute but three.
 In v2.7.0.
+
+**#34 to #39** — his retest of v2.7.0, again each with a reproducer:
+`C_SetPIN` that could not change the user's PIN in any session state (#36),
+multipart AES-GCM decryption that refused every ciphertext (#35), private
+keys given `CKA_DERIVE` they were not asked for (#34), eight more return
+codes and template checks (#37) -- among them a `C_Digest` that dropped the
+part `C_DigestUpdate` had taken, and `CKA_KEY_GEN_MECHANISM`, which took a
+new token format -- and secp256k1 and brainpool public keys refused by
+`C_CreateObject` on curves the module generates on (#39). In v2.8.0.
 
 ---
 

@@ -642,7 +642,8 @@ and fixed the same day; released on 2026-11-11.
 
 | Version | Supported |
 |---|---|
-| `2.7.0` | ✅ — supported, active development |
+| `2.8.0` | ✅ — supported, active development |
+| `2.7.0` | ✅ — supported; no known vulnerability, upgrade for the conformance fixes |
 | `2.6.1` | ⚠️ — **affected by the private data object disclosure**; upgrade to v2.7.0 |
 | `2.6.0` | ⚠️ — affected by the private data object disclosure and **the unextractable-key wrapping**; upgrade to v2.7.0 |
 | `2.5.1` | ⚠️ — affected by the above and **the concatenation/XOR key disclosure**; after a `C_Logout` it does not enforce a public key's `CKA_ALLOWED_MECHANISMS` (low); upgrade to v2.7.0 |

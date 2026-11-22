@@ -5,7 +5,19 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.8.0] --- 2026-11-22
+
+*Minor, with no security fix. The rest of Alexandre Laroche's retest of
+2.7.0 (#34 to #39): `C_SetPIN` changes the user's PIN, AES-GCM decrypts in
+parts, key usages follow the key type, templates are followed, and refusals
+carry the return code that names what is wrong. The token file moves to
+format v5, one way, to store `CKA_OBJECT_ID`, `CKA_KEY_GEN_MECHANISM` and
+two certificate hashes. A secret key asked `CKA_PRIVATE=FALSE` is now
+public. New mechanisms, computed by OpenSSL: the HMAC family, DSA,
+finite-field Diffie-Hellman, the TLS 1.2 and IKE derivations, key wrapping
+in two layers, RIPEMD-160, BLAKE2b, Camellia, ARIA and RSA X9.31, among
+others. Fixes found by python-pkcs11's test suite and by pkcs11-check
+0.3.0, which CI now runs.*
 
 ### Added
 * **The `*_HMAC_GENERAL` mechanisms**, for SHA-1, SHA-224, SHA-256,
