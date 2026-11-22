@@ -5,6 +5,8 @@ All notable changes to FreeHSM C are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
 ## [2.8.0] --- 2026-11-22
 
 *Minor, with no security fix. The rest of Alexandre Laroche's retest of
