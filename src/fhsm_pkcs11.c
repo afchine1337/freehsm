@@ -1765,6 +1765,123 @@ static int ffc_explicit_params_ok(const BIGNUM *p, const BIGNUM *q, const BIGNUM
     return ok;
 }
 
+/* PKCS #3 DH domain parameters p and g, big-endian, checked as
+ * CKM_DH_PKCS_KEY_PAIR_GEN checks them: p odd, of 1024 to 8192 bits (2048
+ * where NIST's rules apply), 1 < g < p - 1, and `vbits`, when not 0, below
+ * p's length; a safe-prime group, or elsewhere and where a provider other
+ * than the FIPS one serves DH, a prime p. Else CKR_DOMAIN_PARAMS_INVALID.
+ * The lengths are the caller's to check. On success *dom holds the
+ * parameters. Shared by generation and, since 2.9.0, C_CreateObject. */
+static CK_RV fhsm_dh_domain(const uint8_t *p, size_t pl, const uint8_t *g, size_t gl,
+                            CK_ULONG vbits, EVP_PKEY **dom) {
+    *dom = NULL;
+    const int strict = fhsm_build_fips_strict || fhsm_mode_is_fips();
+    BIGNUM *bp = BN_bin2bn(p, (int)pl, NULL);
+    BIGNUM *bg = BN_bin2bn(g, (int)gl, NULL);
+    BIGNUM *pm1 = BN_new();
+    CK_RV drv = FHSM_RV_OK;
+    if (!bp || !bg || !pm1 || !BN_sub(pm1, bp, BN_value_one())) drv = FHSM_RV_HOST_MEMORY;
+    if (drv == FHSM_RV_OK) {
+        const int L = BN_num_bits(bp);
+        if (L < (strict ? 2048 : 1024) || L > 8192 || !BN_is_odd(bp)
+            || BN_cmp(bg, BN_value_one()) <= 0 || BN_cmp(bg, pm1) >= 0
+            || (vbits && vbits >= (CK_ULONG)L))
+            drv = 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
+    }
+    if (drv == FHSM_RV_OK) {
+        OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+        OSSL_PARAM *dp = NULL;
+        if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
+            && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1)
+            dp = OSSL_PARAM_BLD_to_param(bld);
+        OSSL_PARAM_BLD_free(bld);
+        EVP_PKEY_CTX *fc = dp ? EVP_PKEY_CTX_new_from_name(NULL, "DH", NULL) : NULL;
+        if (!fc || EVP_PKEY_fromdata_init(fc) != 1
+            || EVP_PKEY_fromdata(fc, dom, EVP_PKEY_KEY_PARAMETERS, dp) != 1)
+            drv = 0x00000130UL;
+        EVP_PKEY_CTX_free(fc);
+        OSSL_PARAM_free(dp);
+    }
+    if (drv == FHSM_RV_OK && !dh_safe_prime_group(*dom)) {
+        /* Not a named group: refused where NIST's rules apply and where
+         * only the FIPS provider serves DH, which takes the named groups
+         * alone; elsewhere p must at least be prime. */
+        if (strict || !fhsm_dh_any_group_available()) drv = 0x00000130UL;
+        else {
+            BN_CTX *bc = BN_CTX_new();
+            if (!bc || BN_check_prime(bp, bc, NULL) != 1) drv = 0x00000130UL;
+            BN_CTX_free(bc);
+        }
+    }
+    BN_free(bp); BN_free(bg); BN_free(pm1);
+    if (drv != FHSM_RV_OK) { EVP_PKEY_free(*dom); *dom = NULL; ERR_clear_error(); }
+    return drv;
+}
+
+/* X9.42 DH domain parameters p, q and g, checked as CKM_X9_42_DH_KEY_PAIR_GEN
+ * checks them: p of 1024 to 8192 bits (2048 where NIST's rules apply) in
+ * steps of 256, q of 160 bits or more and shorter than p, and OpenSSL's
+ * validation; where NIST's rules apply or only the FIPS provider serves DH,
+ * a safe-prime group or an FB or FC set, the latter checked explicitly where
+ * the FIPS provider alone serves DH. Else CKR_DOMAIN_PARAMS_INVALID. The
+ * lengths are the caller's to check. On success *dom holds the parameters. */
+static CK_RV fhsm_x942_domain(const uint8_t *p, size_t pl, const uint8_t *q, size_t ql,
+                              const uint8_t *g, size_t gl, EVP_PKEY **dom) {
+    *dom = NULL;
+    const int strict = fhsm_build_fips_strict || fhsm_mode_is_fips();
+    BIGNUM *bp = BN_bin2bn(p, (int)pl, NULL);
+    BIGNUM *bq = BN_bin2bn(q, (int)ql, NULL);
+    BIGNUM *bg = BN_bin2bn(g, (int)gl, NULL);
+    CK_RV drv = FHSM_RV_OK;
+    if (!bp || !bq || !bg) drv = FHSM_RV_HOST_MEMORY;
+    if (drv == FHSM_RV_OK) {
+        const int L = BN_num_bits(bp), N = BN_num_bits(bq);
+        if (L < (strict ? 2048 : 1024) || L > 8192 || L % 256 != 0 || N < 160 || N >= L)
+            drv = 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
+    }
+    if (drv == FHSM_RV_OK) {
+        OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+        OSSL_PARAM *dp = NULL;
+        if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
+            && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, bq) == 1
+            && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1)
+            dp = OSSL_PARAM_BLD_to_param(bld);
+        OSSL_PARAM_BLD_free(bld);
+        EVP_PKEY_CTX *fc = dp ? EVP_PKEY_CTX_new_from_name(NULL, "DHX", NULL) : NULL;
+        if (!fc || EVP_PKEY_fromdata_init(fc) != 1
+            || EVP_PKEY_fromdata(fc, dom, EVP_PKEY_KEY_PARAMETERS, dp) != 1)
+            drv = 0x00000130UL;
+        EVP_PKEY_CTX_free(fc);
+        OSSL_PARAM_free(dp);
+    }
+    /* Where NIST's rules apply, or only the FIPS provider serves DH: a
+     * safe-prime group, or an FB or FC parameter set (SP 800-56A rev. 3
+     * 5.5.1.1), which the FIPS provider also takes. Elsewhere any group
+     * that validates. */
+    if (drv == FHSM_RV_OK && !dh_safe_prime_group(*dom) && !ffc_fb_fc_group(*dom)
+        && (strict || !fhsm_dh_any_group_available()))
+        drv = 0x00000130UL;
+    if (drv == FHSM_RV_OK) {
+        /* The FIPS provider validates a group it does not know by name the
+         * FIPS 186-4 way, regenerating p and q from the seed, which a
+         * PKCS #11 template does not carry: RFC 5114's groups are named
+         * only outside it, so every FB or FC set failed there. Where it
+         * alone serves DH, those sets get the explicit checks of
+         * ffc_explicit_params_ok instead; every other group, and every
+         * group elsewhere, goes to OpenSSL's validation as before. */
+        if (!fhsm_dh_any_group_available() && ffc_fb_fc_group(*dom)) {
+            if (!ffc_explicit_params_ok(bp, bq, bg)) drv = 0x00000130UL;
+        } else {
+            EVP_PKEY_CTX *vc = EVP_PKEY_CTX_new_from_pkey(NULL, *dom, NULL);
+            if (!vc || EVP_PKEY_param_check(vc) != 1) drv = 0x00000130UL;
+            EVP_PKEY_CTX_free(vc);
+        }
+    }
+    BN_free(bp); BN_free(bq); BN_free(bg);
+    if (drv != FHSM_RV_OK) { EVP_PKEY_free(*dom); *dom = NULL; ERR_clear_error(); }
+    return drv;
+}
+
 /* 1 when the providers serve what the mechanism needs; 1 for any mechanism
  * that needs nothing beyond what every provider has. Grown family by family
  * since 2.8.0: each algorithm the FIPS provider lacks is listed here when it
@@ -5176,41 +5293,61 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         EVP_PKEY_CTX_free(pctx);
         OSSL_PARAM_free(params);
 
-    } else if (a.path == FHSM_CREATE_PATH_DSA_PUB || a.path == FHSM_CREATE_PATH_DSA_PRIV) {
-        /* A DSA key from its values (#42). 2.8.0 generated DSA key pairs and
-         * signed with them, and refused every DSA import with
-         * CKR_TEMPLATE_INCONSISTENT: no path took one. Where the module does
-         * not offer DSA -- NIST's rules, or a FIPS provider that keeps DSA for
-         * verification only -- it still does not, as before.
+    } else if (a.path == FHSM_CREATE_PATH_FFC_PUB || a.path == FHSM_CREATE_PATH_FFC_PRIV) {
+        /* A DSA, DH or X9.42 DH key from its values (#42). 2.8.0 generated
+         * key pairs of all three and used them, but no import path took one:
+         * a public key was CKR_TEMPLATE_INCONSISTENT, a DSA private key too,
+         * and a DH private key was stored as its raw x, CKR_OK, which every
+         * derivation then failed to read (d2i_AutoPrivateKey wants DER).
+         * Where the module does not offer DSA -- NIST's rules, or a FIPS
+         * provider that keeps DSA for verification only -- a DSA key is still
+         * refused, as before.
          *
-         * The domain parameters are checked as CKM_DSA_KEY_PAIR_GEN checks
-         * them (fhsm_dsa_domain). y must be a valid public value for them
-         * (EVP_PKEY_public_check: 1 < y < p - 1, y^q = 1 mod p); x must lie in
-         * [1, q - 1] (EVP_PKEY_private_check). The private key's y is computed
-         * as g^x mod p: the template has no attribute for it. */
-        const int dpriv = (a.path == FHSM_CREATE_PATH_DSA_PRIV);
-        if (fhsm_build_fips_strict || fhsm_mode_is_fips() || !fhsm_dsa_available())
+         * The domain parameters are checked as key-pair generation checks
+         * them (fhsm_dsa_domain, fhsm_dh_domain, fhsm_x942_domain), which
+         * also confines DH to the groups NIST's rules allow where they apply.
+         * y must be a valid public value for them (EVP_PKEY_public_check: 1 <
+         * y < p - 1, and y^q = 1 mod p where there is a q). x must lie in
+         * [1, q - 1], or [1, p - 2] for PKCS #3 DH, and pass
+         * EVP_PKEY_private_check. The private key's y is computed as
+         * g^x mod p: the template has no attribute for it. */
+        const int dpriv = (a.path == FHSM_CREATE_PATH_FFC_PRIV);
+        const int is_dsa = (a.ckk == 0x00000001UL /* CKK_DSA */);
+        const int has_q  = (a.ckk != 0x00000002UL /* CKK_DH */);
+        const char *alg  = is_dsa ? "DSA" : has_q ? "DHX" : "DH";
+        if (is_dsa && (fhsm_build_fips_strict || fhsm_mode_is_fips() || !fhsm_dsa_available()))
             return CKR_TEMPLATE_INCONSISTENT;
-        if (a.value_len > 384) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        const size_t vmax = is_dsa ? 384 : 1024;
+        if (a.value_len > vmax || a.ffc_p_len > vmax || a.ffc_g_len > vmax
+            || (has_q && a.ffc_q_len > vmax))
+            return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
         EVP_PKEY *dom = NULL;
-        CK_RV drv = fhsm_dsa_domain(a.ffc_p, a.ffc_p_len, a.ffc_q, a.ffc_q_len,
-                                    a.ffc_g, a.ffc_g_len, &dom);
+        CK_RV drv = is_dsa ? fhsm_dsa_domain(a.ffc_p, a.ffc_p_len, a.ffc_q, a.ffc_q_len,
+                                             a.ffc_g, a.ffc_g_len, &dom)
+                  : has_q  ? fhsm_x942_domain(a.ffc_p, a.ffc_p_len, a.ffc_q, a.ffc_q_len,
+                                              a.ffc_g, a.ffc_g_len, &dom)
+                           : fhsm_dh_domain(a.ffc_p, a.ffc_p_len, a.ffc_g, a.ffc_g_len, 0, &dom);
         EVP_PKEY_free(dom);
         if (drv != FHSM_RV_OK) return drv;
         BIGNUM *bp = BN_bin2bn(a.ffc_p, (int)a.ffc_p_len, NULL);
-        BIGNUM *bq = BN_bin2bn(a.ffc_q, (int)a.ffc_q_len, NULL);
+        BIGNUM *bq = has_q ? BN_bin2bn(a.ffc_q, (int)a.ffc_q_len, NULL) : NULL;
         BIGNUM *bg = BN_bin2bn(a.ffc_g, (int)a.ffc_g_len, NULL);
         BIGNUM *bv = dpriv ? BN_secure_new() : BN_new();
         BIGNUM *by = dpriv ? BN_new() : NULL;
+        BIGNUM *top = dpriv && !has_q ? BN_new() : NULL;
         BN_CTX *bc = dpriv ? BN_CTX_secure_new() : NULL;
         OSSL_PARAM *params = NULL;
         drv = FHSM_RV_OK;
-        if (!bp || !bq || !bg || !bv || (dpriv && (!by || !bc))
+        if (!bp || (has_q && !bq) || !bg || !bv || (dpriv && (!by || !bc))
+            || (dpriv && !has_q && !top)
             || !BN_bin2bn(a.value_data, (int)a.value_len, bv))
             drv = FHSM_RV_HOST_MEMORY;
         if (drv == FHSM_RV_OK && dpriv) {
             BN_set_flags(bv, BN_FLG_CONSTTIME);
-            if (BN_is_zero(bv) || BN_cmp(bv, bq) >= 0)
+            /* The bound x stays below: q, or p - 1 without one. */
+            if (!has_q && !BN_sub(top, bp, BN_value_one()))
+                drv = FHSM_RV_HOST_MEMORY;
+            else if (BN_is_zero(bv) || BN_cmp(bv, has_q ? bq : top) >= 0)
                 drv = FHSM_RV_ATTRIBUTE_VALUE_INVALID;
             else if (!BN_mod_exp(by, bg, bv, bp, bc))
                 drv = FHSM_RV_FUNCTION_FAILED;
@@ -5218,7 +5355,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         if (drv == FHSM_RV_OK) {
             OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
             if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
-                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, bq) == 1
+                && (!has_q || OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, bq) == 1)
                 && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1
                 && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PUB_KEY, dpriv ? by : bv) == 1
                 && (!dpriv || OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, bv) == 1))
@@ -5227,7 +5364,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
             if (!params) drv = FHSM_RV_FUNCTION_FAILED;
         }
         if (drv == FHSM_RV_OK) {
-            pctx = EVP_PKEY_CTX_new_from_name(NULL, "DSA", NULL);
+            pctx = EVP_PKEY_CTX_new_from_name(NULL, alg, NULL);
             if (!pctx || EVP_PKEY_fromdata_init(pctx) != 1
                 || EVP_PKEY_fromdata(pctx, &pkey,
                                      dpriv ? EVP_PKEY_KEYPAIR : EVP_PKEY_PUBLIC_KEY,
@@ -5246,7 +5383,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         }
         OSSL_PARAM_free(params);
         BN_free(bp); BN_free(bq); BN_free(bg); BN_clear_free(bv); BN_free(by);
-        BN_CTX_free(bc);
+        BN_free(top); BN_CTX_free(bc);
         if (drv != FHSM_RV_OK) { EVP_PKEY_free(pkey); return drv; }
 
     } else {
@@ -5266,7 +5403,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * other end of the same function: what is stored must be what every later
      * reader expects, and d2i_AutoPrivateKey is what reads this one. */
     int is_priv = (a.path == FHSM_CREATE_PATH_RSA_PRIV
-                   || a.path == FHSM_CREATE_PATH_DSA_PRIV);
+                   || a.path == FHSM_CREATE_PATH_FFC_PRIV);
     uint8_t *enc = NULL;
     int enc_len = is_priv ? i2d_PrivateKey(pkey, &enc) : i2d_PUBKEY(pkey, &enc);
     EVP_PKEY_free(pkey);
@@ -10621,45 +10758,9 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
               memcpy(&vbits, pPriv[vb].pValue, sizeof vbits);
               if (vbits < 160) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
           } }
-        const int strict = fhsm_build_fips_strict || fhsm_mode_is_fips();
-        BIGNUM *bp = BN_bin2bn(pPub[ip].pValue, (int)pPub[ip].ulValueLen, NULL);
-        BIGNUM *bg = BN_bin2bn(pPub[ig].pValue, (int)pPub[ig].ulValueLen, NULL);
-        BIGNUM *pm1 = BN_new();
-        CK_RV drv = FHSM_RV_OK;
-        if (!bp || !bg || !pm1 || !BN_sub(pm1, bp, BN_value_one())) drv = FHSM_RV_HOST_MEMORY;
-        if (drv == FHSM_RV_OK) {
-            const int L = BN_num_bits(bp);
-            if (L < (strict ? 2048 : 1024) || L > 8192 || !BN_is_odd(bp)
-                || BN_cmp(bg, BN_value_one()) <= 0 || BN_cmp(bg, pm1) >= 0
-                || (vbits && vbits >= (CK_ULONG)L))
-                drv = 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
-        }
         EVP_PKEY *dom = NULL;
-        if (drv == FHSM_RV_OK) {
-            OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
-            OSSL_PARAM *dp = NULL;
-            if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
-                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1)
-                dp = OSSL_PARAM_BLD_to_param(bld);
-            OSSL_PARAM_BLD_free(bld);
-            EVP_PKEY_CTX *fc = dp ? EVP_PKEY_CTX_new_from_name(NULL, "DH", NULL) : NULL;
-            if (!fc || EVP_PKEY_fromdata_init(fc) != 1
-                || EVP_PKEY_fromdata(fc, &dom, EVP_PKEY_KEY_PARAMETERS, dp) != 1)
-                drv = 0x00000130UL;
-            EVP_PKEY_CTX_free(fc);
-            OSSL_PARAM_free(dp);
-        }
-        if (drv == FHSM_RV_OK && !dh_safe_prime_group(dom)) {
-            /* Not a named group: refused where NIST's rules apply and where
-             * only the FIPS provider serves DH, which takes the named groups
-             * alone; elsewhere p must at least be prime. */
-            if (strict || !fhsm_dh_any_group_available()) drv = 0x00000130UL;
-            else {
-                BN_CTX *bc = BN_CTX_new();
-                if (!bc || BN_check_prime(bp, bc, NULL) != 1) drv = 0x00000130UL;
-                BN_CTX_free(bc);
-            }
-        }
+        CK_RV drv = fhsm_dh_domain(pPub[ip].pValue, (size_t)pPub[ip].ulValueLen,
+                                   pPub[ig].pValue, (size_t)pPub[ig].ulValueLen, vbits, &dom);
         if (drv == FHSM_RV_OK) {
             EVP_PKEY_CTX *kc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
             int plen = (int)vbits;
@@ -10672,7 +10773,6 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             EVP_PKEY_CTX_free(kc);
         }
         EVP_PKEY_free(dom);
-        BN_free(bp); BN_free(bg); BN_free(pm1);
         if (drv != FHSM_RV_OK) { ERR_clear_error(); return drv; }
         ckk_type = 0x00000002UL;   /* CKK_DH */
         pw_family = FHSM_PAIRWISE_DH;
@@ -10694,56 +10794,10 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             if (!pPub[idx[k]].pValue || pPub[idx[k]].ulValueLen == 0
                 || pPub[idx[k]].ulValueLen > 1024)
                 return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-        const int strict = fhsm_build_fips_strict || fhsm_mode_is_fips();
-        BIGNUM *bp = BN_bin2bn(pPub[ip].pValue, (int)pPub[ip].ulValueLen, NULL);
-        BIGNUM *bq = BN_bin2bn(pPub[iq].pValue, (int)pPub[iq].ulValueLen, NULL);
-        BIGNUM *bg = BN_bin2bn(pPub[ig].pValue, (int)pPub[ig].ulValueLen, NULL);
-        CK_RV drv = FHSM_RV_OK;
-        if (!bp || !bq || !bg) drv = FHSM_RV_HOST_MEMORY;
-        if (drv == FHSM_RV_OK) {
-            const int L = BN_num_bits(bp), N = BN_num_bits(bq);
-            if (L < (strict ? 2048 : 1024) || L > 8192 || L % 256 != 0 || N < 160 || N >= L)
-                drv = 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
-        }
         EVP_PKEY *dom = NULL;
-        if (drv == FHSM_RV_OK) {
-            OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
-            OSSL_PARAM *dp = NULL;
-            if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
-                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, bq) == 1
-                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1)
-                dp = OSSL_PARAM_BLD_to_param(bld);
-            OSSL_PARAM_BLD_free(bld);
-            EVP_PKEY_CTX *fc = dp ? EVP_PKEY_CTX_new_from_name(NULL, "DHX", NULL) : NULL;
-            if (!fc || EVP_PKEY_fromdata_init(fc) != 1
-                || EVP_PKEY_fromdata(fc, &dom, EVP_PKEY_KEY_PARAMETERS, dp) != 1)
-                drv = 0x00000130UL;
-            EVP_PKEY_CTX_free(fc);
-            OSSL_PARAM_free(dp);
-        }
-        /* Where NIST's rules apply, or only the FIPS provider serves DH: a
-         * safe-prime group, or an FB or FC parameter set (SP 800-56A rev. 3
-         * 5.5.1.1), which the FIPS provider also takes. Elsewhere any group
-         * that validates. */
-        if (drv == FHSM_RV_OK && !dh_safe_prime_group(dom) && !ffc_fb_fc_group(dom)
-            && (strict || !fhsm_dh_any_group_available()))
-            drv = 0x00000130UL;
-        if (drv == FHSM_RV_OK) {
-            /* The FIPS provider validates a group it does not know by name the
-             * FIPS 186-4 way, regenerating p and q from the seed, which a
-             * PKCS #11 template does not carry: RFC 5114's groups are named
-             * only outside it, so every FB or FC set failed there. Where it
-             * alone serves DH, those sets get the explicit checks of
-             * ffc_explicit_params_ok instead; every other group, and every
-             * group elsewhere, goes to OpenSSL's validation as before. */
-            if (!fhsm_dh_any_group_available() && ffc_fb_fc_group(dom)) {
-                if (!ffc_explicit_params_ok(bp, bq, bg)) drv = 0x00000130UL;
-            } else {
-                EVP_PKEY_CTX *vc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
-                if (!vc || EVP_PKEY_param_check(vc) != 1) drv = 0x00000130UL;
-                EVP_PKEY_CTX_free(vc);
-            }
-        }
+        CK_RV drv = fhsm_x942_domain(pPub[ip].pValue, (size_t)pPub[ip].ulValueLen,
+                                     pPub[iq].pValue, (size_t)pPub[iq].ulValueLen,
+                                     pPub[ig].pValue, (size_t)pPub[ig].ulValueLen, &dom);
         if (drv == FHSM_RV_OK) {
             EVP_PKEY_CTX *kc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
             if (!kc || EVP_PKEY_keygen_init(kc) != 1 || EVP_PKEY_generate(kc, &pkey) != 1)
@@ -10751,7 +10805,6 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             EVP_PKEY_CTX_free(kc);
         }
         EVP_PKEY_free(dom);
-        BN_free(bp); BN_free(bq); BN_free(bg);
         if (drv != FHSM_RV_OK) { ERR_clear_error(); return drv; }
         ckk_type = 0x00000004UL;   /* CKK_X9_42_DH */
         pw_family = FHSM_PAIRWISE_DH;

@@ -47,6 +47,8 @@
 
 #define FHSM_CKK_RSA                0x00000000UL
 #define FHSM_CKK_DSA                0x00000001UL
+#define FHSM_CKK_DH                 0x00000002UL
+#define FHSM_CKK_X9_42_DH           0x00000004UL
 #define FHSM_CKK_EC                 0x00000003UL
 #define FHSM_CKK_EC_EDWARDS         0x00000040UL
 #define FHSM_CKK_ML_KEM             0x00000049UL
@@ -324,28 +326,34 @@ static fhsm_parse_rv_t parse_rsa_priv(
     return FHSM_PARSE_OK;
 }
 
-/* CKK_DSA, public or private, as PKCS#11 v3.2 6.2.3 and 6.2.4 give it: the
- * domain parameters CKA_PRIME, CKA_SUBPRIME and CKA_BASE, and CKA_VALUE (y
- * for the public key, x for the private one). All four required. Presence
- * only here; the builder checks the parameters as key-pair generation does,
- * and the value against them. */
-static fhsm_parse_rv_t parse_dsa(
+/* The finite-field families, public or private, as PKCS#11 v3.2 gives them:
+ * CKA_PRIME, CKA_BASE and, for CKK_DSA (6.2.3, 6.2.4) and CKK_X9_42_DH
+ * (6.4.5, 6.4.6), CKA_SUBPRIME; for CKK_DH (6.4.3, 6.4.4) no subprime. Then
+ * CKA_VALUE, y for the public key and x for the private one. All required.
+ * Presence only here; the builder checks the parameters as key-pair
+ * generation does, and the value against them. */
+static int is_ffc(unsigned long ckk) {
+    return ckk == FHSM_CKK_DSA || ckk == FHSM_CKK_DH || ckk == FHSM_CKK_X9_42_DH;
+}
+
+static fhsm_parse_rv_t parse_ffc(
     const fhsm_attr_t *t, unsigned long n, int priv,
     fhsm_create_attrs_t *attrs) {
-    struct { unsigned long cka; const uint8_t **p; size_t *len; } m[] = {
-        { FHSM_CKA_PRIME,    &attrs->ffc_p,      &attrs->ffc_p_len },
-        { FHSM_CKA_SUBPRIME, &attrs->ffc_q,      &attrs->ffc_q_len },
-        { FHSM_CKA_BASE,     &attrs->ffc_g,      &attrs->ffc_g_len },
-        { FHSM_CKA_VALUE,    &attrs->value_data, &attrs->value_len },
+    struct { unsigned long cka; const uint8_t **p; size_t *len; int needed; } m[] = {
+        { FHSM_CKA_PRIME,    &attrs->ffc_p,      &attrs->ffc_p_len, 1 },
+        { FHSM_CKA_SUBPRIME, &attrs->ffc_q,      &attrs->ffc_q_len, attrs->ckk != FHSM_CKK_DH },
+        { FHSM_CKA_BASE,     &attrs->ffc_g,      &attrs->ffc_g_len, 1 },
+        { FHSM_CKA_VALUE,    &attrs->value_data, &attrs->value_len, 1 },
     };
     for (size_t i = 0; i < sizeof m / sizeof m[0]; ++i) {
+        if (!m[i].needed) continue;
         long ix = fhsm_find_attr(t, n, m[i].cka);
         if (ix < 0 || t[ix].pValue == NULL || t[ix].ulValueLen == 0)
             return FHSM_PARSE_TEMPLATE_INCOMPLETE;
         *m[i].p   = (const uint8_t *)t[ix].pValue;
         *m[i].len = (size_t)t[ix].ulValueLen;
     }
-    attrs->path = priv ? FHSM_CREATE_PATH_DSA_PRIV : FHSM_CREATE_PATH_DSA_PUB;
+    attrs->path = priv ? FHSM_CREATE_PATH_FFC_PRIV : FHSM_CREATE_PATH_FFC_PUB;
     return FHSM_PARSE_OK;
 }
 
@@ -459,12 +467,12 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
         && fhsm_find_attr(pTemplate, ulCount, FHSM_CKA_VALUE) < 0)
         return parse_rsa_priv(pTemplate, ulCount, attrs);
 
-    /* A DSA private key given as the standard defines it (#42). Chosen when
-     * CKA_PRIME is present, so a DER private key in CKA_VALUE alone still
-     * goes to the verbatim path below. */
-    if (attrs->cko == FHSM_CKO_PRIVATE_KEY && attrs->ckk == FHSM_CKK_DSA
+    /* A DSA, DH or X9.42 DH private key given as the standard defines it
+     * (#42). Chosen when CKA_PRIME is present, so a DER private key in
+     * CKA_VALUE alone still goes to the verbatim path below. */
+    if (attrs->cko == FHSM_CKO_PRIVATE_KEY && is_ffc(attrs->ckk)
         && fhsm_find_attr(pTemplate, ulCount, FHSM_CKA_PRIME) >= 0)
-        return parse_dsa(pTemplate, ulCount, 1, attrs);
+        return parse_ffc(pTemplate, ulCount, 1, attrs);
 
     if (attrs->cko == FHSM_CKO_SECRET_KEY
         || attrs->cko == FHSM_CKO_PRIVATE_KEY)
@@ -494,8 +502,8 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
     if (attrs->cko == FHSM_CKO_PUBLIC_KEY && attrs->ckk == FHSM_CKK_RSA)
         return parse_rsa_pub(pTemplate, ulCount, attrs);
 
-    if (attrs->cko == FHSM_CKO_PUBLIC_KEY && attrs->ckk == FHSM_CKK_DSA)
-        return parse_dsa(pTemplate, ulCount, 0, attrs);
+    if (attrs->cko == FHSM_CKO_PUBLIC_KEY && is_ffc(attrs->ckk))
+        return parse_ffc(pTemplate, ulCount, 0, attrs);
 
     return FHSM_PARSE_TEMPLATE_INCONSISTENT;
 }

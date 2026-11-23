@@ -82,15 +82,19 @@ typedef enum {
      * required for this class (PKCS#11 v3.2 par. 4.6.3) ; cert_type
      * below carries the CKA_CERTIFICATE_TYPE value instead. */
     FHSM_CREATE_PATH_CERT_X509,
-    /* CKO_PUBLIC_KEY + CKK_DSA: CKA_PRIME, CKA_SUBPRIME, CKA_BASE and
-     * CKA_VALUE (y), all required (PKCS#11 v3.2 6.2.3). 2.9.0: no path took a
-     * DSA key, and the import answered CKR_TEMPLATE_INCONSISTENT (#42). */
-    FHSM_CREATE_PATH_DSA_PUB,
-    /* CKO_PRIVATE_KEY + CKK_DSA given as p, q, g and CKA_VALUE (x) (6.2.4).
-     * Chosen when CKA_PRIME is present; a DSA private key without it is a
-     * DER blob in CKA_VALUE and stays on the verbatim path, as an RSA one
-     * with CKA_VALUE does. */
-    FHSM_CREATE_PATH_DSA_PRIV,
+    /* CKO_PUBLIC_KEY + CKK_DSA, CKK_DH or CKK_X9_42_DH, the finite-field
+     * families: CKA_PRIME, CKA_BASE, CKA_SUBPRIME except for CKK_DH, and
+     * CKA_VALUE (y), all required (PKCS#11 v3.2 6.2.3, 6.4.3, 6.4.5). 2.9.0:
+     * no path took such a public key, and the import answered
+     * CKR_TEMPLATE_INCONSISTENT (#42). */
+    FHSM_CREATE_PATH_FFC_PUB,
+    /* CKO_PRIVATE_KEY of the same three, given as the same parameters and
+     * CKA_VALUE (x) (6.2.4, 6.4.4, 6.4.6). Chosen when CKA_PRIME is present;
+     * one without it is a DER blob in CKA_VALUE and stays on the verbatim
+     * path, as an RSA one with CKA_VALUE does. A DSA private key given so was
+     * refused, and a DH one stored as its raw x, which no derivation could
+     * read. */
+    FHSM_CREATE_PATH_FFC_PRIV,
 } fhsm_create_path_t;
 
 /* All data parsed from the template. Pointer fields (id_data, value_data,
@@ -149,7 +153,8 @@ typedef struct fhsm_create_attrs_s {
     const uint8_t      *rsa_dmq1;   size_t rsa_dmq1_len;
     const uint8_t      *rsa_iqmp;   size_t rsa_iqmp_len;
 
-    /* === DSA paths === The domain parameters; y or x is in value_data. */
+    /* === Finite-field paths (DSA, DH, X9.42 DH) === The domain parameters,
+     * ffc_q NULL for CKK_DH; y or x is in value_data. */
     const uint8_t      *ffc_p;      size_t ffc_p_len;
     const uint8_t      *ffc_q;      size_t ffc_q_len;
     const uint8_t      *ffc_g;      size_t ffc_g_len;

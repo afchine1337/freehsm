@@ -13,6 +13,10 @@
  *       the cut being Z's trailing bytes.
  *   (F) a peer y of 1, of p - 1 and of p refused; a key pair without
  *       CKA_BASE, with an even p, with g = 1 refused.
+ *   (I) C_CreateObject (2.9.0): the private key from p, g and x derives
+ *       the Z its pair derives -- it was stored as its raw x, CKR_OK, and
+ *       no derivation could read it; the public key from p, g and y reads y
+ *       back. Refused: y = 1, x = 0, x = p - 1, no CKA_BASE, an even p.
  *   (N) the same p with g = 5, not a named group: made where any group is
  *       allowed, CKR_DOMAIN_PARAMS_INVALID where NIST's rules apply or only
  *       the FIPS provider serves DH.
@@ -29,10 +33,13 @@ typedef struct { CK_ULONG type; void *pValue; CK_ULONG ulValueLen; } CK_ATTRIBUT
 typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; } CK_MECHANISM;
 
 #define CKR_OK                         0x000UL
+#define CKR_ATTRIBUTE_VALUE_INVALID    0x013UL
 #define CKR_MECHANISM_PARAM_INVALID    0x071UL
 #define CKR_TEMPLATE_INCOMPLETE        0x0D0UL
 #define CKR_DOMAIN_PARAMS_INVALID      0x130UL
 #define CKF_RW                         6UL
+#define CKO_PUBLIC_KEY                 2UL
+#define CKO_PRIVATE_KEY                3UL
 #define CKO_SECRET_KEY                 4UL
 #define CKK_DH                         0x02UL
 #define CKK_GENERIC_SECRET             0x10UL
@@ -91,6 +98,7 @@ static CK_RV (*C_GetMechanismList)(CK_SLOT_ID, CK_ULONG*, CK_ULONG*);
 static CK_RV (*C_GenerateKeyPair)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_ATTRIBUTE*, CK_ULONG,
                                   CK_ATTRIBUTE*, CK_ULONG, CK_OBJECT_HANDLE*, CK_OBJECT_HANDLE*);
 static CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE*, CK_ULONG);
+static CK_RV (*C_CreateObject)(CK_SESSION_HANDLE, CK_ATTRIBUTE*, CK_ULONG, CK_OBJECT_HANDLE*);
 static CK_RV (*C_DeriveKey)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE, CK_ATTRIBUTE*,
                             CK_ULONG, CK_OBJECT_HANDLE*);
 
@@ -130,6 +138,18 @@ static CK_ULONG value_of(CK_OBJECT_HANDLE h, CK_BYTE *buf, CK_ULONG cap) {
     return C_GetAttributeValue(s, h, &a, 1) == CKR_OK ? a.ulValueLen : 0;
 }
 
+/* C_CreateObject of a PKCS #3 DH key of class cls from the group and v, y or
+ * x; n of the group's attributes given, in the order prime, base. */
+static CK_RV import(CK_ULONG cls, const CK_BYTE *p, CK_ULONG pl, const CK_BYTE *g, CK_ULONG gl,
+                    CK_ULONG n, const CK_BYTE *v, CK_ULONG vl, CK_OBJECT_HANDLE *h) {
+    CK_ULONG kt = CKK_DH;
+    CK_ATTRIBUTE t[] = { { CKA_CLASS, &cls, sizeof cls }, { CKA_KEY_TYPE, &kt, sizeof kt },
+                         { CKA_TOKEN, &no, 1 }, { CKA_DERIVE, &yes, 1 },
+                         { CKA_VALUE, (void*)v, vl },
+                         { CKA_PRIME, (void*)p, pl }, { CKA_BASE, (void*)g, gl } };
+    return C_CreateObject(s, t, 5 + n, h);
+}
+
 static int attr_is(CK_OBJECT_HANDLE h, CK_ULONG type, const CK_BYTE *want, CK_ULONG wl) {
     CK_BYTE buf[512];
     CK_ATTRIBUTE a = { type, buf, sizeof buf };
@@ -154,7 +174,7 @@ int main(void) {
     #define SYM(n) *(void**)&n = dlsym(lib, #n)
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
     SYM(C_Login); SYM(C_Logout); SYM(C_InitPIN); SYM(C_GetMechanismList);
-    SYM(C_GenerateKeyPair); SYM(C_GetAttributeValue); SYM(C_DeriveKey);
+    SYM(C_GenerateKeyPair); SYM(C_GetAttributeValue); SYM(C_DeriveKey); SYM(C_CreateObject);
     if (!C_GenerateKeyPair || !C_DeriveKey) { fprintf(stderr, "missing symbols\n"); return 2; }
 
     printf("PKCS #3 Diffie-Hellman\n\n");
@@ -242,6 +262,55 @@ int main(void) {
         snprintf(what, sizeof what, "(N) ffdhe2048's p with g = 5: %s (0x%lx)",
                  any_group ? "made" : "CKR_DOMAIN_PARAMS_INVALID", rv);
         ok(any_group ? rv == CKR_OK : rv == CKR_DOMAIN_PARAMS_INVALID, what);
+    }
+
+    /* --- (I) C_CreateObject (2.9.0) ----------------------------------------- */
+    {
+        /* A pair whose private half is readable, for its x. */
+        CK_MECHANISM m = { CKM_DH_PKCS_KEY_PAIR_GEN, NULL, 0 };
+        CK_ATTRIBUTE pt[] = { { CKA_TOKEN, &no, 1 }, { CKA_PRIME, (void*)ffdhe2048_p, 256 },
+                              { CKA_BASE, (void*)&g2, 1 } };
+        CK_ATTRIBUTE vt[] = { { CKA_TOKEN, &no, 1 }, { CKA_DERIVE, &yes, 1 },
+                              { CKA_SENSITIVE, &no, 1 }, { CKA_EXTRACTABLE, &yes, 1 } };
+        CK_OBJECT_HANDLE cpub = 0, cprv = 0, ipub = 0, iprv = 0, h = 0, z1 = 0, z2 = 0;
+        CK_BYTE yc[300], xc[300], zi[300], zc[300], yr[300];
+        /* A readable private value is refused in strict mode, so there the
+         * private half is not imported from a generated pair. */
+        const int sm = mode && (!strcmp(mode, "strict") || !strcmp(mode, "fips"));
+        CK_RV rv = sm ? CKR_OK : C_GenerateKeyPair(s, &m, pt, 3, vt, 4, &cpub, &cprv);
+        CK_ULONG ycl = !sm && rv == CKR_OK ? value_of(cpub, yc, sizeof yc) : 0;
+        CK_ULONG xcl = !sm && rv == CKR_OK ? value_of(cprv, xc, sizeof xc) : 0;
+        snprintf(what, sizeof what, "(I) a pair with a readable x: 0x%lx, x of %lu bytes", rv, xcl);
+        if (!sm) ok(rv == CKR_OK && ycl > 0 && xcl > 0, what);
+
+        CK_RV r1 = xcl ? import(CKO_PRIVATE_KEY, ffdhe2048_p, 256, &g2, 1, 2, xc, xcl, &iprv) : 0xFFFF;
+        CK_RV e1 = r1 == CKR_OK ? derive(iprv, yb, ybl, 0, &z1) : r1;
+        CK_RV e2 = ycl ? derive(bprv, yc, ycl, 0, &z2) : 0xFFFF;
+        CK_ULONG zil = e1 == CKR_OK ? value_of(z1, zi, sizeof zi) : 0;
+        CK_ULONG zcl = e2 == CKR_OK ? value_of(z2, zc, sizeof zc) : 0;
+        snprintf(what, sizeof what, "(I) private key from its values derives the pair's Z (0x%lx 0x%lx 0x%lx)",
+                 r1, e1, e2);
+        if (!sm) ok(r1 == CKR_OK && zil == 256 && zcl == 256 && !memcmp(zi, zc, 256), what);
+
+        CK_RV r2 = import(CKO_PUBLIC_KEY, ffdhe2048_p, 256, &g2, 1, 2, yb, ybl, &ipub);
+        CK_ULONG yrl = r2 == CKR_OK ? value_of(ipub, yr, sizeof yr) : 0;
+        snprintf(what, sizeof what, "(I) public key from its values reads y back (0x%lx)", r2);
+        ok(r2 == CKR_OK && yrl == ybl && !memcmp(yr, yb, ybl), what);
+
+        CK_BYTE one = 1, zero = 0;
+        CK_RV f1 = import(CKO_PUBLIC_KEY, ffdhe2048_p, 256, &g2, 1, 2, &one, 1, &h);
+        CK_RV f2 = import(CKO_PRIVATE_KEY, ffdhe2048_p, 256, &g2, 1, 2, &zero, 1, &h);
+        CK_BYTE pm1[256], peven[256];
+        memcpy(pm1, ffdhe2048_p, 256); pm1[255] -= 1;
+        memcpy(peven, ffdhe2048_p, 256); peven[255] ^= 1;
+        CK_RV f3 = import(CKO_PRIVATE_KEY, ffdhe2048_p, 256, &g2, 1, 2, pm1, 256, &h);
+        CK_RV f4 = import(CKO_PUBLIC_KEY, ffdhe2048_p, 256, &g2, 1, 1, yb, ybl, &h);
+        CK_RV f5 = import(CKO_PUBLIC_KEY, peven, 256, &g2, 1, 2, yb, ybl, &h);
+        snprintf(what, sizeof what, "(I) y = 1, x = 0, x = p - 1, no CKA_BASE, an even p "
+                 "(0x%lx 0x%lx 0x%lx 0x%lx 0x%lx)", f1, f2, f3, f4, f5);
+        ok(f1 == CKR_ATTRIBUTE_VALUE_INVALID && f2 == CKR_ATTRIBUTE_VALUE_INVALID
+           && f3 == CKR_ATTRIBUTE_VALUE_INVALID && f4 == CKR_TEMPLATE_INCOMPLETE
+           && f5 == CKR_DOMAIN_PARAMS_INVALID, what);
     }
 
     C_Finalize(NULL);

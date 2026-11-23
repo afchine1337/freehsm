@@ -19,6 +19,15 @@ project adheres to [Semantic Versioning](https://semver.org/).
   key given as a DER blob in `CKA_VALUE` alone is stored as before. Where
   the module does not offer DSA, the import is still refused. Reported by
   AlexLaroche. `tests/test_dsa.c`.
+* **PKCS #3 and X9.42 DH keys import.** The same for `CKK_DH` (`CKA_PRIME`,
+  `CKA_BASE`, `CKA_VALUE`; 6.4.3, 6.4.4) and `CKK_X9_42_DH` (with
+  `CKA_SUBPRIME`; 6.4.5, 6.4.6). A public key was
+  `CKR_TEMPLATE_INCONSISTENT`, and a private key was stored as its raw x
+  with `CKR_OK`, which `CKM_DH_PKCS_DERIVE` and `CKM_X9_42_DH_DERIVE` then
+  could not read. The groups are checked as key-pair generation checks
+  them, which keeps NIST's group rules where they apply; x lies in
+  [1, q - 1], or [1, p - 2] without a q. Found while fixing #42.
+  `tests/test_dh_pkcs.c`, `tests/test_dh_x942.c`.
 
 ### Fixed
 * **`CKM_CHACHA20` with a 64-bit counter takes its last block** (#41). The
