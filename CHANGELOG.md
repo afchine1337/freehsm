@@ -30,6 +30,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `tests/test_dh_pkcs.c`, `tests/test_dh_x942.c`.
 
 ### Fixed
+* **X9.42 DH keys work in a signed module.** With the providers a signed
+  module loads (fips and base), OpenSSL has no decoder for an X9.42 DH key,
+  and the stored key read back as a legacy one whose parameters could not be
+  read: every X9.42 key, generated or imported, answered
+  `CKR_ATTRIBUTE_TYPE_INVALID` for `CKA_PRIME` and failed
+  `CKM_X9_42_DH_DERIVE` (`CKR_FUNCTION_FAILED`, or
+  `CKR_DOMAIN_PARAMS_INVALID` where NIST's rules apply). Since 2.8.0;
+  pkcs11-check's signed jobs recorded the generation as an xfail, and the
+  unsigned module, on the default provider, was not affected. Such a key is
+  now rebuilt from its DER -- the RFC 3279 domain parameters and x or y --
+  with `EVP_PKEY_fromdata`.
 * **`CKM_CHACHA20` with a 64-bit counter takes its last block** (#41). The
   counter's room was 2^64 - 1 - start blocks, one short: from 2^64 - 1 the
   one block left, and from 2^64 - 2 the second of two, were

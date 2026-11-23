@@ -1604,6 +1604,137 @@ static int fhsm_dsa_available(void) {
     return ok;
 }
 
+/* Reading back a stored X9.42 DH key where the FIPS provider is loaded.
+ *
+ * Keys are stored as DER -- PKCS#8 for a private key, SubjectPublicKeyInfo
+ * for a public one -- and read with d2i_AutoPrivateKey and d2i_PUBKEY. With
+ * the providers a signed module loads (fips and base, fips=yes), OpenSSL has
+ * no decoder for an X9.42 DH key: both calls fall back to a legacy key, of
+ * type "X9.42 DH" and no provider, whose parameters cannot be read nor the
+ * key used ("DECODER routines::unsupported", "unsupported key type"). So
+ * every X9.42 key of a signed module failed after it was stored, generated
+ * or imported: C_GetAttributeValue of CKA_PRIME answered
+ * CKR_ATTRIBUTE_TYPE_INVALID, and CKM_X9_42_DH_DERIVE CKR_FUNCTION_FAILED --
+ * or CKR_DOMAIN_PARAMS_INVALID where NIST's rules apply, the group check
+ * finding no q. pkcs11-check's signed jobs recorded the generation as an
+ * xfail from 2.8.0 on; the DH imports of 2.9.0 turned the derivations into
+ * failures, and tests/probe_dhx_der.c (outside the tree) showed why. The
+ * unsigned runs, on the default provider, decode the key.
+ *
+ * These two read the key as before and, when the result is such a legacy
+ * X9.42 key, build it again from the DER: the DomainParameters of RFC 3279
+ * (p, g, q) in the algorithm identifier, the private value x or the public
+ * value y as an INTEGER. The key is made with EVP_PKEY_fromdata, which the
+ * FIPS provider serves; y of a private key is g^x mod p. Every other key
+ * type, and every key under the default provider, is returned as OpenSSL
+ * decoded it. Same signatures as the two calls they wrap. */
+static BIGNUM *ffc_der_integer(const unsigned char *d, long dl, int secure) {
+    ASN1_INTEGER *ai = d2i_ASN1_INTEGER(NULL, &d, dl);
+    BIGNUM *bn = NULL;
+    if (ai) {
+        bn = secure ? BN_secure_new() : BN_new();
+        if (bn && !ASN1_INTEGER_to_BN(ai, bn)) { BN_clear_free(bn); bn = NULL; }
+        ASN1_INTEGER_free(ai);
+    }
+    return bn;
+}
+
+/* p, g and q from an X9.42 algorithm identifier's parameters. */
+static int ffc_der_domain(const X509_ALGOR *alg, BIGNUM **p, BIGNUM **g, BIGNUM **q) {
+    const ASN1_OBJECT *obj = NULL;
+    const void *pval = NULL;
+    int ptype = 0;
+    X509_ALGOR_get0(&obj, &ptype, &pval, alg);
+    if (ptype != V_ASN1_SEQUENCE || !pval) return 0;
+    const ASN1_STRING *ps = pval;
+    const unsigned char *d = ASN1_STRING_get0_data(ps);
+    STACK_OF(ASN1_TYPE) *seq = d2i_ASN1_SEQUENCE_ANY(NULL, &d, ASN1_STRING_length(ps));
+    int ok = seq && sk_ASN1_TYPE_num(seq) >= 3;
+    BIGNUM **out[3] = { p, g, q };
+    for (int i = 0; ok && i < 3; ++i) {
+        const ASN1_TYPE *t = sk_ASN1_TYPE_value(seq, i);
+        ok = t && t->type == V_ASN1_INTEGER
+             && (*out[i] = ASN1_INTEGER_to_BN(t->value.integer, NULL)) != NULL;
+    }
+    sk_ASN1_TYPE_pop_free(seq, ASN1_TYPE_free);
+    return ok;
+}
+
+static EVP_PKEY *ffc_dhx_fromdata(BIGNUM *p, BIGNUM *g, BIGNUM *q, BIGNUM *y, BIGNUM *x) {
+    EVP_PKEY *k = NULL;
+    OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+    OSSL_PARAM *prm = NULL;
+    if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, p) == 1
+        && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, q) == 1
+        && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, g) == 1
+        && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PUB_KEY, y) == 1
+        && (!x || OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, x) == 1))
+        prm = OSSL_PARAM_BLD_to_param(bld);
+    OSSL_PARAM_BLD_free(bld);
+    EVP_PKEY_CTX *c = prm ? EVP_PKEY_CTX_new_from_name(NULL, "DHX", NULL) : NULL;
+    if (!c || EVP_PKEY_fromdata_init(c) != 1
+        || EVP_PKEY_fromdata(c, &k, x ? EVP_PKEY_KEYPAIR : EVP_PKEY_PUBLIC_KEY, prm) != 1)
+        k = NULL;
+    EVP_PKEY_CTX_free(c);
+    OSSL_PARAM_free(prm);
+    return k;
+}
+
+static int is_legacy_dhx(const EVP_PKEY *k) {
+    return k && EVP_PKEY_get0_provider(k) == NULL && EVP_PKEY_get_base_id(k) == EVP_PKEY_DHX;
+}
+
+static EVP_PKEY *fhsm_d2i_private(EVP_PKEY **a, const unsigned char **pp, long len) {
+    const unsigned char *start = *pp;
+    EVP_PKEY *k = d2i_AutoPrivateKey(a, pp, len);
+    if (!is_legacy_dhx(k) || a) return k;
+    const unsigned char *d = start;
+    PKCS8_PRIV_KEY_INFO *p8 = d2i_PKCS8_PRIV_KEY_INFO(NULL, &d, len);
+    const unsigned char *pk = NULL;
+    int pkl = 0;
+    const X509_ALGOR *alg = NULL;
+    BIGNUM *p = NULL, *g = NULL, *q = NULL, *x = NULL, *y = NULL;
+    BN_CTX *bc = BN_CTX_secure_new();
+    EVP_PKEY *r = NULL;
+    if (p8 && bc && PKCS8_pkey_get0(NULL, &pk, &pkl, &alg, p8) == 1
+        && ffc_der_domain(alg, &p, &g, &q)
+        && (x = ffc_der_integer(pk, pkl, 1)) != NULL
+        && (y = BN_new()) != NULL) {
+        BN_set_flags(x, BN_FLG_CONSTTIME);
+        if (BN_mod_exp(y, g, x, p, bc)) r = ffc_dhx_fromdata(p, g, q, y, x);
+    }
+    PKCS8_PRIV_KEY_INFO_free(p8);
+    BN_free(p); BN_free(g); BN_free(q); BN_clear_free(x); BN_free(y);
+    BN_CTX_free(bc);
+    ERR_clear_error();
+    if (!r) return k;   /* as OpenSSL gave it: the caller's failure, as before */
+    EVP_PKEY_free(k);
+    return r;
+}
+
+static EVP_PKEY *fhsm_d2i_pubkey(EVP_PKEY **a, const unsigned char **pp, long len) {
+    const unsigned char *start = *pp;
+    EVP_PKEY *k = d2i_PUBKEY(a, pp, len);
+    if (!is_legacy_dhx(k) || a) return k;
+    const unsigned char *d = start;
+    X509_PUBKEY *xp = d2i_X509_PUBKEY(NULL, &d, len);
+    const unsigned char *pk = NULL;
+    int pkl = 0;
+    X509_ALGOR *alg = NULL;
+    BIGNUM *p = NULL, *g = NULL, *q = NULL, *y = NULL;
+    EVP_PKEY *r = NULL;
+    if (xp && X509_PUBKEY_get0_param(NULL, &pk, &pkl, &alg, xp) == 1
+        && ffc_der_domain(alg, &p, &g, &q)
+        && (y = ffc_der_integer(pk, pkl, 0)) != NULL)
+        r = ffc_dhx_fromdata(p, g, q, y, NULL);
+    X509_PUBKEY_free(xp);
+    BN_free(p); BN_free(g); BN_free(q); BN_free(y);
+    ERR_clear_error();
+    if (!r) return k;
+    EVP_PKEY_free(k);
+    return r;
+}
+
 /* DSA domain parameters p, q and g as big-endian bytes, checked as
  * CKM_DSA_KEY_PAIR_GEN checks them: each 1 to 384 bytes, else
  * CKR_ATTRIBUTE_VALUE_INVALID; sizes one of FIPS 186-4's (L, N) pairs,
@@ -1681,8 +1812,8 @@ static CK_RV x931_key_size_check(fhsm_token_t *t, CK_OBJECT_HANDLE h) {
     if (!t || fhsm_token_object_get(t, (uint32_t)h, &kv, &kvl, &cl, &kt) != FHSM_RV_OK)
         return FHSM_RV_OK;
     const uint8_t *p = kv;
-    EVP_PKEY *pk = cl == 3u /* CKO_PRIVATE_KEY */ ? d2i_AutoPrivateKey(NULL, &p, (long)kvl)
-                 : cl == 2u /* CKO_PUBLIC_KEY */  ? d2i_PUBKEY(NULL, &p, (long)kvl) : NULL;
+    EVP_PKEY *pk = cl == 3u /* CKO_PRIVATE_KEY */ ? fhsm_d2i_private(NULL, &p, (long)kvl)
+                 : cl == 2u /* CKO_PUBLIC_KEY */  ? fhsm_d2i_pubkey(NULL, &p, (long)kvl) : NULL;
     if (!pk) { ERR_clear_error(); return FHSM_RV_OK; }
     const int bits = EVP_PKEY_get_bits(pk);
     EVP_PKEY_free(pk);
@@ -5106,7 +5237,7 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
                                                        a.value_data, a.value_len);
             if (!pkey) {
                 const unsigned char *p = a.value_data;
-                pkey = d2i_PUBKEY(NULL, &p, (long)a.value_len);
+                pkey = fhsm_d2i_pubkey(NULL, &p, (long)a.value_len);
             }
         }
         if (!pkey) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
@@ -6857,7 +6988,7 @@ static CK_RV ffdh_z(fhsm_token_t *t, CK_OBJECT_HANDLE hBaseKey, uint32_t want_kt
     if (bcl != CKO_PRIVATE_KEY || bkt != want_kt)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     const unsigned char *pp = bv;
-    EVP_PKEY *priv = d2i_AutoPrivateKey(NULL, &pp, (long)bvl);
+    EVP_PKEY *priv = fhsm_d2i_private(NULL, &pp, (long)bvl);
     if (!priv) return FHSM_RV_FUNCTION_FAILED;
     if ((fhsm_build_fips_strict || fhsm_mode_is_fips()) && !dh_safe_prime_group(priv)
         && !(want_kt == 0x00000004UL && ffc_fb_fc_group(priv))) {
@@ -7512,7 +7643,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
               if (k != (CK_ULONG)bkt) return CKR_TEMPLATE_INCONSISTENT;
           } }
         const unsigned char *pp = bv;
-        EVP_PKEY *pk = d2i_AutoPrivateKey(NULL, &pp, (long)bvl);
+        EVP_PKEY *pk = fhsm_d2i_private(NULL, &pp, (long)bvl);
         if (!pk) { ERR_clear_error(); return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         unsigned char *pder = NULL;
         int pdl = i2d_PUBKEY(pk, &pder);
@@ -7819,7 +7950,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (!base_is_ecm && kt != (uint32_t)CKK_EC)
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
     const uint8_t *dp = kv;
-    EVP_PKEY *priv = d2i_AutoPrivateKey(NULL, &dp, (long)kvl);
+    EVP_PKEY *priv = fhsm_d2i_private(NULL, &dp, (long)kvl);
     if (!priv) return FHSM_RV_FUNCTION_FAILED;
 
     /* Construct the peer public key. pkcs11-tool's --derive --input-file
@@ -7852,7 +7983,7 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         peer = EVP_PKEY_new_raw_public_key_ex(NULL, alg, NULL, pdata, want);
         if (!peer) { EVP_PKEY_free(priv); return FHSM_RV_MECHANISM_PARAM_INVALID; }
     }
-    if (!peer) peer = d2i_PUBKEY(NULL, &pdata, (long)p->ulPublicDataLen);
+    if (!peer) peer = fhsm_d2i_pubkey(NULL, &pdata, (long)p->ulPublicDataLen);
     if (!peer) {
         /* A bare point, or one wrapped in a DER OCTET STRING -- told apart by
          * the length the bare point must have on this curve: 1 + 2n bytes
@@ -8338,7 +8469,7 @@ static fhsm_rv_t aes_cbc_wrap_run(int enc, CK_MECHANISM *m,
 static uint8_t *private_value_to_pkcs8(const uint8_t *v, size_t vl, int *len) {
     uint8_t *der = NULL;
     const unsigned char *p = v;
-    EVP_PKEY *pk = d2i_AutoPrivateKey(NULL, &p, (long)vl);
+    EVP_PKEY *pk = fhsm_d2i_private(NULL, &p, (long)vl);
     PKCS8_PRIV_KEY_INFO *inf = pk ? EVP_PKEY2PKCS8(pk) : NULL;
     *len = inf ? i2d_PKCS8_PRIV_KEY_INFO(inf, &der) : 0;
     PKCS8_PRIV_KEY_INFO_free(inf);
@@ -8767,7 +8898,7 @@ static CK_RV wrap_key_value(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism
             return 0x00000115UL;   /* CKR_WRAPPING_KEY_TYPE_INCONSISTENT */
         if (kvl == 0) return 0x00000062UL;   /* CKR_KEY_SIZE_RANGE */
         const unsigned char *wp = wkv;
-        EVP_PKEY *pub = d2i_PUBKEY(NULL, &wp, (long)wkl);
+        EVP_PKEY *pub = fhsm_d2i_pubkey(NULL, &wp, (long)wkl);
         if (!pub) return 0x00000113UL;   /* CKR_WRAPPING_KEY_HANDLE_INVALID */
         const size_t pl = ec_point_len(pub);
         const size_t need = pl + ((kvl + 7) & ~(size_t)7) + 8;
@@ -8992,7 +9123,7 @@ static CK_RV unwrap_decrypt(CK_MECHANISM *m, const uint8_t *ukv, size_t ukl,
         size_t al = 0; CK_MECHANISM om;
         { CK_RV pr = rsa_aes_params(m, &al, &om); if (pr != FHSM_RV_OK) return pr; }
         const unsigned char *pp = ukv;
-        EVP_PKEY *pk = d2i_AutoPrivateKey(NULL, &pp, (long)ukl);
+        EVP_PKEY *pk = fhsm_d2i_private(NULL, &pp, (long)ukl);
         int ms = pk ? EVP_PKEY_get_size(pk) : 0;
         EVP_PKEY_free(pk);
         if (ms <= 0) return 0x000000F0UL;   /* CKR_UNWRAPPING_KEY_HANDLE_INVALID */
@@ -9012,7 +9143,7 @@ static CK_RV unwrap_decrypt(CK_MECHANISM *m, const uint8_t *ukv, size_t ukl,
         fhsm_ecdh_aes_params_t ep;
         { CK_RV pr = ecdh_aes_params(m, &ep); if (pr != FHSM_RV_OK) return pr; }
         const unsigned char *pp = ukv;
-        EVP_PKEY *priv = d2i_AutoPrivateKey(NULL, &pp, (long)ukl);
+        EVP_PKEY *priv = fhsm_d2i_private(NULL, &pp, (long)ukl);
         if (!priv) return 0x000000F0UL;   /* CKR_UNWRAPPING_KEY_HANDLE_INVALID */
         const size_t pl = ec_point_len(priv);
         if (pl == 0 || in_len < pl + 16 || ((size_t)in_len - pl) % 8 != 0
@@ -9514,7 +9645,7 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
           return FHSM_RV_KEY_FUNCTION_NOT_PERMITTED; }
 
     const uint8_t *p = kv;
-    EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
+    EVP_PKEY *pkey = fhsm_d2i_pubkey(NULL, &p, (long)kvl);
     if (!pkey) return FHSM_RV_FUNCTION_FAILED;
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey, NULL);
     if (!ctx) { EVP_PKEY_free(pkey); return FHSM_RV_HOST_MEMORY; }
@@ -9640,7 +9771,7 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
               kvl, kvl ? kv[0] : 0);
 
     const uint8_t *p = kv;
-    EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+    EVP_PKEY *pkey = fhsm_d2i_private(NULL, &p, (long)kvl);
     MLKEM_DBG("d2i_AutoPrivateKey %s", pkey ? "OK" : "failed");
     if (!pkey) {
         /* Raw ML-KEM private key import fallback. The Wycheproof
@@ -10339,8 +10470,8 @@ static int fhsm_pset_selector_of(uint32_t cko_class, uint32_t ckk_type,
     else return 0;
     const unsigned char *pp = value;
     EVP_PKEY *pk = NULL;
-    if (cko_class == CKO_PUBLIC_KEY)       pk = d2i_PUBKEY(NULL, &pp, (long)value_len);
-    else if (cko_class == CKO_PRIVATE_KEY) pk = d2i_AutoPrivateKey(NULL, &pp, (long)value_len);
+    if (cko_class == CKO_PUBLIC_KEY)       pk = fhsm_d2i_pubkey(NULL, &pp, (long)value_len);
+    else if (cko_class == CKO_PRIVATE_KEY) pk = fhsm_d2i_private(NULL, &pp, (long)value_len);
     if (!pk) return 0;
     int found = 0;
     for (CK_ULONG k = 1; !found; ++k) {
@@ -11054,8 +11185,8 @@ static int extract_pubkey_attr(fhsm_token_t *t, uint32_t handle,
      * from the private key too). */
     const uint8_t *p = kv;
     EVP_PKEY *pkey = NULL;
-    if (cl == CKO_PUBLIC_KEY)       pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
-    else if (cl == CKO_PRIVATE_KEY) pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+    if (cl == CKO_PUBLIC_KEY)       pkey = fhsm_d2i_pubkey(NULL, &p, (long)kvl);
+    else if (cl == CKO_PRIVATE_KEY) pkey = fhsm_d2i_private(NULL, &p, (long)kvl);
     else return -1;
     if (!pkey) return -1;
     int rc = -1;
@@ -11320,7 +11451,7 @@ static int private_value_of(const uint8_t *der, size_t der_len, CK_ULONG ckk,
         return -1;
     }
     const unsigned char *p = der;
-    EVP_PKEY *pk = d2i_AutoPrivateKey(NULL, &p, (long)der_len);
+    EVP_PKEY *pk = fhsm_d2i_private(NULL, &p, (long)der_len);
     if (!pk) return -3;
     int rc = -3;
     if (raw) {
@@ -11480,7 +11611,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     && (ckk_type == CKK_ML_KEM || ckk_type == CKK_ML_DSA
                         || ckk_type == CKK_SLH_DSA)) {
                     const unsigned char *pp = value;
-                    EVP_PKEY *pk = d2i_PUBKEY(NULL, &pp, (long)value_len);
+                    EVP_PKEY *pk = fhsm_d2i_pubkey(NULL, &pp, (long)value_len);
                     size_t rl = sizeof pqc_raw;
                     int raw_ok = (pk != NULL)
                                  && EVP_PKEY_get_raw_public_key(pk, pqc_raw, &rl) == 1;
@@ -11496,7 +11627,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                     && (ckk_type == 0x00000001UL /* CKK_DSA */ || ckk_type == 0x00000002UL /* CKK_DH */
                         || ckk_type == 0x00000004UL /* CKK_X9_42_DH */)) {
                     const unsigned char *pp = value;
-                    EVP_PKEY *pk = d2i_PUBKEY(NULL, &pp, (long)value_len);
+                    EVP_PKEY *pk = fhsm_d2i_pubkey(NULL, &pp, (long)value_len);
                     BIGNUM *y = NULL;
                     int yl = -1;
                     if (pk && EVP_PKEY_get_bn_param(pk, OSSL_PKEY_PARAM_PUB_KEY, &y) == 1 && y
@@ -13211,7 +13342,7 @@ static fhsm_rv_t fhsm_rsa_oaep_wrap(const uint8_t *pub_der, size_t pub_len,
     if (rv != FHSM_RV_OK) return rv;
 
     const unsigned char *p = pub_der;
-    EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)pub_len);
+    EVP_PKEY *pkey = fhsm_d2i_pubkey(NULL, &p, (long)pub_len);
     if (!pkey) return 0x00000113UL;   /* CKR_WRAPPING_KEY_HANDLE_INVALID */
     if (out == NULL) {                      /* size query : modulus size */
         int sz = EVP_PKEY_get_size(pkey);
@@ -13242,7 +13373,7 @@ static fhsm_rv_t fhsm_rsa_oaep_unwrap(const uint8_t *priv_der, size_t priv_len,
     if (rv != FHSM_RV_OK) return rv;
 
     const unsigned char *p = priv_der;
-    EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)priv_len);
+    EVP_PKEY *pkey = fhsm_d2i_private(NULL, &p, (long)priv_len);
     if (!pkey) return 0x000000F0UL;   /* CKR_UNWRAPPING_KEY_HANDLE_INVALID */
     EVP_PKEY_CTX *ctx = NULL;
     rv = oaep_ctx_init(pkey, 0, &oaep, &ctx);
@@ -13305,7 +13436,7 @@ static fhsm_rv_t fhsm_rsa_v15_wrap(const uint8_t *pub_der, size_t pub_len,
                                     unsigned char *out, size_t *out_len) {
     if (!pub_der || !out_len) return FHSM_RV_ARGUMENTS_BAD;
     const unsigned char *p = pub_der;
-    EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)pub_len);
+    EVP_PKEY *pkey = fhsm_d2i_pubkey(NULL, &p, (long)pub_len);
     if (!pkey) return 0x00000113UL;   /* CKR_WRAPPING_KEY_HANDLE_INVALID */
     int sz = EVP_PKEY_get_size(pkey);
     if (sz <= 0) { EVP_PKEY_free(pkey); return FHSM_RV_FUNCTION_FAILED; }
@@ -13360,7 +13491,7 @@ static fhsm_rv_t fhsm_rsa_v15_unwrap(const uint8_t *priv_der, size_t priv_len,
                                       uint8_t *out, size_t *out_len) {
     if (!priv_der || !out || !out_len) return FHSM_RV_ARGUMENTS_BAD;
     const unsigned char *p = priv_der;
-    EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)priv_len);
+    EVP_PKEY *pkey = fhsm_d2i_private(NULL, &p, (long)priv_len);
     if (!pkey) return 0x000000F0UL;   /* CKR_UNWRAPPING_KEY_HANDLE_INVALID */
     /* A blob that is not modulus-sized cannot be a wrapping under this key.
      * This is a length check on the *ciphertext*, which the attacker already
@@ -14305,8 +14436,8 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                                       &cl, &kt) == FHSM_RV_OK) {
                 const uint8_t *p = kv;
                 EVP_PKEY *pk = NULL;
-                if (cl == CKO_PUBLIC_KEY)       pk = d2i_PUBKEY(NULL, &p, (long)kvl);
-                else if (cl == CKO_PRIVATE_KEY) pk = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+                if (cl == CKO_PUBLIC_KEY)       pk = fhsm_d2i_pubkey(NULL, &p, (long)kvl);
+                else if (cl == CKO_PRIVATE_KEY) pk = fhsm_d2i_private(NULL, &p, (long)kvl);
                 int is_ed448 = pk && EVP_PKEY_is_a(pk, "ED448");
                 EVP_PKEY_free(pk);
                 if (is_ed448) return FHSM_RV_MECHANISM_PARAM_INVALID;
@@ -14371,8 +14502,8 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
                                             &cl, &kt) == FHSM_RV_OK) {
                 const uint8_t *p = kv;
                 EVP_PKEY *pk = NULL;
-                if (cl == CKO_PUBLIC_KEY)       pk = d2i_PUBKEY(NULL, &p, (long)kvl);
-                else if (cl == CKO_PRIVATE_KEY) pk = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+                if (cl == CKO_PUBLIC_KEY)       pk = fhsm_d2i_pubkey(NULL, &p, (long)kvl);
+                else if (cl == CKO_PRIVATE_KEY) pk = fhsm_d2i_private(NULL, &p, (long)kvl);
                 int is_ed25519 = pk && EVP_PKEY_is_a(pk, "ED25519");
                 EVP_PKEY_free(pk);
                 if (is_ed25519) return FHSM_RV_MECHANISM_PARAM_INVALID;
@@ -15031,7 +15162,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
             op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
         }
         const uint8_t *p = kv;
-        EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
+        EVP_PKEY *pkey = fhsm_d2i_pubkey(NULL, &p, (long)kvl);
         if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
         EVP_PKEY_CTX *ectx = NULL;
         rv = oaep_ctx_init(pkey, 1, &g_oaep_enc[hSession].p, &ectx);
@@ -15093,7 +15224,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE hSession, unsigned char *pData,
         if (cl != CKO_PUBLIC_KEY || kt != CKK_RSA) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         int pad = (op->mechanism == CKM_RSA_PKCS) ? RSA_PKCS1_PADDING : RSA_NO_PADDING;
         const uint8_t *pp = kv;
-        EVP_PKEY *pkey = d2i_PUBKEY(NULL, &pp, (long)kvl);
+        EVP_PKEY *pkey = fhsm_d2i_pubkey(NULL, &pp, (long)kvl);
         if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
         EVP_PKEY_CTX *ectx = EVP_PKEY_CTX_new(pkey, NULL);
         if (!ectx || EVP_PKEY_encrypt_init(ectx) <= 0
@@ -15536,7 +15667,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
             op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT;
         }
         const uint8_t *p = kv;
-        EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+        EVP_PKEY *pkey = fhsm_d2i_private(NULL, &p, (long)kvl);
         if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
         EVP_PKEY_CTX *dctx = NULL;
         rv = oaep_ctx_init(pkey, 0, &g_oaep_dec[hSession].p, &dctx);
@@ -15582,7 +15713,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession, unsigned char *pEnc, CK_ULONG ulEncL
         if (cl != CKO_PRIVATE_KEY || kt != CKK_RSA) { op->active = 0; return FHSM_RV_KEY_TYPE_INCONSISTENT; }
         int pad = (op->mechanism == CKM_RSA_PKCS) ? RSA_PKCS1_PADDING : RSA_NO_PADDING;
         const uint8_t *pp = kv;
-        EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &pp, (long)kvl);
+        EVP_PKEY *pkey = fhsm_d2i_private(NULL, &pp, (long)kvl);
         if (!pkey) { op->active = 0; return FHSM_RV_FUNCTION_FAILED; }
         /* A ciphertext that is not modulus-sized is refused before anything is
          * decrypted. OpenSSL rejects one that is too long, but takes a shorter
@@ -16697,7 +16828,7 @@ static size_t fhsm_exact_sig_len(fhsm_token_t *t, fhsm_op_t *op) {
         return 0;
     if (cl != CKO_PRIVATE_KEY) return 0;
     const uint8_t *p = kv;
-    EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+    EVP_PKEY *pkey = fhsm_d2i_private(NULL, &p, (long)kvl);
     if (!pkey) return 0;
     size_t out = 0;
     if (mech_is_rs(op->mechanism)) {
@@ -16750,7 +16881,7 @@ static fhsm_rv_t sign_asymmetric(fhsm_token_t *t, fhsm_op_t *op,
     if (rv != FHSM_RV_OK) return rv;
     if (cl != CKO_PRIVATE_KEY) return FHSM_RV_KEY_TYPE_INCONSISTENT;
     const uint8_t *p = kv;
-    EVP_PKEY *pkey = d2i_AutoPrivateKey(NULL, &p, (long)kvl);
+    EVP_PKEY *pkey = fhsm_d2i_private(NULL, &p, (long)kvl);
     if (!pkey) return FHSM_RV_FUNCTION_FAILED;
     if ((kt == CKK_RSA && EVP_PKEY_get_base_id(pkey) != EVP_PKEY_RSA) ||
         (kt == CKK_EC  && EVP_PKEY_get_base_id(pkey) != EVP_PKEY_EC)) {
@@ -17447,7 +17578,7 @@ static fhsm_rv_t verify_asymmetric(CK_SESSION_HANDLE hSession, fhsm_token_t *t,
         return rv;
     }
     const uint8_t *p = kv;
-    EVP_PKEY *pkey = d2i_PUBKEY(NULL, &p, (long)kvl);
+    EVP_PKEY *pkey = fhsm_d2i_pubkey(NULL, &p, (long)kvl);
     if (!pkey && (op->mechanism == CKM_ML_DSA_OP || op->hm_row)) {
         /* Raw ML-DSA public key import fallback. Wycheproof and most
          * FIPS 204 test corpora carry the verification key as raw
