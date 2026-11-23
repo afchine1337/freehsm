@@ -10,7 +10,8 @@
 #
 # Build :
 #   make -f fuzz/Makefile.fuzz                   # all four harnesses
-#   make -f fuzz/Makefile.fuzz fuzz_ecdsa_raw    # one specific
+#   make -f fuzz/Makefile.fuzz fuzz/fuzz_ecdsa_raw   # one specific: the
+#                                                  # target is the path
 #
 # Run :
 #   ./fuzz/fuzz_ecdsa_raw      fuzz/corpus/ecdsa_raw      -max_total_time=300

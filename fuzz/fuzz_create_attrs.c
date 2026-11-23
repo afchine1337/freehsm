@@ -177,8 +177,10 @@ static unsigned long build_template(const uint8_t *data, size_t size,
  * the offending input.
  * ----------------------------------------------------------------------- */
 static void check_ok(const fhsm_create_attrs_t *a) {
-    /* P1 : path enum is in range. CERT_X509 (#110) is the highest value. */
-    if ((unsigned)a->path > (unsigned)FHSM_CREATE_PATH_CERT_X509) {
+    /* P1 : path enum is in range. FFC_PRIV (2.9.0) is the highest value; it
+     * was CERT_X509 (#110) until the finite-field paths were added after it,
+     * and the first fuzz run to reach them trapped here. */
+    if ((unsigned)a->path > (unsigned)FHSM_CREATE_PATH_FFC_PRIV) {
         __builtin_trap();
     }
     /* P2 : OK implies non-INVALID. */
@@ -269,6 +271,40 @@ static void check_ok(const fhsm_create_attrs_t *a) {
          * non-empty value before returning OK on this path. */
         if (a->cko != HARNESS_CKO_CERTIFICATE) __builtin_trap();
         if (a->value_data == NULL)             __builtin_trap();
+        break;
+
+    case FHSM_CREATE_PATH_PQC_PUB:
+        /* P13 : an ML-KEM, ML-DSA or SLH-DSA public key carries
+         * CKO_PUBLIC_KEY and a CKA_VALUE pointer. pqc_alg may be NULL: the
+         * value is then tried as DER downstream. Missing from this switch
+         * since the path was added, which -Wswitch reported. */
+        if (a->cko != HARNESS_CKO_PUBLIC_KEY) __builtin_trap();
+        if (a->value_data == NULL)            __builtin_trap();
+        break;
+
+    case FHSM_CREATE_PATH_RSA_PRIV:
+        /* P14 : an RSA private key given as components carries
+         * CKO_PRIVATE_KEY and n, e and d; the CRT five are optional. Missing
+         * from this switch since the path was added, as P13. */
+        if (a->cko != HARNESS_CKO_PRIVATE_KEY) __builtin_trap();
+        if (a->rsa_modulus == NULL || a->rsa_exponent == NULL || a->rsa_d == NULL)
+            __builtin_trap();
+        break;
+
+    case FHSM_CREATE_PATH_FFC_PUB:
+    case FHSM_CREATE_PATH_FFC_PRIV:
+        /* P12 : a DSA, DH or X9.42 DH key (2.9.0) of the class its path
+         * names, with p, g and CKA_VALUE present and non-empty, and a
+         * subprime present exactly when the key type is not CKK_DH. */
+        if (a->cko != (a->path == FHSM_CREATE_PATH_FFC_PUB ? HARNESS_CKO_PUBLIC_KEY
+                                                           : HARNESS_CKO_PRIVATE_KEY))
+            __builtin_trap();
+        if (a->ckk != 0x01UL && a->ckk != 0x02UL && a->ckk != 0x04UL) __builtin_trap();
+        if (a->ffc_p == NULL || a->ffc_p_len == 0)           __builtin_trap();
+        if (a->ffc_g == NULL || a->ffc_g_len == 0)           __builtin_trap();
+        if (a->value_data == NULL || a->value_len == 0)      __builtin_trap();
+        if ((a->ckk == 0x02UL) != (a->ffc_q == NULL))        __builtin_trap();
+        if (a->ffc_q != NULL && a->ffc_q_len == 0)           __builtin_trap();
         break;
 
     case FHSM_CREATE_PATH_INVALID:
