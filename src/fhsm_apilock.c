@@ -34,6 +34,7 @@
 
 #include "fhsm_common.h"
 #include "fhsm_apilock.h"
+#include "fhsm_crypto.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -59,6 +60,20 @@ static pthread_once_t    g_libctx_once = PTHREAD_ONCE_INIT;
 
 static void libctx_init(void) {
     g_libctx = OSSL_LIB_CTX_new();
+}
+
+OSSL_LIB_CTX *fhsm_libctx(void) {
+    pthread_once(&g_libctx_once, libctx_init);
+    return g_libctx;
+}
+
+__attribute__((destructor))
+static void libctx_cleanup(void) {
+    if (g_libctx != NULL) {
+        fhsm_crypto_cleanup();
+        OSSL_LIB_CTX_free(g_libctx);
+        g_libctx = NULL;
+    }
 }
 
 static void release_now(void *p, size_t len, int secure) {
@@ -126,6 +141,7 @@ static int have_retired(void) {
 
 void fhsm_api_enter(fhsm_api_guard_t *g, fhsm_api_mode_t mode) {
     g->taken = 0;
+    g->libctx_switched = 0;
     g->prev_libctx = NULL;
     /* Nested C_ call: the outermost one holds the lock. The only nesting in
      * the module is C_CloseAllSessions -> C_CloseSession, both EXCLUSIVE. */
@@ -140,15 +156,18 @@ void fhsm_api_enter(fhsm_api_guard_t *g, fhsm_api_mode_t mode) {
     tl_mode = mode;
     g->taken = 1;
     pthread_once(&g_libctx_once, libctx_init);
-    if (g_libctx != NULL)
+    if (g_libctx != NULL) {
         g->prev_libctx = OSSL_LIB_CTX_set0_default(g_libctx);
+        g->libctx_switched = 1;
+    }
 }
 
 void fhsm_api_leave(fhsm_api_guard_t *g) {
     if (!g->taken) return;
-    if (g->prev_libctx != NULL) {
+    if (g->libctx_switched) {
         OSSL_LIB_CTX_set0_default(g->prev_libctx);
         g->prev_libctx = NULL;
+        g->libctx_switched = 0;
     }
     fhsm_api_mode_t was = tl_mode;
     tl_mode = FHSM_API_NONE;

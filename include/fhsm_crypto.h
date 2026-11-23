@@ -67,6 +67,7 @@ extern "C" {
  * ----------------------------------------------------------------------- */
 fhsm_rv_t fhsm_crypto_init(void);
 void      fhsm_crypto_finalize(void);
+void      fhsm_crypto_cleanup(void);
 
 /* ---------------------------------------------------------------------------
  * DRBG --- the single approved RNG. CTR_DRBG-AES-256 with NIST SP 800-90B

@@ -74,8 +74,12 @@ typedef enum {
  * as the objects fetched from it are kept across calls. */
 typedef struct {
     int           taken;
+    int           libctx_switched;
     OSSL_LIB_CTX *prev_libctx;
 } fhsm_api_guard_t;
+
+/* Returns the module's private library context, creating it if needed. */
+OSSL_LIB_CTX *fhsm_libctx(void);
 
 void fhsm_api_enter(fhsm_api_guard_t *g, fhsm_api_mode_t mode);
 void fhsm_api_leave(fhsm_api_guard_t *g);

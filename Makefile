@@ -1058,6 +1058,11 @@ tests/test_private_attr: tests/test_private_attr.c libfreehsm.so
 tests/test_finalize_release: tests/test_finalize_release.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Application OpenSSL library context isolation: C_Initialize must leave
+# the caller's context unchanged.
+tests/test_app_context: tests/test_app_context.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -ldl $(LDFLAGS)
+
 # CKA_ALWAYS_AUTHENTICATE (PKCS#11 v3.2 5.6) : the attribute was stored and
 # reported and gated nothing, so a key marked TRUE signed without
 # C_Login(CKU_CONTEXT_SPECIFIC). Both directions of the loop are checked.
@@ -1315,6 +1320,7 @@ TEST_BINS = \
 	tests/test_derive_des_parity \
 	tests/test_private_attr \
 	tests/test_finalize_release \
+	tests/test_app_context \
 	tests/test_apilock \
 	tests/test_concurrency \
 	tests/test_concurrency_store \
@@ -1494,6 +1500,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_private_attr
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_finalize_release
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_app_context
 # The concurrency tests (#111-prep) were run by hand under TSAN=1 and by
 # nothing else. Run plain here they still check results -- a key freed under
 # a running C_Sign shows as CKR_FUNCTION_FAILED, a torn label as a wrong

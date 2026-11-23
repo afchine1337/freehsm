@@ -32,6 +32,7 @@
 #include "fhsm_crypto.h"
 #include "fhsm_integrity.h"
 #include "fhsm_drbg.h"
+#include "fhsm_apilock.h"
 
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -47,7 +48,7 @@
 #include <time.h>
 
 /* OpenSSL FIPS provider handle. Loaded on crypto_init, unloaded on
- * crypto_finalize. The default provider is NOT loaded in approved mode
+ * crypto_cleanup. The default provider is NOT loaded in approved mode
  * --- this ensures every algorithm fetch goes through the validated
  * FIPS provider only. */
 static OSSL_PROVIDER *g_fips_prov = NULL;
@@ -77,6 +78,14 @@ static size_t            g_kat_count = 0;
  * Subsystem lifecycle.
  * ----------------------------------------------------------------------- */
 static void crypto_init_once(void) {
+    if (fhsm_libctx() == NULL) {
+        fprintf(stderr,
+            "[freehsm-c] FATAL : could not create OpenSSL library context.\n");
+        g_crypto_init_rv = FHSM_RV_HOST_MEMORY;
+        fhsm_state_latch_error("OpenSSL library context creation failed");
+        return;
+    }
+
     /* FIPS 140-3 §7.10.2 : the integrity self-test runs BEFORE any
      * approved crypto service is exposed, even before the provider
      * load. We use OpenSSL EVP_DigestSign internally, which is
@@ -285,6 +294,14 @@ fhsm_rv_t fhsm_crypto_init(void) {
 }
 
 void fhsm_crypto_finalize(void) {
+    /* Providers live as long as the library context (process lifetime) so
+     * that repeated C_Initialize / C_Finalize cycles in the same process
+     * retain access to the loaded providers (since crypto_init_once runs
+     * under pthread_once). Provider unloading is deferred to
+     * fhsm_crypto_cleanup(), called when the library context is freed. */
+}
+
+void fhsm_crypto_cleanup(void) {
     if (g_base_prov)    { OSSL_PROVIDER_unload(g_base_prov);    g_base_prov    = NULL; }
     if (g_fips_prov)    { OSSL_PROVIDER_unload(g_fips_prov);    g_fips_prov    = NULL; }
     if (g_default_prov) { OSSL_PROVIDER_unload(g_default_prov); g_default_prov = NULL; }

@@ -33,6 +33,8 @@
 #include "fhsm_common.h"
 #include "fhsm_crypto.h"
 
+#include <openssl/provider.h>
+#include <openssl/evp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,8 +70,16 @@ static void scribble_dead_stack(void) {
 int main(void) {
     unsigned long rv;
 
+    int prov_before = OSSL_PROVIDER_available(NULL, "fips");
+    int fips_before = EVP_default_properties_is_fips_enabled(NULL);
+
     rv = C_Initialize(NULL);
     fprintf(stderr, "C_Initialize returned 0x%lx\n", rv); CHECK(rv == FHSM_RV_OK, "C_Initialize");
+
+    CHECK(OSSL_PROVIDER_available(NULL, "fips") == prov_before,
+          "OSSL_PROVIDER_available(NULL, fips) unchanged after C_Initialize");
+    CHECK(EVP_default_properties_is_fips_enabled(NULL) == fips_before,
+          "EVP_default_properties_is_fips_enabled(NULL) unchanged after C_Initialize");
     CHECK(fhsm_state_get() == FHSM_STATE_INITIALIZED, "state after init");
 
     /* --- RNG smoke --- */
