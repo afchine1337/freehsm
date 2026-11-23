@@ -19,8 +19,13 @@
  *       and a short signature are refused.
  *   (F) refusals: no CKA_BASE, sizes that are not one of FIPS 186-4's pairs,
  *       a generator of the wrong order, an ECDSA mechanism on a DSA key.
+ *   (I) C_CreateObject (#42): the public key from p, q, g and y verifies a
+ *       signature of the generated private key; the private key from p, q, g
+ *       and x signs what the generated public key verifies. Refused: no
+ *       CKA_BASE, (2048, 160) sizes, y = 1, x = 0 and x = q.
  *   (N) refused where NIST's rules apply, and not offered where only the
- *       FIPS provider serves DSA.
+ *       FIPS provider serves DSA; C_CreateObject of a DSA key is
+ *       CKR_TEMPLATE_INCONSISTENT there.
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -34,22 +39,29 @@ typedef struct { CK_ULONG type; void *pValue; CK_ULONG ulValueLen; } CK_ATTRIBUT
 typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; } CK_MECHANISM;
 
 #define CKR_OK                         0x000UL
+#define CKR_ATTRIBUTE_VALUE_INVALID    0x013UL
 #define CKR_KEY_TYPE_INCONSISTENT      0x063UL
 #define CKR_MECHANISM_INVALID          0x070UL
 #define CKR_SIGNATURE_INVALID          0x0C0UL
 #define CKR_SIGNATURE_LEN_RANGE        0x0C1UL
 #define CKR_TEMPLATE_INCOMPLETE        0x0D0UL
+#define CKR_TEMPLATE_INCONSISTENT      0x0D1UL
 #define CKR_DOMAIN_PARAMS_INVALID      0x130UL
 #define CKF_RW                         6UL
 #define CKK_DSA                        0x01UL
+#define CKO_PUBLIC_KEY                 2UL
+#define CKO_PRIVATE_KEY                3UL
+#define CKA_CLASS                      0x000UL
 #define CKA_TOKEN                      0x001UL
 #define CKA_VALUE                      0x011UL
 #define CKA_KEY_TYPE                   0x100UL
+#define CKA_SENSITIVE                  0x103UL
 #define CKA_SIGN                       0x108UL
 #define CKA_VERIFY                     0x10AUL
 #define CKA_PRIME                      0x130UL
 #define CKA_SUBPRIME                   0x131UL
 #define CKA_BASE                       0x132UL
+#define CKA_EXTRACTABLE                0x162UL
 #define CKM_RSA_PKCS                   0x0001UL
 #define CKM_DSA_KEY_PAIR_GEN           0x0010UL
 #define CKM_DSA                        0x0011UL
@@ -127,6 +139,7 @@ static CK_RV (*C_GetMechanismList)(CK_SLOT_ID, CK_ULONG*, CK_ULONG*);
 static CK_RV (*C_GenerateKeyPair)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_ATTRIBUTE*, CK_ULONG,
                                   CK_ATTRIBUTE*, CK_ULONG, CK_OBJECT_HANDLE*, CK_OBJECT_HANDLE*);
 static CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE*, CK_ULONG);
+static CK_RV (*C_CreateObject)(CK_SESSION_HANDLE, CK_ATTRIBUTE*, CK_ULONG, CK_OBJECT_HANDLE*);
 static CK_RV (*C_SignInit)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE);
 static CK_RV (*C_Sign)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG, CK_BYTE*, CK_ULONG*);
 static CK_RV (*C_SignUpdate)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG);
@@ -167,6 +180,21 @@ static CK_RV gen(const CK_BYTE *p, CK_ULONG pl, const CK_BYTE *q, CK_ULONG ql,
     return C_GenerateKeyPair(s, &m, pt, 2 + n, vt, 2, pub, prv);
 }
 
+/* C_CreateObject of a DSA key of class cls from (p, q, g) and v, y or x; n
+ * of the three parameters given, base last. */
+static CK_RV import(CK_ULONG cls, const CK_BYTE *p, CK_ULONG pl, const CK_BYTE *q, CK_ULONG ql,
+                    const CK_BYTE *g, CK_ULONG gl, CK_ULONG n, const CK_BYTE *v, CK_ULONG vl,
+                    CK_OBJECT_HANDLE *h) {
+    CK_ULONG kt = CKK_DSA;
+    CK_ATTRIBUTE t[] = { { CKA_CLASS, &cls, sizeof cls }, { CKA_KEY_TYPE, &kt, sizeof kt },
+                         { CKA_TOKEN, &no, 1 },
+                         { cls == CKO_PUBLIC_KEY ? CKA_VERIFY : CKA_SIGN, &yes, 1 },
+                         { CKA_VALUE, (void*)v, vl },
+                         { CKA_PRIME, (void*)p, pl }, { CKA_SUBPRIME, (void*)q, ql },
+                         { CKA_BASE, (void*)g, gl } };
+    return C_CreateObject(s, t, 5 + n, h);
+}
+
 static int attr_is(CK_OBJECT_HANDLE h, CK_ULONG type, const CK_BYTE *want, CK_ULONG wl) {
     CK_BYTE buf[512];
     CK_ATTRIBUTE a = { type, buf, sizeof buf };
@@ -194,7 +222,7 @@ int main(void) {
     #define SYM(n) *(void**)&n = dlsym(lib, #n)
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
     SYM(C_Login); SYM(C_Logout); SYM(C_InitPIN); SYM(C_GetMechanismList);
-    SYM(C_GenerateKeyPair); SYM(C_GetAttributeValue);
+    SYM(C_GenerateKeyPair); SYM(C_GetAttributeValue); SYM(C_CreateObject);
     SYM(C_SignInit); SYM(C_Sign); SYM(C_SignUpdate); SYM(C_SignFinal);
     SYM(C_VerifyInit); SYM(C_Verify); SYM(C_DigestInit); SYM(C_Digest);
     if (!C_GenerateKeyPair || !C_Sign || !C_Digest) { fprintf(stderr, "missing symbols\n"); return 2; }
@@ -221,6 +249,12 @@ int main(void) {
         snprintf(what, sizeof what, "(N) %s: CKM_DSA_KEY_PAIR_GEN refused (0x%lx)",
                  nist ? "NIST's rules" : "DSA from the FIPS provider only", rv);
         ok(rv == CKR_MECHANISM_INVALID && !listed(CKM_DSA_SHA256), what);
+        CK_BYTE yv[256]; memset(yv, 0x5A, sizeof yv);
+        CK_OBJECT_HANDLE h = 0;
+        CK_RV ri = import(CKO_PUBLIC_KEY, dsa_p, sizeof dsa_p, dsa_q, sizeof dsa_q,
+                          dsa_g, sizeof dsa_g, 3, yv, sizeof yv, &h);
+        snprintf(what, sizeof what, "(N) C_CreateObject of a DSA public key refused (0x%lx)", ri);
+        ok(ri == CKR_TEMPLATE_INCONSISTENT, what);
         C_Finalize(NULL);
         printf("\n%s\n", fails ? "FAILURES" : "all good");
         return fails ? 1 : 0;
@@ -300,6 +334,64 @@ int main(void) {
                  r1, r2, r3, r4);
         ok(r1 == CKR_TEMPLATE_INCOMPLETE && r2 == CKR_DOMAIN_PARAMS_INVALID
            && r3 == CKR_DOMAIN_PARAMS_INVALID && r4 == CKR_KEY_TYPE_INCONSISTENT, what);
+    }
+
+    /* --- (I) C_CreateObject (#42) ---------------------------------------- */
+    {
+        /* A second pair whose private half is readable, for its x. */
+        CK_MECHANISM m = { CKM_DSA_KEY_PAIR_GEN, NULL, 0 };
+        CK_ATTRIBUTE pt[] = { { CKA_TOKEN, &no, 1 }, { CKA_VERIFY, &yes, 1 },
+                              { CKA_PRIME, (void*)dsa_p, sizeof dsa_p },
+                              { CKA_SUBPRIME, (void*)dsa_q, sizeof dsa_q },
+                              { CKA_BASE, (void*)dsa_g, sizeof dsa_g } };
+        CK_ATTRIBUTE vt[] = { { CKA_TOKEN, &no, 1 }, { CKA_SIGN, &yes, 1 },
+                              { CKA_SENSITIVE, &no, 1 }, { CKA_EXTRACTABLE, &yes, 1 } };
+        CK_OBJECT_HANDLE gpub = 0, gprv = 0, ipub = 0, iprv = 0, h = 0;
+        CK_BYTE y[256], x[32];
+        CK_ATTRIBUTE ya = { CKA_VALUE, y, sizeof y }, xa = { CKA_VALUE, x, sizeof x };
+        rv = C_GenerateKeyPair(s, &m, pt, 5, vt, 4, &gpub, &gprv);
+        int have = rv == CKR_OK && C_GetAttributeValue(s, gpub, &ya, 1) == CKR_OK
+                   && C_GetAttributeValue(s, gprv, &xa, 1) == CKR_OK;
+        snprintf(what, sizeof what, "(I) a pair with a readable x: 0x%lx, x of %lu bytes", rv, xa.ulValueLen);
+        ok(have && xa.ulValueLen > 0 && xa.ulValueLen <= 32, what);
+
+        CK_RV r1 = have ? import(CKO_PUBLIC_KEY, dsa_p, sizeof dsa_p, dsa_q, sizeof dsa_q,
+                                 dsa_g, sizeof dsa_g, 3, y, ya.ulValueLen, &ipub) : 0xFFFF;
+        sl = sizeof sig;
+        rv = sign(CKM_DSA_SHA256, gprv, msg, 100, sig, &sl);
+        v1 = r1 == CKR_OK && rv == CKR_OK ? verify(CKM_DSA_SHA256, ipub, msg, 100, sig, sl) : 0xFFFF;
+        snprintf(what, sizeof what, "(I) public key from p, q, g, y verifies the pair's signature (0x%lx 0x%lx)",
+                 r1, v1);
+        ok(r1 == CKR_OK && v1 == CKR_OK, what);
+
+        CK_RV r2 = have ? import(CKO_PRIVATE_KEY, dsa_p, sizeof dsa_p, dsa_q, sizeof dsa_q,
+                                 dsa_g, sizeof dsa_g, 3, x, xa.ulValueLen, &iprv) : 0xFFFF;
+        sl = sizeof sig;
+        rv = r2 == CKR_OK ? sign(CKM_DSA_SHA256, iprv, msg, 100, sig, &sl) : r2;
+        v2 = rv == CKR_OK ? verify(CKM_DSA_SHA256, gpub, msg, 100, sig, sl) : 0xFFFF;
+        snprintf(what, sizeof what, "(I) private key from p, q, g, x signs for the pair's y (0x%lx 0x%lx 0x%lx)",
+                 r2, rv, v2);
+        ok(r2 == CKR_OK && rv == CKR_OK && v2 == CKR_OK, what);
+        ok(r2 == CKR_OK && attr_is(iprv, CKA_PRIME, dsa_p, sizeof dsa_p)
+           && attr_is(iprv, CKA_BASE, dsa_g, sizeof dsa_g),
+           "(I) the imported private key reads back its p and g");
+
+        CK_BYTE one = 1, zero = 0;
+        CK_RV f1 = import(CKO_PUBLIC_KEY, dsa_p, sizeof dsa_p, dsa_q, sizeof dsa_q,
+                          dsa_g, sizeof dsa_g, 2, y, sizeof y, &h);
+        CK_RV f2 = import(CKO_PUBLIC_KEY, dsa_p, sizeof dsa_p, dsa_q, 20,
+                          dsa_g, sizeof dsa_g, 3, y, sizeof y, &h);
+        CK_RV f3 = import(CKO_PUBLIC_KEY, dsa_p, sizeof dsa_p, dsa_q, sizeof dsa_q,
+                          dsa_g, sizeof dsa_g, 3, &one, 1, &h);
+        CK_RV f4 = import(CKO_PRIVATE_KEY, dsa_p, sizeof dsa_p, dsa_q, sizeof dsa_q,
+                          dsa_g, sizeof dsa_g, 3, &zero, 1, &h);
+        CK_RV f5 = import(CKO_PRIVATE_KEY, dsa_p, sizeof dsa_p, dsa_q, sizeof dsa_q,
+                          dsa_g, sizeof dsa_g, 3, dsa_q, sizeof dsa_q, &h);
+        snprintf(what, sizeof what, "(I) no base, (2048, 160), y = 1, x = 0, x = q "
+                 "(0x%lx 0x%lx 0x%lx 0x%lx 0x%lx)", f1, f2, f3, f4, f5);
+        ok(f1 == CKR_TEMPLATE_INCOMPLETE && f2 == CKR_DOMAIN_PARAMS_INVALID
+           && f3 == CKR_ATTRIBUTE_VALUE_INVALID && f4 == CKR_ATTRIBUTE_VALUE_INVALID
+           && f5 == CKR_ATTRIBUTE_VALUE_INVALID, what);
     }
 
     C_Finalize(NULL);

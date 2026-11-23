@@ -7,6 +7,37 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+* **DSA keys import** (#42). `C_CreateObject` takes a `CKK_DSA` public key
+  from `CKA_PRIME`, `CKA_SUBPRIME`, `CKA_BASE` and `CKA_VALUE` (y), and a
+  private key from the same parameters and x (PKCS#11 v3.2 6.2.3, 6.2.4).
+  2.8.0 generated DSA key pairs and signed with them, but answered every
+  DSA import `CKR_TEMPLATE_INCONSISTENT`, so an external DSA signature could
+  not be verified. The parameters are checked as `CKM_DSA_KEY_PAIR_GEN`
+  checks them (`CKR_DOMAIN_PARAMS_INVALID`), y must be a valid public value
+  for them and x lie in [1, q - 1] (`CKR_ATTRIBUTE_VALUE_INVALID`). A private
+  key given as a DER blob in `CKA_VALUE` alone is stored as before. Where
+  the module does not offer DSA, the import is still refused. Reported by
+  AlexLaroche. `tests/test_dsa.c`.
+
+### Fixed
+* **`CKM_CHACHA20` with a 64-bit counter takes its last block** (#41). The
+  counter's room was 2^64 - 1 - start blocks, one short: from 2^64 - 1 the
+  one block left, and from 2^64 - 2 the second of two, were
+  `CKR_DATA_LEN_RANGE`. It is 2^64 - start; the 32-bit counter was right.
+  Reported by AlexLaroche from Wycheproof's XChaCha20 counter cases.
+  `tests/test_chacha20_poly1305.c`.
+* **The IKE derivations follow PKCS#11 v3.2 6.64 on key types and usage**
+  (#43). With `bDataAsKey` FALSE, and for `CKM_IKE1_PRF_DERIVE`,
+  `CKM_IKE2_PRF_PLUS_DERIVE` and `CKM_IKE1_EXTENDED_DERIVE`, the base key
+  must be of the prf's key type, `CKK_SHA256_HMAC` for `CKM_SHA256_HMAC`; a
+  generic secret or another HMAC type was taken and is now
+  `CKR_KEY_TYPE_INCONSISTENT`, as in Kryoptic. The keys the parameters
+  name -- `hKeygxy`, `hNewKey`, `hPrevKey`, the seed key -- are the prf's
+  data, not base keys, and no longer need `CKA_DERIVE`; they were refused
+  `CKR_KEY_FUNCTION_NOT_PERMITTED` without it, where NSS softoken and
+  Kryoptic take them. Reported by AlexLaroche. `tests/test_ike_prf.c`.
+
 ## [2.8.0] --- 2026-11-22
 
 *Minor, with no security fix. The rest of Alexandre Laroche's retest of

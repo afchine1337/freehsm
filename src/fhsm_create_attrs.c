@@ -32,6 +32,9 @@
 #define FHSM_CKA_EXPONENT_1         0x00000126UL
 #define FHSM_CKA_EXPONENT_2         0x00000127UL
 #define FHSM_CKA_COEFFICIENT        0x00000128UL
+#define FHSM_CKA_PRIME              0x00000130UL
+#define FHSM_CKA_SUBPRIME           0x00000131UL
+#define FHSM_CKA_BASE               0x00000132UL
 
 #define FHSM_CKO_DATA               0x00000000UL
 #define FHSM_CKO_CERTIFICATE        0x00000001UL
@@ -43,6 +46,7 @@
 #define FHSM_CKC_X_509              0x00000000UL
 
 #define FHSM_CKK_RSA                0x00000000UL
+#define FHSM_CKK_DSA                0x00000001UL
 #define FHSM_CKK_EC                 0x00000003UL
 #define FHSM_CKK_EC_EDWARDS         0x00000040UL
 #define FHSM_CKK_ML_KEM             0x00000049UL
@@ -320,6 +324,31 @@ static fhsm_parse_rv_t parse_rsa_priv(
     return FHSM_PARSE_OK;
 }
 
+/* CKK_DSA, public or private, as PKCS#11 v3.2 6.2.3 and 6.2.4 give it: the
+ * domain parameters CKA_PRIME, CKA_SUBPRIME and CKA_BASE, and CKA_VALUE (y
+ * for the public key, x for the private one). All four required. Presence
+ * only here; the builder checks the parameters as key-pair generation does,
+ * and the value against them. */
+static fhsm_parse_rv_t parse_dsa(
+    const fhsm_attr_t *t, unsigned long n, int priv,
+    fhsm_create_attrs_t *attrs) {
+    struct { unsigned long cka; const uint8_t **p; size_t *len; } m[] = {
+        { FHSM_CKA_PRIME,    &attrs->ffc_p,      &attrs->ffc_p_len },
+        { FHSM_CKA_SUBPRIME, &attrs->ffc_q,      &attrs->ffc_q_len },
+        { FHSM_CKA_BASE,     &attrs->ffc_g,      &attrs->ffc_g_len },
+        { FHSM_CKA_VALUE,    &attrs->value_data, &attrs->value_len },
+    };
+    for (size_t i = 0; i < sizeof m / sizeof m[0]; ++i) {
+        long ix = fhsm_find_attr(t, n, m[i].cka);
+        if (ix < 0 || t[ix].pValue == NULL || t[ix].ulValueLen == 0)
+            return FHSM_PARSE_TEMPLATE_INCOMPLETE;
+        *m[i].p   = (const uint8_t *)t[ix].pValue;
+        *m[i].len = (size_t)t[ix].ulValueLen;
+    }
+    attrs->path = priv ? FHSM_CREATE_PATH_DSA_PRIV : FHSM_CREATE_PATH_DSA_PUB;
+    return FHSM_PARSE_OK;
+}
+
 /* ---------------------------------------------------------------------------
  * Public entry point. Reads CKA_CLASS / CKA_KEY_TYPE / CKA_LABEL / CKA_ID
  * then dispatches to the right sub-parser based on (cko, ckk).
@@ -430,6 +459,13 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
         && fhsm_find_attr(pTemplate, ulCount, FHSM_CKA_VALUE) < 0)
         return parse_rsa_priv(pTemplate, ulCount, attrs);
 
+    /* A DSA private key given as the standard defines it (#42). Chosen when
+     * CKA_PRIME is present, so a DER private key in CKA_VALUE alone still
+     * goes to the verbatim path below. */
+    if (attrs->cko == FHSM_CKO_PRIVATE_KEY && attrs->ckk == FHSM_CKK_DSA
+        && fhsm_find_attr(pTemplate, ulCount, FHSM_CKA_PRIME) >= 0)
+        return parse_dsa(pTemplate, ulCount, 1, attrs);
+
     if (attrs->cko == FHSM_CKO_SECRET_KEY
         || attrs->cko == FHSM_CKO_PRIVATE_KEY)
         return parse_verbatim(pTemplate, ulCount, attrs);
@@ -457,6 +493,9 @@ fhsm_parse_rv_t fhsm_parse_create_attrs(
 
     if (attrs->cko == FHSM_CKO_PUBLIC_KEY && attrs->ckk == FHSM_CKK_RSA)
         return parse_rsa_pub(pTemplate, ulCount, attrs);
+
+    if (attrs->cko == FHSM_CKO_PUBLIC_KEY && attrs->ckk == FHSM_CKK_DSA)
+        return parse_dsa(pTemplate, ulCount, 0, attrs);
 
     return FHSM_PARSE_TEMPLATE_INCONSISTENT;
 }

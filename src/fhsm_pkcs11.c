@@ -1604,6 +1604,57 @@ static int fhsm_dsa_available(void) {
     return ok;
 }
 
+/* DSA domain parameters p, q and g as big-endian bytes, checked as
+ * CKM_DSA_KEY_PAIR_GEN checks them: each 1 to 384 bytes, else
+ * CKR_ATTRIBUTE_VALUE_INVALID; sizes one of FIPS 186-4's (L, N) pairs,
+ * (1024, 160), (2048, 224), (2048, 256) or (3072, 256), and OpenSSL's
+ * parameter validation -- p and q prime, q dividing p - 1, g of order q --
+ * else CKR_DOMAIN_PARAMS_INVALID. On success *dom holds the parameters, the
+ * caller's to free. Shared by key-pair generation and, since 2.9.0, by
+ * C_CreateObject, which could not import a DSA key at all (#42). */
+static CK_RV fhsm_dsa_domain(const uint8_t *p, size_t pl, const uint8_t *q, size_t ql,
+                             const uint8_t *g, size_t gl, EVP_PKEY **dom) {
+    *dom = NULL;
+    if (!p || !q || !g || pl == 0 || ql == 0 || gl == 0
+        || pl > 384 || ql > 384 || gl > 384)
+        return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+    BIGNUM *bp = BN_bin2bn(p, (int)pl, NULL);
+    BIGNUM *bq = BN_bin2bn(q, (int)ql, NULL);
+    BIGNUM *bg = BN_bin2bn(g, (int)gl, NULL);
+    CK_RV drv = FHSM_RV_OK;
+    if (!bp || !bq || !bg) drv = FHSM_RV_HOST_MEMORY;
+    if (drv == FHSM_RV_OK) {
+        const int L = BN_num_bits(bp), N = BN_num_bits(bq);
+        if (!((L == 1024 && N == 160) || (L == 2048 && N == 224)
+              || (L == 2048 && N == 256) || (L == 3072 && N == 256)))
+            drv = 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
+    }
+    if (drv == FHSM_RV_OK) {
+        OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+        OSSL_PARAM *dp = NULL;
+        if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
+            && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, bq) == 1
+            && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1)
+            dp = OSSL_PARAM_BLD_to_param(bld);
+        OSSL_PARAM_BLD_free(bld);
+        EVP_PKEY_CTX *fc = dp ? EVP_PKEY_CTX_new_from_name(NULL, "DSA", NULL) : NULL;
+        if (!fc || EVP_PKEY_fromdata_init(fc) != 1
+            || EVP_PKEY_fromdata(fc, dom, EVP_PKEY_KEY_PARAMETERS, dp) != 1)
+            drv = 0x00000130UL;
+        EVP_PKEY_CTX_free(fc);
+        OSSL_PARAM_free(dp);
+    }
+    if (drv == FHSM_RV_OK) {
+        EVP_PKEY_CTX *vc = EVP_PKEY_CTX_new_from_pkey(NULL, *dom, NULL);
+        if (!vc || EVP_PKEY_param_check(vc) != 1) drv = 0x00000130UL;
+        EVP_PKEY_CTX_free(vc);
+        ERR_clear_error();
+    }
+    BN_free(bp); BN_free(bq); BN_free(bg);
+    if (drv != FHSM_RV_OK) { EVP_PKEY_free(*dom); *dom = NULL; }
+    return drv;
+}
+
 /* RSA signatures with X9.31 padding (2.8.0): a provider other than the FIPS
  * one serves RSA signatures, as the FIPS provider refuses X9.31 padding for
  * signing (FIPS 186-5 withdrew it). */
@@ -5125,6 +5176,79 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         EVP_PKEY_CTX_free(pctx);
         OSSL_PARAM_free(params);
 
+    } else if (a.path == FHSM_CREATE_PATH_DSA_PUB || a.path == FHSM_CREATE_PATH_DSA_PRIV) {
+        /* A DSA key from its values (#42). 2.8.0 generated DSA key pairs and
+         * signed with them, and refused every DSA import with
+         * CKR_TEMPLATE_INCONSISTENT: no path took one. Where the module does
+         * not offer DSA -- NIST's rules, or a FIPS provider that keeps DSA for
+         * verification only -- it still does not, as before.
+         *
+         * The domain parameters are checked as CKM_DSA_KEY_PAIR_GEN checks
+         * them (fhsm_dsa_domain). y must be a valid public value for them
+         * (EVP_PKEY_public_check: 1 < y < p - 1, y^q = 1 mod p); x must lie in
+         * [1, q - 1] (EVP_PKEY_private_check). The private key's y is computed
+         * as g^x mod p: the template has no attribute for it. */
+        const int dpriv = (a.path == FHSM_CREATE_PATH_DSA_PRIV);
+        if (fhsm_build_fips_strict || fhsm_mode_is_fips() || !fhsm_dsa_available())
+            return CKR_TEMPLATE_INCONSISTENT;
+        if (a.value_len > 384) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+        EVP_PKEY *dom = NULL;
+        CK_RV drv = fhsm_dsa_domain(a.ffc_p, a.ffc_p_len, a.ffc_q, a.ffc_q_len,
+                                    a.ffc_g, a.ffc_g_len, &dom);
+        EVP_PKEY_free(dom);
+        if (drv != FHSM_RV_OK) return drv;
+        BIGNUM *bp = BN_bin2bn(a.ffc_p, (int)a.ffc_p_len, NULL);
+        BIGNUM *bq = BN_bin2bn(a.ffc_q, (int)a.ffc_q_len, NULL);
+        BIGNUM *bg = BN_bin2bn(a.ffc_g, (int)a.ffc_g_len, NULL);
+        BIGNUM *bv = dpriv ? BN_secure_new() : BN_new();
+        BIGNUM *by = dpriv ? BN_new() : NULL;
+        BN_CTX *bc = dpriv ? BN_CTX_secure_new() : NULL;
+        OSSL_PARAM *params = NULL;
+        drv = FHSM_RV_OK;
+        if (!bp || !bq || !bg || !bv || (dpriv && (!by || !bc))
+            || !BN_bin2bn(a.value_data, (int)a.value_len, bv))
+            drv = FHSM_RV_HOST_MEMORY;
+        if (drv == FHSM_RV_OK && dpriv) {
+            BN_set_flags(bv, BN_FLG_CONSTTIME);
+            if (BN_is_zero(bv) || BN_cmp(bv, bq) >= 0)
+                drv = FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            else if (!BN_mod_exp(by, bg, bv, bp, bc))
+                drv = FHSM_RV_FUNCTION_FAILED;
+        }
+        if (drv == FHSM_RV_OK) {
+            OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+            if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
+                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, bq) == 1
+                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1
+                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PUB_KEY, dpriv ? by : bv) == 1
+                && (!dpriv || OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, bv) == 1))
+                params = OSSL_PARAM_BLD_to_param(bld);
+            OSSL_PARAM_BLD_free(bld);
+            if (!params) drv = FHSM_RV_FUNCTION_FAILED;
+        }
+        if (drv == FHSM_RV_OK) {
+            pctx = EVP_PKEY_CTX_new_from_name(NULL, "DSA", NULL);
+            if (!pctx || EVP_PKEY_fromdata_init(pctx) != 1
+                || EVP_PKEY_fromdata(pctx, &pkey,
+                                     dpriv ? EVP_PKEY_KEYPAIR : EVP_PKEY_PUBLIC_KEY,
+                                     params) != 1)
+                drv = FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            EVP_PKEY_CTX_free(pctx);
+            pctx = NULL;
+        }
+        if (drv == FHSM_RV_OK) {
+            EVP_PKEY_CTX *chk = EVP_PKEY_CTX_new_from_pkey(NULL, pkey, NULL);
+            if (!chk || EVP_PKEY_public_check(chk) != 1
+                || (dpriv && EVP_PKEY_private_check(chk) != 1))
+                drv = FHSM_RV_ATTRIBUTE_VALUE_INVALID;
+            EVP_PKEY_CTX_free(chk);
+            ERR_clear_error();
+        }
+        OSSL_PARAM_free(params);
+        BN_free(bp); BN_free(bq); BN_free(bg); BN_clear_free(bv); BN_free(by);
+        BN_CTX_free(bc);
+        if (drv != FHSM_RV_OK) { EVP_PKEY_free(pkey); return drv; }
+
     } else {
         /* Should not happen : the parser only emits the paths listed
          * above when it returns OK. Defensive return to satisfy the
@@ -5141,7 +5265,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * This is the same shape the verbatim branch above guards against, at the
      * other end of the same function: what is stored must be what every later
      * reader expects, and d2i_AutoPrivateKey is what reads this one. */
-    int is_priv = (a.path == FHSM_CREATE_PATH_RSA_PRIV);
+    int is_priv = (a.path == FHSM_CREATE_PATH_RSA_PRIV
+                   || a.path == FHSM_CREATE_PATH_DSA_PRIV);
     uint8_t *enc = NULL;
     int enc_len = is_priv ? i2d_PrivateKey(pkey, &enc) : i2d_PUBKEY(pkey, &enc);
     EVP_PKEY_free(pkey);
@@ -6216,23 +6341,20 @@ static CK_ULONG ike_hmac_key_type(fhsm_hash_t h) {
         case FHSM_HASH_BLAKE2B_256: return 0x3B;
         case FHSM_HASH_BLAKE2B_384: return 0x3C;
         case FHSM_HASH_BLAKE2B_512: return 0x3D;
+        case FHSM_HASH_MD5:         return 0x27;
         default:                    return CKK_GENERIC_SECRET;
     }
 }
 
-static int ike_prf_key_type_ok(uint32_t kt) {
-    switch (kt) {
-        case 0x10: case 0x28: case 0x2A: case 0x2B: case 0x2C: case 0x2D: case 0x2E:
-        case 0x36: case 0x37: case 0x38: case 0x39:
-        case 0x3A: case 0x3B: case 0x3C: case 0x3D: case 0x43: case 0x44:
-            return 1;
-        default:
-            return 0;
-    }
-}
-
 /* A key the parameter names: visible, a secret key -- a generic secret
- * where `generic` -- that permits derivation, as HKDF's salt key must. */
+ * where `generic`.
+ *
+ * Its value is input data for the prf, not a base key, and §6.64 asks of it a
+ * key type only: hKeygxy and hNewKey a generic secret, hPrevKey and the seed
+ * key nothing more. This also asked for CKA_DERIVE, as HKDF does of its salt
+ * key, and refused a caller who followed the specification with
+ * CKR_KEY_FUNCTION_NOT_PERMITTED; NSS softoken and Kryoptic take such keys
+ * (#43). The base key's own CKA_DERIVE is checked as for every derivation. */
 static CK_RV ike_aux_key(fhsm_token_t *t, CK_OBJECT_HANDLE h, int generic,
                          const uint8_t **v, size_t *vl) {
     { CK_RV vr = fhsm_key_handle_visible(t, h, FHSM_RV_KEY_HANDLE_INVALID);
@@ -6242,7 +6364,7 @@ static CK_RV ike_aux_key(fhsm_token_t *t, CK_OBJECT_HANDLE h, int generic,
     if (r != FHSM_RV_OK) return r;
     if (cl != CKO_SECRET_KEY || (generic && kt != CKK_GENERIC_SECRET))
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
-    return fhsm_check_usage(t, h, FHSM_USAGE_DERIVE);
+    return FHSM_RV_OK;
 }
 
 /* Bytes appended to a buffer the caller sized. */
@@ -6291,9 +6413,13 @@ static CK_RV ike_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     uint32_t bcl = 0, bkt = 0;
     { fhsm_rv_t r = fhsm_token_object_get(t, (uint32_t)hBaseKey, &bv, &bvl, &bcl, &bkt);
       if (r != FHSM_RV_OK) return r; }
+    /* §6.64.3 to §6.64.6: a generic secret when bDataAsKey is TRUE, "the key
+     * type of the underlying prf" otherwise -- CKK_SHA256_HMAC for
+     * CKM_SHA256_HMAC, and not a generic secret. Any HMAC key type or a
+     * generic secret was taken; Kryoptic takes the prf's type only (#43). */
     const int data_as_key = m == FHSM_CKM_IKE_PRF_DERIVE && p.a.bDataAsKey;
     if (bcl != CKO_SECRET_KEY || bvl == 0
-        || (data_as_key ? bkt != CKK_GENERIC_SECRET : !ike_prf_key_type_ok(bkt)))
+        || bkt != (data_as_key ? CKK_GENERIC_SECRET : (uint32_t)ike_hmac_key_type(h)))
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
 
     /* The template's type and length, per mechanism (6.64.3 to 6.64.6). */
@@ -10458,53 +10584,18 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         const long iq = find_attr(pPub, ulPub, 0x131UL /* CKA_SUBPRIME */);
         const long ig = find_attr(pPub, ulPub, 0x132UL /* CKA_BASE */);
         if (ip < 0 || iq < 0 || ig < 0) return CKR_TEMPLATE_INCOMPLETE;
-        const long idx[3] = { ip, iq, ig };
-        for (int k = 0; k < 3; ++k)
-            if (!pPub[idx[k]].pValue || pPub[idx[k]].ulValueLen == 0
-                || pPub[idx[k]].ulValueLen > 384)
-                return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-        BIGNUM *bp = BN_bin2bn(pPub[ip].pValue, (int)pPub[ip].ulValueLen, NULL);
-        BIGNUM *bq = BN_bin2bn(pPub[iq].pValue, (int)pPub[iq].ulValueLen, NULL);
-        BIGNUM *bg = BN_bin2bn(pPub[ig].pValue, (int)pPub[ig].ulValueLen, NULL);
-        CK_RV drv = FHSM_RV_OK;
-        if (!bp || !bq || !bg) drv = FHSM_RV_HOST_MEMORY;
-        if (drv == FHSM_RV_OK) {
-            const int L = BN_num_bits(bp), N = BN_num_bits(bq);
-            if (!((L == 1024 && N == 160) || (L == 2048 && N == 224)
-                  || (L == 2048 && N == 256) || (L == 3072 && N == 256)))
-                drv = 0x00000130UL;   /* CKR_DOMAIN_PARAMS_INVALID */
-        }
         EVP_PKEY *dom = NULL;
-        if (drv == FHSM_RV_OK) {
-            OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
-            OSSL_PARAM *dp = NULL;
-            if (bld && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_P, bp) == 1
-                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_Q, bq) == 1
-                && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_FFC_G, bg) == 1)
-                dp = OSSL_PARAM_BLD_to_param(bld);
-            OSSL_PARAM_BLD_free(bld);
-            EVP_PKEY_CTX *fc = dp ? EVP_PKEY_CTX_new_from_name(NULL, "DSA", NULL) : NULL;
-            if (!fc || EVP_PKEY_fromdata_init(fc) != 1
-                || EVP_PKEY_fromdata(fc, &dom, EVP_PKEY_KEY_PARAMETERS, dp) != 1)
-                drv = 0x00000130UL;
-            EVP_PKEY_CTX_free(fc);
-            OSSL_PARAM_free(dp);
-        }
-        if (drv == FHSM_RV_OK) {
-            EVP_PKEY_CTX *vc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
-            if (!vc || EVP_PKEY_param_check(vc) != 1) drv = 0x00000130UL;
-            EVP_PKEY_CTX_free(vc);
-            ERR_clear_error();
-        }
-        if (drv == FHSM_RV_OK) {
+        CK_RV drv = fhsm_dsa_domain(pPub[ip].pValue, (size_t)pPub[ip].ulValueLen,
+                                    pPub[iq].pValue, (size_t)pPub[iq].ulValueLen,
+                                    pPub[ig].pValue, (size_t)pPub[ig].ulValueLen, &dom);
+        if (drv != FHSM_RV_OK) return drv;
+        {
             EVP_PKEY_CTX *kc = EVP_PKEY_CTX_new_from_pkey(NULL, dom, NULL);
             if (!kc || EVP_PKEY_keygen_init(kc) != 1 || EVP_PKEY_generate(kc, &pkey) != 1)
                 pkey = NULL;   /* reported below, with OpenSSL's reason */
             EVP_PKEY_CTX_free(kc);
         }
         EVP_PKEY_free(dom);
-        BN_free(bp); BN_free(bq); BN_free(bg);
-        if (drv != FHSM_RV_OK) return drv;
         ckk_type = 0x00000001UL;   /* CKK_DSA */
         pw_family = FHSM_PAIRWISE_DSA;
     } else if (pMechanism->mechanism == 0x00000020UL /* CKM_DH_PKCS_KEY_PAIR_GEN */) {
@@ -13847,7 +13938,14 @@ static fhsm_rv_t op_init(fhsm_op_t *op, CK_SESSION_HANDLE hSession,
         op->have_iv = 1;
         uint64_t start = 0;
         for (size_t i = cb; i-- > 0;) start = (start << 8) | op->iv[i];
-        op->ctr_blocks_max = cb == 4 ? (((uint64_t)1 << 32) - start) : (UINT64_MAX - start);
+        /* Room: 2^32 - start blocks, or 2^64 - start. The second does not fit
+         * a uint64_t when start is 0, and then any length fits: ctr_take
+         * counts the blocks of a uint64_t of bytes, at most 2^58. It was
+         * UINT64_MAX - start, one block short: a counter at 2^64 - 1 had no
+         * room for the one block it has (#41). */
+        op->ctr_blocks_max = cb == 4    ? (((uint64_t)1 << 32) - start)
+                           : start == 0 ? UINT64_MAX
+                                        : (UINT64_MAX - start) + 1;
         op->ctr_bytes_done = 0;
     }
     /* The key-wrap IV of §6.16.2, captured here for the C_Encrypt / C_Decrypt

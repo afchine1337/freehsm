@@ -82,6 +82,15 @@ typedef enum {
      * required for this class (PKCS#11 v3.2 par. 4.6.3) ; cert_type
      * below carries the CKA_CERTIFICATE_TYPE value instead. */
     FHSM_CREATE_PATH_CERT_X509,
+    /* CKO_PUBLIC_KEY + CKK_DSA: CKA_PRIME, CKA_SUBPRIME, CKA_BASE and
+     * CKA_VALUE (y), all required (PKCS#11 v3.2 6.2.3). 2.9.0: no path took a
+     * DSA key, and the import answered CKR_TEMPLATE_INCONSISTENT (#42). */
+    FHSM_CREATE_PATH_DSA_PUB,
+    /* CKO_PRIVATE_KEY + CKK_DSA given as p, q, g and CKA_VALUE (x) (6.2.4).
+     * Chosen when CKA_PRIME is present; a DSA private key without it is a
+     * DER blob in CKA_VALUE and stays on the verbatim path, as an RSA one
+     * with CKA_VALUE does. */
+    FHSM_CREATE_PATH_DSA_PRIV,
 } fhsm_create_path_t;
 
 /* All data parsed from the template. Pointer fields (id_data, value_data,
@@ -139,6 +148,11 @@ typedef struct fhsm_create_attrs_s {
     const uint8_t      *rsa_dmp1;   size_t rsa_dmp1_len;
     const uint8_t      *rsa_dmq1;   size_t rsa_dmq1_len;
     const uint8_t      *rsa_iqmp;   size_t rsa_iqmp_len;
+
+    /* === DSA paths === The domain parameters; y or x is in value_data. */
+    const uint8_t      *ffc_p;      size_t ffc_p_len;
+    const uint8_t      *ffc_q;      size_t ffc_q_len;
+    const uint8_t      *ffc_g;      size_t ffc_g_len;
 } fhsm_create_attrs_t;
 
 /* Return codes match the subset of FHSM_RV / CKR codes that C_CreateObject

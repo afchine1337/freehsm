@@ -21,7 +21,11 @@
  *   (E) CKM_IKE1_EXTENDED_DERIVE: SKEYID cut, K1 = prf(K, 0x00) expanded,
  *       and from g^xy and extra data (RFC 2409 appendix B, 5.5). Refused
  *       where NIST's rules apply.
- *   (F) a *_HMAC_GENERAL prf, an AES base key, an AES g^ir.
+ *   (F) a *_HMAC_GENERAL prf, an AES base key, an AES g^ir; with bDataAsKey
+ *       FALSE, a generic secret base key and a CKK_SHA_1_HMAC one under the
+ *       SHA-256 prf (#43).
+ *   (D) g^xy, the new g^ir and the previous key without CKA_DERIVE: taken,
+ *       their values are the prf's data, not base keys (#43).
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -54,6 +58,7 @@ typedef struct { CK_ULONG prfMechanism; CK_BYTE bHasSeedKey; CK_OBJECT_HANDLE hS
 #define CKO_SECRET_KEY                 4UL
 #define CKK_GENERIC_SECRET             0x10UL
 #define CKK_AES                        0x1FUL
+#define CKK_SHA_1_HMAC                 0x28UL
 #define CKK_SHA256_HMAC                0x2BUL
 #define CKA_CLASS                      0x000UL
 #define CKA_TOKEN                      0x001UL
@@ -108,14 +113,20 @@ static int listed(CK_ULONG mech) {
     return found;
 }
 
-/* A secret key of type kt holding v, readable, that derives and signs. */
-static CK_OBJECT_HANDLE secret(CK_ULONG kt, const CK_BYTE *v, CK_ULONG vl) {
+/* A secret key of type kt holding v, readable, that signs, and derives
+ * unless `derive` is 0. */
+static CK_OBJECT_HANDLE secret_d(CK_ULONG kt, const CK_BYTE *v, CK_ULONG vl, int derive) {
     CK_ULONG cls = CKO_SECRET_KEY;
     CK_ATTRIBUTE t[] = { { CKA_CLASS, &cls, sizeof cls }, { CKA_KEY_TYPE, &kt, sizeof kt },
                          { CKA_TOKEN, &no, 1 }, { CKA_SENSITIVE, &no, 1 }, { CKA_EXTRACTABLE, &yes, 1 },
-                         { CKA_DERIVE, &yes, 1 }, { CKA_SIGN, &yes, 1 }, { CKA_VALUE, (void*)v, vl } };
+                         { CKA_DERIVE, derive ? &yes : &no, 1 }, { CKA_SIGN, &yes, 1 },
+                         { CKA_VALUE, (void*)v, vl } };
     CK_OBJECT_HANDLE h = 0;
     return C_CreateObject(s, t, 8, &h) == CKR_OK ? h : 0;
+}
+
+static CK_OBJECT_HANDLE secret(CK_ULONG kt, const CK_BYTE *v, CK_ULONG vl) {
+    return secret_d(kt, v, vl, 1);
 }
 
 static CK_ULONG value_of(CK_OBJECT_HANDLE h, CK_BYTE *buf, CK_ULONG cap) {
@@ -174,7 +185,8 @@ int main(void) {
                                    aesv[i] = (CK_BYTE)(0x5C + i); }
     for (int i = 0; i < 8; i++)  { ckyi[i] = (CK_BYTE)(0x11 * i); ckyr[i] = (CK_BYTE)(0x80 | i); }
     CK_OBJECT_HANDLE kgir = secret(CKK_GENERIC_SECRET, gir, 32);
-    CK_OBJECT_HANDLE kpsk = secret(CKK_GENERIC_SECRET, psk, 24);
+    /* SKEYID's base key, with bDataAsKey FALSE: the prf's key type. */
+    CK_OBJECT_HANDLE kpsk = secret(CKK_SHA256_HMAC, psk, 24);
     CK_OBJECT_HANDLE kaes = secret(CKK_AES, aesv, 16);
     if (!kgir || !kpsk || !kaes) { fprintf(stderr, "base keys\n"); return 2; }
 
@@ -362,6 +374,36 @@ int main(void) {
                  r1, r2, r3);
         ok(r1 == CKR_MECHANISM_PARAM_INVALID && r2 == CKR_KEY_TYPE_INCONSISTENT
            && r3 == CKR_KEY_TYPE_INCONSISTENT, what);
+
+        /* bDataAsKey FALSE: the base key is the prf's type, CKK_SHA256_HMAC
+         * here. A generic secret and another HMAC type were taken. */
+        CK_OBJECT_HANDLE ksha1 = secret(CKK_SHA_1_HMAC, psk, 24);
+        p.bRekey = 0; p.hNewKey = 0;
+        CK_RV r4 = C_DeriveKey(s, &m, kgir, dt, 5, &h);
+        CK_RV r5 = ksha1 ? C_DeriveKey(s, &m, ksha1, dt, 5, &h) : CKR_OK;
+        snprintf(what, sizeof what, "(F) not the prf's key type: generic, SHA-1 HMAC (0x%lx 0x%lx)",
+                 r4, r5);
+        ok(r4 == CKR_KEY_TYPE_INCONSISTENT && r5 == CKR_KEY_TYPE_INCONSISTENT, what);
+    }
+
+    /* --- (D) the keys the parameters name need no CKA_DERIVE ------------- */
+    if (seed && skeyid) {
+        CK_OBJECT_HANDLE gnd = secret_d(CKK_GENERIC_SECRET, gir, 32, 0);
+        CK_OBJECT_HANDLE pnd = secret_d(CKK_GENERIC_SECRET, psk, 24, 0);
+        CK_OBJECT_HANDLE h = 0;
+        CK_IKE1_PRF_DERIVE_PARAMS p1 = { CKM_SHA256_HMAC, 1, gnd, pnd, ckyi, 8, ckyr, 8, 1 };
+        CK_MECHANISM m1 = { CKM_IKE1_PRF_DERIVE, &p1, sizeof p1 };
+        CK_RV r1 = gnd && pnd ? C_DeriveKey(s, &m1, skeyid, dt, 6, &h) : (CK_RV)-1;
+        il = 0; cat(in, &il, psk, 24); cat(in, &il, gir, 32); cat(in, &il, ckyi, 8);
+        cat(in, &il, ckyr, 8); in[il++] = 1;
+        int good1 = r1 == CKR_OK && value_of(h, got, sizeof got) == 32
+                    && prf(skeyidv, 32, in, il, want) && !memcmp(got, want, 32);
+        CK_IKE_PRF_DERIVE_PARAMS pr = { CKM_SHA256_HMAC, 0, 1, ni, 16, nr, 16, gnd };
+        CK_MECHANISM mr = { CKM_IKE_PRF_DERIVE, &pr, sizeof pr };
+        CK_RV r2 = gnd ? C_DeriveKey(s, &mr, seed, dt, 5, &h) : (CK_RV)-1;
+        snprintf(what, sizeof what, "(D) g^xy, previous key, new g^ir without CKA_DERIVE (0x%lx 0x%lx)",
+                 r1, r2);
+        ok(good1 && r2 == CKR_OK, what);
     }
 
     C_Finalize(NULL);

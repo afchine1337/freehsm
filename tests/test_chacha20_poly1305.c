@@ -8,10 +8,12 @@
  *   (V) ChaCha20: RFC 8439 2.4.2 (32-bit counter at 1, 96-bit nonce, 114
  *       bytes); the 64-bit counter and nonce layout at counter 0, and at
  *       0xFFFFFFFF over 130 bytes, where the counter carries into its high
- *       word; the 32-bit counter at 0xFFFFFFFF for its last block. Through
- *       C_Encrypt, C_Decrypt, and both in parts of 5 bytes and the rest.
- *   (C) the 32-bit counter does not wrap: 65 bytes from 0xFFFFFFFF is
- *       CKR_DATA_LEN_RANGE, single-part and in parts.
+ *       word; the 64-bit counter's last two blocks from 2^64 - 2 and its
+ *       last one from 2^64 - 1 (#41); the 32-bit counter at 0xFFFFFFFF for
+ *       its last block. Through C_Encrypt, C_Decrypt, and both in parts of
+ *       5 bytes and the rest.
+ *   (C) neither counter wraps: 65 bytes from 0xFFFFFFFF (32-bit) and from
+ *       2^64 - 1 (64-bit) are CKR_DATA_LEN_RANGE, single-part and in parts.
  *   (M) Poly1305: RFC 8439 2.5.2, the empty message (the tag is s) and 100
  *       bytes; C_Sign, in parts, C_Verify, in parts; a changed message and
  *       a short tag are CKR_SIGNATURE_INVALID.
@@ -307,6 +309,24 @@ int main(void) {
                "7deb66caa93b99af0a574f754a30412019bc1e322dd2c6200536697a0f10ed27c3ebae934bc64e86"
                "ee15e543153cfa4a484a");
     }
+    /* The 64-bit counter's last blocks (#41): two from 2^64 - 2, one from
+     * 2^64 - 1. Both were CKR_DATA_LEN_RANGE, the room counted one short. */
+    CK_BYTE cfe64[8] = { 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    CK_BYTE cff64[8] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    CK_CHACHA20_PARAMS last64 = { cff64, 64, n64, 64 };
+    CK_MECHANISM mlast64 = { CKM_CHACHA20, &last64, sizeof last64 };
+    {
+        CK_CHACHA20_PARAMS cp = { cfe64, 64, n64, 64 };
+        CK_MECHANISM m = { CKM_CHACHA20, &cp, sizeof cp };
+        vector("(V) 64-bit counter, its last two blocks", &m, ck, pt, 128,
+               "f927334b890cc094a4f0cb6454f3e2d2404dc642f716a8b986292775b133c897932b8e1ece75d9fe"
+               "df5bed6493dd1c5a4f3d1f8b1c40a01038e4100da9473d4a061fc4000c3f7dec9fac2c421e97bf0a"
+               "e6412be433e16a79f2b14b6efd3fd2034fbde8a3c9d5f763c5b83ea7a8caa23471ba1b7c09fe96ba"
+               "643f7dd0b83200bf");
+    }
+    vector("(V) 64-bit counter, its last block", &mlast64, ck, pt, 64,
+           "c6df04c0ccffbd2c5fec6c025ed7ff4aa601eb24f321aab932718b2ebd7f92430ffda8e3891537a3"
+           "0578fe67680ae27431fa5b3c49bed67aa4ffbd1078f2c07f");
     CK_BYTE cff32[4] = { 0xff, 0xff, 0xff, 0xff };
     CK_CHACHA20_PARAMS last = { cff32, 32, n96b, 96 };
     CK_MECHANISM mlast = { CKM_CHACHA20, &last, sizeof last };
@@ -322,6 +342,12 @@ int main(void) {
         ol = sizeof out;
         CK_RV r2 = in_parts(1, &mlast, ck, pt, 65, out, &ol);
         snprintf(what, sizeof what, "(C) 65 bytes from 0xFFFFFFFF: DATA_LEN_RANGE (0x%lx 0x%lx)", r1, r2);
+        ok(r1 == CKR_DATA_LEN_RANGE && r2 == CKR_DATA_LEN_RANGE, what);
+        ol = sizeof out;
+        r1 = one_shot(1, &mlast64, ck, pt, 65, out, &ol);
+        ol = sizeof out;
+        r2 = in_parts(1, &mlast64, ck, pt, 65, out, &ol);
+        snprintf(what, sizeof what, "(C) 65 bytes from 2^64 - 1: DATA_LEN_RANGE (0x%lx 0x%lx)", r1, r2);
         ok(r1 == CKR_DATA_LEN_RANGE && r2 == CKR_DATA_LEN_RANGE, what);
     }
 
