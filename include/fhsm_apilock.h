@@ -18,6 +18,7 @@
 #ifndef FHSM_APILOCK_H
 #define FHSM_APILOCK_H
 #include <stddef.h>
+#include <openssl/types.h>
 
 /* ---------------------------------------------------------------------------
  * The PKCS#11 entry lock (#111-prep).
@@ -54,7 +55,31 @@ typedef enum {
     FHSM_API_EXCLUSIVE = 2
 } fhsm_api_mode_t;
 
-typedef struct { int taken; } fhsm_api_guard_t;
+/* The module's own OpenSSL library context.
+ *
+ * The module calls OpenSSL with a NULL library context throughout (EVP
+ * fetches, d2i_AutoPrivateKey, EVP_PKEY_fromdata, ...). NULL is the calling
+ * thread's default context, which in an application is the application's:
+ * whatever providers its openssl.cnf loads are candidates for the module's own
+ * operations. With pkcs11-provider configured for this module, decoding a
+ * stored key in C_SignFinal picked pkcs11-provider's key management, which
+ * imported the key back into this module and signed with it there -- the
+ * same C_SignFinal again, nested until CKR_HOST_MEMORY.
+ *
+ * So the outermost guarded C_ call makes a private context the thread's
+ * default (OSSL_LIB_CTX_set0_default is per thread) and the guard restores the
+ * caller's on the way out. Every NULL libctx in the module then means this
+ * one, and so do the provider loads and the default properties set by
+ * C_Initialize. The context is created once and lives as long as the process,
+ * as the objects fetched from it are kept across calls. */
+typedef struct {
+    int           taken;
+    int           libctx_switched;
+    OSSL_LIB_CTX *prev_libctx;
+} fhsm_api_guard_t;
+
+/* Returns the module's private library context, creating it if needed. */
+OSSL_LIB_CTX *fhsm_libctx(void);
 
 void fhsm_api_enter(fhsm_api_guard_t *g, fhsm_api_mode_t mode);
 void fhsm_api_leave(fhsm_api_guard_t *g);

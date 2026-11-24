@@ -418,6 +418,13 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
     }
     g_init_pid = self;
 
+    if (fhsm_libctx() == NULL) {
+        fprintf(stderr,
+            "[freehsm-c] FATAL : could not create OpenSSL library context.\n");
+        fhsm_state_latch_error("OpenSSL library context creation failed");
+        return FHSM_RV_HOST_MEMORY;
+    }
+
     /* Already initialized in this process: CKR_CRYPTOKI_ALREADY_INITIALIZED
      * (§5.4), and nothing is touched. The transition table refused
      * INITIALIZED -> INITIALIZING and that came back CKR_FUNCTION_FAILED, which
