@@ -57,6 +57,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   data, not base keys, and no longer need `CKA_DERIVE`; they were refused
   `CKR_KEY_FUNCTION_NOT_PERMITTED` without it, where NSS softoken and
   Kryoptic take them. Reported by AlexLaroche. `tests/test_ike_prf.c`.
+* **The module's OpenSSL calls run in its own library context** (#40). They
+  used the calling thread's default context, which in an application is the
+  application's, with the providers its configuration loads. With
+  pkcs11-provider configured for this module, decoding a stored private key
+  in `C_SignFinal` picked pkcs11-provider's key management: the key went
+  back into the token to be signed there, which entered `C_SignFinal` again,
+  nested until the module returned `CKR_HOST_MEMORY`. `C_Initialize` also
+  loaded its providers into the application's context and turned on its
+  `fips=yes` default property there. Each outermost `C_` call now makes a
+  private `OSSL_LIB_CTX` the thread's default and gives the caller's back on
+  return. The providers and properties go to that context, and stay loaded
+  until the module is unloaded, so a second `C_Initialize` in the same
+  process finds them. If the context cannot be created, `C_Initialize`
+  returns `CKR_HOST_MEMORY`. Contributed by Jakub Jelen.
+  `tests/test_app_context.c`, `tests/test_smoke.c`.
 
 ## [2.8.0] --- 2026-11-22
 
