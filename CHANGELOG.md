@@ -34,8 +34,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   module loads (fips and base), OpenSSL has no decoder for an X9.42 DH key,
   and the stored key read back as a legacy one whose parameters could not be
   read: every X9.42 key, generated or imported, answered
-  `CKR_ATTRIBUTE_TYPE_INVALID` for `CKA_PRIME` and failed
-  `CKM_X9_42_DH_DERIVE` (`CKR_FUNCTION_FAILED`, or
+  `CKR_ATTRIBUTE_TYPE_INVALID` for `CKA_PRIME` (the public key also for
+  `CKA_VALUE`) and failed `CKM_X9_42_DH_DERIVE` (`CKR_FUNCTION_FAILED`, or
   `CKR_DOMAIN_PARAMS_INVALID` where NIST's rules apply). Since 2.8.0;
   pkcs11-check's signed jobs recorded the generation as an xfail, and the
   unsigned module, on the default provider, was not affected. Such a key is

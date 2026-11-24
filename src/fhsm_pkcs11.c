@@ -1639,14 +1639,8 @@ static BIGNUM *ffc_der_integer(const unsigned char *d, long dl, int secure) {
     return bn;
 }
 
-/* p, g and q from an X9.42 algorithm identifier's parameters. */
-static int ffc_der_domain(const X509_ALGOR *alg, BIGNUM **p, BIGNUM **g, BIGNUM **q) {
-    const ASN1_OBJECT *obj = NULL;
-    const void *pval = NULL;
-    int ptype = 0;
-    X509_ALGOR_get0(&obj, &ptype, &pval, alg);
-    if (ptype != V_ASN1_SEQUENCE || !pval) return 0;
-    const ASN1_STRING *ps = pval;
+/* p, g and q from X9.42 DomainParameters (RFC 3279), the DER of `ps`. */
+static int ffc_der_domain_str(const ASN1_STRING *ps, BIGNUM **p, BIGNUM **g, BIGNUM **q) {
     const unsigned char *d = ASN1_STRING_get0_data(ps);
     STACK_OF(ASN1_TYPE) *seq = d2i_ASN1_SEQUENCE_ANY(NULL, &d, ASN1_STRING_length(ps));
     int ok = seq && sk_ASN1_TYPE_num(seq) >= 3;
@@ -1658,6 +1652,16 @@ static int ffc_der_domain(const X509_ALGOR *alg, BIGNUM **p, BIGNUM **g, BIGNUM 
     }
     sk_ASN1_TYPE_pop_free(seq, ASN1_TYPE_free);
     return ok;
+}
+
+/* The same, from an algorithm identifier's parameters. */
+static int ffc_der_domain(const X509_ALGOR *alg, BIGNUM **p, BIGNUM **g, BIGNUM **q) {
+    const ASN1_OBJECT *obj = NULL;
+    const void *pval = NULL;
+    int ptype = 0;
+    X509_ALGOR_get0(&obj, &ptype, &pval, alg);
+    if (ptype != V_ASN1_SEQUENCE || !pval) return 0;
+    return ffc_der_domain_str(pval, p, g, q);
 }
 
 static EVP_PKEY *ffc_dhx_fromdata(BIGNUM *p, BIGNUM *g, BIGNUM *q, BIGNUM *y, BIGNUM *x) {
@@ -1712,26 +1716,55 @@ static EVP_PKEY *fhsm_d2i_private(EVP_PKEY **a, const unsigned char **pp, long l
     return r;
 }
 
+/* p, g, q and y from an X9.42 SubjectPublicKeyInfo, read as plain ASN.1:
+ * SEQUENCE { SEQUENCE { dhpublicnumber, DomainParameters }, BIT STRING
+ * holding INTEGER y }. Not through X509_PUBKEY, whose decoding asks the
+ * providers for the key and gets nothing back for this type under the FIPS
+ * provider. 1 on success. */
+static int ffc_spki_parse(const unsigned char *der, long len,
+                          BIGNUM **p, BIGNUM **g, BIGNUM **q, BIGNUM **y) {
+    const unsigned char *d = der;
+    STACK_OF(ASN1_TYPE) *top = d2i_ASN1_SEQUENCE_ANY(NULL, &d, len);
+    STACK_OF(ASN1_TYPE) *aid = NULL;
+    int ok = top && sk_ASN1_TYPE_num(top) == 2;
+    const ASN1_TYPE *t0 = ok ? sk_ASN1_TYPE_value(top, 0) : NULL;
+    const ASN1_TYPE *t1 = ok ? sk_ASN1_TYPE_value(top, 1) : NULL;
+    ok = ok && t0 && t0->type == V_ASN1_SEQUENCE && t1 && t1->type == V_ASN1_BIT_STRING;
+    if (ok) {
+        const unsigned char *a = ASN1_STRING_get0_data(t0->value.sequence);
+        aid = d2i_ASN1_SEQUENCE_ANY(NULL, &a, ASN1_STRING_length(t0->value.sequence));
+        const ASN1_TYPE *oid = aid && sk_ASN1_TYPE_num(aid) == 2 ? sk_ASN1_TYPE_value(aid, 0) : NULL;
+        const ASN1_TYPE *prm = oid ? sk_ASN1_TYPE_value(aid, 1) : NULL;
+        ok = oid && oid->type == V_ASN1_OBJECT
+             && OBJ_obj2nid(oid->value.object) == NID_dhpublicnumber
+             && prm && prm->type == V_ASN1_SEQUENCE;
+        if (ok) ok = ffc_der_domain_str(prm->value.sequence, p, g, q);
+    }
+    if (ok) {
+        const ASN1_BIT_STRING *bs = t1->value.bit_string;
+        ok = (*y = ffc_der_integer(ASN1_STRING_get0_data(bs), ASN1_STRING_length(bs), 0)) != NULL;
+    }
+    sk_ASN1_TYPE_pop_free(aid, ASN1_TYPE_free);
+    sk_ASN1_TYPE_pop_free(top, ASN1_TYPE_free);
+    return ok;
+}
+
 static EVP_PKEY *fhsm_d2i_pubkey(EVP_PKEY **a, const unsigned char **pp, long len) {
     const unsigned char *start = *pp;
     EVP_PKEY *k = d2i_PUBKEY(a, pp, len);
-    if (!is_legacy_dhx(k) || a) return k;
-    const unsigned char *d = start;
-    X509_PUBKEY *xp = d2i_X509_PUBKEY(NULL, &d, len);
-    const unsigned char *pk = NULL;
-    int pkl = 0;
-    X509_ALGOR *alg = NULL;
+    /* A public key comes back NULL here, where a private one comes back
+     * legacy: both are rebuilt, an X9.42 one only -- ffc_spki_parse checks
+     * the algorithm. */
+    if (a || (k && !is_legacy_dhx(k))) return k;
     BIGNUM *p = NULL, *g = NULL, *q = NULL, *y = NULL;
     EVP_PKEY *r = NULL;
-    if (xp && X509_PUBKEY_get0_param(NULL, &pk, &pkl, &alg, xp) == 1
-        && ffc_der_domain(alg, &p, &g, &q)
-        && (y = ffc_der_integer(pk, pkl, 0)) != NULL)
+    if (ffc_spki_parse(start, len, &p, &g, &q, &y))
         r = ffc_dhx_fromdata(p, g, q, y, NULL);
-    X509_PUBKEY_free(xp);
     BN_free(p); BN_free(g); BN_free(q); BN_free(y);
+    if (!r) return k;   /* NULL or legacy: the caller's failure, as before */
     ERR_clear_error();
-    if (!r) return k;
     EVP_PKEY_free(k);
+    if (!k) *pp = start + len;   /* consumed, as d2i_PUBKEY would have */
     return r;
 }
 
