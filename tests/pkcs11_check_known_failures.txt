@@ -62,3 +62,13 @@ all-mechanisms  pkcs11_check/testcases/test_camellia.py::TestCamelliaCTR::test_c
 all-mechanisms  pkcs11_check/testcases/test_rsa_extended.py::TestRSAX931::test_sign_verify_sha1
 all-mechanisms  pkcs11_check/testcases/test_rsa_extended.py::TestRSAX931::test_sign_verify_sha256
 
+
+# 0.3.0: imports a fresh RSA-2048 key and expects each CRT component back at
+# a fixed width (d at 256 bytes; dmp1, dmq1 and iqmp at 128). These are Big
+# integers, and the module returns the minimal encoding (BN_num_bytes), so
+# the test fails whenever one of the four has a leading zero byte: about one
+# run in 64. Seen on 2026-11-22 (CKA_EXPONENT_1) and 2026-11-24 on 5e4a78b53
+# (CKA_PRIVATE_EXPONENT, signed nist-approved-only), passing on the runs
+# around both. The gate's "did not fail" notice for it means nothing.
+# mingulov/pkcs11-check#95.
+*  pkcs11_check/testcases/test_sensitivity.py::TestProtectedComponentMatrix::test_unsealed_components_readable[rsa-import-unsealed]
