@@ -12784,6 +12784,26 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, new_handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
+    /* Without CKA_ALLOWED_MECHANISMS in the template, the copy keeps the
+     * source's list. The second flags byte, FHSM_OBJF2_HAS_ALLOWED_MECH
+     * included, is inherited below, so a copy without the list itself
+     * would have an empty allow-list and refuse every mechanism. */
+    if (find_attr(pTemplate, ulCount, CKA_ALLOWED_MECHANISMS_ATTR) < 0) {
+        uint8_t sf2 = 0;
+        if (fhsm_token_object_get_flags2(t, (uint32_t)hObject, &sf2) == FHSM_RV_OK
+            && (sf2 & FHSM_OBJF2_HAS_ALLOWED_MECH)) {
+            uint32_t mechs[FHSM_POLICY_MECH_MAX] = {0};
+            uint8_t cnt = FHSM_POLICY_MECH_MAX;
+            fhsm_rv_t mr = fhsm_token_object_get_allowed_mechs(t, (uint32_t)hObject,
+                                                               mechs, &cnt);
+            if (mr == FHSM_RV_OK)
+                mr = fhsm_token_object_set_allowed_mechs(t, new_handle, mechs, cnt);
+            if (mr != FHSM_RV_OK) {
+                (void)fhsm_token_object_destroy(t, new_handle);
+                return mr;
+            }
+        }
+    }
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, new_handle,
                                         CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
