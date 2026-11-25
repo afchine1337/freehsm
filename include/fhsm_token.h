@@ -198,6 +198,29 @@ fhsm_rv_t fhsm_token_object_add(fhsm_token_t *t,
                                  uint8_t  flags,
                                  uint32_t *out_handle);
 
+/* fhsm_token_object_add with the third flags byte the object is born with,
+ * and its owner: 0 for a token object, or the session handle that owns a
+ * session object, which is created as one and never written to the file.
+ *
+ * A token object needs the token logged in. A session object does not when
+ * it is public -- FHSM_OBJF3_PUBLIC on a data object, secret key or private
+ * key, or any public key or certificate -- since PKCS#11 v3.2 §5.6 gives a
+ * public session read/write access to public session objects (#45). It is
+ * then kept in memory through the first login, with its handle, and changed
+ * or destroyed without one. A private object without a login is
+ * FHSM_RV_USER_NOT_LOGGED_IN, as is any object on a token whose public view
+ * could not be read, before a login. */
+fhsm_rv_t fhsm_token_object_add_ex(fhsm_token_t *t,
+                                    uint32_t cko_class,
+                                    uint32_t ckk_type,
+                                    const char *label,
+                                    const uint8_t *value, size_t value_len,
+                                    const uint8_t *id,    size_t id_len,
+                                    uint8_t  flags,
+                                    uint8_t  flags3,
+                                    uint32_t owner_session,
+                                    uint32_t *out_handle);
+
 /* Lookup by handle. Returns FHSM_RV_KEY_HANDLE_INVALID if not found.
  * The output pointer references storage owned by the token; valid until
  * the next mutation. The caller must NOT free it. */
@@ -431,7 +454,11 @@ fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
  * (#37 K1). That one is a loosening, and an older build that ignored it
  * would be stricter; but no older build reads a v5 record at all, which is
  * what makes it safe to give the bit to a class that never had it. The old
- * name is kept for tests/make_v4_fixture.c, which builds against v2.7.0. */
+ * name is kept for tests/make_v4_fixture.c, which builds against v2.7.0.
+ *
+ * Since 2.9.0 it also marks a private key created with CKA_PRIVATE=FALSE
+ * (#45), on the same footing. Such a key is never written to the public
+ * section: its value is a private key, and it is seen after a login. */
 #define FHSM_OBJF3_PUBLIC            0x08
 #define FHSM_OBJF3_DATA_PUBLIC       FHSM_OBJF3_PUBLIC
 
@@ -534,7 +561,10 @@ fhsm_rv_t fhsm_token_object_is_token(fhsm_token_t *t, uint32_t handle,
  *
  * Each setter requires the token to be in the logged-in state and
  * persists the change atomically to disk before returning (same model
- * as fhsm_token_object_destroy). The caller is responsible for
+ * as fhsm_token_object_destroy). A public session object is the exception:
+ * it is changed without a login and nothing is written, as it is not in the
+ * file (#45); a change that would make it private is refused without a
+ * login. The caller is responsible for
  * enforcing PKCS#11's one-way state transitions on CKA_SENSITIVE and
  * CKA_EXTRACTABLE before calling set_flags ; this layer accepts the
  * new flags byte unconditionally. */

@@ -699,6 +699,9 @@ tests/test_wrong_pin_store: tests/test_wrong_pin_store.c $(LIB_OBJ)
 tests/test_public_objects: tests/test_public_objects.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
+tests/test_session_prelogin: tests/test_session_prelogin.c $(LIB_OBJ)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
 tests/test_audit_fsync: tests/test_audit_fsync.c $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(LDFLAGS) -lpthread
 
@@ -1409,6 +1412,7 @@ TEST_BINS = \
 	tests/test_throttle_reboot \
 	tests/test_wrong_pin_store \
 	tests/test_public_objects \
+	tests/test_session_prelogin \
 	tests/test_audit_fsync \
 	tests/test_audit_concurrent \
 	tests/test_audit_multiproc \
@@ -1579,6 +1583,7 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_throttle_reboot
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_wrong_pin_store
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_public_objects
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_session_prelogin
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_fsync
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_concurrent
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) $(TEST_LD) ./tests/test_audit_multiproc

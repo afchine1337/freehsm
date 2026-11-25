@@ -563,12 +563,14 @@ _Static_assert(FHSM_OBJ_OBJECT_ID_MAX <= FHSM_OBJ_LABEL_LEN,
 #define FHSM_CKO_SECRET_KEY   0x04u
 
 /* CKA_PRIVATE as C_GetAttributeValue reports it: TRUE but for public keys,
- * certificates, and data objects and secret keys carrying FHSM_OBJF3_PUBLIC.
- * fhsm_obj_private in fhsm_pkcs11.c applies the same rule to a handle. */
+ * certificates, and data objects, secret keys and private keys carrying
+ * FHSM_OBJF3_PUBLIC. fhsm_obj_private in fhsm_pkcs11.c applies the same rule
+ * to a handle. */
 static int obj_is_private(const fhsm_object_t *o) {
     if (o->class == FHSM_CKO_PUBLIC_KEY || o->class == FHSM_CKO_CERTIFICATE)
         return 0;
-    if ((o->class == FHSM_CKO_DATA || o->class == FHSM_CKO_SECRET_KEY)
+    if ((o->class == FHSM_CKO_DATA || o->class == FHSM_CKO_SECRET_KEY
+         || o->class == FHSM_CKO_PRIVATE_KEY)
         && (o->flags3 & FHSM_OBJF3_PUBLIC))
         return 0;
     return 1;
@@ -578,11 +580,47 @@ static int obj_is_private(const fhsm_object_t *o) {
  * not private. A sensitive public key stays out, as it always has, and so
  * does a sensitive public secret key: the section is in clear, and a value
  * the caller asked to keep from being revealed is not written there. Such a
- * key is public, and is seen after a login. */
+ * key is public, and is seen after a login.
+ *
+ * A private key stays out even when it is public and not sensitive (#45): its
+ * value is a private key, and the module does not write one in clear to the
+ * token file. A public private key that is a token object is therefore seen
+ * after a login only; a session one, which is never written, is seen at once. */
 static int obj_is_public(const fhsm_object_t *o) {
     return o->owner_session == 0
         && !obj_is_private(o)
-        && !(o->flags & FHSM_OBJF_SENSITIVE);
+        && !(o->flags & FHSM_OBJF_SENSITIVE)
+        && o->class != FHSM_CKO_PRIVATE_KEY;
+}
+
+/* May `o` be changed now? A token object is in the encrypted store, so a
+ * change needs the store loaded and the DEK to write it: not the public view
+ * read before a login, not the store left in memory after a logout. A session
+ * object is never written to the file, so a public one needs neither: PKCS#11
+ * v3.2 §5.6 gives a public session read/write access to public session
+ * objects (#45). A private one still needs the login it was made under. */
+static int obj_may_change(const fhsm_token_t *t, const fhsm_object_t *o) {
+    if (t->dek_live && t->objects_loaded) return 1;
+    return o->owner_session != 0 && !obj_is_private(o);
+}
+
+static fhsm_rv_t write_atomic(const fhsm_token_t *t);
+
+/* What a setter answers, under t->mu, for a handle it did not find. Without
+ * the store, FHSM_RV_USER_NOT_LOGGED_IN, as every setter answered before a
+ * session object could be changed without a login: a handle that is not in
+ * memory may be a private object the store has not loaded. */
+static fhsm_rv_t obj_missing(const fhsm_token_t *t) {
+    return (t->dek_live && t->objects_loaded) ? FHSM_RV_KEY_HANDLE_INVALID
+                                              : FHSM_RV_USER_NOT_LOGGED_IN;
+}
+
+/* Persist a change to `o`. A session object is not in the file, so changing
+ * one writes nothing; a token object rewrites the store. */
+static fhsm_rv_t obj_commit(fhsm_token_t *t, const fhsm_object_t *o) {
+    if (o->owner_session != 0) return FHSM_RV_OK;
+    t->objects_dirty = 1;
+    return write_atomic(t);
 }
 
 /* #125 large-object storage helpers. The per-object value is heap-owned;
@@ -1072,10 +1110,10 @@ static fhsm_rv_t parse_objects(fhsm_token_t *t, const uint8_t *buf, size_t len) 
  * Read the encrypted object blob (if any) from the on-disk file, decrypt
  * with the DEK, and populate t->objects. Called from fhsm_token_login.
  * If there is no blob (e.g. fresh token), objects_loaded is set to 1
- * with object_count=0.
+ * with object_count=0. objects_decrypt_load, below, keeps the session
+ * objects across it.
  * ----------------------------------------------------------------------- */
-static fhsm_rv_t objects_decrypt_load(fhsm_token_t *t) {
-    if (!t->dek_live) return FHSM_RV_USER_NOT_LOGGED_IN;
+static fhsm_rv_t objects_load_blob(fhsm_token_t *t) {
     objects_free_all(t);   /* reclaim any values from a prior login (#125) */
     t->objects_public = 0; /* the public view gives way to the store */
     int fd = open(t->path, O_RDONLY | O_CLOEXEC);
@@ -1146,6 +1184,68 @@ static fhsm_rv_t objects_decrypt_load(fhsm_token_t *t) {
     }
     fhsm_zeroize(pt, ct_len);
     free(pt);
+    return rv;
+}
+
+/* The first login's load, keeping the session objects (#45).
+ *
+ * Before a login, objects[] is the public view plus the public session objects
+ * made since. The load replaces the view with the store; the session objects
+ * are not in the store and are carried across, with their handles: the
+ * application holds them.
+ *
+ * Their handles came from next_handle as the public section gave it, which is
+ * the blob's, written in the same write, so they lie above every handle in the
+ * blob. A token whose view could not be read refuses session objects before a
+ * login (fhsm_token_object_add_ex), so it has none to carry. A blob object
+ * whose handle a session object holds all the same is given a fresh one: it is
+ * not in the view, so the application has not seen its handle. next_handle
+ * ends above all of them.
+ *
+ * The store is full only if the blob and the session objects together pass
+ * FHSM_MAX_OBJECTS, which a view that shows only part of the store cannot
+ * prevent. The session objects that do not fit are destroyed, as C_Logout
+ * destroys private ones: there is nowhere to keep them. */
+static fhsm_rv_t objects_decrypt_load(fhsm_token_t *t) {
+    if (!t->dek_live) return FHSM_RV_USER_NOT_LOGGED_IN;
+    uint32_t nkeep = 0;
+    for (uint32_t i = 0; i < t->object_count; ++i)
+        if (t->objects[i].owner_session != 0) nkeep++;
+    fhsm_object_t *keep = NULL;
+    if (nkeep > 0) {
+        keep = calloc(nkeep, sizeof(*keep));
+        if (!keep) return FHSM_RV_HOST_MEMORY;
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < t->object_count; ++i) {
+            if (t->objects[i].owner_session == 0) continue;
+            keep[k++] = t->objects[i];   /* the value moves with the struct */
+            fhsm_zeroize(&t->objects[i], sizeof(t->objects[i]));
+        }
+    }
+    fhsm_rv_t rv = objects_load_blob(t);
+    /* A blob that failed to parse may have left values in slots past
+     * object_count, where the session objects are about to go. */
+    if (rv != FHSM_RV_OK) objects_free_all(t);
+
+    uint32_t top = t->next_handle == 0 ? 1 : t->next_handle;
+    for (uint32_t k = 0; k < nkeep; ++k)
+        if (keep[k].handle >= top) top = keep[k].handle + 1;
+    for (uint32_t i = 0; i < t->object_count; ++i) {
+        for (uint32_t k = 0; k < nkeep; ++k) {
+            if (t->objects[i].handle == keep[k].handle) {
+                t->objects[i].handle = top++;
+                break;
+            }
+        }
+    }
+    for (uint32_t k = 0; k < nkeep; ++k) {
+        if (t->object_count < FHSM_MAX_OBJECTS)
+            t->objects[t->object_count++] = keep[k];
+        else
+            obj_free_value(&keep[k]);
+    }
+    t->next_handle = top;
+    if (keep) { fhsm_zeroize(keep, nkeep * sizeof(*keep)); free(keep); }
     return rv;
 }
 
@@ -2120,21 +2220,51 @@ out:
     return rv;
 }
 /* ---------------------------------------------------------------------------
- * Object store API. The token must be logged-in (SO or USER) for any
- * of these to succeed --- the DEK is required to read or write the blob.
+ * Object store API. A token object needs the token logged in (SO or USER):
+ * the DEK is required to read or write the blob. A public session object
+ * does not (#45); see obj_may_change.
  * ----------------------------------------------------------------------- */
 fhsm_rv_t fhsm_token_object_add(fhsm_token_t *t, uint32_t cko_class,
                                  uint32_t ckk_type, const char *label,
                                  const uint8_t *value, size_t value_len,
                                  const uint8_t *id,    size_t id_len,
                                  uint8_t flags, uint32_t *out_handle) {
+    return fhsm_token_object_add_ex(t, cko_class, ckk_type, label, value,
+                                    value_len, id, id_len, flags, 0, 0,
+                                    out_handle);
+}
+
+fhsm_rv_t fhsm_token_object_add_ex(fhsm_token_t *t, uint32_t cko_class,
+                                    uint32_t ckk_type, const char *label,
+                                    const uint8_t *value, size_t value_len,
+                                    const uint8_t *id,    size_t id_len,
+                                    uint8_t flags, uint8_t flags3,
+                                    uint32_t owner_session,
+                                    uint32_t *out_handle) {
     if (!t || !out_handle) return FHSM_RV_ARGUMENTS_BAD;
     if (value_len > FHSM_OBJ_VALUE_MAX) return FHSM_RV_KEY_SIZE_RANGE;
     if (id_len > 32) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
+    const int store = t->dek_live && t->objects_loaded;
+    /* Without the store, only a public session object, and only where the
+     * objects in memory can be read: a token whose view could not be loaded
+     * answers every read CKR_USER_NOT_LOGGED_IN, and an object made there
+     * could not be used. Whether it is public is decided below, on the
+     * object as it will be. */
+    if (!store && (owner_session == 0
+                   || (!t->objects_loaded && !t->objects_public))) {
         pthread_mutex_unlock(&t->mu);
         return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
+    if (!store) {
+        fhsm_object_t probe;
+        memset(&probe, 0, sizeof(probe));
+        probe.class = cko_class;
+        probe.flags3 = flags3;
+        if (obj_is_private(&probe)) {
+            pthread_mutex_unlock(&t->mu);
+            return FHSM_RV_USER_NOT_LOGGED_IN;
+        }
     }
     if (t->object_count >= FHSM_MAX_OBJECTS) {
         /* Token storage is full --- this is CKR_DEVICE_MEMORY (token
@@ -2158,14 +2288,18 @@ fhsm_rv_t fhsm_token_object_add(fhsm_token_t *t, uint32_t cko_class,
     }
     if (id && id_len)       { memcpy(o->id, id, id_len); o->id_len = (uint32_t)id_len; }
     o->flags = flags;
+    o->flags3 = flags3;
     if (!(flags & FHSM_OBJF_SENSITIVE))  o->flags3 |= FHSM_OBJF3_WAS_NOT_SENSITIVE;
     if (flags & FHSM_OBJF_EXTRACTABLE)   o->flags3 |= FHSM_OBJF3_WAS_EXTRACTABLE;
+    /* A session object made here is one from the start and is never written.
+     * Made as a token object and then marked, as fhsm_token_object_mark_session
+     * does, it is written to the file with its value first. */
+    o->owner_session = owner_session;
 
     t->object_count++;
     t->next_handle = o->handle + 1;
-    t->objects_dirty = 1;
     *out_handle = o->handle;
-    fhsm_rv_t rv = write_atomic(t);
+    fhsm_rv_t rv = obj_commit(t, o);
     pthread_mutex_unlock(&t->mu);
     (void)fhsm_audit_event(FHSM_EV_OBJECT_CREATE, -1, -1, t->logged_in, rv,
                             "label", label ? label : "", FHSM_AUDIT_END);
@@ -2203,23 +2337,21 @@ fhsm_rv_t fhsm_token_object_set_usage(fhsm_token_t *t, uint32_t handle,
                                       uint8_t usage_flags) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    /* A change needs the store, and the DEK to write it: not the public view
-     * read before login, not the store left in memory after a logout. */
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             t->objects[i].usage_flags = usage_flags;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 fhsm_rv_t fhsm_token_object_get_usage(fhsm_token_t *t, uint32_t handle,
@@ -2267,7 +2399,6 @@ fhsm_rv_t fhsm_token_destroy_session_objects(fhsm_token_t *t,
                                              uint32_t owner_session) {
     if (!t || owner_session == 0) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    int removed = 0;
     uint32_t i = 0;
     while (i < t->object_count) {
         if (t->objects[i].owner_session == owner_session) {
@@ -2279,16 +2410,16 @@ fhsm_rv_t fhsm_token_destroy_session_objects(fhsm_token_t *t,
                              sizeof(t->objects[0]));
             }
             t->object_count--;
-            removed = 1;
             /* do not advance i : the swapped-in entry must be checked */
         } else {
             i++;
         }
     }
-    fhsm_rv_t rv = FHSM_RV_OK;
-    if (removed) { t->objects_dirty = 1; rv = write_atomic(t); }
+    /* Session objects are not in the file, so their going changes nothing
+     * there. This used to rewrite it anyway -- without the DEK, a copy of
+     * what was on disk. */
     pthread_mutex_unlock(&t->mu);
-    return rv;
+    return FHSM_RV_OK;
 }
 
 fhsm_rv_t fhsm_token_object_find(fhsm_token_t *t,
@@ -2349,14 +2480,12 @@ fhsm_rv_t fhsm_token_object_set_meta(fhsm_token_t *t, uint32_t handle,
     if (start_len > 8 || end_len > 8 || app_len > FHSM_OBJ_LABEL_LEN)
         return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     pthread_mutex_lock(&t->mu);
-    /* A change needs the store, and the DEK to write it: not the public view
-     * read before login, not the store left in memory after a logout. */
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             fhsm_object_t *o = &t->objects[i];
             if (start) { memcpy(o->start_date, start, start_len);
                          o->start_date_len = (uint8_t)start_len; }
@@ -2364,14 +2493,14 @@ fhsm_rv_t fhsm_token_object_set_meta(fhsm_token_t *t, uint32_t handle,
                          o->end_date_len = (uint8_t)end_len; }
             if (app)   { memcpy(o->application, app, app_len);
                          o->application_len = (uint8_t)app_len; }
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 fhsm_rv_t fhsm_token_object_get_meta(fhsm_token_t *t, uint32_t handle,
@@ -2493,25 +2622,25 @@ fhsm_rv_t fhsm_token_object_set_allowed_mechs(fhsm_token_t *t, uint32_t handle,
     if (!t || (count > 0 && !mechs)) return FHSM_RV_ARGUMENTS_BAD;
     if (count > FHSM_POLICY_MECH_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             fhsm_object_t *o = &t->objects[i];
             memset(o->allowed, 0, sizeof(o->allowed));
             for (uint8_t k = 0; k < count; ++k) o->allowed[k] = mechs[k];
             o->allowed_count = count;
             o->flags2 |= FHSM_OBJF2_HAS_ALLOWED_MECH;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 /* Read it back. *io_count is the caller's capacity on entry, the stored count
@@ -2630,12 +2759,12 @@ fhsm_rv_t fhsm_token_object_set_tmpl(fhsm_token_t *t, uint32_t handle,
             return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     }
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             fhsm_object_t *o = &t->objects[i];
             uint8_t *cnt = NULL;
             fhsm_policy_attr_t *slot = tmpl_slot(o, which, &cnt);
@@ -2644,14 +2773,14 @@ fhsm_rv_t fhsm_token_object_set_tmpl(fhsm_token_t *t, uint32_t handle,
             for (uint8_t k = 0; k < count; ++k) slot[k] = a[k];
             *cnt = count;
             o->flags2 |= bit;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 fhsm_rv_t fhsm_token_object_get_tmpl(fhsm_token_t *t, uint32_t handle,
@@ -2723,12 +2852,12 @@ fhsm_rv_t fhsm_token_object_set_label(fhsm_token_t *t, uint32_t handle,
                                        const char *label) {
     if (!t || !label) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             /* Bounded copy : at most FHSM_OBJ_LABEL_LEN - 1 chars +
              * NUL terminator. Pre-zero the buffer so the unused tail
              * does not leak whatever was there before. */
@@ -2737,14 +2866,14 @@ fhsm_rv_t fhsm_token_object_set_label(fhsm_token_t *t, uint32_t handle,
             memcpy(t->objects[i].label, label, n);
             /* label is uint8_t[64] ; NUL terminator already present
              * thanks to the zeroize above. */
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 fhsm_rv_t fhsm_token_object_set_id(fhsm_token_t *t, uint32_t handle,
@@ -2755,35 +2884,35 @@ fhsm_rv_t fhsm_token_object_set_id(fhsm_token_t *t, uint32_t handle,
     }
     if (id_len > 0 && !id) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             fhsm_zeroize(t->objects[i].id, sizeof(t->objects[i].id));
             if (id_len > 0) memcpy(t->objects[i].id, id, id_len);
             t->objects[i].id_len = (uint32_t)id_len;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 fhsm_rv_t fhsm_token_object_set_flags(fhsm_token_t *t, uint32_t handle,
                                        uint8_t flags) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             fhsm_object_t *o = &t->objects[i];
             /* CKA_SENSITIVE is one-way FALSE->TRUE, so a value allocated in
              * plain malloc can become sensitive after the fact. Migrate it
@@ -2802,14 +2931,14 @@ fhsm_rv_t fhsm_token_object_set_flags(fhsm_token_t *t, uint32_t handle,
                 o->value_secure = 1;
             }
             o->flags = flags;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 /* The second flags byte. Deliberately plainer than its sibling above: that
@@ -2836,21 +2965,21 @@ fhsm_rv_t fhsm_token_object_set_flags2(fhsm_token_t *t, uint32_t handle,
                                         uint8_t flags2) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             t->objects[i].flags2 = flags2;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 /* CKA_OBJECT_ID and CKA_KEY_GEN_MECHANISM, persisted by the v5 record. Same
@@ -2860,24 +2989,24 @@ fhsm_rv_t fhsm_token_object_set_object_id(fhsm_token_t *t, uint32_t handle,
     if (!t || (oid_len && !oid)) return FHSM_RV_ARGUMENTS_BAD;
     if (oid_len > FHSM_OBJ_OBJECT_ID_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             fhsm_object_t *o = &t->objects[i];
             memset(o->object_id, 0, sizeof o->object_id);
             if (oid_len) memcpy(o->object_id, oid, oid_len);
             o->object_id_len = (uint8_t)oid_len;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 fhsm_rv_t fhsm_token_object_set_cert_hash(fhsm_token_t *t, uint32_t handle,
@@ -2888,12 +3017,12 @@ fhsm_rv_t fhsm_token_object_set_cert_hash(fhsm_token_t *t, uint32_t handle,
         && which != FHSM_OBJ_META_HASH_ISSUER_PUBKEY) return FHSM_RV_ARGUMENTS_BAD;
     if (h_len > FHSM_OBJ_CERT_HASH_MAX) return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             fhsm_object_t *o = &t->objects[i];
             uint8_t *dst = (which == FHSM_OBJ_META_HASH_SUBJECT_PUBKEY)
                                ? o->hash_subj : o->hash_iss;
@@ -2901,36 +3030,36 @@ fhsm_rv_t fhsm_token_object_set_cert_hash(fhsm_token_t *t, uint32_t handle,
             if (h_len) memcpy(dst, h, h_len);
             if (which == FHSM_OBJ_META_HASH_SUBJECT_PUBKEY) o->hash_subj_len = (uint8_t)h_len;
             else                                            o->hash_iss_len  = (uint8_t)h_len;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 fhsm_rv_t fhsm_token_object_set_keygen_mech(fhsm_token_t *t, uint32_t handle,
                                             uint32_t mechanism) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
             t->objects[i].keygen_mech = mechanism;
             t->objects[i].keygen_set  = 1;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = obj_commit(t, &t->objects[i]);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 fhsm_rv_t fhsm_token_object_get_keygen_mech(fhsm_token_t *t, uint32_t handle,
@@ -2970,32 +3099,43 @@ fhsm_rv_t fhsm_token_object_set_flags3(fhsm_token_t *t, uint32_t handle,
                                         uint8_t flags3) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
-            t->objects[i].flags3 = flags3;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_object_t *o = &t->objects[i];
+            if (!obj_may_change(t, o)) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
+            /* Without a login the object must stay public: FHSM_OBJF3_PUBLIC
+             * is CKA_PRIVATE, and a private object is the user's to make. */
+            const uint8_t was = o->flags3;
+            o->flags3 = flags3;
+            if (!obj_may_change(t, o)) {
+                o->flags3 = was;
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
+            fhsm_rv_t rv = obj_commit(t, o);
             pthread_mutex_unlock(&t->mu);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
 
 fhsm_rv_t fhsm_token_object_destroy(fhsm_token_t *t, uint32_t handle) {
     if (!t) return FHSM_RV_ARGUMENTS_BAD;
     pthread_mutex_lock(&t->mu);
-    if (!t->dek_live || !t->objects_loaded) {
-        pthread_mutex_unlock(&t->mu);
-        return FHSM_RV_USER_NOT_LOGGED_IN;
-    }
     for (uint32_t i = 0; i < t->object_count; ++i) {
         if (t->objects[i].handle == handle) {
+            if (!obj_may_change(t, &t->objects[i])) {
+                pthread_mutex_unlock(&t->mu);
+                return FHSM_RV_USER_NOT_LOGGED_IN;
+            }
+            /* A session object is not in the file: nothing to write. */
+            const int session = t->objects[i].owner_session != 0;
             /* Free the heap value, then zeroize before compacting (#125) */
             obj_free_value(&t->objects[i]);
             fhsm_zeroize(&t->objects[i], sizeof(t->objects[i]));
@@ -3006,14 +3146,15 @@ fhsm_rv_t fhsm_token_object_destroy(fhsm_token_t *t, uint32_t handle) {
                              sizeof(t->objects[0]));
             }
             t->object_count--;
-            t->objects_dirty = 1;
-            fhsm_rv_t rv = write_atomic(t);
+            fhsm_rv_t rv = FHSM_RV_OK;
+            if (!session) { t->objects_dirty = 1; rv = write_atomic(t); }
             pthread_mutex_unlock(&t->mu);
             (void)fhsm_audit_event(FHSM_EV_OBJECT_DESTROY, -1, -1,
                                     t->logged_in, rv, FHSM_AUDIT_END);
             return rv;
         }
     }
+    fhsm_rv_t miss = obj_missing(t);
     pthread_mutex_unlock(&t->mu);
-    return FHSM_RV_KEY_HANDLE_INVALID;
+    return miss;
 }
