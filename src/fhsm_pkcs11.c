@@ -12876,8 +12876,11 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
          * restriction the original carried. */
         uint8_t src_f2 = 0;
         if (fhsm_token_object_get_flags2(t, (uint32_t)hObject, &src_f2) == FHSM_RV_OK
-            && src_f2 != 0)
-            (void)fhsm_token_object_set_flags2(t, new_handle, src_f2);
+            && src_f2 != 0) {
+            uint8_t cur_f2 = 0;
+            (void)fhsm_token_object_get_flags2(t, new_handle, &cur_f2);
+            (void)fhsm_token_object_set_flags2(t, new_handle, (uint8_t)(cur_f2 | src_f2));
+        }
         /* The third byte describes the key, not a restriction on it, and a
          * copy is the same key. */
         uint8_t src_f3 = 0;
