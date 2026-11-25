@@ -12804,6 +12804,41 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
             }
         }
     }
+    /* Without nested templates in the override template, the copy keeps
+     * the source's templates. The presence bits in flags2 are inherited,
+     * so a copy without the templates themselves would drop the policy. */
+    {
+        static const struct {
+            CK_ULONG          attr;
+            fhsm_tmpl_which_t which;
+            uint8_t           flag_bit;
+        } nested_policies[] = {
+            { CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP, FHSM_OBJF2_HAS_UNWRAP_TMPL },
+            { CKA_DERIVE_TEMPLATE_ATTR, FHSM_TMPL_DERIVE, FHSM_OBJF2_HAS_DERIVE_TMPL },
+            { CKA_WRAP_TEMPLATE_ATTR,   FHSM_TMPL_WRAP,   FHSM_OBJF2_HAS_WRAP_TMPL },
+        };
+        for (size_t k = 0; k < sizeof(nested_policies)/sizeof(nested_policies[0]); ++k) {
+            if (find_attr(pTemplate, ulCount, nested_policies[k].attr) < 0) {
+                uint8_t sf2 = 0;
+                if (fhsm_token_object_get_flags2(t, (uint32_t)hObject, &sf2) == FHSM_RV_OK
+                    && (sf2 & nested_policies[k].flag_bit)) {
+                    fhsm_policy_attr_t attrs[FHSM_POLICY_ATTR_MAX];
+                    uint8_t cnt = FHSM_POLICY_ATTR_MAX;
+                    fhsm_rv_t tr = fhsm_token_object_get_tmpl(t, (uint32_t)hObject,
+                                                              nested_policies[k].which,
+                                                              attrs, &cnt);
+                    if (tr == FHSM_RV_OK)
+                        tr = fhsm_token_object_set_tmpl(t, new_handle,
+                                                        nested_policies[k].which,
+                                                        attrs, cnt);
+                    if (tr != FHSM_RV_OK) {
+                        (void)fhsm_token_object_destroy(t, new_handle);
+                        return tr;
+                    }
+                }
+            }
+        }
+    }
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, new_handle,
                                         CKA_UNWRAP_TEMPLATE_ATTR, FHSM_TMPL_UNWRAP);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
