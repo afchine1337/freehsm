@@ -72,6 +72,8 @@ static CK_RV (*C_OpenSession)(CK_SLOT_ID,CK_FLAGS,void*,void*,CK_SESSION_HANDLE*
 static CK_RV (*C_Login)(CK_SESSION_HANDLE,CK_ULONG,CK_BYTE*,CK_ULONG);
 static CK_RV (*C_InitPIN)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
 static CK_RV (*C_CreateObject)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
+static CK_RV (*C_CopyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG,
+                             CK_OBJECT_HANDLE*);
 static CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
 static CK_RV (*C_EncryptInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
 static CK_RV (*C_DecryptInit)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE);
@@ -139,8 +141,9 @@ int main(void)
     #define SYM(n) *(void**)&n = dlsym(lib,#n)
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
     SYM(C_Login); SYM(C_InitPIN); SYM(C_CreateObject); SYM(C_GetAttributeValue);
+    SYM(C_CopyObject);
     SYM(C_EncryptInit); SYM(C_DecryptInit); SYM(C_Encrypt); SYM(C_Decrypt);
-    if (!C_CreateObject || !C_EncryptInit) { fprintf(stderr,"missing symbols\n"); return 2; }
+    if (!C_CreateObject || !C_EncryptInit || !C_CopyObject) { fprintf(stderr,"missing symbols\n"); return 2; }
 
     printf("CKA_ALLOWED_MECHANISMS: absent, listed, empty\n\n");
 
@@ -218,6 +221,57 @@ int main(void)
         CK_OBJECT_HANDLE h = 0;
         ok(make_key(s, "toomany", many, 9, &h) == CKR_ATTRIBUTE_VALUE_INVALID,
            "nine mechanisms is refused rather than silently cut to eight");
+    }
+
+    /* ---- C_CopyObject: inheriting CKA_ALLOWED_MECHANISMS ---- */
+    printf("\nC_CopyObject: inheriting CKA_ALLOWED_MECHANISMS\n\n");
+    {
+        /* (1) Copying a key with listed allowed mechanisms inherits them */
+        CK_MECHANISM_TYPE only_ecb[1] = { CKM_AES_ECB };
+        CK_OBJECT_HANDLE orig = 0, copy = 0;
+        ok(make_key(s, "orig_ecb", only_ecb, 1, &orig) == CKR_OK,
+           "original key with CKA_ALLOWED_MECHANISMS=[ECB] created");
+
+        CK_BYTE no = 0;
+        CK_ATTRIBUTE tmpl[1] = { { CKA_TOKEN, &no, 1 } };
+        ok(C_CopyObject(s, orig, tmpl, 1, &copy) == CKR_OK && copy != 0,
+           "C_CopyObject copies the key into a session object");
+
+        CK_MECHANISM_TYPE back[4] = { 0, 0, 0, 0 };
+        CK_ATTRIBUTE q = { CKA_ALLOWED_MECHANISMS, back, sizeof back };
+        ok(C_GetAttributeValue(s, copy, &q, 1) == CKR_OK
+           && q.ulValueLen == sizeof(CK_MECHANISM_TYPE)
+           && back[0] == CKM_AES_ECB,
+           "  copied key reads back CKA_ALLOWED_MECHANISMS = [ECB]");
+
+        ok(init_then_finish(1, s, &ecb, copy) == CKR_OK,
+           "  copied key permits AES-ECB (the allowed mechanism)");
+        ok(init_then_finish(1, s, &cbc, copy) == CKR_MECHANISM_INVALID,
+           "  copied key refuses AES-CBC with CKR_MECHANISM_INVALID");
+
+        /* (2) Copying a key with NO CKA_ALLOWED_MECHANISMS (absent) */
+        CK_OBJECT_HANDLE orig_absent = 0, copy_absent = 0;
+        ok(make_key(s, "orig_absent", NULL, 1, &orig_absent) == CKR_OK,
+           "original key with no CKA_ALLOWED_MECHANISMS created");
+        ok(C_CopyObject(s, orig_absent, tmpl, 1, &copy_absent) == CKR_OK && copy_absent != 0,
+           "C_CopyObject copies key with no CKA_ALLOWED_MECHANISMS");
+        CK_ATTRIBUTE q_absent = { CKA_ALLOWED_MECHANISMS, NULL, 0 };
+        (void)C_GetAttributeValue(s, copy_absent, &q_absent, 1);
+        ok(q_absent.ulValueLen == (CK_ULONG)-1,
+           "  copied key has absent CKA_ALLOWED_MECHANISMS (unavailable)");
+        ok(init_then_finish(1, s, &ecb, copy_absent) == CKR_OK,
+           "  copied key permits AES-ECB");
+        ok(init_then_finish(1, s, &cbc, copy_absent) == CKR_OK,
+           "  copied key permits AES-CBC");
+
+        /* (3) Copying a key with EMPTY CKA_ALLOWED_MECHANISMS */
+        CK_OBJECT_HANDLE orig_empty = 0, copy_empty = 0;
+        ok(make_key(s, "orig_empty", NULL, 0, &orig_empty) == CKR_OK,
+           "original key with empty CKA_ALLOWED_MECHANISMS created");
+        ok(C_CopyObject(s, orig_empty, tmpl, 1, &copy_empty) == CKR_OK && copy_empty != 0,
+           "C_CopyObject copies key with empty CKA_ALLOWED_MECHANISMS");
+        ok(init_then_finish(1, s, &ecb, copy_empty) == CKR_MECHANISM_INVALID,
+           "  copied key refuses AES-ECB");
     }
 
     C_Finalize(NULL);
