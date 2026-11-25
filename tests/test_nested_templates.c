@@ -87,6 +87,8 @@ static CK_RV (*C_OpenSession)(CK_SLOT_ID,CK_FLAGS,void*,void*,CK_SESSION_HANDLE*
 static CK_RV (*C_Login)(CK_SESSION_HANDLE,CK_ULONG,CK_BYTE*,CK_ULONG);
 static CK_RV (*C_InitPIN)(CK_SESSION_HANDLE,CK_BYTE*,CK_ULONG);
 static CK_RV (*C_CreateObject)(CK_SESSION_HANDLE,CK_ATTRIBUTE*,CK_ULONG,CK_OBJECT_HANDLE*);
+static CK_RV (*C_CopyObject)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG,
+                             CK_OBJECT_HANDLE*);
 static CK_RV (*C_GetAttributeValue)(CK_SESSION_HANDLE,CK_OBJECT_HANDLE,CK_ATTRIBUTE*,CK_ULONG);
 static CK_RV (*C_WrapKey)(CK_SESSION_HANDLE,CK_MECHANISM*,CK_OBJECT_HANDLE,
                           CK_OBJECT_HANDLE,CK_BYTE*,CK_ULONG*);
@@ -145,8 +147,9 @@ int main(void)
     #define SYM(n) *(void**)&n = dlsym(lib,#n)
     SYM(C_Initialize); SYM(C_Finalize); SYM(C_InitToken); SYM(C_OpenSession);
     SYM(C_Login); SYM(C_InitPIN); SYM(C_CreateObject); SYM(C_GetAttributeValue);
+    SYM(C_CopyObject);
     SYM(C_WrapKey); SYM(C_UnwrapKey); SYM(C_DeriveKey);
-    if (!C_UnwrapKey || !C_DeriveKey) { fprintf(stderr,"missing symbols\n"); return 2; }
+    if (!C_UnwrapKey || !C_DeriveKey || !C_CopyObject) { fprintf(stderr,"missing symbols\n"); return 2; }
 
     printf("The three nested policy templates\n\n");
 
@@ -318,6 +321,117 @@ int main(void)
         ok(make_policy_key(s, CKA_WRAP_TEMPLATE, unreadable, sizeof unreadable, &nope)
            != CKR_OK,
            "  and a template naming an unreadable attribute is refused at creation");
+    }
+
+    /* ---------------- C_CopyObject with nested templates ---------------- */
+    printf("\nC_CopyObject with nested templates\n\n");
+    {
+        CK_BYTE no = 0;
+        CK_ATTRIBUTE ctmpl[1] = { { CKA_TOKEN, &no, 1 } };
+
+        /* 1. Copying a key with CKA_UNWRAP_TEMPLATE */
+        CK_OBJECT_HANDLE kw = 0, kw_copy = 0;
+        if (make_policy_key(s, CKA_UNWRAP_TEMPLATE, nested, sizeof nested, &kw) != CKR_OK) {
+            fprintf(stderr, "policy key unwrap\n"); return 2;
+        }
+        ok(C_CopyObject(s, kw, ctmpl, 1, &kw_copy) == CKR_OK && kw_copy != 0,
+           "a key with CKA_UNWRAP_TEMPLATE is copied");
+
+        CK_ATTRIBUTE q = { CKA_UNWRAP_TEMPLATE, NULL, 0 };
+        ok(C_GetAttributeValue(s, kw_copy, &q, 1) == CKR_OK
+           && q.ulValueLen == sizeof(CK_ATTRIBUTE),
+           "  copied key reports CKA_UNWRAP_TEMPLATE with size of 1 attribute");
+
+        CK_BYTE      lbuf[64];
+        CK_ATTRIBUTE inner[1] = { { CKA_LABEL, lbuf, sizeof lbuf } };
+        CK_ATTRIBUTE outer[1] = { { CKA_UNWRAP_TEMPLATE, inner, sizeof inner } };
+        ok(C_GetAttributeValue(s, kw_copy, outer, 1) == CKR_OK
+           && inner[0].ulValueLen == strlen(ALLOWED)
+           && memcmp(lbuf, ALLOWED, strlen(ALLOWED)) == 0,
+           "  and readback on copied key matches original template");
+
+        /* Test unwrap enforcement with the copied key */
+        CK_OBJECT_HANDLE src = 0;
+        CK_ATTRIBUTE st[] = {
+            { CKA_CLASS, &g_klass, sizeof g_klass },
+            { CKA_KEY_TYPE, &g_aes, sizeof g_aes },
+            { CKA_VALUE, (void*)g_val, sizeof g_val },
+            { CKA_TOKEN, &g_no, 1 },
+            { CKA_SENSITIVE, &g_no, 1 },
+            { CKA_EXTRACTABLE, &g_yes, 1 },
+        };
+        if (C_CreateObject(s, st, sizeof st / sizeof st[0], &src) != CKR_OK) {
+            fprintf(stderr, "source key\n"); return 2;
+        }
+        CK_MECHANISM kwmech = { CKM_AES_KEY_WRAP, NULL, 0 };
+        CK_BYTE wrapped[64]; CK_ULONG wl = sizeof wrapped;
+        if (C_WrapKey(s, &kwmech, kw_copy, src, wrapped, &wl) == CKR_OK) {
+            CK_ATTRIBUTE nt[8]; CK_ULONG nc;
+            CK_OBJECT_HANDLE out = 0;
+
+            nc = new_key_template(nt, ALLOWED, CKK_AES);
+            ok(C_UnwrapKey(s, &kwmech, kw_copy, wrapped, wl, nt, nc, &out) == CKR_OK,
+               "  copied unwrapping key allows matching template");
+
+            out = 0;
+            nc = new_key_template(nt, DENIED, CKK_AES);
+            ok(C_UnwrapKey(s, &kwmech, kw_copy, wrapped, wl, nt, nc, &out)
+               == CKR_TEMPLATE_INCONSISTENT,
+               "  copied unwrapping key refuses violating template");
+        }
+
+        /* 2. Copying a key with CKA_DERIVE_TEMPLATE */
+        CK_OBJECT_HANDLE kd = 0, kd_copy = 0;
+        if (make_policy_key(s, CKA_DERIVE_TEMPLATE, nested, sizeof nested, &kd) != CKR_OK) {
+            fprintf(stderr, "policy key derive\n"); return 2;
+        }
+        ok(C_CopyObject(s, kd, ctmpl, 1, &kd_copy) == CKR_OK && kd_copy != 0,
+           "a key with CKA_DERIVE_TEMPLATE is copied");
+
+        CK_ATTRIBUTE qd = { CKA_DERIVE_TEMPLATE, NULL, 0 };
+        ok(C_GetAttributeValue(s, kd_copy, &qd, 1) == CKR_OK
+           && qd.ulValueLen == sizeof(CK_ATTRIBUTE),
+           "  copied key reports CKA_DERIVE_TEMPLATE with size of 1 attribute");
+
+        CK_BYTE data[16] = { 9 };
+        CK_KEY_DERIVATION_STRING_DATA sd = { data, sizeof data };
+        CK_MECHANISM dm = { CKM_CONCATENATE_BASE_AND_DATA, &sd, sizeof sd };
+        CK_ATTRIBUTE dnt[8]; CK_ULONG dnc;
+        CK_OBJECT_HANDLE dout = 0;
+        dnc = new_key_template(dnt, ALLOWED, CKK_GENERIC_SECRET);
+        if (C_DeriveKey(s, &dm, kd_copy, dnt, dnc, &dout) == CKR_OK) {
+            ok(1, "  copied derive key allows matching template");
+            dout = 0;
+            dnc = new_key_template(dnt, DENIED, CKK_GENERIC_SECRET);
+            ok(C_DeriveKey(s, &dm, kd_copy, dnt, dnc, &dout) == CKR_TEMPLATE_INCONSISTENT,
+               "  copied derive key refuses violating template");
+        }
+
+        /* 3. Copying a key with CKA_WRAP_TEMPLATE */
+        CK_OBJECT_HANDLE kwrap = 0, kwrap_copy = 0;
+        if (make_policy_key(s, CKA_WRAP_TEMPLATE, nested, sizeof nested, &kwrap) != CKR_OK) {
+            fprintf(stderr, "policy key wrap\n"); return 2;
+        }
+        ok(C_CopyObject(s, kwrap, ctmpl, 1, &kwrap_copy) == CKR_OK && kwrap_copy != 0,
+           "a key with CKA_WRAP_TEMPLATE is copied");
+
+        CK_ATTRIBUTE qw = { CKA_WRAP_TEMPLATE, NULL, 0 };
+        ok(C_GetAttributeValue(s, kwrap_copy, &qw, 1) == CKR_OK
+           && qw.ulValueLen == sizeof(CK_ATTRIBUTE),
+           "  copied key reports CKA_WRAP_TEMPLATE with size of 1 attribute");
+
+        CK_OBJECT_HANDLE good = 0, bad = 0;
+        CK_ATTRIBUTE gt[] = { { CKA_CLASS, &g_klass, sizeof g_klass }, { CKA_KEY_TYPE, &g_aes, sizeof g_aes }, { CKA_VALUE, (void*)g_val, sizeof g_val }, { CKA_TOKEN, &g_no, 1 }, { CKA_SENSITIVE, &g_no, 1 }, { CKA_EXTRACTABLE, &g_yes, 1 }, { CKA_LABEL, (void*)ALLOWED, (CK_ULONG)strlen(ALLOWED) } };
+        CK_ATTRIBUTE bt[] = { { CKA_CLASS, &g_klass, sizeof g_klass }, { CKA_KEY_TYPE, &g_aes, sizeof g_aes }, { CKA_VALUE, (void*)g_val, sizeof g_val }, { CKA_TOKEN, &g_no, 1 }, { CKA_SENSITIVE, &g_no, 1 }, { CKA_EXTRACTABLE, &g_yes, 1 }, { CKA_LABEL, (void*)DENIED, (CK_ULONG)strlen(DENIED) } };
+        if (C_CreateObject(s, gt, sizeof gt / sizeof gt[0], &good) == CKR_OK
+            && C_CreateObject(s, bt, sizeof bt / sizeof bt[0], &bad) == CKR_OK) {
+            CK_BYTE outbuf[64]; CK_ULONG outl = sizeof outbuf;
+            ok(C_WrapKey(s, &kwmech, kwrap_copy, good, outbuf, &outl) == CKR_OK,
+               "  copied wrapping key wraps matching target");
+            outl = sizeof outbuf;
+            ok(C_WrapKey(s, &kwmech, kwrap_copy, bad, outbuf, &outl) == CKR_TEMPLATE_INCONSISTENT,
+               "  copied wrapping key refuses non-matching target");
+        }
     }
 
     /* A key with no nested template is unrestricted, which is every key
