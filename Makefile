@@ -1067,6 +1067,10 @@ tests/test_derive_des_parity: tests/test_derive_des_parity.c libfreehsm.so
 tests/test_private_attr: tests/test_private_attr.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# Public session objects without a login (#45).
+tests/test_public_session: tests/test_public_session.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # C_SetPIN changes a PIN in an R/W user, R/W SO or R/W public session (#36).
 tests/test_set_pin: tests/test_set_pin.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
@@ -1479,6 +1483,7 @@ TEST_BINS = \
 	tests/test_pub_value_absent \
 	tests/test_derive_des_parity \
 	tests/test_private_attr \
+	tests/test_public_session \
 	tests/test_set_pin \
 	tests/test_gcm_multipart_decrypt \
 	tests/test_single_part_after_update \
@@ -1697,6 +1702,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_derive_des_parity
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_private_attr
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_public_session
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_set_pin
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \

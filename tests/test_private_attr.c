@@ -37,11 +37,13 @@
  *       user then finds the private data objects intact. Those three calls
  *       ran no access check, and handles are small integers;
  *   (8) only the user makes a private object (#31): without a login, a data
- *       object without CKA_PRIVATE is refused (the store makes no object
- *       before a login at all, public or not); with the SO logged in,
- *       C_CreateObject of a private secret key or data object, C_GenerateKey,
- *       C_GenerateKeyPair and a copy made CKA_PRIVATE=TRUE are all
- *       CKR_USER_NOT_LOGGED_IN, while public data objects are still made;
+ *       object without CKA_PRIVATE is refused; with the SO logged in,
+ *       C_CreateObject of a private secret key or data object, C_GenerateKey
+ *       of a private secret key, C_GenerateKeyPair and a copy made
+ *       CKA_PRIVATE=TRUE are all CKR_USER_NOT_LOGGED_IN, while public data
+ *       objects are still made, and so is a public secret key (#45: the SO's
+ *       R/W session has read/write access to public objects, and a secret key
+ *       asked CKA_PRIVATE=FALSE is one);
  *   (9) a read-only session copies a token object into a session object
  *       only (#30): a template that leaves CKA_TOKEN out, and an empty one,
  *       inherit TRUE and are CKR_SESSION_READ_ONLY; CKA_TOKEN=FALSE is made;
@@ -398,8 +400,19 @@ int main(void)
            "(8) SO: a private data object, asked or by default, is refused");
         ok(mkdata_rv(s2, "so-pub", 0, 0) == CKR_OK,
            "(8) SO: a public data object is made");
-        ok(C_GenerateKey(s2, &kg, kt, 6, &x) == CKR_USER_NOT_LOGGED_IN,
-           "(8) SO: C_GenerateKey is refused");
+        CK_ULONG vl16 = 16;
+        CK_ATTRIBUTE kpriv[] = { { CKA_CLASS, &g_secret, sizeof g_secret },
+                                 { CKA_KEY_TYPE, &g_aes, sizeof g_aes },
+                                 { CKA_VALUE_LEN, &vl16, sizeof vl16 },
+                                 { CKA_TOKEN, &g_no, 1 } };
+        ok(C_GenerateKey(s2, &kg, kpriv, 4, &x) == CKR_USER_NOT_LOGGED_IN,
+           "(8) SO: C_GenerateKey of a private secret key is refused");
+        CK_ATTRIBUTE kpub[] = { { CKA_CLASS, &g_secret, sizeof g_secret },
+                                { CKA_KEY_TYPE, &g_aes, sizeof g_aes },
+                                { CKA_VALUE_LEN, &vl16, sizeof vl16 },
+                                { CKA_TOKEN, &g_no, 1 }, { CKA_PRIVATE, &g_no, 1 } };
+        ok(C_GenerateKey(s2, &kg, kpub, 5, &x) == CKR_OK && read_private(s2, x) == 0,
+           "(8) SO: a public secret key is generated (#45)");
         ok(C_GenerateKeyPair(s2, &ecg, pt, 5, vt, 2, &pub, &prv) == CKR_USER_NOT_LOGGED_IN,
            "(8) SO: C_GenerateKeyPair is refused");
         CK_OBJECT_HANDLE src = 0;

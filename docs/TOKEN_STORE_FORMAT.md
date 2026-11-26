@@ -152,7 +152,8 @@ sealing.
    holds public keys, certificates, and the data objects and secret keys
    created with `CKA_PRIVATE=FALSE` that are not sensitive; its reader
    refuses anything else. A secret key there is one the caller asked to be
-   usable without a login (2.8.0, #37 K1).
+   usable without a login (2.8.0, #37 K1). A private key is never there,
+   public or not (2.9.0, #45).
 5. `objects_blob` absent ⇒ `object_count = 0` (fresh or re-initialized
    token). `fhsm_token_init` and `fhsm_token_reinit` write a token without
    one; `fhsm_token_reinit` empties the store in memory first.
@@ -164,6 +165,11 @@ sealing.
 7. The public section is written only by the write that re-encrypts the
    blob, from the same store, and copied byte for byte by every other write,
    so it never describes a store other than the blob beside it.
+8. A session object is never written: it is made in memory, as one, and
+   changed and destroyed there (2.9.0, #45). A public one is made without a
+   login, and the first login's load keeps it, with its handle, beside the
+   store; a blob object that happens to hold its handle is given a fresh
+   one.
 
 ## The public section (2.6.0)
 
@@ -181,15 +187,19 @@ u8   plaintext[len]        a blob plaintext holding the public objects only
 ```
 
 * **What is public.** `CKA_PRIVATE` is FALSE for public keys and
-  certificates, and for data objects (2.7.0) and secret keys (2.8.0) created
-  with `CKA_PRIVATE=FALSE`, which carry `FHSM_OBJF3_PUBLIC`. Those, and only
-  those not flagged sensitive, go into the section; the reader refuses a
-  section holding any other object, and loads nothing. A sensitive public
-  object is public all the same, and is seen after a login.
+  certificates, and for data objects (2.7.0), secret keys (2.8.0) and
+  private keys (2.9.0) created with `CKA_PRIVATE=FALSE`, which carry
+  `FHSM_OBJF3_PUBLIC`. Those not flagged sensitive go into the section,
+  except private keys: a private key value is not written in clear. The
+  reader refuses a section holding any other object, and loads nothing. A
+  sensitive public object, and a public private key, is public all the same,
+  and is seen after a login.
 * **The blob is the store.** A login drops the view and loads the blob. The
   write that re-encrypts the blob writes the section afresh from the same
   store; every other write copies both as they are. The view itself cannot be
-  changed: every mutation needs the DEK and the loaded store.
+  changed: every mutation of a token object needs the DEK and the loaded
+  store. Public session objects made before the login sit beside the view,
+  and are kept when the login replaces it (2.9.0, #45).
 * **Written even when empty.** A token holding objects but no public one has
   a section with a count of zero, so that a reader can tell "no public
   object" from a file written by a build without the section. A token with
@@ -497,6 +507,11 @@ Since 2.8.0 the same bit marks a secret key created with `CKA_PRIVATE=FALSE`
 it is safe now for the reason it gave: no build that predates the bit reads a
 v5 record, so none can misread it. A copy may make a public secret key
 private, not the reverse (`CKR_ATTRIBUTE_READ_ONLY`).
+
+Since 2.9.0 it also marks a private key created with `CKA_PRIVATE=FALSE`
+outside strict mode (#45), for the same reason. Such a key is kept out of
+the public section whether or not it is sensitive. A copy may make a public
+private key private, not the reverse.
 
 ## Objects blob v5 (2.8.0 — attributes without a field)
 

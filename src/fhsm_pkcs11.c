@@ -3339,25 +3339,40 @@ static CK_RV fhsm_check_ro_token(CK_SESSION_HANDLE hSession,
  * This refused only the public session. The SO could make a private object it
  * could then not see, and a user would later find it as one of its own.
  *
- * Whether the object will be private follows fhsm_obj_private: private keys
- * always, public keys and certificates never, a data object unless its
- * template says CKA_PRIVATE=FALSE. A secret key counts as private here even
- * when its template asks CKA_PRIVATE=FALSE (#37 K1): public or not, it is
- * the user's to make. `cls` is the class to assume
- * when the template names none (the class the call produces), and
- * `data_default` what a data object is when the template does not say. */
+ * Whether the object will be private follows fhsm_tmpl_public and
+ * fhsm_obj_private: public keys and certificates never; a data object, a
+ * secret key or a private key unless its template says CKA_PRIVATE=FALSE --
+ * for a private key, outside strict mode. `cls` is the class to assume when
+ * the template names none (the class the call produces), and `priv_default`
+ * what the object is when the template does not say: TRUE at creation, the
+ * source's for a copy.
+ *
+ * A secret key with CKA_PRIVATE=FALSE was counted as private here, the user's
+ * to make public or not (#37 K1), and so was a private key, whose template was
+ * ignored. Since 2.9.0 (#45) both are public objects that a public session may
+ * make, as §5.6 says and as pkcs11-provider expects: it imports keys read
+ * from PEM files and HKDF inputs as public session objects, without a login.
+ *
+ * A public session makes session objects only. A token object is written in
+ * the encrypted store, which needs the key a login brings; the store refuses
+ * one too, and this says so before any work is done. */
 static CK_RV fhsm_check_private_login_cls(CK_SESSION_HANDLE hSession,
                                           CK_ATTRIBUTE *tmpl, CK_ULONG n,
-                                          CK_ULONG cls, int data_default) {
+                                          CK_ULONG cls, int priv_default) {
     long ci = find_attr(tmpl, n, 0x00 /* CKA_CLASS */);
     if (ci >= 0 && tmpl[ci].pValue && tmpl[ci].ulValueLen == sizeof(CK_ULONG))
         cls = *(CK_ULONG *)tmpl[ci].pValue;
     int priv;
     if (cls == CKO_PUBLIC_KEY || cls == CKO_CERTIFICATE) priv = 0;
-    else if (cls == CKO_DATA) priv = tmpl_bbool(tmpl, n, CKA_PRIVATE, data_default);
-    else if (cls == CKO_SECRET_KEY || cls == CKO_PRIVATE_KEY) priv = 1;
+    else if (cls == CKO_DATA || cls == CKO_SECRET_KEY)
+        priv = tmpl_bbool(tmpl, n, CKA_PRIVATE, priv_default);
+    else if (cls == CKO_PRIVATE_KEY)
+        priv = fhsm_mode_is_fips() ? 1 : tmpl_bbool(tmpl, n, CKA_PRIVATE, priv_default);
     else priv = tmpl_bbool(tmpl, n, CKA_PRIVATE, 0);   /* creation refuses it later */
-    if (priv && fhsm_session_role(hSession) != FHSM_ROLE_USER)
+    const fhsm_role_t role = fhsm_session_role(hSession);
+    if (priv && role != FHSM_ROLE_USER)
+        return FHSM_RV_USER_NOT_LOGGED_IN;
+    if (role == FHSM_ROLE_NONE && tmpl_bbool(tmpl, n, CKA_TOKEN, 0))
         return FHSM_RV_USER_NOT_LOGGED_IN;
     return FHSM_RV_OK;
 }
@@ -3566,14 +3581,14 @@ static CK_RV fhsm_apply_obj_meta(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
 }
 
 /* CKA_PRIVATE of object `h` of class `cls`: TRUE but for public keys,
- * certificates, and data objects and secret keys made public
+ * certificates, and data objects, secret keys and private keys made public
  * (FHSM_OBJF3_PUBLIC). The same rule as obj_is_private in fhsm_token.c, which
  * the store applies to its own records; C_GetAttributeValue, the access
  * checks before login and C_FindObjects all ask this. */
 static int fhsm_obj_private(fhsm_token_t *t, CK_OBJECT_HANDLE h, uint32_t cls) {
     if (cls == CKO_PUBLIC_KEY || cls == CKO_CERTIFICATE) return 0;
     uint8_t f3 = 0;
-    if ((cls == CKO_DATA || cls == CKO_SECRET_KEY)
+    if ((cls == CKO_DATA || cls == CKO_SECRET_KEY || cls == CKO_PRIVATE_KEY)
         && fhsm_token_object_get_flags3(t, (uint32_t)h, &f3) == FHSM_RV_OK
         && (f3 & FHSM_OBJF3_PUBLIC))
         return 0;
@@ -3640,53 +3655,68 @@ static CK_RV fhsm_check_made_class(CK_ATTRIBUTE *tmpl, CK_ULONG n,
     return CKR_TEMPLATE_INCONSISTENT;
 }
 
-/* Records a data object's or a secret key's CKA_PRIVATE=FALSE.
+/* Does the template make an object of class `cls` public, by CKA_PRIVATE?
  *
- * The attribute was accepted and ignored: a data object created with
- * CKA_PRIVATE=FALSE read back TRUE, and -- the other half -- every data
- * object was readable before a login all the same, since only secret and
- * private keys were kept from an unauthenticated session. pkcs11-tool sends
- * CKA_PRIVATE=FALSE on every object it makes unless --private is given, so a
- * refusal was not an option. Found by pkcs11-check 0.3.0
- * (test_logout_object_lifetime_across_two_sessions).
+ * Data objects: the attribute was accepted and ignored, so a data object
+ * created with CKA_PRIVATE=FALSE read back TRUE, and -- the other half --
+ * every data object was readable before a login all the same, since only
+ * secret and private keys were kept from an unauthenticated session.
+ * pkcs11-tool sends CKA_PRIVATE=FALSE on every object it makes unless
+ * --private is given, so a refusal was not an option. Found by pkcs11-check
+ * 0.3.0 (test_logout_object_lifetime_across_two_sessions).
  *
  * Secret keys since 2.8.0 (#37 K1). One asked CKA_PRIVATE=FALSE was accepted
  * and kept private, and read back TRUE: CKR_OK for a template not followed.
- * It is now a public object, found and used before a login. Not sensitive,
- * it is also in the token file's public section, which is in clear; a
+ * It is a public object, found and used before a login. Not sensitive, a
+ * token one is also in the token file's public section, which is in clear; a
  * sensitive one is not (obj_is_public in fhsm_token.c). The cost falls on
  * pkcs11-tool's default, which asks for exactly this unless --private is
  * given; OpenSC/OpenSC#3950 asks for that default to change.
  *
- * Creating one still needs the user's login (fhsm_check_private_login_cls):
- * a secret key is the user's to make, public or not (#31).
+ * Private keys since 2.9.0 (#45), outside strict mode, where the template is
+ * ignored and the key stays private, as every private key was before. A
+ * public private key is never written to the public section.
  *
- * On the other classes the template is ignored, as before, and the class
- * decides (§4.4 leaves the default to the token). A private key usable
- * without a login is not one this module makes. A public key or certificate
- * asked CKA_PRIVATE=TRUE stays public: an older build would read the
- * restriction as absent (see FHSM_OBJF3_PUBLIC). */
-static void fhsm_apply_private_attr(fhsm_token_t *t, CK_ATTRIBUTE *tmpl,
-                                    CK_ULONG n, uint32_t handle) {
+ * On public keys and certificates the template is ignored, as before, and
+ * the class decides (§4.4 leaves the default to the token). One asked
+ * CKA_PRIVATE=TRUE stays public: an older build would read the restriction
+ * as absent (see FHSM_OBJF3_PUBLIC). */
+static int fhsm_tmpl_public(CK_ATTRIBUTE *tmpl, CK_ULONG n, uint32_t cls) {
     long pi = find_attr(tmpl, n, CKA_PRIVATE);
-    if (pi < 0 || !tmpl[pi].pValue || tmpl[pi].ulValueLen != 1) return;
-    uint32_t cls = 0, kt = 0;
-    if (fhsm_token_object_get(t, handle, NULL, NULL, &cls, &kt) != FHSM_RV_OK
-        || (cls != CKO_DATA && cls != CKO_SECRET_KEY))
-        return;
-    int want_public = ((const unsigned char *)tmpl[pi].pValue)[0] == 0;
-    uint8_t f3 = 0;
-    (void)fhsm_token_object_get_flags3(t, handle, &f3);
-    uint8_t nf3 = want_public ? (uint8_t)(f3 | FHSM_OBJF3_PUBLIC)
-                              : (uint8_t)(f3 & ~FHSM_OBJF3_PUBLIC);
-    if (nf3 != f3) (void)fhsm_token_object_set_flags3(t, handle, nf3);
+    if (pi < 0 || !tmpl[pi].pValue || tmpl[pi].ulValueLen != 1) return 0;
+    if (((const unsigned char *)tmpl[pi].pValue)[0] != 0) return 0;
+    if (cls == CKO_DATA || cls == CKO_SECRET_KEY) return 1;
+    if (cls == CKO_PRIVATE_KEY) return !fhsm_mode_is_fips();
+    return 0;
 }
 
+/* Add the object a creation template asks for, with its scope and its
+ * CKA_PRIVATE from the start: a session object owned by hSession unless the
+ * template says CKA_TOKEN=TRUE, public per fhsm_tmpl_public.
+ *
+ * Every creation path but C_CopyObject goes through here. Each used to add a
+ * token object, which wrote the file with the object's value, then mark it a
+ * session object, which wrote the file again without it, and only then set
+ * CKA_PRIVATE. Before a login none of that could be done; now a public
+ * session object is made in memory and nothing is written (#45). */
+static fhsm_rv_t fhsm_obj_add(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                              CK_ATTRIBUTE *tmpl, CK_ULONG n,
+                              uint32_t cls, uint32_t kt, const char *label,
+                              const uint8_t *value, size_t value_len,
+                              const uint8_t *id, size_t id_len,
+                              uint8_t flags, uint32_t *out_handle) {
+    const uint32_t owner = tmpl_bbool(tmpl, n, CKA_TOKEN, 0) ? 0 : (uint32_t)hSession;
+    const uint8_t f3 = fhsm_tmpl_public(tmpl, n, cls) ? FHSM_OBJF3_PUBLIC : 0;
+    return fhsm_token_object_add_ex(t, cls, kt, label, value, value_len,
+                                    id, id_len, flags, f3, owner, out_handle);
+}
+
+/* What a creation template says beyond the value, applied once the object
+ * exists. Its scope and CKA_PRIVATE are not here: fhsm_obj_add gives the
+ * object those at birth. */
 static void fhsm_apply_token_scope(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
                                    CK_ATTRIBUTE *tmpl, CK_ULONG n, uint32_t handle) {
-    if (!tmpl_bbool(tmpl, n, CKA_TOKEN, 0))
-        (void)fhsm_token_object_mark_session(t, handle, (uint32_t)hSession);
-    fhsm_apply_private_attr(t, tmpl, n, handle);
+    (void)hSession;
     /* Persist CKA_MODIFIABLE / CKA_DESTROYABLE = FALSE (both default TRUE) so
      * the read-back is truthful and mutation/destroy can be enforced (#125
      * TestModifiableAttribute / TestDestroyable). */
@@ -4008,8 +4038,8 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV cr = fhsm_check_ro_token(hSession, pTemplate, ulCount); if (cr != FHSM_RV_OK) return cr; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
-    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
-        return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A public session may make a public session object (#45);
+     * fhsm_check_private_login_cls below refuses the rest. */
     /* A secret or private key is the user's to make, not the SO's (#31). */
     { CK_RV pl = fhsm_check_private_login_cls(hSession, pTemplate, ulCount, CKO_SECRET_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
@@ -4285,8 +4315,8 @@ CK_RV C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     if (rv != FHSM_RV_OK) { fhsm_zeroize(key, sizeof(key)); return rv; }
 
     uint32_t handle = 0;
-    rv = fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
-                                key, key_len, id, id_len, obj_flags, &handle);
+    rv = fhsm_obj_add(t, hSession, pTemplate, ulCount, CKO_SECRET_KEY, key_type, label,
+                      key, key_len, id, id_len, obj_flags, &handle);
     fhsm_zeroize(key, sizeof(key));
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
@@ -5158,8 +5188,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
         }
 
         uint32_t handle = 0;
-        fhsm_rv_t rv = fhsm_token_object_add(
-            t, (uint32_t)a.cko, (uint32_t)a.ckk,
+        fhsm_rv_t rv = fhsm_obj_add(
+            t, hSession, pTemplate, ulCount, (uint32_t)a.cko, (uint32_t)a.ckk,
             a.label, store_data, store_len,
             a.id_data, a.id_len, flags, &handle);
         if (der) { OPENSSL_cleanse(der, store_len); OPENSSL_free(der); }
@@ -5206,8 +5236,8 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
      * carried in the store's key_type field (CKC_X_509 = 0). */
     if (a.path == FHSM_CREATE_PATH_CERT_X509) {
         uint32_t handle = 0;
-        fhsm_rv_t rv = fhsm_token_object_add(
-            t, (uint32_t)CKO_CERTIFICATE, (uint32_t)a.cert_type,
+        fhsm_rv_t rv = fhsm_obj_add(
+            t, hSession, pTemplate, ulCount, (uint32_t)CKO_CERTIFICATE, (uint32_t)a.cert_type,
             a.label, a.value_data, a.value_len,
             a.id_data, a.id_len,
             (uint8_t)(FHSM_OBJF_EXTRACTABLE | trusted_flag), &handle);
@@ -5592,9 +5622,10 @@ CK_RV C_CreateObject(CK_SESSION_HANDLE hSession,
     if (is_priv && tmpl_extractable) import_flags |= FHSM_OBJF_EXTRACTABLE;
 
     uint32_t handle = 0;
-    fhsm_rv_t rv = fhsm_token_object_add(t, (uint32_t)a.cko, (uint32_t)a.ckk,
-                                          a.label, enc, (size_t)enc_len,
-                                          a.id_data, a.id_len, import_flags, &handle);
+    fhsm_rv_t rv = fhsm_obj_add(t, hSession, pTemplate, ulCount,
+                                (uint32_t)a.cko, (uint32_t)a.ckk,
+                                a.label, enc, (size_t)enc_len,
+                                a.id_data, a.id_len, import_flags, &handle);
     OPENSSL_free(enc);
     if (rv != FHSM_RV_OK) return rv;
     *phObject = handle;
@@ -7248,8 +7279,8 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
-    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
-        return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A public session may make a public session object (#45);
+     * fhsm_check_private_login_cls below refuses the rest. */
     /* A secret key, or for CKM_HKDF_DATA a data object; nothing else. A
      * public key for CKM_PUB_KEY_FROM_PRIV_KEY, which checks its own class. */
     const int pub_from_priv = pMechanism->mechanism == 0x0000403AUL;
@@ -7699,8 +7730,9 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         size_t pid_len = 0;
         const uint8_t *pid = fhsm_template_id(pTemplate, ulCount, &pid_len);
         uint32_t ph = 0;
-        fhsm_rv_t prv = fhsm_token_object_add(t, CKO_PUBLIC_KEY, bkt, plabel,
-                                               pder, (size_t)pdl, pid, pid_len, 0, &ph);
+        fhsm_rv_t prv = fhsm_obj_add(t, hSession, pTemplate, ulCount,
+                                     CKO_PUBLIC_KEY, bkt, plabel,
+                                     pder, (size_t)pdl, pid, pid_len, 0, &ph);
         OPENSSL_free(pder);
         if (prv != FHSM_RV_OK) return prv;
         CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, ph);
@@ -8294,9 +8326,10 @@ static CK_RV derive_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     uint32_t handle = 0;
     size_t id_len = 0;
     const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
-    fhsm_rv_t rv = fhsm_token_object_add(t, obj_class, derived_ckk, label,
-                                          secret, secret_len, id, id_len,
-                                          obj_flags, &handle);
+    fhsm_rv_t rv = fhsm_obj_add(t, hSession, pTemplate, ulCount,
+                                obj_class, derived_ckk, label,
+                                secret, secret_len, id, id_len,
+                                obj_flags, &handle);
     if (des_fixed) OPENSSL_cleanse(des_buf, sizeof des_buf);
     if (rv != FHSM_RV_OK) return rv;
     *phKey = handle;
@@ -8726,8 +8759,8 @@ static CK_RV wrap_key_value(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism
               return 0x00000069UL;   /* CKR_KEY_NOT_WRAPPABLE */
       } }
     { CK_RV uc = fhsm_check_usage(t, hWrappingKey, FHSM_USAGE_WRAP); if (uc != FHSM_RV_OK) return uc; }
-    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
-        return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A public session may wrap too (#45): C_WrapKey has found both keys
+     * accessible to it, which a private one is not before a login. */
 
     /* Source key : extract its value bytes. */
     const uint8_t *kv = NULL; size_t kvl = 0;
@@ -9226,7 +9259,8 @@ static CK_RV unwrap_decrypt(CK_MECHANISM *m, const uint8_t *ukv, size_t ukl,
 
 /* Imports the decrypted bytes as a fresh object: a secret key, or the private
  * key the template's CKA_CLASS names. Reads pt, never keeps it. */
-static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
+static CK_RV unwrap_import(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
+                           CK_OBJECT_HANDLE hUnwrappingKey,
                            CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount,
                            const uint8_t *pt, size_t pt_len,
                            uint32_t *obj_class_out, uint32_t *handle) {
@@ -9319,8 +9353,8 @@ static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
     size_t id_len = 0;
     const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
     if (obj_class != CKO_PRIVATE_KEY)
-        return fhsm_token_object_add(t, CKO_SECRET_KEY, key_type, label,
-                                     pt, pt_len, id, id_len, obj_flags, handle);
+        return fhsm_obj_add(t, hSession, pTemplate, ulCount, CKO_SECRET_KEY, key_type,
+                            label, pt, pt_len, id, id_len, obj_flags, handle);
 
     /* The blob is a PKCS#8 PrivateKeyInfo, the form C_WrapKey gives. It is
      * stored as every reader here expects it, i2d_PrivateKey's form, and
@@ -9342,9 +9376,9 @@ static CK_RV unwrap_import(fhsm_token_t *t, CK_OBJECT_HANDLE hUnwrappingKey,
     } else if ((dl = i2d_PrivateKey(pk, &der)) <= 0) {
         rv = FHSM_RV_FUNCTION_FAILED;
     } else {
-        rv = fhsm_token_object_add(t, CKO_PRIVATE_KEY, key_type, label,
-                                    der, (size_t)dl, id, id_len,
-                                    obj_flags, handle);
+        rv = fhsm_obj_add(t, hSession, pTemplate, ulCount, CKO_PRIVATE_KEY, key_type,
+                          label, der, (size_t)dl, id, id_len,
+                          obj_flags, handle);
     }
     EVP_PKEY_free(pk);
     OPENSSL_clear_free(der, dl > 0 ? (size_t)dl : 0);
@@ -9399,8 +9433,8 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     { CK_RV uc = fhsm_check_usage(fhsm_session_token(hSession), hUnwrappingKey, FHSM_USAGE_UNWRAP); if (uc != FHSM_RV_OK) return uc; }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
-    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
-        return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A public session may make a public session object (#45);
+     * fhsm_check_private_login_cls below refuses the rest. */
     /* A secret or a private key; CKO_DATA put the plaintext in a data object. */
     { CK_RV mc = fhsm_check_made_class(pTemplate, ulCount, 1, 0);
       if (mc != FHSM_RV_OK) return mc; }
@@ -9435,7 +9469,7 @@ CK_RV C_UnwrapKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     CK_RV ur = unwrap_decrypt(pMechanism, ukv, ukl, pWrappedKey, ulWrappedKeyLen,
                               pt, cap, &pt_len);
     if (ur == FHSM_RV_OK)
-        ur = unwrap_import(t, hUnwrappingKey, pTemplate, ulCount, pt, pt_len,
+        ur = unwrap_import(t, hSession, hUnwrappingKey, pTemplate, ulCount, pt, pt_len,
                            &obj_class, &handle);
     /* The only release of pt, with no exit between it and the allocation.
      * fhsm_secure_free clears the block before returning it to the arena. */
@@ -9570,9 +9604,10 @@ static CK_RV kem_store_secret(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     uint32_t handle = 0;
     size_t id_len = 0;
     const uint8_t *id = fhsm_template_id(pTemplate, ulCount, &id_len);
-    fhsm_rv_t rv = fhsm_token_object_add(t, CKO_SECRET_KEY, new_ckk, label,
-                                          ss, out_len, id, id_len, obj_flags,
-                                          &handle);
+    fhsm_rv_t rv = fhsm_obj_add(t, hSession, pTemplate, ulCount,
+                                CKO_SECRET_KEY, new_ckk, label,
+                                ss, out_len, id, id_len, obj_flags,
+                                &handle);
     if (rv != FHSM_RV_OK) return rv;
 
     /* The same tail as C_UnwrapKey's, in the same order. */
@@ -9659,8 +9694,8 @@ CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
-    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
-        return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A public session may make a public session object (#45);
+     * fhsm_check_private_login_cls below refuses the rest. */
     /* A secret key, refused here rather than once the secret exists. */
     { CK_RV mc = fhsm_check_made_class(pTemplate, ulCount, 0, 0);
       if (mc != FHSM_RV_OK) return mc; }
@@ -9771,8 +9806,8 @@ CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         return FHSM_RV_MECHANISM_INVALID;
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
-    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
-        return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A public session may make a public session object (#45);
+     * fhsm_check_private_login_cls below refuses the rest. */
     /* A secret key, refused here rather than once the secret exists. */
     { CK_RV mc = fhsm_check_made_class(pTemplate, ulCount, 0, 0);
       if (mc != FHSM_RV_OK) return mc; }
@@ -10619,8 +10654,11 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
     }
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
-    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
-        return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A public session may make a key pair of public session objects
+     * (#45). The public half's scope is checked here, the private half's
+     * below. */
+    { CK_RV pl = fhsm_check_private_login_cls(hSession, pPub, ulPub, CKO_PUBLIC_KEY, 0);
+      if (pl != FHSM_RV_OK) return pl; }
     /* A secret or private key is the user's to make, not the SO's (#31). */
     { CK_RV pl = fhsm_check_private_login_cls(hSession, pPriv, ulPriv, CKO_PRIVATE_KEY, 1);
       if (pl != FHSM_RV_OK) return pl; }
@@ -11099,10 +11137,10 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
             && *(unsigned char *)pPriv[ei].pValue)
             priv_flags |= FHSM_OBJF_EXTRACTABLE;
     }
-    fhsm_rv_t rv = fhsm_token_object_add(t, CKO_PUBLIC_KEY, ckk_type,
-                                          label_pub, pub_der, (size_t)pub_len,
-                                          id_pub, id_pub_len,
-                                          FHSM_OBJF_LOCAL, &hp);
+    fhsm_rv_t rv = fhsm_obj_add(t, hSession, pPub, ulPub, CKO_PUBLIC_KEY, ckk_type,
+                                label_pub, pub_der, (size_t)pub_len,
+                                id_pub, id_pub_len,
+                                FHSM_OBJF_LOCAL, &hp);
     OPENSSL_free(pub_der);
     if (rv != FHSM_RV_OK) { OPENSSL_free(priv_der); return rv; }
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pPub, ulPub, hp);
@@ -11120,10 +11158,10 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                                         CKA_WRAP_TEMPLATE_ATTR, FHSM_TMPL_WRAP);
       if (ar != FHSM_RV_OK) { OPENSSL_free(priv_der);
                               (void)fhsm_token_object_destroy(t, hp); return ar; } }
-    rv = fhsm_token_object_add(t, CKO_PRIVATE_KEY, ckk_type, label_priv,
-                                priv_der, (size_t)priv_len,
-                                id_priv, id_priv_len,
-                                priv_flags, &hk);
+    rv = fhsm_obj_add(t, hSession, pPriv, ulPriv, CKO_PRIVATE_KEY, ckk_type, label_priv,
+                      priv_der, (size_t)priv_len,
+                      id_priv, id_priv_len,
+                      priv_flags, &hk);
     fhsm_zeroize(priv_der, (size_t)priv_len);
     OPENSSL_free(priv_der);
     if (rv != FHSM_RV_OK) {
@@ -12229,8 +12267,19 @@ CK_RV C_SetAttributeValue(CK_SESSION_HANDLE hSession,
 
     fhsm_token_t *t = fhsm_session_token(hSession);
     if (!t) return FHSM_RV_SESSION_HANDLE_INVALID;
-    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
-        return FHSM_RV_USER_NOT_LOGGED_IN;
+    /* A public session changes a public session object only (#45). A
+     * token object is in the encrypted store, which it cannot write, and a
+     * private object is not its to see. Anything else, an unknown handle
+     * included, answers CKR_USER_NOT_LOGGED_IN as before. */
+    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE) {
+        const uint8_t *v = NULL; size_t vl = 0;
+        uint32_t cls = 0, kt = 0;
+        int is_tok = 1;
+        if (fhsm_token_object_get(t, (uint32_t)hObject, &v, &vl, &cls, &kt) != FHSM_RV_OK
+            || fhsm_token_object_is_token(t, (uint32_t)hObject, &is_tok) != FHSM_RV_OK
+            || is_tok || fhsm_obj_private(t, hObject, cls))
+            return FHSM_RV_USER_NOT_LOGGED_IN;
+    }
     /* A private object is invalid to the SO (§4.4). */
     if (fhsm_handle_access_denied(t, hObject))
         return FHSM_RV_OBJECT_HANDLE_INVALID;
@@ -12609,8 +12658,6 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
       if (fhsm_token_object_get_flags2(t, (uint32_t)hObject, &sf2) == FHSM_RV_OK
           && (sf2 & FHSM_OBJF2_NOT_COPYABLE))
           return 0x0000001BUL;   /* CKR_ACTION_PROHIBITED */ }
-    if (fhsm_session_role(hSession) == FHSM_ROLE_NONE)
-        return FHSM_RV_USER_NOT_LOGGED_IN;
 
     /* Read original object's value + scalar fields. */
     const uint8_t *src_value = NULL;
@@ -12701,17 +12748,18 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                 break;
             }
             case CKA_PRIVATE:
-                /* A copy of a private secret key may not be public. PKCS#11
-                 * lets CKA_PRIVATE change in a copy, and a data object may go
-                 * either way here, as at creation. A secret key that went
-                 * public would be usable before a login and, unless
-                 * sensitive, written in clear in the token file: a copy
-                 * would take out a key the user had kept private. One way
-                 * only, as CKA_SENSITIVE and CKA_EXTRACTABLE above, with the
-                 * same answer (#37 K1). */
+                /* A copy of a private secret key or private key may not be
+                 * public. PKCS#11 lets CKA_PRIVATE change in a copy, and a
+                 * data object may go either way here, as at creation. A key
+                 * that went public would be usable before a login and, for a
+                 * secret key not sensitive, written in clear in the token
+                 * file: a copy would take out a key the user had kept
+                 * private. One way only, as CKA_SENSITIVE and CKA_EXTRACTABLE
+                 * above, with the same answer (#37 K1, #45). */
                 if (a->ulValueLen != 1 || !a->pValue)
                     return FHSM_RV_ATTRIBUTE_VALUE_INVALID;
-                if (src_class == CKO_SECRET_KEY && *(const uint8_t *)a->pValue == 0
+                if ((src_class == CKO_SECRET_KEY || src_class == CKO_PRIVATE_KEY)
+                    && *(const uint8_t *)a->pValue == 0
                     && fhsm_obj_private(t, hObject, src_class))
                     return 0x00000010UL;             /* CKR_ATTRIBUTE_READ_ONLY */
                 break;
@@ -12763,25 +12811,54 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
         }
     }
 
-    /* Persist the new object. fhsm_token_object_add returns the new
-     * handle in *out_handle. The source value blob is referenced
-     * read-only ; the token store performs its own copy. */
+    /* CKA_TOKEN is inherited from the source unless the template overrides
+     * it (PKCS#11 v3.2 §C.6.7.3). fhsm_obj_add reads an absent one as FALSE,
+     * which is wrong for a copy of a token object, so the scope is computed
+     * here: the template's value if the caller stated it, else the source's
+     * own. C_CopyObject was the one creation path that never scoped the copy,
+     * so every copy landed as a token object and copying a session object
+     * promoted it to persistent storage (#125 TestCopyObject). */
+    int want_token;
+    { long ti = find_attr(pTemplate, ulCount, CKA_TOKEN);
+      if (ti >= 0 && pTemplate[ti].pValue && pTemplate[ti].ulValueLen == 1) {
+          want_token = *(unsigned char *)pTemplate[ti].pValue ? 1 : 0;
+      } else {
+          int it = 1;
+          (void)fhsm_token_object_is_token(t, (uint32_t)hObject, &it);
+          want_token = it;
+      } }
+    /* The third byte describes the key, not a restriction on it, and a copy
+     * is the same key: it has the original's past (§5.7), not a clean one
+     * from its template. Its CKA_PRIVATE is the source's unless the template
+     * says otherwise -- a data object either way, a key only towards private,
+     * checked in the loop above -- as at creation (fhsm_tmpl_public). */
+    uint8_t copy_f3 = 0;
+    (void)fhsm_token_object_get_flags3(t, (uint32_t)hObject, &copy_f3);
+    if (!fhsm_always_sensitive(t, hObject)) copy_f3 |= FHSM_OBJF3_WAS_NOT_SENSITIVE;
+    if (!fhsm_never_extractable(t, hObject)) copy_f3 |= FHSM_OBJF3_WAS_EXTRACTABLE;
+    if (src_class == CKO_DATA || src_class == CKO_SECRET_KEY
+        || src_class == CKO_PRIVATE_KEY) {
+        long pi = find_attr(pTemplate, ulCount, CKA_PRIVATE);
+        if (pi >= 0) {
+            if (fhsm_tmpl_public(pTemplate, ulCount, src_class))
+                copy_f3 |= FHSM_OBJF3_PUBLIC;
+            else
+                copy_f3 &= (uint8_t)~FHSM_OBJF3_PUBLIC;
+        }
+    }
+
+    /* Persist the new object, a session object from the start when it is
+     * one. The source value blob is referenced read-only; the token store
+     * performs its own copy. */
     uint32_t new_handle = 0;
-    fhsm_rv_t r2 = fhsm_token_object_add(t, src_class, src_key_type,
-                                          copy_label,
-                                          src_value, src_value_len,
-                                          copy_id, copy_id_len,
-                                          copy_flags, &new_handle);
+    fhsm_rv_t r2 = fhsm_token_object_add_ex(t, src_class, src_key_type,
+                                             copy_label,
+                                             src_value, src_value_len,
+                                             copy_id, copy_id_len,
+                                             copy_flags, copy_f3,
+                                             want_token ? 0 : (uint32_t)hSession,
+                                             &new_handle);
     if (r2 != FHSM_RV_OK) return r2;
-    /* The copy has the original's past (§5.7), not a clean one from its
-     * template. */
-    { uint8_t src_f3 = 0;
-      (void)fhsm_token_object_get_flags3(t, (uint32_t)hObject, &src_f3);
-      if (!fhsm_always_sensitive(t, hObject)) src_f3 |= FHSM_OBJF3_WAS_NOT_SENSITIVE;
-      if (!fhsm_never_extractable(t, hObject)) src_f3 |= FHSM_OBJF3_WAS_EXTRACTABLE;
-      CK_RV ar = fhsm_add_key_history(t, new_handle,
-                                      (uint8_t)(src_f3 & FHSM_KEY_FROM_OUTSIDE));
-      if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
     { CK_RV ar = fhsm_apply_allowed_mechs(t, pTemplate, ulCount, new_handle);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
     { CK_RV ar = fhsm_apply_nested_tmpl(t, pTemplate, ulCount, new_handle,
@@ -12794,32 +12871,9 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
                                         CKA_WRAP_TEMPLATE_ATTR, FHSM_TMPL_WRAP);
       if (ar != FHSM_RV_OK) { (void)fhsm_token_object_destroy(t, new_handle); return ar; } }
 
-    /* Scope the copy. C_CopyObject was the one creation path that never called
-     * fhsm_apply_token_scope, so every copy landed with owner_session = 0 -- a
-     * token object -- and copying a session object silently promoted it to
-     * persistent storage (#125 TestCopyObject; fifth of six creation paths to
-     * be missed by a guard wired only to the others).
-     *
-     * CKA_TOKEN is inherited from the source unless the template overrides it
-     * (PKCS#11 v3.2 §C.6.7.3). apply_token_scope keys off CKA_TOKEN in the
-     * template and defaults an absent one to FALSE (session), which is wrong
-     * when the source was a token object. So compute the effective scope here:
-     * template value if the caller stated it, else the source's own scope.
-     * Mark the copy a session object only when that effective scope is FALSE.
-     * The MODIFIABLE / DESTROYABLE persistence is handled the same way as the
+    /* The MODIFIABLE / DESTROYABLE persistence is handled the same way as the
      * other creation paths. */
     {
-        long ti = find_attr(pTemplate, ulCount, CKA_TOKEN);
-        int want_token;
-        if (ti >= 0 && pTemplate[ti].pValue && pTemplate[ti].ulValueLen == 1) {
-            want_token = *(unsigned char *)pTemplate[ti].pValue ? 1 : 0;
-        } else {
-            int it = 1;
-            (void)fhsm_token_object_is_token(t, (uint32_t)hObject, &it);
-            want_token = it;
-        }
-        if (!want_token)
-            (void)fhsm_token_object_mark_session(t, new_handle, (uint32_t)hSession);
         uint8_t pf = 0;
         if (fhsm_token_object_get_flags(t, new_handle, &pf) == FHSM_RV_OK) {
             if (!tmpl_bbool(pTemplate, ulCount, CKA_MODIFIABLE_ATTR, 1))
@@ -12858,17 +12912,6 @@ CK_RV C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
         if (fhsm_token_object_get_flags2(t, (uint32_t)hObject, &src_f2) == FHSM_RV_OK
             && src_f2 != 0)
             (void)fhsm_token_object_set_flags2(t, new_handle, src_f2);
-        /* The third byte describes the key, not a restriction on it, and a
-         * copy is the same key. */
-        uint8_t src_f3 = 0;
-        if (fhsm_token_object_get_flags3(t, (uint32_t)hObject, &src_f3) == FHSM_RV_OK
-            && src_f3 != 0)
-            (void)fhsm_token_object_set_flags3(t, new_handle, src_f3);
-        /* CKA_PRIVATE may change in a copy (§4.4, §4.1.3); this module
-         * honours it on a data object and a secret key, as at creation --
-         * for a secret key in one direction only, checked in the template
-         * loop above. After the inherited byte, so the template wins. */
-        fhsm_apply_private_attr(t, pTemplate, ulCount, new_handle);
         {
             uint32_t copy_class = 0, copy_kt = 0;
             const uint8_t *cv = NULL; size_t cvl = 0;

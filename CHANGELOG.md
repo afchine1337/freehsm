@@ -8,6 +8,39 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+* **Public session objects without a login** (#45). PKCS#11 v3.2 §5.6 gives
+  a R/W public session read/write access to public objects, and a R/O one to
+  public session objects. The module refused every object before a login, so
+  pkcs11-provider, which imports the keys an application hands it (a key
+  read from a PEM file, the input key of an HKDF) as session objects, failed
+  where SoftHSM, softokn and Kryoptic accept them. A session that is not
+  logged in now makes, uses, changes, copies and destroys public session
+  objects: a public key or certificate, and a data object, secret key or
+  private key asked `CKA_PRIVATE=FALSE`. `C_CreateObject`, `C_GenerateKey`,
+  `C_GenerateKeyPair`, `C_DeriveKey`, `C_UnwrapKey`, `C_EncapsulateKey`,
+  `C_DecapsulateKey`, `C_CopyObject`, `C_WrapKey` and `C_SetAttributeValue`
+  check that the keys they use are reachable and that what they make is
+  public, where they refused a public session outright. A private object
+  still needs the user, and a token object still needs a login
+  (`CKR_USER_NOT_LOGGED_IN`): it is written to the encrypted store. The
+  objects are kept, with their handles, when the user logs in.
+
+  The SO, whose session has read/write access to public objects, now makes
+  public secret keys too; since #31 a secret key needed the user, public or
+  not.
+
+  A session object is now made as one and never written to the token file.
+  It was written there with its value, encrypted, then removed by a second
+  write. Reported by Jakub Jelen. `tests/test_session_prelogin.c`,
+  `tests/test_public_session.c`.
+* **A private key created with `CKA_PRIVATE=FALSE` is a public object**
+  (#45), outside strict mode. The attribute was ignored and the key read
+  back TRUE, as a secret key's did before 2.8.0 (#37 K1). Strict mode keeps
+  every private key private: the template is ignored there, as before. A
+  public private key is never written to the token file's public section,
+  sensitive or not, so a token one is seen after a login only; a session one
+  is seen at once. A copy may make a public private key private, not the
+  reverse (`CKR_ATTRIBUTE_READ_ONLY`).
 * **DSA keys import** (#42). `C_CreateObject` takes a `CKK_DSA` public key
   from `CKA_PRIME`, `CKA_SUBPRIME`, `CKA_BASE` and `CKA_VALUE` (y), and a
   private key from the same parameters and x (PKCS#11 v3.2 6.2.3, 6.2.4).
