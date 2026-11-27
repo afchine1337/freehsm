@@ -32,9 +32,14 @@
  *  (11) a generated sensitive key's bytes do not come back out through XOR
  *       with zeros or concatenation: a copy imported from them would compute
  *       the same HMAC
+ * The XOR cases run where the module offers CKM_XOR_BASE_AND_DATA, which the
+ * nist build and strict mode refuse (2.9.0, #48). Its data is as long as the
+ * base: shorter data from a protected base is refused, and
+ * tests/test_derive_cut.c covers that.
  * ========================================================================= */
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef unsigned long CK_RV, CK_ULONG, CK_SLOT_ID, CK_SESSION_HANDLE,
@@ -154,6 +159,20 @@ static int value_readable(CK_OBJECT_HANDLE h) {
     return C_GetAttributeValue(s, h, &a, 1) == CKR_OK;
 }
 
+/* CKM_XOR_BASE_AND_DATA where the module offers it: listed, and not refused
+ * by strict mode. It is not approved (2.9.0, #48), so the nist build and
+ * strict mode refuse it. Called after C_Initialize. */
+static int xor_offered(void *lib) {
+    CK_RV (*gml)(CK_SLOT_ID, CK_ULONG*, CK_ULONG*);
+    *(void**)&gml = dlsym(lib, "C_GetMechanismList");
+    const char *mode = getenv("FHSM_MODE");
+    if (mode && (!strcmp(mode, "strict") || !strcmp(mode, "fips"))) return 0;
+    CK_ULONG n = 0, ml[1024];
+    if (!gml || gml(0, NULL, &n) != 0 || n > 1024 || gml(0, ml, &n) != 0) return 0;
+    for (CK_ULONG i = 0; i < n; i++) if (ml[i] == 0x364UL) return 1;
+    return 0;
+}
+
 int main(void)
 {
     void *hl = dlopen("./libfreehsm.so", RTLD_NOW);
@@ -262,9 +281,12 @@ int main(void)
     }
 
     /* (9), (10) */
+    const int xor_ok = xor_offered(hl);
     {
-        CK_BYTE data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
-        CK_KEY_DERIVATION_STRING_DATA sd = { data, sizeof data };
+        CK_BYTE data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 }, data32[32];
+        for (int i = 0; i < 32; ++i) data32[i] = (CK_BYTE)(i + 1);
+        CK_KEY_DERIVATION_STRING_DATA sd = { data, sizeof data },
+                                      sd32 = { data32, sizeof data32 };
         struct { CK_ULONG m; const char *name; } ms[] = {
             { CKM_CONCAT_BASE_DATA, "CKM_CONCATENATE_BASE_AND_DATA" },
             { CKM_CONCAT_DATA_BASE, "CKM_CONCATENATE_DATA_AND_BASE" },
@@ -272,7 +294,9 @@ int main(void)
         };
         char what[96];
         for (int i = 0; i < 3; ++i) {
-            CK_MECHANISM m = { ms[i].m, &sd, sizeof sd };
+            if (ms[i].m == CKM_XOR_BASE_DATA && !xor_ok) continue;
+            /* XOR's data as long as the 32-byte base: not a cut (#48). */
+            CK_MECHANISM m = { ms[i].m, ms[i].m == CKM_XOR_BASE_DATA ? &sd32 : &sd, sizeof sd };
             CK_OBJECT_HANDLE h = 0;
             rv = derive_as(&m, locked, 0, 1, NULL, &h);
             snprintf(what, sizeof what, "(9) %s: asking for the opposite is refused", ms[i].name);
@@ -325,6 +349,7 @@ int main(void)
             { CKM_CONCAT_BASE_DATA, &sd, "(11) CKM_CONCATENATE_BASE_AND_DATA: value not recovered" },
         };
         for (int i = 0; i < 2; ++i) {
+            if (ms[i].m == CKM_XOR_BASE_DATA && !xor_ok) continue;
             CK_MECHANISM m = { ms[i].m, ms[i].p, sizeof *ms[i].p };
             CK_OBJECT_HANDLE h = 0, copy = 0;
             CK_BYTE out[64]; CK_ATTRIBUTE a = { CKA_VALUE, out, sizeof out };

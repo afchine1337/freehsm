@@ -5793,6 +5793,30 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
 static CK_RV fhsm_check_allowed_mech(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
                                       CK_ULONG mech);
 
+/* A protected key -- sensitive, or not extractable -- may not be cut short
+ * by a derivation that copies its bytes (#48). A key holding its first n
+ * bytes, all but the last known, answers an HMAC or a cipher that a caller
+ * matches against 256 guesses; n + 1 gives the next byte, and the whole key
+ * follows, as Clulow showed in 2003. The derived key keeps the base's
+ * protection (GHSA-4x45-2v79-28cj), which keeps its value from being read
+ * but not from being used. A floor on the length would not help: a
+ * concatenation puts known bytes in front of the key first. So the length
+ * is compared with the base's own:
+ *
+ *   CKM_XOR_BASE_AND_DATA       data shorter than the base
+ *   CKM_EXTRACT_KEY_FROM_KEY    a run of bits shorter than the base
+ *   CKM_IKE1_EXTENDED_DERIVE    SKEYID_e cut (RFC 2409 appendix B)
+ *
+ * The concatenations make a longer key, and CKA_VALUE_LEN does not shorten
+ * them. A base whose flags cannot be read is taken as protected. */
+static int fhsm_protected_key_shrinks(fhsm_token_t *t, CK_OBJECT_HANDLE hBase,
+                                      size_t base_len, size_t out_len) {
+    uint8_t bf = 0;
+    if (out_len >= base_len) return 0;
+    if (fhsm_token_object_get_flags(t, (uint32_t)hBase, &bf) != FHSM_RV_OK) return 1;
+    return (bf & FHSM_OBJF_SENSITIVE) || !(bf & FHSM_OBJF_EXTRACTABLE);
+}
+
 /* CK_KEY_DERIVATION_STRING_DATA (PKCS#11 v3.2 §6.20). Used by
  * CONCATENATE_BASE_AND_DATA, CONCATENATE_DATA_AND_BASE and
  * XOR_BASE_AND_DATA. CONCATENATE_BASE_AND_KEY does NOT use it: its
@@ -6872,6 +6896,10 @@ static CK_RV ike_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
     if (!okm) { rv = FHSM_RV_HOST_MEMORY; goto done; }
     if (truncate_base) {
         if (bvl < out_len) { rv = FHSM_RV_KEY_SIZE_RANGE; goto done; }
+        /* The base key's own bytes, cut: not from a protected key (#48). */
+        if (fhsm_protected_key_shrinks(t, hBaseKey, bvl, out_len)) {
+            rv = FHSM_RV_KEY_FUNCTION_NOT_PERMITTED; goto done;
+        }
         memcpy(okm, bv, out_len);
     } else if (m == FHSM_CKM_IKE_PRF_DERIVE || m == FHSM_CKM_IKE1_PRF_DERIVE) {
         uint8_t mac[64]; size_t ml = sizeof mac;
@@ -7672,6 +7700,9 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         size_t klen = 0;
         { CK_RV lr = ecdh_key_len(pTemplate, ulCount, FHSM_DERIVE_MAX, &klen);
           if (lr != FHSM_RV_OK) return lr; }
+        /* Fewer bits than a protected base holds: refused (#48). */
+        if (fhsm_protected_key_shrinks(t, hBaseKey, bvl, klen))
+            return FHSM_RV_KEY_FUNCTION_NOT_PERMITTED;
         uint8_t *xb = OPENSSL_zalloc(klen);
         if (!xb) return FHSM_RV_HOST_MEMORY;
         for (uint64_t i = 0; i < (uint64_t)klen * 8u; ++i) {
@@ -7885,6 +7916,12 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
         || pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA_OP
         || pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE_OP
         || pMechanism->mechanism == CKM_XOR_BASE_AND_DATA_OP) {
+        /* XOR with data is no key derivation NIST approves (SP 800-56C,
+         * SP 800-108, SP 800-135): refused where its rules apply, as
+         * CKM_EXTRACT_KEY_FROM_KEY is (2.9.0, #48). */
+        if (pMechanism->mechanism == CKM_XOR_BASE_AND_DATA_OP
+            && (fhsm_build_fips_strict || fhsm_mode_is_fips()))
+            return FHSM_RV_MECHANISM_INVALID;
         const uint8_t *bv = NULL; size_t bvl = 0;
         uint32_t bcl = 0, bkt = 0;
         fhsm_rv_t brv = fhsm_token_object_get(t, (uint32_t)hBaseKey,
@@ -7949,6 +7986,10 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                       ? ovl : bvl + ovl;
         if (need == 0 || need > FHSM_DERIVE_MAX)
             return FHSM_RV_MECHANISM_PARAM_INVALID;
+        /* Data shorter than a protected base cuts it: refused (#48). */
+        if (pMechanism->mechanism == CKM_XOR_BASE_AND_DATA_OP
+            && fhsm_protected_key_shrinks(t, hBaseKey, bvl, need))
+            return FHSM_RV_KEY_FUNCTION_NOT_PERMITTED;
 
         uint8_t *buf = OPENSSL_malloc(need);
         if (!buf) return FHSM_RV_HOST_MEMORY;

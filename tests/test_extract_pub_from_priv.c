@@ -13,6 +13,8 @@
  *       bit past the end, or no parameter, CKR_MECHANISM_PARAM_INVALID; an
  *       AES base CKR_KEY_TYPE_INCONSISTENT; CKA_SENSITIVE=FALSE from a
  *       sensitive base CKR_TEMPLATE_INCONSISTENT.
+ *   (C) fewer bytes than a sensitive base holds: CKR_KEY_FUNCTION_NOT_PERMITTED
+ *       (#48); all of them, rotated, are taken.
  * CKM_PUB_KEY_FROM_PRIV_KEY (both builds):
  *   (P) from a generated P-256, RSA-2048 and Ed25519 private key, a public
  *       key object whose CKA_EC_POINT / CKA_EC_PARAMS, or CKA_MODULUS /
@@ -34,6 +36,7 @@ typedef struct { CK_ULONG type; void *pValue; CK_ULONG ulValueLen; } CK_ATTRIBUT
 typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; } CK_MECHANISM;
 
 #define CKR_OK                         0x000UL
+#define CKR_KEY_FUNCTION_NOT_PERMITTED 0x068UL
 #define CKR_KEY_TYPE_INCONSISTENT      0x063UL
 #define CKR_MECHANISM_INVALID          0x070UL
 #define CKR_MECHANISM_PARAM_INVALID    0x071UL
@@ -223,13 +226,21 @@ int main(void) {
         CK_OBJECT_HANDLE h = 0;
         CK_RV r3 = C_DeriveKey(s, &none, g32, t, 4, &h);
         CK_RV r4 = extract(aes, 0, 4, 0, NULL, NULL);
-        CK_RV r5 = extract(gsens, 0, 4, 0, NULL, NULL);
+        CK_RV r5 = extract(gsens, 0, 32, 0, NULL, NULL);
         snprintf(what, sizeof what,
                  "(R) no length, bit 256, no param, AES base, unsensitive (0x%lx 0x%lx 0x%lx 0x%lx 0x%lx)",
                  r1, r2, r3, r4, r5);
         ok(r1 == CKR_TEMPLATE_INCOMPLETE && r2 == CKR_MECHANISM_PARAM_INVALID
            && r3 == CKR_MECHANISM_PARAM_INVALID && r4 == CKR_KEY_TYPE_INCONSISTENT
            && r5 == CKR_TEMPLATE_INCONSISTENT, what);
+        /* (C) A sensitive base is not cut short (#48): four of its 32 bytes
+         * would be found by an HMAC under them and 2^32 guesses, one by 256.
+         * All 32 bytes, rotated, is not a cut. */
+        CK_RV r6 = extract(gsens, 0, 4, 1, NULL, NULL);
+        CK_RV r7 = extract(gsens, 8, 32, 1, NULL, NULL);
+        snprintf(what, sizeof what,
+                 "(C) 4 bytes of a sensitive base refused, 32 rotated made (0x%lx 0x%lx)", r6, r7);
+        ok(r6 == CKR_KEY_FUNCTION_NOT_PERMITTED && r7 == CKR_OK, what);
     }
 
     /* --- CKM_PUB_KEY_FROM_PRIV_KEY ---------------------------------------- */

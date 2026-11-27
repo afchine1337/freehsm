@@ -116,7 +116,7 @@ The module advertises these mechanisms in `C_GetMechanismList` for compatibility
 * SSL3 KDF family
 * AES-ECB on > 16 bytes (FIPS forbids)
 * CBC-MAC (`CKM_AES_MAC`, `CKM_DES3_MAC` and their `_GENERAL` forms) and 3DES-CMAC
-* Key derivation by digest (`*_KEY_DERIVATION`), by encryption (`*_ENCRYPT_DATA`) and `CKM_EXTRACT_KEY_FROM_KEY`
+* Key derivation by digest (`*_KEY_DERIVATION`), by encryption (`*_ENCRYPT_DATA`), `CKM_EXTRACT_KEY_FROM_KEY` and `CKM_XOR_BASE_AND_DATA` (2.9.0)
 * ChaCha20, Poly1305 and ChaCha20-Poly1305 (RFC 8439), which the FIPS provider does not serve: there they are not advertised at all
 
 ---

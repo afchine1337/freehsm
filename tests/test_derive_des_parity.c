@@ -17,9 +17,12 @@
  *   - CKM_CONCATENATE_BASE_AND_DATA to CKK_DES3: the same, on another
  *     mechanism;
  *   - control: CKK_GENERIC_SECRET keeps the XOR exactly, low bits included.
+ * The XOR cases run where the module offers CKM_XOR_BASE_AND_DATA, which
+ * the nist build and strict mode refuse (2.9.0, #48).
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef unsigned long CK_RV, CK_ULONG, CK_SLOT_ID, CK_SESSION_HANDLE,
@@ -95,6 +98,20 @@ static CK_ULONG derive(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE base, CK_ULONG mech
     return v.ulValueLen;
 }
 
+/* CKM_XOR_BASE_AND_DATA where the module offers it: listed, and not refused
+ * by strict mode. It is not approved (2.9.0, #48), so the nist build and
+ * strict mode refuse it. Called after C_Initialize. */
+static int xor_offered(void *lib) {
+    CK_RV (*gml)(CK_SLOT_ID, CK_ULONG*, CK_ULONG*);
+    *(void**)&gml = dlsym(lib, "C_GetMechanismList");
+    const char *mode = getenv("FHSM_MODE");
+    if (mode && (!strcmp(mode, "strict") || !strcmp(mode, "fips"))) return 0;
+    CK_ULONG n = 0, ml[1024];
+    if (!gml || gml(0, NULL, &n) != 0 || n > 1024 || gml(0, ml, &n) != 0) return 0;
+    for (CK_ULONG i = 0; i < n; i++) if (ml[i] == 0x364UL) return 1;
+    return 0;
+}
+
 int main(void)
 {
     void *lib = dlopen("./libfreehsm.so", RTLD_NOW);
@@ -134,7 +151,9 @@ int main(void)
         { "CKK_DES",  CKK_DES,  8 },  { "CKK_DES2", CKK_DES2, 16 },
         { "CKK_DES3", CKK_DES3, 24 }, { "CKK_CDMF", CKK_CDMF, 8 },
     };
-    for (size_t k = 0; k < sizeof T / sizeof T[0]; ++k) {
+    const int xor_ok = xor_offered(lib);
+    if (!xor_ok) printf("  CKM_XOR_BASE_AND_DATA is not offered here: its cases are skipped\n");
+    for (size_t k = 0; xor_ok && k < sizeof T / sizeof T[0]; ++k) {
         CK_BYTE out[32];
         CK_ULONG n = derive(s, base, CKM_XOR_BASE_AND_DATA, data, T[k].len, T[k].kt, out);
         int good = n == T[k].len;
@@ -164,7 +183,7 @@ int main(void)
         ok(good, "CONCATENATE_BASE_AND_DATA -> CKK_DES3: odd parity, bytes kept");
     }
 
-    {   /* The control: a generic secret is not touched. */
+    if (xor_ok) {   /* The control: a generic secret is not touched. */
         CK_BYTE out[32];
         CK_ULONG n = derive(s, base, CKM_XOR_BASE_AND_DATA, data, 16, CKK_GENERIC_SECRET, out);
         int good = n == 16;

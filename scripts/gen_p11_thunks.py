@@ -865,9 +865,11 @@ MECHANISMS: tuple[Mech, ...] = (
          "dispatch_concat_data_and_base",
          fips="approved",
          refs=("PKCS#11 v3.2 §6.20.3",)),
+    # XOR with data is no key derivation NIST approves (2.9.0, #48): it was
+    # listed approved, and cut a protected key short in strict mode too.
     Mech("CKM_XOR_BASE_AND_DATA",         0x00000364, "KDF-concat", "derive",
          "dispatch_xor_base_and_data",
-         fips="approved",
+         fips="non-approved",
          refs=("PKCS#11 v3.2 §6.20.4",)),
 
     # === Key derivation by encrypting data under the base key (2.8.0) ==

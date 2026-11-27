@@ -120,6 +120,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
   was. Each of these keys is now refused `CKR_MECHANISM_INVALID` when its
   list leaves the mechanism out, as the base key is. Present since 2.2.0.
   Reported by Alexandre Laroche. `tests/test_derive_aux_allowed.c`.
+* **A protected key could be cut short by a derivation, and recovered a
+  byte at a time** (#48). `CKM_XOR_BASE_AND_DATA` makes a key as long as its
+  data, `CKM_EXTRACT_KEY_FROM_KEY` as long as the template asks, and
+  `CKM_IKE1_EXTENDED_DERIVE` without g^xy cuts SKEYID_e. From a sensitive or
+  unextractable key with `CKA_DERIVE=TRUE`, each gave a key holding its
+  first bytes. That key kept the base's protection (GHSA-4x45-2v79-28cj),
+  so its value did not read, but it could sign: an HMAC under a key whose
+  bytes are all known but the last leaves 256 guesses for it. A logged-in
+  user recovered a 32-byte generic secret in 32 derivations, and an AES-256
+  key in 33 by first appending it to a known base with
+  `CKM_CONCATENATE_BASE_AND_KEY`. This is the attack Clulow described in
+  2003. A derivation that copies a protected key's bytes into a shorter key
+  is now `CKR_KEY_FUNCTION_NOT_PERMITTED`; as long or longer is taken, and a
+  key in the clear is cut as before. A floor on the length would not have
+  helped, since the concatenation puts known bytes in front. An IKEv1
+  application that cuts a sensitive SKEYID_e to its cipher's length is
+  refused too; the mechanism is not approved and was refused in strict mode
+  already. Present since 2.2.0 (XOR), 2.8.0 (the other two). Reported by
+  Alexandre Laroche. `tests/test_derive_cut.c`.
+* **`CKM_XOR_BASE_AND_DATA` is no longer approved** (#48). It was listed
+  approved and taken in strict mode, where the cut above worked too; XOR
+  with data is no key derivation SP 800-56C, SP 800-108 or SP 800-135
+  describes. It is refused where NIST's rules apply, and left out of the
+  `nist-approved-only` build, as `CKM_EXTRACT_KEY_FROM_KEY` is. The
+  concatenations stay.
 
 ## [2.8.0] --- 2026-11-22
 

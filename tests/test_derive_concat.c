@@ -21,7 +21,9 @@
  *     CONCATENATE_DATA_AND_BASE   data || base   (12)
  *     CONCATENATE_BASE_AND_KEY    base || key2   (12)
  *     XOR_BASE_AND_DATA           base ^ data    ( 4 -- the data length
- *                                                  sets the output length)
+ *                                                  sets the output length;
+ *                                                  refused where NIST's rules
+ *                                                  apply, 2.9.0)
  *
  * Case 5 is the parameter validation: a NULL pData with a non-zero ulLen,
  * and a 2^63 ulLen, both of which the sign and cipher paths already refuse
@@ -29,6 +31,7 @@
  * ======================================================================== */
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef unsigned long CK_RV, CK_ULONG, CK_SLOT_ID, CK_SESSION_HANDLE,
@@ -39,6 +42,7 @@ typedef struct { CK_ULONG mechanism; void *pParameter; CK_ULONG ulParameterLen; 
 typedef struct { void *pData; CK_ULONG ulLen; } CK_KEY_DERIVATION_STRING_DATA;
 
 #define CKR_OK                        0UL
+#define CKR_MECHANISM_INVALID         0x70UL
 #define CKR_MECHANISM_PARAM_INVALID   0x71UL
 #define CKF_RW                        6UL
 #define CKA_CLASS                     0UL
@@ -100,6 +104,20 @@ static void check_derived(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE h,
     CK_RV rv = C_GetAttributeValue(s, h, q, 1);
     ok(rv == CKR_OK && q[0].ulValueLen == wantlen
        && memcmp(got, want, wantlen) == 0, what);
+}
+
+/* CKM_XOR_BASE_AND_DATA where the module offers it: listed, and not refused
+ * by strict mode. It is not approved (2.9.0, #48), so the nist build and
+ * strict mode refuse it. Called after C_Initialize. */
+static int xor_offered(void *lib) {
+    CK_RV (*gml)(CK_SLOT_ID, CK_ULONG*, CK_ULONG*);
+    *(void**)&gml = dlsym(lib, "C_GetMechanismList");
+    const char *mode = getenv("FHSM_MODE");
+    if (mode && (!strcmp(mode, "strict") || !strcmp(mode, "fips"))) return 0;
+    CK_ULONG n = 0, ml[1024];
+    if (!gml || gml(0, NULL, &n) != 0 || n > 1024 || gml(0, ml, &n) != 0) return 0;
+    for (CK_ULONG i = 0; i < n; i++) if (ml[i] == 0x364UL) return 1;
+    return 0;
 }
 
 int main(void)
@@ -178,7 +196,11 @@ int main(void)
         }
     }
     /* (4) base XOR data, output length taken from the data */
-    {
+    if (!xor_offered(lib)) {
+        CK_MECHANISM m = { CKM_XOR_BASE_AND_DATA, &sd, sizeof sd };
+        rv = C_DeriveKey(s, &m, hbase, out_tmpl, 4, &out);
+        ok(rv == CKR_MECHANISM_INVALID, "XOR_BASE_AND_DATA refused where NIST's rules apply");
+    } else {
         CK_MECHANISM m = { CKM_XOR_BASE_AND_DATA, &sd, sizeof sd };
         rv = C_DeriveKey(s, &m, hbase, out_tmpl, 4, &out);
         ok(rv == CKR_OK, "XOR_BASE_AND_DATA accepted");
