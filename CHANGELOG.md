@@ -106,6 +106,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
   returns `CKR_HOST_MEMORY`. Contributed by Jakub Jelen.
   `tests/test_app_context.c`, `tests/test_smoke.c`.
 
+### Security
+* **`C_DeriveKey` ignored `CKA_ALLOWED_MECHANISMS` on the keys its parameter
+  names** (#47). The list was checked on the base key only. The second key
+  of `CKM_CONCATENATE_BASE_AND_KEY`, the `hSaltKey` of `CKM_HKDF_DERIVE` and
+  `CKM_HKDF_DATA`, and the keys of the four IKE derivations were taken
+  whatever their list said, though each is used with the mechanism
+  (PKCS#11 v3.2 §4.9). Through the concatenation, a secret key with
+  `CKA_DERIVE=TRUE` whose list left the mechanism out, an AES key listing
+  `CKM_AES_GCM` alone for one, was appended to a known base, and the result
+  cut with `CKM_XOR_BASE_AND_DATA` and tested a byte at a time with an HMAC:
+  a logged-in user recovered the key, sensitive and unextractable as it
+  was. Each of these keys is now refused `CKR_MECHANISM_INVALID` when its
+  list leaves the mechanism out, as the base key is. Present since 2.2.0.
+  Reported by Alexandre Laroche. `tests/test_derive_aux_allowed.c`.
+
 ## [2.8.0] --- 2026-11-22
 
 *Minor, with no security fix. The rest of Alexandre Laroche's retest of

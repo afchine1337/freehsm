@@ -6693,9 +6693,13 @@ static CK_ULONG ike_hmac_key_type(fhsm_hash_t h) {
  * key nothing more. This also asked for CKA_DERIVE, as HKDF does of its salt
  * key, and refused a caller who followed the specification with
  * CKR_KEY_FUNCTION_NOT_PERMITTED; NSS softoken and Kryoptic take such keys
- * (#43). The base key's own CKA_DERIVE is checked as for every derivation. */
+ * (#43). The base key's own CKA_DERIVE is checked as for every derivation.
+ *
+ * Its CKA_ALLOWED_MECHANISMS is: the key is used with the mechanism, as the
+ * base key is (§4.9), and a key whose list leaves the mechanism out was
+ * taken here (#47). */
 static CK_RV ike_aux_key(fhsm_token_t *t, CK_OBJECT_HANDLE h, int generic,
-                         const uint8_t **v, size_t *vl) {
+                         CK_ULONG mech, const uint8_t **v, size_t *vl) {
     { CK_RV vr = fhsm_key_handle_visible(t, h, FHSM_RV_KEY_HANDLE_INVALID);
       if (vr != FHSM_RV_OK) return vr; }
     uint32_t cl = 0, kt = 0;
@@ -6703,7 +6707,7 @@ static CK_RV ike_aux_key(fhsm_token_t *t, CK_OBJECT_HANDLE h, int generic,
     if (r != FHSM_RV_OK) return r;
     if (cl != CKO_SECRET_KEY || (generic && kt != CKK_GENERIC_SECRET))
         return FHSM_RV_KEY_TYPE_INCONSISTENT;
-    return FHSM_RV_OK;
+    return fhsm_check_allowed_mech(t, h, mech);
 }
 
 /* Bytes appended to a buffer the caller sized. */
@@ -6803,7 +6807,7 @@ static CK_RV ike_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
             return FHSM_RV_MECHANISM_PARAM_INVALID;
         const uint8_t *nv = NULL; size_t nvl = 0;
         if (p.a.bRekey) {
-            rv = ike_aux_key(t, p.a.hNewKey, 1, &nv, &nvl);
+            rv = ike_aux_key(t, p.a.hNewKey, 1, m, &nv, &nvl);
             if (rv != FHSM_RV_OK) return rv;
             h2 = p.a.hNewKey;
         }
@@ -6826,10 +6830,10 @@ static CK_RV ike_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
             || p.b.ulCKYiLen > 64 || p.b.ulCKYrLen > 64)
             return FHSM_RV_MECHANISM_PARAM_INVALID;
         const uint8_t *gv = NULL, *pv = NULL; size_t gvl = 0, pvl = 0;
-        rv = ike_aux_key(t, p.b.hKeygxy, 1, &gv, &gvl);
+        rv = ike_aux_key(t, p.b.hKeygxy, 1, m, &gv, &gvl);
         if (rv != FHSM_RV_OK) return rv;
         if (p.b.bHasPrevKey) {
-            rv = ike_aux_key(t, p.b.hPrevKey, 0, &pv, &pvl);
+            rv = ike_aux_key(t, p.b.hPrevKey, 0, m, &pv, &pvl);
             if (rv != FHSM_RV_OK) return rv;
         }
         h2 = p.b.hKeygxy;
@@ -6849,7 +6853,7 @@ static CK_RV ike_derive(fhsm_token_t *t, CK_SESSION_HANDLE hSession,
         if ((!sd && sdl) || sdl > 4096) return FHSM_RV_MECHANISM_PARAM_INVALID;
         const uint8_t *sv = NULL; size_t svl = 0;
         if (has) {
-            rv = ike_aux_key(t, sk, ext, &sv, &svl);
+            rv = ike_aux_key(t, sk, ext, m, &sv, &svl);
             if (rv != FHSM_RV_OK) return rv;
             h2 = sk;
         }
@@ -7372,6 +7376,11 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
                  * same reasoning as the second key of the 6.20 combiners. */
                 { CK_RV su = fhsm_check_usage(t, hp.hSaltKey, FHSM_USAGE_DERIVE);
                   if (su != FHSM_RV_OK) return su; }
+                /* And it is used with the mechanism, so its list applies
+                 * (§4.9, #47). */
+                { CK_RV sa = fhsm_check_allowed_mech(t, hp.hSaltKey,
+                                                     pMechanism->mechanism);
+                  if (sa != FHSM_RV_OK) return sa; }
                 break;
             }
             default:
@@ -7915,6 +7924,12 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession, CK_MECHANISM *pMechanism,
              * one-byte base and extracting the result. */
             { CK_RV u2 = fhsm_check_usage(t, h2, FHSM_USAGE_DERIVE);
               if (u2 != FHSM_RV_OK) return u2; }
+            /* For the same reason its CKA_ALLOWED_MECHANISMS applies: both
+             * keys are used with the mechanism (§4.9). A key listing
+             * CKM_AES_GCM alone was concatenated here, then cut to a byte it
+             * did not know, and read back whole (#47). */
+            { CK_RV a2 = fhsm_check_allowed_mech(t, h2, pMechanism->mechanism);
+              if (a2 != FHSM_RV_OK) return a2; }
             base2 = h2;
         } else {
             if (!pMechanism->pParameter
@@ -15175,13 +15190,17 @@ static CK_RV fhsm_check_key_mech_type(fhsm_token_t *t, CK_OBJECT_HANDLE hKey,
  *   C_SignInit         hKey
  *   C_VerifyInit       hKey
  *   C_DeriveKey        hBaseKey
+ *                      and the keys its parameter names (#47): the second
+ *                      key of CKM_CONCATENATE_BASE_AND_KEY, the hSaltKey of
+ *                      CKM_HKDF_DERIVE / CKM_HKDF_DATA, and the keys of the
+ *                      four IKE derivations (ike_aux_key)
  *   C_WrapKey          hWrappingKey     -- the key performing the wrap
  *   C_UnwrapKey        hUnwrappingKey   -- likewise
  *   C_EncapsulateKey   hPublicKey
  *   C_DecapsulateKey   hPrivateKey
  *   C_DigestKey        hKey             -- see the judgement call below
  *
- * Ten. There is no C_SignRecoverInit, C_VerifyRecoverInit or C_Message*Init in
+ * Ten entry points. There is no C_SignRecoverInit, C_VerifyRecoverInit or C_Message*Init in
  * this module, so the list is closed; if one is added, it belongs here on the
  * same commit.
  *

@@ -1040,6 +1040,10 @@ tests/test_store_v5: tests/test_store_v5.c libfreehsm.so
 tests/test_allowed_mechanisms: tests/test_allowed_mechanisms.c libfreehsm.so
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# The same list on the keys a derivation's parameter names (#47).
+tests/test_derive_aux_allowed: tests/test_derive_aux_allowed.c libfreehsm.so
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+
 # The three nested policy templates. Two compare against a creation template,
 # the third against an existing object's attributes.
 tests/test_nested_templates: tests/test_nested_templates.c libfreehsm.so
@@ -1477,6 +1481,7 @@ TEST_BINS = \
 	tests/test_v4_fixture \
 	tests/test_store_v5 \
 	tests/test_allowed_mechanisms \
+	tests/test_derive_aux_allowed \
 	tests/test_nested_templates \
 	tests/test_wrap_with_trusted \
 	tests/test_wrap_unextractable \
@@ -1690,6 +1695,8 @@ tests: $(TEST_BINS) tools/fhsm-token tools/fhsm-csr tools/fhsm-ca tools/fhsm-sig
 		$(TEST_LD) ./tests/test_store_v5
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_allowed_mechanisms
+	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
+		$(TEST_LD) ./tests/test_derive_aux_allowed
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
 		$(TEST_LD) ./tests/test_nested_templates
 	FHSM_INTEGRITY_ALLOW_UNSIGNED=1 FHSM_TOKENS_DIR=$$(mktemp -d) OPENSSL_CONF=/dev/null \
